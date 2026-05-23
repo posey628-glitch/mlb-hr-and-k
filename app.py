@@ -28,7 +28,7 @@ from data_fetcher import (
     get_hitter_stats, get_pitcher_stats, get_pitcher_arsenal,
     get_hitter_traditional, get_pitcher_traditional,
     get_pitcher_recent_form, get_hitter_recent_form_trad,
-    get_sprint_speed,
+    get_sprint_speed, fill_pitcher_stats_for_slate,
 )
 from models import build_matchup_table, build_pitcher_slate
 from park_factors import get_park
