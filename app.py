@@ -785,3 +785,307 @@ else:
     st.caption("Waiting for matchup data to populate.")
 
 st.divider()
+# ============================================================================
+# TOP SLEEPERS + TOP HR PLAYS ACROSS THE WHOLE SLATE
+# ============================================================================
+st.subheader("💎 Top Sleepers & Best HR Plays")
+st.caption(
+    "Combined view across every game today. **Sleepers**: hitters whose HR probability "
+    "today exceeds their season pace (under-the-radar plays). **Top HR**: highest "
+    "calibrated HR Game% regardless of name recognition."
+)
+
+all_hitters = []
+for gpk, ctx in game_context_map.items():
+    game_rows = slate[slate["gamePk"] == gpk]
+    if game_rows.empty:
+        continue
+    g_row = game_rows.iloc[0]
+    for side in ("away", "home"):
+        m = ctx.get(f"{side}_matchup")
+        if m is None or m.empty:
+            continue
+        x = m.copy()
+        x["game"] = f"{g_row['away_team_abbr']} @ {g_row['home_team_abbr']}"
+        x["team"] = g_row[f"{side}_team_abbr"]
+        opp_side = "home" if side == "away" else "away"
+        x["opp_pitcher"] = g_row.get(f"{opp_side}_pitcher", "TBD") or "TBD"
+        all_hitters.append(x)
+
+if all_hitters:
+    combined_all = pd.concat(all_hitters, ignore_index=True)
+    if "pa" in combined_all.columns:
+        qualified = combined_all[combined_all["pa"].notna() & (combined_all["pa"] >= INSUFFICIENT_PA_THRESHOLD)]
+    else:
+        qualified = combined_all
+
+    col_left, col_right = st.columns(2)
+
+    with col_left:
+        st.markdown("**🎯 Top 10 HR Plays**")
+        if "hr_game_pct" in qualified.columns:
+            top_hr = qualified.dropna(subset=["hr_game_pct"]).sort_values(
+                "hr_game_pct", ascending=False
+            ).head(10)
+            if not top_hr.empty:
+                cols = [c for c in [
+                    "player_name", "team", "game", "opp_pitcher",
+                    "hr_game_pct", "hr_pa_pct", "barrel_pct", "iso", "matchup",
+                ] if c in top_hr.columns]
+                disp = top_hr[cols].copy().reset_index(drop=True)
+                st.dataframe(
+                    disp, hide_index=True, use_container_width=True,
+                    column_config={
+                        "player_name": st.column_config.TextColumn("Hitter"),
+                        "team": st.column_config.TextColumn("Tm"),
+                        "game": st.column_config.TextColumn("Game"),
+                        "opp_pitcher": st.column_config.TextColumn("vs Pitcher"),
+                        "hr_game_pct": st.column_config.NumberColumn("HR Game%", format="%.1f%%"),
+                        "hr_pa_pct": st.column_config.NumberColumn("HR PA%", format="%.2f%%"),
+                        "barrel_pct": st.column_config.NumberColumn("Brl%", format="%.1f%%"),
+                        "iso": st.column_config.NumberColumn("ISO", format="%.3f"),
+                        "matchup": st.column_config.NumberColumn("Matchup", format="%.1f"),
+                    },
+                )
+            else:
+                st.caption("No HR projections available.")
+
+    with col_right:
+        st.markdown("**💎 Top 10 Sleepers**")
+        if "sleeper_score" in qualified.columns:
+            top_sleep = qualified.dropna(subset=["sleeper_score"]).sort_values(
+                "sleeper_score", ascending=False
+            ).head(10)
+            if not top_sleep.empty:
+                cols = [c for c in [
+                    "player_name", "team", "game", "opp_pitcher",
+                    "sleeper_score", "hr_game_pct", "home_run", "recent_hr", "barrel_pct",
+                ] if c in top_sleep.columns]
+                disp = top_sleep[cols].copy().reset_index(drop=True)
+                st.dataframe(
+                    disp, hide_index=True, use_container_width=True,
+                    column_config={
+                        "player_name": st.column_config.TextColumn("Hitter"),
+                        "team": st.column_config.TextColumn("Tm"),
+                        "game": st.column_config.TextColumn("Game"),
+                        "opp_pitcher": st.column_config.TextColumn("vs Pitcher"),
+                        "sleeper_score": st.column_config.NumberColumn(
+                            "Sleeper",
+                            format="%.1f",
+                            help="HR prob percentile MINUS season HR percentile. "
+                                 "Higher = bigger surprise candidate.",
+                        ),
+                        "hr_game_pct": st.column_config.NumberColumn("HR Game%", format="%.1f%%"),
+                        "home_run": st.column_config.NumberColumn("Season HR", format="%d"),
+                        "recent_hr": st.column_config.NumberColumn("L15 HR", format="%d"),
+                        "barrel_pct": st.column_config.NumberColumn("Brl%", format="%.1f%%"),
+                    },
+                )
+            else:
+                st.caption("No sleeper scores computed yet.")
+else:
+    st.caption("Waiting for matchup data to populate.")
+
+st.divider()
+
+
+# ============================================================================
+# GAME-BY-GAME MATCHUPS
+# ============================================================================
+st.subheader("🎮 Isolated Game-by-Game Matchups")
+st.caption("Real data only. Empty cells = data not available for that player.")
+
+
+def build_col_config():
+    return {
+        "alert": st.column_config.TextColumn("Signal", width="small"),
+        "player_name": st.column_config.TextColumn("Hitter"),
+        "lineup_pos": st.column_config.NumberColumn("#", width="small"),
+        "bats": st.column_config.TextColumn("B", width="small"),
+        "position": st.column_config.TextColumn("Pos", width="small"),
+        "hr_game_pct": st.column_config.NumberColumn("HR Game%", format="%.1f%%"),
+        "hr_pa_pct": st.column_config.NumberColumn("HR PA%", format="%.2f%%"),
+        "matchup": st.column_config.NumberColumn("Matchup", format="%.1f"),
+        "test_score": st.column_config.NumberColumn("Test", format="%.1f"),
+        "pa": st.column_config.NumberColumn("PA"),
+        "barrel_pct": st.column_config.NumberColumn("Brl%", format="%.1f%%"),
+        "iso": st.column_config.NumberColumn("ISO", format="%.3f"),
+        "xwoba": st.column_config.NumberColumn("xwOBA", format="%.3f"),
+        "xwobacon": st.column_config.NumberColumn("xwOBAcon", format="%.3f"),
+        "pitch_match_score": st.column_config.NumberColumn("Pitch Match", format="%.1f"),
+        "best_pitch": st.column_config.TextColumn("Best Pitch"),
+        "best_pitch_xwoba": st.column_config.NumberColumn("Best xwOBA", format="%.3f"),
+        "worst_pitch": st.column_config.TextColumn("Worst Pitch"),
+        "fb_pct": st.column_config.NumberColumn("FB%", format="%.1f%%"),
+        "la": st.column_config.NumberColumn("LA"),
+        "sprint_speed": st.column_config.NumberColumn("Sprint"),
+        "k_pct": st.column_config.NumberColumn("K%", format="%.1f%%"),
+        "bb_pct": st.column_config.NumberColumn("BB%", format="%.1f%%"),
+        "whiff_pct": st.column_config.NumberColumn("Whiff%", format="%.1f%%"),
+        "home_run": st.column_config.NumberColumn("HR", format="%d"),
+        "recent_hr": st.column_config.NumberColumn("L15 HR"),
+        "sleeper_score": st.column_config.NumberColumn("Sleeper", format="%.1f"),
+        "verdict": st.column_config.TextColumn("Verdict"),
+    }
+
+
+def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
+    if matchup_df is None or matchup_df.empty:
+        st.caption(f"{team_label}: no lineup data available yet.")
+        return
+
+    # Split qualified vs insufficient sample
+    if "pa" in matchup_df.columns:
+        qualified = matchup_df[matchup_df["pa"].notna() & (matchup_df["pa"] >= INSUFFICIENT_PA_THRESHOLD)]
+        insufficient = matchup_df[~(matchup_df["pa"].notna() & (matchup_df["pa"] >= INSUFFICIENT_PA_THRESHOLD))]
+    else:
+        qualified = matchup_df
+        insufficient = pd.DataFrame()
+
+    cols_to_show = [c for c in [
+        "alert", "player_name", "lineup_pos", "bats", "position",
+        "hr_game_pct", "hr_pa_pct", "matchup", "test_score",
+        "pa", "barrel_pct", "iso", "xwoba", "xwobacon",
+        "pitch_match_score", "best_pitch", "best_pitch_xwoba", "worst_pitch",
+        "fb_pct", "la", "sprint_speed",
+        "k_pct", "bb_pct", "whiff_pct",
+        "home_run", "recent_hr", "sleeper_score",
+    ] if c in matchup_df.columns]
+
+    if not qualified.empty:
+        st.markdown(f"**{team_label}**")
+        st.dataframe(
+            qualified[cols_to_show], hide_index=True, use_container_width=True,
+            column_config=build_col_config(),
+        )
+
+    if not insufficient.empty:
+        with st.expander(f"⚠️ {team_label} — Insufficient Sample ({len(insufficient)} hitters below {INSUFFICIENT_PA_THRESHOLD} PA)"):
+            st.dataframe(
+                insufficient[cols_to_show], hide_index=True, use_container_width=True,
+                column_config=build_col_config(),
+            )
+
+
+for _, game in slate.iterrows():
+    ctx = game_context_map.get(game["gamePk"], {})
+    if not ctx:
+        continue
+
+    away_tab = f"✈️ {game['away_team_abbr']} @ {game['home_team_abbr']}"
+    home_tab = f"🏠 {game['home_team_abbr']} vs {game['away_team_abbr']}"
+
+    # Game header
+    away_k_mean = ctx["away_k_proj"].get("mean") if ctx.get("away_k_proj") else None
+    home_k_mean = ctx["home_k_proj"].get("mean") if ctx.get("home_k_proj") else None
+    header_bits = [f"### {game['away_team_abbr']} @ {game['home_team_abbr']}"]
+    if game.get("away_pitcher") and game.get("home_pitcher"):
+        header_bits.append(
+            f"**{game['away_pitcher']}** vs **{game['home_pitcher']}**"
+        )
+    st.markdown(" · ".join(header_bits))
+
+    info_cols = st.columns(4)
+    with info_cols[0]:
+        st.metric("Venue", game.get("venue", "—"))
+    with info_cols[1]:
+        wx = ctx.get("weather") or {}
+        if wx:
+            temp = wx.get("temp_f", "—")
+            wind = wx.get("wind_mph", "—")
+            wind_dir = wx.get("wind_dir", "—")
+            st.metric("Weather", f"{temp}°F · {wind} mph {wind_dir}")
+        else:
+            st.metric("Weather", "—")
+    with info_cols[2]:
+        st.metric("Park × Wx", f"{ctx.get('hr_mult', 1.0):.2f}×")
+    with info_cols[3]:
+        vg = ctx.get("vegas") or {}
+        if vg.get("total"):
+            st.metric("Vegas total", f"{vg['total']:.1f}")
+        else:
+            st.metric("Vegas total", "—")
+
+    tabs = st.tabs([away_tab, home_tab, "🎯 K Projections"])
+    with tabs[0]:
+        render_matchup_section(ctx.get("away_matchup"), game['away_team_abbr'])
+    with tabs[1]:
+        render_matchup_section(ctx.get("home_matchup"), game['home_team_abbr'])
+    with tabs[2]:
+        kp1, kp2 = st.columns(2)
+        for col, side, label in [
+            (kp1, "away", game.get("away_pitcher") or "TBD"),
+            (kp2, "home", game.get("home_pitcher") or "TBD"),
+        ]:
+            with col:
+                pp = ctx.get(f"{side}_k_proj") or {}
+                if not pp or pp.get("mean") is None:
+                    st.write(f"**{label}** — no real K/9 data available")
+                    p_row = ctx.get(f"{side}_p_row") or {}
+                    if p_row:
+                        avail = [k for k, v in p_row.items()
+                                  if v is not None and not (isinstance(v, float) and pd.isna(v))
+                                  and k in ("k9", "k_percent", "era", "whip", "ip")]
+                        if avail:
+                            st.caption(f"Has: {', '.join(avail)}")
+                        else:
+                            st.caption("Pitcher has no real stat data this season yet")
+                    continue
+                st.markdown(
+                    f"**{label}** · Projected K: **{pp['mean']:.1f}** "
+                    f"(range {pp.get('low', 0):.1f}–{pp.get('high', 0):.1f})"
+                )
+                st.caption(
+                    f"Blended K/9: {pp.get('blended_k9', 0):.2f} · "
+                    f"Lineup adj: {pp.get('lineup_adj', 1):.2f}×"
+                )
+                lines = pd.DataFrame([
+                    {"Line": f"Over {x} K", "Prob": round(pp.get(f"p_over_{x}", 0) * 100, 1)}
+                    for x in ["5.5", "6.5", "7.5", "8.5"]
+                ])
+                st.dataframe(
+                    lines, hide_index=True, use_container_width=True,
+                    column_config={
+                        "Line": st.column_config.TextColumn("Line"),
+                        "Prob": st.column_config.NumberColumn("P(Over)", format="%.1f%%"),
+                    },
+                )
+
+    if use_bvp or not pitcher_arsenal_all.empty:
+        with st.expander("🔬 Supplemental (BvP + Arsenals)"):
+            sub1, sub2 = st.columns(2)
+            with sub1:
+                if use_bvp:
+                    h_pid = safe_int(game.get("home_pitcher_id"))
+                    if h_pid:
+                        st.markdown(f"**{game['away_team_abbr']} BvP history**")
+                        st.caption(f"vs {game.get('home_pitcher', 'TBD')}")
+                if not pitcher_arsenal_all.empty:
+                    h_pid = safe_int(game.get("home_pitcher_id"))
+                    if h_pid:
+                        ars = pitcher_arsenal_all[pitcher_arsenal_all["player_id"] == h_pid]
+                        if not ars.empty:
+                            st.markdown(f"**{game.get('home_pitcher', 'TBD')} arsenal**")
+                            st.dataframe(ars, hide_index=True, use_container_width=True)
+            with sub2:
+                if use_bvp:
+                    a_pid = safe_int(game.get("away_pitcher_id"))
+                    if a_pid:
+                        st.markdown(f"**{game['home_team_abbr']} BvP history**")
+                        st.caption(f"vs {game.get('away_pitcher', 'TBD')}")
+                if not pitcher_arsenal_all.empty:
+                    a_pid = safe_int(game.get("away_pitcher_id"))
+                    if a_pid:
+                        ars = pitcher_arsenal_all[pitcher_arsenal_all["player_id"] == a_pid]
+                        if not ars.empty:
+                            st.markdown(f"**{game.get('away_pitcher', 'TBD')} arsenal**")
+                            st.dataframe(ars, hide_index=True, use_container_width=True)
+
+    st.divider()
+
+
+st.caption(
+    f"Built {datetime.now().strftime('%Y-%m-%d %H:%M')} · "
+    f"Sources: MLB Stats API, Baseball Savant, Open-Meteo · "
+    f"Posey MLB HR & K Data"
+)
