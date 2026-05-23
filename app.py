@@ -312,9 +312,10 @@ if show_legend:
             st.markdown("**Role flags (pitchers)**")
             st.markdown(
                 "✓ Established starter\n\n"
-                "🔄 SWING — swing-man / spot starter\n\n"
+                "🔄 SWING — swing-man / spot starter / bulk relief between starts\n\n"
                 "⚠️ LOW IP — under 25 IP this season\n\n"
-                "🚨 RELIEVER — pure reliever / opener day"
+                "🚨 RELIEVER — pure reliever / opener day\n\n"
+                "📉 SAMPLE NOISE — stat inconsistency (low IP)"
             )
         with leg2:
             st.markdown("**Signal column (pitchers)**")
@@ -385,10 +386,20 @@ if not p_slate.empty:
         axis=1,
     )
 
+    # Add a visible warning flag column combining role + sample_noise
+    if not p_slate.empty:
+        def _warn_flag(r):
+            flags = []
+            if r.get("sample_noise"):
+                flags.append("📉")
+            return " ".join(flags) if flags else ""
+        p_slate["warn"] = p_slate.apply(_warn_flag, axis=1)
+
     show_cols = [c for c in [
-        "alert", "role", "pitcher_name", "team", "home_away", "opp", "throws",
+        "alert", "role", "warn", "pitcher_name", "team", "home_away", "opp", "throws",
         "test_score", "kHR", "proj_k", "form_arrow",
-        "era", "whip", "k9", "bb9", "hr9", "ip", "games_started",
+        "era", "whip", "k9", "bb9", "hr9",
+        "ip", "games_started", "games_played", "ip_per_outing",
         "k_pct", "whiff_pct",
         "xwoba_allowed", "barrel_allowed",
         "recent_era", "recent_k9", "days_rest", "avg_recent_pitches",
@@ -400,6 +411,10 @@ if not p_slate.empty:
         "role": st.column_config.TextColumn(
             "Role", width="small",
             help="✓ established starter · ⚠️ LOW IP · 🔄 SWING · 🚨 RELIEVER (test score scaled down)",
+        ),
+        "warn": st.column_config.TextColumn(
+            "Flag", width="small",
+            help="📉 = sample noise (ERA-WHIP mismatch or zero Statcast values at low IP)",
         ),
         "pitcher_name": st.column_config.TextColumn("Pitcher"),
         "team": st.column_config.TextColumn("Tm", width="small"),
@@ -428,6 +443,14 @@ if not p_slate.empty:
         "hr9": st.column_config.NumberColumn("HR/9", format="%.2f"),
         "ip": st.column_config.NumberColumn("IP", format="%.1f"),
         "games_started": st.column_config.NumberColumn("GS", format="%d", width="small"),
+        "games_played": st.column_config.NumberColumn(
+            "G", format="%d", width="small",
+            help="Total games appeared in. If G > GS by a lot, pitcher has been used in relief between starts.",
+        ),
+        "ip_per_outing": st.column_config.NumberColumn(
+            "IP/Out", format="%.1f", width="small",
+            help="Average innings per appearance. Below 5 = short outings (opener / pulled early / reliever).",
+        ),
         "k_pct": st.column_config.NumberColumn("K%", format="%.1f"),
         "whiff_pct": st.column_config.NumberColumn("Whiff%", format="%.1f"),
         "xwoba_allowed": st.column_config.NumberColumn("xwOBA", format="%.3f"),
@@ -438,7 +461,7 @@ if not p_slate.empty:
         "avg_recent_pitches": st.column_config.NumberColumn("Pitches"),
         "reliability": st.column_config.NumberColumn(
             "Conf", format="%.2f", width="small",
-            help="Reliability factor (0.3 - 1.0). Multiplier on Test/kHR scores. Low = small sample / reliever.",
+            help="Reliability factor (0.3 - 1.0). Multiplier on Test/kHR scores. Low = small sample / reliever / bulk relief role.",
         ),
     }
     st.dataframe(
