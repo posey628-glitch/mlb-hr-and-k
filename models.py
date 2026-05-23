@@ -306,6 +306,7 @@ def build_pitcher_slate(
                     "bb9": r.get("bb9"),
                     "ip": r.get("ip"),
                     "games_started": r.get("games_started"),
+                    "games_played": r.get("games_played"),
                 })
             if pitcher_recent and pid in pitcher_recent:
                 base.update(pitcher_recent[pid])
@@ -316,42 +317,92 @@ def build_pitcher_slate(
         return df
 
     # ------------------------------------------------------------------
-    # RELIABILITY FACTOR - penalize low-IP / non-starter pitchers
+    # IP PER OUTING - better signal than IP/GS since it uses games_played
     # ------------------------------------------------------------------
-    # A pitcher with 50+ IP and 10+ GS is fully reliable (1.0).
-    # Below that, scale down. Pure relievers with no starts get 0.3.
+    def _ip_per_outing(row):
+        ip = row.get("ip")
+        gp = row.get("games_played")
+        gs = row.get("games_started")
+        # Prefer games_played; fall back to games_started; else IP/6 guess
+        if ip is None or pd.isna(ip):
+            return None
+        denom = gp if (gp is not None and not pd.isna(gp) and gp > 0) else gs
+        if denom is None or pd.isna(denom) or denom == 0:
+            return None
+        return round(float(ip) / float(denom), 2)
+
+    df["ip_per_outing"] = df.apply(_ip_per_outing, axis=1)
+
+    # ------------------------------------------------------------------
+    # SAMPLE NOISE FLAG - catches stat inconsistencies (high ERA + low WHIP, etc)
+    # ------------------------------------------------------------------
+    def _sample_noise(row):
+        ip = row.get("ip")
+        era = row.get("era")
+        whip = row.get("whip")
+        # ERA-WHIP inconsistency at low sample = 1 bad inning skewing ERA
+        if (ip is not None and not pd.isna(ip) and ip < 20
+                and era is not None and not pd.isna(era) and era > 5.0
+                and whip is not None and not pd.isna(whip) and whip < 1.1):
+            return True
+        # Statcast zeros at very low sample
+        barrel = row.get("barrel_allowed")
+        if (ip is not None and not pd.isna(ip) and ip < 10
+                and barrel is not None and not pd.isna(barrel) and barrel == 0):
+            return True
+        return False
+
+    df["sample_noise"] = df.apply(_sample_noise, axis=1)
+
+    # ------------------------------------------------------------------
+    # RELIABILITY FACTOR - penalize low-IP / non-starter pitchers
+    # Now uses ip_per_outing to detect bulk relievers masquerading as starters
+    # ------------------------------------------------------------------
     def _reliability(row):
         ip = row.get("ip")
         gs = row.get("games_started")
+        gp = row.get("games_played")
+        ipo = row.get("ip_per_outing")
         if ip is None or pd.isna(ip):
-            return 0.3  # no data = treat as unreliable
-        # Hard cap: if we know they have zero starts, they're a reliever - max 0.5
+            return 0.3
+        # Hard cap: zero starts = reliever
         if gs is not None and not pd.isna(gs) and gs == 0:
             return 0.4
-        # Innings-based confidence - 30 IP = full confidence (real starter through May)
+        # If pitcher has played more games than started (relief between starts),
+        # they're a swing role - downgrade
+        if (gp is not None and gs is not None
+                and not pd.isna(gp) and not pd.isna(gs)
+                and gs > 0 and gp > gs * 1.5):
+            # Real swing role (relief appearances between starts)
+            base = 0.65
+        else:
+            base = 1.0
         ip_factor = min(1.0, ip / 30.0)
-        # Starter ratio - if we have games_started data, use it
         if gs is not None and not pd.isna(gs) and gs > 0:
-            # GS >= 6 = full starter; less = ramp up
             start_factor = min(1.0, gs / 6.0)
         else:
-            # Unknown GS - rely solely on IP heuristic
             start_factor = ip_factor
-        return round(max(0.3, ip_factor * 0.5 + start_factor * 0.5), 2)
+        return round(max(0.3, base * (ip_factor * 0.5 + start_factor * 0.5)), 2)
 
     df["reliability"] = df.apply(_reliability, axis=1)
 
     # ------------------------------------------------------------------
-    # ROLE FLAG - visible indicator for the table
+    # ROLE FLAG - now uses games_played vs games_started to spot bulk relievers
     # ------------------------------------------------------------------
     def _role_flag(row):
         ip = row.get("ip")
         gs = row.get("games_started")
+        gp = row.get("games_played")
         # Hard reliever flag if we explicitly know GS=0
         if gs is not None and not pd.isna(gs) and gs == 0:
             return "🚨 RELIEVER"
         if ip is None or pd.isna(ip) or ip < 10:
             return "🚨 RELIEVER"
+        # Bulk reliever: games_played >> games_started
+        if (gp is not None and gs is not None
+                and not pd.isna(gp) and not pd.isna(gs)
+                and gs > 0 and gp > gs * 1.5):
+            return "🔄 SWING"
         if ip < 25:
             return "⚠️ LOW IP"
         if gs is not None and not pd.isna(gs) and gs < 5:
