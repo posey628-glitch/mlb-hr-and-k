@@ -186,19 +186,28 @@ with st.spinner("Loading Statcast..."):
     except Exception:
         pitcher_trad = pd.DataFrame()
 
-# Merge traditional stats
+# Merge traditional stats - force player_id types to match
 if not hitter_trad.empty and "player_id" in hitter_stats.columns:
+    hitter_stats["player_id"] = pd.to_numeric(hitter_stats["player_id"], errors="coerce").astype("Int64")
+    hitter_trad["player_id"] = pd.to_numeric(hitter_trad["player_id"], errors="coerce").astype("Int64")
     drop = [c for c in ["player_name"] if c in hitter_trad.columns]
     hitter_stats = hitter_stats.merge(
         hitter_trad.drop(columns=drop, errors="ignore"),
         on="player_id", how="left", suffixes=("", "_t"),
     )
 if not pitcher_trad.empty and "player_id" in pitcher_stats.columns:
+    pitcher_stats["player_id"] = pd.to_numeric(pitcher_stats["player_id"], errors="coerce").astype("Int64")
+    pitcher_trad["player_id"] = pd.to_numeric(pitcher_trad["player_id"], errors="coerce").astype("Int64")
     drop = [c for c in ["player_name"] if c in pitcher_trad.columns]
     pitcher_stats = pitcher_stats.merge(
         pitcher_trad.drop(columns=drop, errors="ignore"),
         on="player_id", how="left", suffixes=("", "_t"),
     )
+
+# Backstop: derive ISO from SLG - AVG if Statcast didn't supply it
+if "iso" not in hitter_stats.columns or hitter_stats["iso"].isna().all():
+    if "slg" in hitter_stats.columns and "avg" in hitter_stats.columns:
+        hitter_stats["iso"] = (hitter_stats["slg"] - hitter_stats["avg"]).round(3)
 
 # Sprint speed
 if use_sprint_speed:
