@@ -24,6 +24,23 @@ from data_fetcher import (
     get_pitcher_recent_form, get_hitter_recent_form_trad,
     get_sprint_speed,
 )
+
+# Optional newer functions added in updated data_fetcher.py
+try:
+    from data_fetcher import get_hitter_traditional, get_pitcher_traditional
+    HAVE_TRADITIONAL = True
+except ImportError:
+    HAVE_TRADITIONAL = False
+    def get_hitter_traditional(*a, **k): return pd.DataFrame()
+    def get_pitcher_traditional(*a, **k): return pd.DataFrame()
+
+try:
+    from data_fetcher import fill_pitcher_stats_for_slate, fill_hitter_bats
+    HAVE_FILL_HELPERS = True
+except ImportError:
+    HAVE_FILL_HELPERS = False
+    def fill_pitcher_stats_for_slate(p, s, season=None): return p
+    def fill_hitter_bats(lineups, ids=None): return {}
 from models import build_matchup_table, build_pitcher_slate
 from sleepers import hr_probability, find_sleepers, grand_slam_probability
 from props import (
@@ -94,6 +111,54 @@ def pa_threshold_for_date(d: date) -> int:
     if month == 7:
         return 160
     return 200
+
+
+def hr_verdict(hr_game_pct, sample_size=None, pa_threshold=80):
+    """Inline tier for HR Game% display."""
+    if hr_game_pct is None or pd.isna(hr_game_pct):
+        return ""
+    if sample_size is not None and not pd.isna(sample_size) and sample_size < pa_threshold:
+        return "⚠️ SMALL"
+    if hr_game_pct >= 25:
+        return "🔥 ELITE"
+    if hr_game_pct >= 18:
+        return "✅ STRONG"
+    if hr_game_pct >= 12:
+        return "📊 SOLID"
+    if hr_game_pct >= 5:
+        return "💤 WEAK"
+    return "❌ AVOID"
+
+
+def hr_signal_emoji(hr_game_pct, sample_size=None, pa_threshold=80):
+    """Single emoji for the Signal column - hitters."""
+    if hr_game_pct is None or pd.isna(hr_game_pct):
+        return "⚪"
+    if sample_size is not None and not pd.isna(sample_size) and sample_size < pa_threshold:
+        return "⚪"
+    if hr_game_pct >= 22:
+        return "🟢"
+    if hr_game_pct >= 14:
+        return "🟡"
+    if hr_game_pct >= 7:
+        return "🟠"
+    return "🔴"
+
+
+def pitcher_signal_emoji(test_score, sample_size=None, pa_threshold=80):
+    """Single emoji for the Signal column - pitchers."""
+    if test_score is None or pd.isna(test_score):
+        return "⚪"
+    if sample_size is not None and not pd.isna(sample_size) and sample_size < pa_threshold:
+        return "⚪"
+    if test_score >= 65:
+        return "🟢"
+    if test_score >= 45:
+        return "🟡"
+    if test_score >= 30:
+        return "🟠"
+    return "🔴"
+
 
 
 # ============================================================================
@@ -355,7 +420,7 @@ for _, game in slate.iterrows():
     weather = {}
     wx_mult = 1.0
     wx_summary = ""
-   if use_weather and venue in PARKS:
+    if use_weather and venue in PARKS:
         try:
             park_info = PARKS[venue]
             lat = park_info.get("lat")
@@ -369,7 +434,7 @@ for _, game in slate.iterrows():
             else:
                 wx_iso = None
             weather = fetch_weather(lat, lon, wx_iso) or {}
-            wx_mult = weather_hr_multiplier(weather, cf_bearing) or 1.0
+            wx_mult, _summary = hr_multiplier(weather, park_info)
             wx_summary = weather.get("summary", "")
         except Exception:
             weather = {}
@@ -598,10 +663,7 @@ for _, game in slate.iterrows():
                 row_dict, opp_p_row,
                 park_hr_factor=park_mult, weather_hr_factor=wx_mult,
             )
-            p_game = hr_prob_per_game(
-                row_dict, opp_p_row,
-                park_hr_factor=park_mult, weather_hr_factor=wx_mult,
-            )
+            p_game = hr_prob_full_game(p_pa) if p_pa is not None else None
             hr_pa.append(round(p_pa * 100, 2) if p_pa is not None else None)
             hr_game.append(round(p_game * 100, 2) if p_game is not None else None)
             verdicts.append(hr_verdict(
@@ -617,7 +679,7 @@ for _, game in slate.iterrows():
         matchup_df["verdict"] = verdicts
         matchup_df["alert"] = signals
 
-  # Sleeper score - uses sleepers.py functions correctly
+    # Sleeper score - uses sleepers.py functions correctly
     try:
         if not away_matchup.empty:
             away_matchup = hr_probability(
