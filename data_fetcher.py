@@ -28,7 +28,44 @@ HEADERS = {
 }
 
 CURRENT_SEASON = datetime.now().year
+# ----------------------------------------------------------------------------
+# Shared normalizers - keep player_id types consistent across all sources
+# ----------------------------------------------------------------------------
 
+def _normalize_player_df(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Ensure player_id is a consistent integer type so merges work.
+    Also rename common column aliases that Savant uses inconsistently.
+    """
+    if df is None or df.empty:
+        return df
+    if "player_id" not in df.columns:
+        for cand in ["mlb_id", "playerid", "MLBAMID", "mlbam_id", "player_mlb_id"]:
+            if cand in df.columns:
+                df = df.rename(columns={cand: "player_id"})
+                break
+    if "player_id" in df.columns:
+        df["player_id"] = pd.to_numeric(df["player_id"], errors="coerce").astype("Int64")
+    return df
+
+
+def _derive_hitter_missing(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Compute commonly-missing hitter columns from real underlying stats.
+    These are math identities (ISO = SLG - AVG), not fake defaults.
+    """
+    if df is None or df.empty:
+        return df
+
+    # ISO from SLG - AVG if missing or all-null
+    needs_iso = "iso" not in df.columns or df["iso"].isna().all()
+    if needs_iso:
+        slg_col = next((c for c in ["slg", "slugging_percentage"] if c in df.columns), None)
+        avg_col = next((c for c in ["batting_avg", "avg", "ba"] if c in df.columns), None)
+        if slg_col and avg_col:
+            df["iso"] = (df[slg_col] - df[avg_col]).round(3)
+
+    return df
 
 # ===========================================================================
 # Safe parsers - handle MLB Stats API "-.--" and other junk values
