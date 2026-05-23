@@ -21,18 +21,17 @@ import streamlit as st
 from data_fetcher import (
     get_slate, get_lineup, get_team_roster,
     get_hitter_stats, get_pitcher_stats, get_pitcher_arsenal,
-    get_hitter_traditional, get_pitcher_traditional,
     get_pitcher_recent_form, get_hitter_recent_form_trad,
-    get_sprint_speed, fill_pitcher_stats_for_slate, fill_hitter_bats,
+    get_sprint_speed,
 )
 from models import build_matchup_table, build_pitcher_slate
 from sleepers import hr_probability, find_sleepers, grand_slam_probability
 from props import (
-    hr_prob_per_pa, hr_prob_per_game, k_total_projection,
-    hr_verdict, hr_signal_emoji, pitcher_signal_emoji,
+    hr_prob_per_pa, hr_prob_full_game, k_total_projection,
+    verdict_color,
 )
 from park_factors import get_park, PARKS
-from weather import fetch_weather, weather_hr_multiplier
+from weather import fetch_weather, hr_multiplier
 
 try:
     from splits import get_career_bvp_aggregate, get_similar_arsenal_aggregate
