@@ -2,9 +2,7 @@
 models.py
 ==========
 Composite scoring engine for hitter matchups and pitcher slate.
-
 Real data only - NaN propagates honestly when stats are missing.
-No fake-50 defaults, no league-average fillna shortcuts.
 """
 
 from __future__ import annotations
@@ -12,10 +10,6 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-
-# ===========================================================================
-# Scoring weights - tuned to roughly match Kasper-style outputs
-# ===========================================================================
 
 SCORING_WEIGHTS = {
     "matchup": {
@@ -26,7 +20,7 @@ SCORING_WEIGHTS = {
         "sweet_spot_pct": 0.05,
         "fb_pct": 0.10,
         "xwobacon": 0.15,
-        "pitcher_xwoba": 0.10,  # higher = better for hitter
+        "pitcher_xwoba": 0.10,
     },
     "hr_form": {
         "recent_iso": 0.30,
@@ -40,29 +34,20 @@ SCORING_WEIGHTS = {
         "hard_hit": 0.20,
         "xwobacon": 0.20,
         "iso": 0.15,
-        "avg_best_speed": 0.15,
+        "avg_ev": 0.15,
     },
 }
 
-NEG_COLS = ("k_pct", "whiff_pct")  # columns where lower is better for the hitter
+NEG_COLS = ("k_pct", "whiff_pct")
 
 
 def _safe_pct_rank(s: pd.Series) -> pd.Series:
-    """
-    Percentile rank 0-100. NaNs stay NaN - no fake-50 defaults.
-    Composite scores will also be NaN for players with missing data,
-    which is honest.
-    """
+    """Percentile rank 0-100. NaNs stay NaN."""
     return s.rank(pct=True) * 100
 
 
 def _score_from_weights(df: pd.DataFrame, weights: dict, neg: tuple = NEG_COLS) -> pd.Series:
-    """
-    Weighted sum of percentile-ranked columns.
-    - Rows with NO data in any weighted column → NaN
-    - Rows with partial data → score scaled by weights of columns that DO have data
-    - Columns in `neg` are inverted (lower raw = higher score)
-    """
+    """Weighted sum of percentile-ranked columns. Honest NaN when no data."""
     contributions = []
     for col, w in weights.items():
         if col not in df.columns:
@@ -78,13 +63,11 @@ def _score_from_weights(df: pd.DataFrame, weights: dict, neg: tuple = NEG_COLS) 
 
     total_weight = sum(wp for wp, _ in contributions)
     weighted_sum = sum(wp * r for wp, r in contributions)
-
     score = weighted_sum / total_weight.replace(0, np.nan)
     return score.round(2)
 
 
 def _form_arrow(recent: float, season: float, threshold: float = 0.10) -> str:
-    """Compare recent rolling form vs season baseline."""
     if pd.isna(recent) or pd.isna(season) or season == 0:
         return "→"
     diff = (recent - season) / abs(season)
@@ -95,91 +78,95 @@ def _form_arrow(recent: float, season: float, threshold: float = 0.10) -> str:
     return "→"
 
 
-# ===========================================================================
-# Hitter matchup table
-# ===========================================================================
-
 def build_matchup_table(
     lineup: list,
     pitcher_row: pd.Series | None,
     hitter_stats: pd.DataFrame,
     pitcher_stats: pd.DataFrame,
     recent_form_dict: dict | None = None,
+    pitcher_arsenal_df: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """Build per-hitter matchup table for one team facing today's pitcher."""
+    """Build the matchup table from lineup + season stats."""
     if not lineup:
         return pd.DataFrame()
 
+    ids = [p["id"] for p in lineup if p.get("id")]
+    h = hitter_stats[hitter_stats["player_id"].isin(ids)].copy() if "player_id" in hitter_stats.columns else hitter_stats.copy()
+
     rows = []
     for i, p in enumerate(lineup, start=1):
-        pid = p.get("id")
-        if pid is None:
-            continue
-        h = hitter_stats[hitter_stats["player_id"] == pid]
-        base = {
-            "player_id": pid,
-            "player_name": p.get("name"),
-            "lineup_pos": i,
-            "position": p.get("position"),
-            "bats": p.get("bats", ""),
-        }
-        if len(h) > 0:
-            r = h.iloc[0].to_dict()
-            base.update({
-                "pa": r.get("pa"),
-                "iso": r.get("iso"),
-                "xwoba": r.get("xwoba"),
-                "xwobacon": r.get("xwobacon"),
-                "xba": r.get("xba"),
-                "xslg": r.get("xslg"),
-                "barrel_pct": r.get("barrel_batted_rate"),
-                "hard_hit": r.get("hard_hit_percent"),
-                "sweet_spot_pct": r.get("sweet_spot_percent"),
-                "fb_pct": r.get("flyballs_percent"),
-                "la": r.get("launch_angle"),
-                "ev": r.get("launch_speed"),
-                "best_speed": r.get("avg_best_speed"),
-                "k_pct": r.get("k_percent"),
-                "bb_pct": r.get("bb_percent"),
-                "whiff_pct": r.get("whiff_percent"),
-                "home_run": r.get("home_run"),
-                "pulled_brl_pct": r.get("pulled_brl_pct"),
-                "pull_pct": r.get("pull_percent"),
-                "oppo_pct": r.get("opposite_percent"),
-                "pull_air_pct": r.get("pull_air_percent"),
-                "oppo_air_pct": r.get("opposite_air_percent"),
-                "sprint_speed": r.get("sprint_speed"),
-            })
-        if recent_form_dict and pid in recent_form_dict:
-            base.update(recent_form_dict[pid])
-        rows.append(base)
-
+        match = h[h["player_id"] == p["id"]] if "player_id" in h.columns else pd.DataFrame()
+        row = match.iloc[0].to_dict() if len(match) else {"player_id": p.get("id")}
+        row["player_name"] = p["name"]
+        row["lineup_pos"] = i
+        row["position"] = p.get("position", "")
+        row["bats"] = p.get("bats", "")
+        if recent_form_dict and p.get("id") in recent_form_dict:
+            for k, v in recent_form_dict[p["id"]].items():
+                row[k] = v
+        rows.append(row)
     df = pd.DataFrame(rows)
-    if df.empty:
-        return df
 
-    # Attach pitcher context (same value for every hitter in the lineup)
-    if pitcher_row is not None and len(pitcher_row):
-        df["pitcher_xwoba"] = pitcher_row.get("xwoba")
-        df["pitcher_k_pct"] = pitcher_row.get("k_percent")
-        df["pitcher_whiff_pct"] = pitcher_row.get("whiff_percent")
-        df["pitcher_barrel_allowed"] = pitcher_row.get("barrel_batted_rate")
-        df["pitcher_hr"] = pitcher_row.get("home_run")
-        df["pitcher_throws"] = pitcher_row.get("p_throws", "")
+    # Pitcher context (same value for whole lineup)
+    if pitcher_row is not None and not pitcher_row.empty:
+        df["pitcher_xwoba"] = pitcher_row.get("xwoba", np.nan)
+        df["pitcher_k_pct"] = pitcher_row.get("k_percent", np.nan)
+        df["pitcher_k_inv"] = -1 * df["pitcher_k_pct"]
+        df["pitcher_barrel_allowed"] = pitcher_row.get("barrel_batted_rate", np.nan)
+        df["pitcher_hr"] = pitcher_row.get("home_run", np.nan)
+        df["pitcher_whiff"] = pitcher_row.get("whiff_percent", np.nan)
+    else:
+        df["pitcher_xwoba"] = np.nan
+        df["pitcher_k_inv"] = np.nan
+        df["pitcher_barrel_allowed"] = np.nan
 
-    # Composite scores (real data only - NaN propagates)
+    # Normalize column names - handle Savant's column-name inconsistencies
+    rename = {
+        "barrel_batted_rate": "barrel_pct",
+        "hard_hit_percent": "hard_hit",
+        "k_percent": "k_pct",
+        "bb_percent": "bb_pct",
+        "avg_best_speed": "avg_ev",
+        "sweet_spot_percent": "sweet_spot_pct",
+        "flyballs_percent": "fb_pct",
+        "groundballs_percent": "gb_pct",
+        "linedrives_percent": "ld_pct",
+        "whiff_percent": "whiff_pct",
+        # Launch angle - Savant uses several variants
+        "launch_angle": "la",
+        "launch_angle_avg": "la",
+        "avg_hit_angle": "la",
+        # ISO - Savant uses isolated_power in CSV exports
+        "isolated_power": "iso",
+        "pull_air_percent": "pull_air_pct",
+    }
+    df = df.rename(columns=rename)
+
+    # Dedupe if rename created duplicates
+    if isinstance(df.columns, pd.Index) and df.columns.duplicated().any():
+        df = df.loc[:, ~df.columns.duplicated()]
+
+    # Derive ISO from SLG-AVG (or xSLG-xBA) if still missing
+    if "iso" not in df.columns or df["iso"].isna().all():
+        slg_col = next((c for c in ["slg", "xslg"] if c in df.columns), None)
+        avg_col = next((c for c in ["batting_avg", "avg", "xba"] if c in df.columns), None)
+        if slg_col and avg_col:
+            df["iso"] = (df[slg_col] - df[avg_col]).round(3)
+
+    df["k_pct_inv"] = -df["k_pct"] if "k_pct" in df.columns else np.nan
+
+    # Composite scores
     df["matchup"] = _score_from_weights(df, SCORING_WEIGHTS["matchup"])
     df["hr_form"] = _score_from_weights(df, SCORING_WEIGHTS["hr_form"])
     df["ceiling"] = _score_from_weights(df, SCORING_WEIGHTS["ceiling"])
 
-    # Test Score = matchup × (PA sample weight). NaN matchup → NaN Test.
     if "pa" in df.columns:
         pa_factor = (df["pa"] / 150.0).clip(0.5, 1.0)
         df["test_score"] = (df["matchup"] * pa_factor).round(2)
     else:
         df["test_score"] = df["matchup"]
 
-    # Zone Fit: only if real data exists
+    # Zone Fit
     if "xwobacon" in df.columns and df["xwobacon"].notna().any():
         base = _safe_pct_rank(df["xwobacon"]) / 100
         if "pitcher_xwoba" in df.columns and not df["pitcher_xwoba"].isna().all():
@@ -190,14 +177,13 @@ def build_matchup_table(
     else:
         df["zone_fit"] = np.nan
 
-    # kHR - real data only
+    # kHR
     if "k_pct" in df.columns and "pitcher_k_pct" in df.columns:
         df["k_combined"] = (df["k_pct"] + df["pitcher_k_pct"]) / 2
         df["kHR"] = (100 - _safe_pct_rank(df["k_combined"])).round(2)
     else:
         df["kHR"] = np.nan
 
-    # HR Form arrow
     if "recent_iso" in df.columns and "iso" in df.columns:
         df["hr_form_arrow"] = df.apply(
             lambda r: _form_arrow(r.get("recent_iso"), r.get("iso")), axis=1
@@ -212,7 +198,6 @@ def build_matchup_table(
             lambda x: f"{x:.0f}% →" if pd.notna(x) else "—"
         )
 
-    # "Likely HR%" - only if real data
     if "barrel_pct" in df.columns and "fb_pct" in df.columns:
         df["likely_hr_pct"] = ((df["barrel_pct"] * df["fb_pct"] / 100) * 0.75).round(2)
     elif "barrel_pct" in df.columns:
@@ -220,35 +205,30 @@ def build_matchup_table(
     else:
         df["likely_hr_pct"] = np.nan
 
-    # Final display column order
     display_cols = [
         "player_id", "player_name", "lineup_pos", "position", "bats",
         "matchup", "test_score", "ceiling", "zone_fit",
         "hr_form", "hr_form_label", "hr_form_arrow", "kHR", "likely_hr_pct",
         "pa", "iso", "xwoba", "xwobacon", "xba", "xslg",
         "barrel_pct", "hard_hit", "sweet_spot_pct", "fb_pct",
-        "la", "ev", "best_speed",
+        "la", "ev", "avg_ev",
         "k_pct", "bb_pct", "whiff_pct",
         "home_run", "pulled_brl_pct", "pull_pct", "oppo_pct",
         "pull_air_pct", "oppo_air_pct", "sprint_speed",
         "recent_hr", "recent_iso", "recent_avg", "recent_k_pct",
-        "pitcher_xwoba", "pitcher_k_pct", "pitcher_whiff_pct",
-        "pitcher_barrel_allowed", "pitcher_hr", "pitcher_throws",
+        "pitcher_xwoba", "pitcher_k_pct", "pitcher_whiff",
+        "pitcher_barrel_allowed", "pitcher_hr",
     ]
     keep = [c for c in display_cols if c in df.columns]
     return df[keep]
 
-
-# ===========================================================================
-# Pitcher slate
-# ===========================================================================
 
 def build_pitcher_slate(
     slate: pd.DataFrame,
     pitcher_stats: pd.DataFrame,
     pitcher_recent: dict | None = None,
 ) -> pd.DataFrame:
-    """One row per starting pitcher with composite scores + recent form."""
+    """One row per starting pitcher with composite scores."""
     pitchers = []
     for _, g in slate.iterrows():
         for side in ("away", "home"):
@@ -295,7 +275,6 @@ def build_pitcher_slate(
     if df.empty:
         return df
 
-    # Composite scores - NaN propagates honestly
     if "k_pct" in df.columns:
         df["k_score"] = _safe_pct_rank(df["k_pct"])
     else:
@@ -309,7 +288,6 @@ def build_pitcher_slate(
     else:
         df["suppress_score"] = np.nan
 
-    # Weight-scaled composite (rows missing all three → NaN, partial → scaled)
     def _composite(row, components):
         present = [(v, w) for v, w in components if pd.notna(v)]
         if not present:
@@ -325,13 +303,11 @@ def build_pitcher_slate(
         (r["k_score"], 0.7), (r["whiff_score"], 0.3),
     ]), axis=1).round(2)
 
-    # Estimate expected Ks today: K9 × 5.5 IP avg start. Only if real K/9.
     if "k9" in df.columns:
         df["proj_k"] = (df["k9"] * 5.5 / 9).round(1)
     else:
         df["proj_k"] = np.nan
 
-    # Form arrow: recent ERA vs season ERA
     if "recent_era" in df.columns and "era" in df.columns:
         df["form_arrow"] = df.apply(
             lambda r: _form_arrow(-r.get("recent_era", 0), -r.get("era", 0))
