@@ -544,4 +544,5 @@ def get_pitcher_traditional(season: int = CURRENT_SEASON) -> pd.DataFrame:
             })
         except Exception:
             continue
-    return pd.DataFrame(rows)
+   df = pd.DataFrame(rows)
+    return _normalize_player_df(df)
