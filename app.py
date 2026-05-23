@@ -717,6 +717,9 @@ for _, game in slate.iterrows():
                 matchup_df["sleeper_score"] = (hr_pct - season_pct).round(1)
 
     # Grand slam compound probability - real signature: (df, pitcher_row, hr_mult)
+    # Adds a gs_score column per hitter. Sum to get a team-level value.
+    away_gs = 0.0
+    home_gs = 0.0
     try:
         if not away_matchup.empty:
             away_matchup = grand_slam_probability(
@@ -724,12 +727,16 @@ for _, game in slate.iterrows():
                 pd.Series(home_p_row) if home_p_row else None,
                 hr_mult=full_hr_mult,
             )
+            if "gs_score" in away_matchup.columns:
+                away_gs = float(away_matchup["gs_score"].fillna(0).sum())
         if not home_matchup.empty:
             home_matchup = grand_slam_probability(
                 home_matchup,
                 pd.Series(away_p_row) if away_p_row else None,
                 hr_mult=full_hr_mult,
             )
+            if "gs_score" in home_matchup.columns:
+                home_gs = float(home_matchup["gs_score"].fillna(0).sum())
     except Exception:
         pass
 
