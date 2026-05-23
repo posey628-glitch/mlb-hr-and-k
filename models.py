@@ -509,10 +509,16 @@ def build_pitcher_slate(
 
     # Form arrow: recent ERA vs season ERA (negate so "improvement" = lower ERA = up arrow)
     if "recent_era" in df.columns and "era" in df.columns:
-        df["form_arrow"] = df.apply(
-            lambda r: _form_arrow(-r.get("recent_era", 0), -r.get("era", 0))
-            if pd.notna(r.get("recent_era")) else "→", axis=1
-        )
+        def _safe_form(r):
+            recent = r.get("recent_era")
+            season = r.get("era")
+            if recent is None or pd.isna(recent) or season is None or pd.isna(season):
+                return "→"
+            try:
+                return _form_arrow(-float(recent), -float(season))
+            except (TypeError, ValueError):
+                return "→"
+        df["form_arrow"] = df.apply(_safe_form, axis=1)
     else:
         df["form_arrow"] = "→"
 
