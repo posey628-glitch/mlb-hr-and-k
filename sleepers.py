@@ -1,16 +1,14 @@
 """
 sleepers.py
 ============
-Identifies dark-horse HR picks and grand slam candidates for today's slate.
+Identifies HR sleepers - hitters whose today HR_PROB greatly exceeds
+their season HR pace. Big positive sleeper_score = "you wouldn't expect
+this guy, but conditions favor him."
 
-A "sleeper HR" is a hitter whose composite HR_PROB is well above what their
-public profile (HR total, ownership likelihood) would suggest. Surprise edge.
+Also computes Grand Slam compound probability per hitter.
 
-A "grand slam candidate" is a hitter whose compound P(GS) is highest:
-  P(bases loaded when up) × P(HR in that PA)
-
-Both metrics get HR_MULT (park × weather) applied at the very end so the
-ranking always reflects today's specific game conditions.
+Real data only - NaN propagates when stats are missing.
+No fake-50 defaults, no league-average fillna shortcuts.
 """
 
 from __future__ import annotations
@@ -19,62 +17,64 @@ import numpy as np
 import pandas as pd
 
 
+# ===========================================================================
+# HR probability per hitter
+# ===========================================================================
+
 def hr_probability(
     matchup_df: pd.DataFrame,
-    pitcher_row: pd.Series,
-    hr_mult: float,
+    pitcher_row: pd.Series | None,
+    hr_mult: float = 1.0,
 ) -> pd.DataFrame:
     """
-    Add per-hitter HR probability for THIS GAME.
-
-    Components (each percentile-ranked across the lineup, then weighted):
-      - barrel_pct (hitter)       0.30
-      - iso (hitter)              0.20
-      - hard_hit (hitter)         0.15
-      - pitcher HR/9 surrogate    0.15  (uses pitcher barrel_allowed)
-      - pitcher xwOBA allowed     0.10
-      - pitcher hard-hit allowed  0.10
-
-    Final value is scaled by HR_MULT (park × weather), so a Coors day with
-    20mph out wind will lift everyone, and Oracle Park on a cold night will
-    suppress everyone, RELATIVE to their season-level expectation.
+    Composite HR probability score on a 0-100 percentile basis.
+    Components: hitter barrel%, ISO, hard-hit%, plus pitcher allowance.
+    NaN when no real component data exists.
     """
-    if matchup_df.empty:
+    if matchup_df is None or matchup_df.empty:
         return matchup_df
 
     df = matchup_df.copy()
     p = pitcher_row if pitcher_row is not None else pd.Series(dtype=float)
 
     def _rank(s):
-        return (s.rank(pct=True) * 100).fillna(50.0)
+        """Percentile rank 0-100; NaN stays NaN (honest)."""
+        return s.rank(pct=True) * 100
 
-    components = pd.Series(0.0, index=df.index)
-    if "barrel_pct" in df.columns:
-        components += _rank(df["barrel_pct"]) * 0.30
-    if "iso" in df.columns:
-        components += _rank(df["iso"]) * 0.20
-    if "hard_hit" in df.columns:
-        components += _rank(df["hard_hit"]) * 0.15
+    # Build weighted score using only components with real data
+    weight_sums = pd.Series(0.0, index=df.index)
+    weighted_score = pd.Series(0.0, index=df.index)
 
-    # Pitcher context - same value applied to everyone in this lineup
+    for col, weight in [("barrel_pct", 0.30), ("iso", 0.20), ("hard_hit", 0.15)]:
+        if col in df.columns:
+            r = _rank(df[col])
+            mask = r.notna()
+            weight_sums[mask] += weight
+            weighted_score[mask] += r[mask] * weight
+
+    # Pitcher context - only adds when real pitcher data exists
     p_barrel = p.get("barrel_batted_rate", np.nan)
     p_xwoba = p.get("xwoba", np.nan)
     p_hh = p.get("hard_hit_percent", np.nan)
 
-    # Translate pitcher allowance into a 0-100 booster (higher allowed = better for hitters)
     def _pitcher_boost(val, neutral, scale):
         if pd.isna(val):
-            return 50.0
+            return None
         return float(np.clip(50 + (val - neutral) * scale, 0, 100))
 
-    boost = (
-        _pitcher_boost(p_barrel, 7.5, 4) * 0.15 +
-        _pitcher_boost(p_xwoba, 0.310, 250) * 0.10 +
-        _pitcher_boost(p_hh, 38.0, 1.5) * 0.10
-    )
-    components += boost
+    pitcher_boosts = [
+        (_pitcher_boost(p_barrel, 7.5, 4), 0.15),
+        (_pitcher_boost(p_xwoba, 0.310, 250), 0.10),
+        (_pitcher_boost(p_hh, 38.0, 1.5), 0.10),
+    ]
+    for boost_val, w in pitcher_boosts:
+        if boost_val is not None:
+            weight_sums += w
+            weighted_score += boost_val * w
 
-    # Apply today's park × weather multiplier
+    # Honest score: NaN when no real data at all
+    components = weighted_score / weight_sums.replace(0, np.nan)
+
     df["hr_prob"] = (components * hr_mult).round(2)
     df["hr_mult_today"] = hr_mult
     return df
@@ -85,73 +85,91 @@ def find_sleepers(hr_df: pd.DataFrame, season_hr_col: str = "home_run") -> pd.Da
     Flag hitters whose today HR_PROB greatly exceeds their season HR pace.
 
     Sleeper score = HR_PROB percentile MINUS season HR percentile.
-    Big positive value = "you wouldn't expect this guy, but conditions favor him."
+    Real data only - NaN if either input missing.
     """
     df = hr_df.copy()
     if df.empty:
         return df
 
-    hr_pct = (df["hr_prob"].rank(pct=True) * 100)
-    if season_hr_col in df.columns:
-        season_pct = (df[season_hr_col].rank(pct=True) * 100).fillna(50)
+    if "hr_prob" in df.columns:
+        hr_pct = df["hr_prob"].rank(pct=True) * 100
     else:
-        season_pct = pd.Series(50.0, index=df.index)
+        hr_pct = pd.Series([np.nan] * len(df), index=df.index)
+
+    if season_hr_col in df.columns:
+        season_pct = df[season_hr_col].rank(pct=True) * 100
+    else:
+        season_pct = pd.Series([np.nan] * len(df), index=df.index)
 
     df["sleeper_score"] = (hr_pct - season_pct).round(1)
-    df["is_sleeper"] = df["sleeper_score"] >= 25  # arbitrary cutoff - tune
+
+    # Flag the strongest sleepers (top 25% delta) - only if real scores
+    if df["sleeper_score"].notna().any():
+        threshold = df["sleeper_score"].quantile(0.75)
+        df["is_sleeper"] = df["sleeper_score"] >= threshold
+    else:
+        df["is_sleeper"] = False
+
     return df
 
 
+# ===========================================================================
+# Grand Slam probability
+# ===========================================================================
+
 def grand_slam_probability(
     matchup_df: pd.DataFrame,
-    pitcher_row: pd.Series,
-    hr_mult: float,
+    pitcher_row: pd.Series | None,
+    hr_mult: float = 1.0,
 ) -> pd.DataFrame:
     """
-    Compound probability: P(bases loaded for this hitter) × P(HR | PA).
+    Compound probability of a Grand Slam:
+      P(GS) ≈ P(HR | PA) × P(bases loaded | this lineup position)
 
-    P(bases loaded) drivers:
-      - Batting order position (3-6 hit with traffic most)
-      - On-base ability of hitters in front (here: lineup-average OBP)
-      - Pitcher WHIP / BB% (pitcher who allows traffic)
-
-    P(HR | PA) is the same per-hitter HR rate used in hr_probability,
-    then both get the park×weather multiplier.
+    Bases-loaded probability is approximated by the typical traffic ahead
+    of each lineup spot, multiplied by an estimate of how much the pitcher
+    walks/allows base runners.
     """
-    if matchup_df.empty:
+    if matchup_df is None or matchup_df.empty:
         return matchup_df
 
     df = matchup_df.copy()
 
-    # 1) Batting-order traffic factor (1-9). 3-6 see most loaded bases.
-    order_traffic = {1: 0.5, 2: 0.7, 3: 1.0, 4: 1.1, 5: 1.1, 6: 1.0, 7: 0.8, 8: 0.6, 9: 0.55}
-    if "lineup_pos" not in df.columns:
-        df["lineup_pos"] = range(1, len(df) + 1)
-    df["order_traffic"] = df["lineup_pos"].map(order_traffic).fillna(0.7)
-
-    # 2) Pitcher-traffic factor (high WHIP/BB% pitchers create loaded bases)
-    p = pitcher_row if pitcher_row is not None else pd.Series(dtype=float)
-    bb_pct = p.get("bb_percent", 8.0)  # league avg ~8%
-    pitcher_traffic = float(np.clip(1 + (bb_pct - 8.0) * 0.04, 0.7, 1.5))
-
-    # 3) Lineup OBP context - if "obp" not in df, fallback to xwoba as proxy
-    obp_col = "obp" if "obp" in df.columns else ("xwoba" if "xwoba" in df.columns else None)
-    if obp_col:
-        lineup_obp = df[obp_col].mean()
-        league_avg = 0.320 if obp_col == "obp" else 0.310
-        lineup_factor = float(np.clip(1 + (lineup_obp - league_avg) * 3, 0.7, 1.4))
+    # Approximate "bases loaded when you bat" frequency by lineup position
+    # (rough heuristic from historical play-by-play - cleanup spot sees most)
+    order_traffic = {
+        1: 0.005, 2: 0.012, 3: 0.025, 4: 0.040, 5: 0.035,
+        6: 0.028, 7: 0.022, 8: 0.015, 9: 0.010,
+    }
+    if "lineup_pos" in df.columns:
+        df["order_traffic"] = df["lineup_pos"].map(order_traffic)
     else:
-        lineup_factor = 1.0
+        df["order_traffic"] = np.nan
 
-    # 4) Per-hitter HR rate (re-use hr_prob if present, else compute quickly)
-    if "hr_prob" not in df.columns:
-        df = hr_probability(df, pitcher_row, hr_mult)
-    base_hr = df["hr_prob"] / 100.0  # normalize 0-1
+    # Pitcher walk rate boost - high BB% pitchers create more bases-loaded situations
+    p = pitcher_row if pitcher_row is not None else pd.Series(dtype=float)
+    p_bb = p.get("bb_percent", np.nan)
+    if pd.isna(p_bb):
+        bb_factor = 1.0  # no boost when we have no data
+    else:
+        bb_factor = float(np.clip(p_bb / 8.0, 0.7, 1.5))  # league avg BB% ~ 8
 
-    # Compound it
+    df["bases_loaded_prob"] = df["order_traffic"] * bb_factor
+
+    # Per-PA HR rate from hr_prob if available, else from season HR/PA
+    if "hr_prob" in df.columns and df["hr_prob"].notna().any():
+        # Convert percentile-style hr_prob (0-100) to a rough per-PA rate
+        hr_pa_rate = (df["hr_prob"] / 100) * 0.05  # cap at 5% per PA top of scale
+    elif "home_run" in df.columns and "pa" in df.columns:
+        hr_pa_rate = df["home_run"] / df["pa"].replace(0, np.nan)
+    else:
+        hr_pa_rate = pd.Series([np.nan] * len(df), index=df.index)
+
+    df["hr_pa_rate"] = hr_pa_rate
+
+    # Grand Slam = HR + bases loaded
     df["gs_score"] = (
-        base_hr * df["order_traffic"] * pitcher_traffic * lineup_factor * hr_mult * 100
-    ).round(2)
-    df["gs_traffic_factor"] = round(pitcher_traffic * lineup_factor, 3)
+        df["bases_loaded_prob"] * df["hr_pa_rate"] * hr_mult * 100
+    ).round(3)
 
-    return df.sort_values("gs_score", ascending=False)
+    return df
