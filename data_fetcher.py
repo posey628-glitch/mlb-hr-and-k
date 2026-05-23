@@ -57,9 +57,9 @@ def _derive_hitter_missing(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# ===========================================================================
+# ----------------------------------------------------------------------------
 # Safe parsers
-# ===========================================================================
+# ----------------------------------------------------------------------------
 
 def _safe_float(val):
     if val is None:
@@ -93,9 +93,9 @@ def _safe_int(val):
         return None
 
 
-# ===========================================================================
+# ----------------------------------------------------------------------------
 # Slate / probable pitchers
-# ===========================================================================
+# ----------------------------------------------------------------------------
 
 @st.cache_data(ttl=1800)
 def get_slate(game_date: Optional[str] = None) -> pd.DataFrame:
@@ -213,9 +213,9 @@ def get_all_team_rosters(slate: pd.DataFrame) -> dict:
     return rosters
 
 
-# ===========================================================================
+# ----------------------------------------------------------------------------
 # Statcast hitter stats
-# ===========================================================================
+# ----------------------------------------------------------------------------
 
 @st.cache_data(ttl=3600)
 def get_hitter_stats(season: int = CURRENT_SEASON) -> pd.DataFrame:
@@ -249,11 +249,6 @@ def get_hitter_stats(season: int = CURRENT_SEASON) -> pd.DataFrame:
             lambda s: " ".join(reversed([p.strip() for p in str(s).split(",")]))
             if isinstance(s, str) and "," in s else s
         )
-    if "player_id" not in df.columns:
-        for cand in ["mlb_id", "playerid", "MLBAMID"]:
-            if cand in df.columns:
-                df = df.rename(columns={cand: "player_id"})
-                break
     if "pull_air_percent" in df.columns and "barrel_batted_rate" in df.columns:
         df["pulled_brl_pct"] = (df["pull_air_percent"] * df["barrel_batted_rate"] / 100).round(2)
     df = _normalize_player_df(df)
@@ -261,9 +256,9 @@ def get_hitter_stats(season: int = CURRENT_SEASON) -> pd.DataFrame:
     return df
 
 
-# ===========================================================================
+# ----------------------------------------------------------------------------
 # Statcast pitcher stats
-# ===========================================================================
+# ----------------------------------------------------------------------------
 
 @st.cache_data(ttl=3600)
 def get_pitcher_stats(season: int = CURRENT_SEASON) -> pd.DataFrame:
@@ -298,9 +293,9 @@ def get_pitcher_stats(season: int = CURRENT_SEASON) -> pd.DataFrame:
     return df
 
 
-# ===========================================================================
+# ----------------------------------------------------------------------------
 # Pitcher arsenal
-# ===========================================================================
+# ----------------------------------------------------------------------------
 
 @st.cache_data(ttl=3600)
 def get_pitcher_arsenal(season: int = CURRENT_SEASON) -> pd.DataFrame:
@@ -339,9 +334,9 @@ def get_pitcher_arsenal_by_count(season: int = CURRENT_SEASON) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-# ===========================================================================
-# Sprint speed
-# ===========================================================================
+# ----------------------------------------------------------------------------
+# Sprint speed + run values
+# ----------------------------------------------------------------------------
 
 @st.cache_data(ttl=86400)
 def get_sprint_speed(season: int = CURRENT_SEASON) -> pd.DataFrame:
@@ -383,9 +378,9 @@ def get_pitch_run_values(season: int = CURRENT_SEASON) -> pd.DataFrame:
     return df
 
 
-# ===========================================================================
-# Recent form
-# ===========================================================================
+# ----------------------------------------------------------------------------
+# Recent form (per player)
+# ----------------------------------------------------------------------------
 
 @st.cache_data(ttl=1800)
 def get_pitcher_recent_form(pitcher_id: int, season: int = CURRENT_SEASON, n_starts: int = 5) -> dict:
@@ -470,13 +465,13 @@ def get_hitter_recent_form_trad(player_id: int, season: int = CURRENT_SEASON, n_
         return {}
 
 
-# ===========================================================================
-# Traditional stats from MLB Stats API
-# ===========================================================================
+# ----------------------------------------------------------------------------
+# Traditional stats - uses playerPool=All to catch non-qualifying players
+# ----------------------------------------------------------------------------
 
 @st.cache_data(ttl=3600)
 def get_hitter_traditional(season: int = CURRENT_SEASON) -> pd.DataFrame:
-   url = (
+    url = (
         "https://statsapi.mlb.com/api/v1/stats"
         f"?stats=season&group=hitting&season={season}&sportIds=1"
         "&playerPool=All&limit=3000"
@@ -517,7 +512,7 @@ def get_hitter_traditional(season: int = CURRENT_SEASON) -> pd.DataFrame:
 
 @st.cache_data(ttl=3600)
 def get_pitcher_traditional(season: int = CURRENT_SEASON) -> pd.DataFrame:
-  url = (
+    url = (
         "https://statsapi.mlb.com/api/v1/stats"
         f"?stats=season&group=pitching&season={season}&sportIds=1"
         "&playerPool=All&limit=3000"
@@ -543,8 +538,8 @@ def get_pitcher_traditional(season: int = CURRENT_SEASON) -> pd.DataFrame:
                 "era": _safe_float(st_.get("era")),
                 "whip": _safe_float(st_.get("whip")),
                 "hr9": _safe_float(st_.get("homeRunsPer9")),
-                "k9": _safe_float(st_.get("strikeoutsPer9Inn") or st_.get("strikeOutsPer9Inn")),
                 "bb9": _safe_float(st_.get("walksPer9Inn") or st_.get("baseOnBallsPer9Inn")),
+                "k9": _safe_float(st_.get("strikeoutsPer9Inn") or st_.get("strikeOutsPer9Inn")),
                 "ip": _safe_float(st_.get("inningsPitched")),
                 "wins": _safe_int(st_.get("wins")),
                 "losses": _safe_int(st_.get("losses")),
@@ -557,6 +552,8 @@ def get_pitcher_traditional(season: int = CURRENT_SEASON) -> pd.DataFrame:
             continue
     df = pd.DataFrame(rows)
     return _normalize_player_df(df)
+
+
 # ----------------------------------------------------------------------------
 # Per-pitcher fallback - guarantees data for today's starters
 # ----------------------------------------------------------------------------
