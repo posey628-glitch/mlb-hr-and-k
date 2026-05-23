@@ -517,9 +517,10 @@ def get_hitter_traditional(season: int = CURRENT_SEASON) -> pd.DataFrame:
 
 @st.cache_data(ttl=3600)
 def get_pitcher_traditional(season: int = CURRENT_SEASON) -> pd.DataFrame:
-    url = (
+  url = (
         "https://statsapi.mlb.com/api/v1/stats"
-        f"?stats=season&group=pitching&season={season}&sportIds=1&limit=2000"
+        f"?stats=season&group=pitching&season={season}&sportIds=1"
+        "&playerPool=All&limit=3000"
     )
     try:
         r = requests.get(url, headers=HEADERS, timeout=20)
