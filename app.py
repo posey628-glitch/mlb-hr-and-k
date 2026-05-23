@@ -43,10 +43,21 @@ except ImportError:
     def fill_hitter_bats(lineups, ids=None): return {}
 from models import build_matchup_table, build_pitcher_slate
 from sleepers import hr_probability, find_sleepers, grand_slam_probability
-from props import (
-    hr_prob_per_pa, hr_prob_full_game, k_total_projection,
-    verdict_color,
-)
+# Props - core functions are required, verdict_color is optional
+from props import hr_prob_per_pa, k_total_projection
+
+# hr_prob_full_game may not exist in older props.py versions
+try:
+    from props import hr_prob_full_game
+except ImportError:
+    def hr_prob_full_game(prob_per_pa, expected_pa=4.2):
+        """Fallback: P(>=1 HR in expected_pa) from per-PA prob."""
+        if prob_per_pa is None:
+            return None
+        try:
+            return float(1 - (1 - prob_per_pa) ** expected_pa)
+        except Exception:
+            return None
 from park_factors import get_park, PARKS
 from weather import fetch_weather, hr_multiplier
 
