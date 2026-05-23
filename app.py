@@ -59,6 +59,12 @@ except ImportError:
         except Exception:
             return None
 from park_factors import get_park, PARKS
+
+# Optional newer helper
+try:
+    from park_factors import park_k_factor
+except ImportError:
+    def park_k_factor(venue_name): return 1.0
 from weather import fetch_weather, hr_multiplier
 
 try:
@@ -736,7 +742,7 @@ for _, game in slate.iterrows():
             sample = int(pa) if pa is not None else None
             p_pa = hr_prob_per_pa(
                 row_dict, opp_p_row,
-                park_hr_factor=park_mult, weather_hr_factor=wx_mult,
+                park_factor=park_mult, weather_mult=wx_mult,
             )
             p_game = hr_prob_full_game(p_pa) if p_pa is not None else None
             hr_pa.append(round(p_pa * 100, 2) if p_pa is not None else None)
@@ -812,15 +818,19 @@ for _, game in slate.iterrows():
 
     away_k_proj, home_k_proj = {}, {}
     try:
+        # Park K factor (small effect, but worth including)
+        pkf = park_k_factor(venue) if venue else 1.0
         if away_p_row:
             away_k_proj = k_total_projection(
                 away_p_row, home_lineup_k_pct,
                 ump_k_factor=ump.get("k_factor", 1.0),
+                park_k_factor=pkf,
             )
         if home_p_row:
             home_k_proj = k_total_projection(
                 home_p_row, away_lineup_k_pct,
                 ump_k_factor=ump.get("k_factor", 1.0),
+                park_k_factor=pkf,
             )
     except Exception:
         pass
