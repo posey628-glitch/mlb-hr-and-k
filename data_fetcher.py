@@ -280,32 +280,12 @@ def get_hitter_stats(season: int = CURRENT_SEASON) -> pd.DataFrame:
 @st.cache_data(ttl=3600)
 def get_pitcher_stats(season: int = CURRENT_SEASON) -> pd.DataFrame:
     selections = (
-        "pa,k_percent,bb_percent,woba,xwoba,xiso,xba,xslg,xobp,"
-        "barrel_batted_rate,hard_hit_percent,avg_best_speed,avg_hit_angle,"
-        "whiff_percent,swing_percent,sweet_spot_percent,xwobacon,iso,babip,"
-        "launch_speed,launch_angle,p_total_pitches,p_total_swinging_strike,"
-        "csw_percent,zone_percent,in_zone_swing_miss_percent,"
-        "f_strike_percent,oz_swing_percent,z_swing_percent,"
-        "groundballs_percent,flyballs_percent,linedrives_percent,popups_percent,"
-        "pull_percent,straightaway_percent,opposite_percent,home_run"
-    )
-    url = (
-        "https://baseballsavant.mlb.com/leaderboard/custom"
-        f"?year={season}&type=pitcher&filter=&min=q&selections={selections}"
-        "&chart=false&x=pa&y=pa&r=no&chartType=beeswarm&csv=true"
-    )
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=30)
-        r.raise_for_status()
-        df = pd.read_csv(io.StringIO(r.text))
-    except Exception:
-        return pd.DataFrame()
-
-    if "last_name, first_name" in df.columns:
+       if "last_name, first_name" in df.columns:
         df["player_name"] = df["last_name, first_name"].apply(
             lambda s: " ".join(reversed([p.strip() for p in str(s).split(",")]))
             if isinstance(s, str) and "," in s else s
         )
+    df = _normalize_player_df(df)
     return df
 
 
