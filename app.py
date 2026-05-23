@@ -208,7 +208,12 @@ if not pitcher_trad.empty and "player_id" in pitcher_stats.columns:
 if "iso" not in hitter_stats.columns or hitter_stats["iso"].isna().all():
     if "slg" in hitter_stats.columns and "avg" in hitter_stats.columns:
         hitter_stats["iso"] = (hitter_stats["slg"] - hitter_stats["avg"]).round(3)
-
+# Per-pitcher fallback: fetch stats individually for any starter still missing data
+with st.spinner("Filling in missing pitcher data..."):
+    try:
+        pitcher_stats = fill_pitcher_stats_for_slate(pitcher_stats, slate)
+    except Exception as e:
+        st.warning(f"Per-pitcher fill skipped: {e}")
 # Sprint speed
 if use_sprint_speed:
     try:
