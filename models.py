@@ -377,9 +377,14 @@ def build_pitcher_slate(
         df["era_score"] = np.nan
 
     # Recent form blend: shift weight onto current performance
-    # If we have recent_k9, recompute k_score as weighted blend
+    # BUT cap recent_k9 contribution - relievers can K 2 in 1 IP (k9=18) which
+    # isn't sustainable over a multi-inning outing. Cap recent at 1.4x season K9.
     if "recent_k9" in df.columns and df["recent_k9"].notna().any() and "k9" in df.columns:
-        blended_k9 = df["recent_k9"].fillna(df["k9"]) * 0.35 + df["k9"].fillna(0) * 0.65
+        season_k9 = df["k9"].fillna(0)
+        # Cap recent K9 at 1.4 × season K9 (prevents tiny-sample explosions)
+        recent_capped = df["recent_k9"].fillna(season_k9).clip(upper=season_k9 * 1.4)
+        # If season K9 itself is 0/missing (no real data), don't blend
+        blended_k9 = recent_capped * 0.35 + season_k9 * 0.65
         df["blended_k9"] = blended_k9.round(2)
         df["k_score_blended"] = _safe_pct_rank(blended_k9)
     else:
@@ -430,21 +435,24 @@ def build_pitcher_slate(
     # ------------------------------------------------------------------
     # PROJ K - reliability-adjusted, uses blended K/9 when available
     # ------------------------------------------------------------------
-    # Expected IP for a starter is ~5.5; for low-IP/swing roles, scale down
+    # Expected IP varies by role - relievers/openers won't go deep
     if "k9" in df.columns:
-        # Use blended k9 if we have it, else season
         effective_k9 = df.get("blended_k9", df["k9"]).fillna(df["k9"])
-        # Expected IP varies by role
         def _expected_ip(row):
             ip = row.get("ip")
             gs = row.get("games_started")
+            # Hard reliever: explicit GS=0, OR very low IP
+            if gs is not None and not pd.isna(gs) and gs == 0:
+                return 1.5  # opener / bulk-relief: at most a couple innings
             if ip is None or pd.isna(ip) or ip < 10:
-                return 2.5  # opener / bulk-relief
+                return 2.0
+            # Swing/spot starter: limited usage
+            if gs is not None and not pd.isna(gs) and gs < 5:
+                return 3.5
             if ip < 25:
                 return 4.0
-            if gs is not None and not pd.isna(gs) and gs < 5:
-                return 4.5
-            return 5.5  # standard starter
+            # Established starter
+            return 5.5
         df["expected_ip"] = df.apply(_expected_ip, axis=1)
         df["proj_k"] = (effective_k9 * df["expected_ip"] / 9).round(1)
 
