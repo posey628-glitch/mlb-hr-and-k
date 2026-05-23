@@ -31,7 +31,7 @@ from props import (
     hr_prob_per_pa, hr_prob_per_game, k_total_projection,
     hr_verdict, hr_signal_emoji, pitcher_signal_emoji,
 )
-from park_factors import get_park_factor, PARK_LATLON
+from park_factors import get_park, PARKS
 from weather import fetch_weather, weather_hr_multiplier
 
 try:
