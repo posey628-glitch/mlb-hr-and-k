@@ -4,6 +4,8 @@ data_fetcher.py
 Pulls all data from public sources:
   - MLB Stats API (statsapi.mlb.com) - slate, lineups, traditional stats, handedness
   - Baseball Savant (baseballsavant.mlb.com) - Statcast stats, arsenals, sprint speed
+
+No API keys required. Defensive parsing throughout.
 """
 
 from __future__ import annotations
@@ -29,10 +31,11 @@ CURRENT_SEASON = datetime.now().year
 
 
 # ----------------------------------------------------------------------------
-# Shared normalizers
+# Shared normalizers - keep player_id types consistent across all sources
 # ----------------------------------------------------------------------------
 
 def _normalize_player_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Ensure player_id is consistent Int64 so merges work across sources."""
     if df is None or df.empty:
         return df
     if "player_id" not in df.columns:
@@ -46,6 +49,7 @@ def _normalize_player_df(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _derive_hitter_missing(df: pd.DataFrame) -> pd.DataFrame:
+    """Compute ISO from real underlying stats if Savant didn't supply it."""
     if df is None or df.empty:
         return df
     needs_iso = "iso" not in df.columns or df["iso"].isna().all()
@@ -58,7 +62,7 @@ def _derive_hitter_missing(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ----------------------------------------------------------------------------
-# Safe parsers
+# Safe parsers - handle MLB Stats API "-.--" and other junk values
 # ----------------------------------------------------------------------------
 
 def _safe_float(val):
@@ -214,7 +218,7 @@ def get_all_team_rosters(slate: pd.DataFrame) -> dict:
 
 
 # ----------------------------------------------------------------------------
-# Statcast hitter stats - min=1 to include all hitters
+# Statcast hitter stats - min=1 to include non-qualifying players
 # ----------------------------------------------------------------------------
 
 @st.cache_data(ttl=3600)
@@ -257,7 +261,7 @@ def get_hitter_stats(season: int = CURRENT_SEASON) -> pd.DataFrame:
 
 
 # ----------------------------------------------------------------------------
-# Statcast pitcher stats - min=1 to include all pitchers
+# Statcast pitcher stats - min=1 to include non-qualifying players
 # ----------------------------------------------------------------------------
 
 @st.cache_data(ttl=3600)
@@ -379,7 +383,7 @@ def get_pitch_run_values(season: int = CURRENT_SEASON) -> pd.DataFrame:
 
 
 # ----------------------------------------------------------------------------
-# Recent form (per player)
+# Recent form per player
 # ----------------------------------------------------------------------------
 
 @st.cache_data(ttl=1800)
@@ -555,7 +559,7 @@ def get_pitcher_traditional(season: int = CURRENT_SEASON) -> pd.DataFrame:
 
 
 # ----------------------------------------------------------------------------
-# Per-pitcher fallback + handedness bulk fetch
+# Per-pitcher fallback + handedness backfill
 # ----------------------------------------------------------------------------
 
 @st.cache_data(ttl=1800)
@@ -584,6 +588,39 @@ def get_player_season_pitching(player_id: int, season: int = CURRENT_SEASON) -> 
             "walks": _safe_int(st_.get("baseOnBalls")),
             "earned_runs": _safe_int(st_.get("earnedRuns")),
         }
+    except Exception:
+        return {}
+
+
+def fill_hitter_bats(lineups: list, ids: set | None = None) -> dict:
+    """
+    Bulk-fetch batting handedness for hitter IDs.
+    Returns {player_id: "R"/"L"/"S"} mapping.
+    """
+    if ids is None:
+        ids = set()
+        for lineup in lineups:
+            for p in lineup or []:
+                pid = p.get("id")
+                if pid is not None:
+                    try:
+                        ids.add(int(pid))
+                    except (ValueError, TypeError):
+                        continue
+    if not ids:
+        return {}
+    try:
+        ids_str = ",".join(str(p) for p in ids)
+        url = f"https://statsapi.mlb.com/api/v1/people?personIds={ids_str}"
+        r = requests.get(url, headers=HEADERS, timeout=15)
+        r.raise_for_status()
+        out = {}
+        for person in r.json().get("people", []):
+            pid = person.get("id")
+            side = (person.get("batSide") or {}).get("code")
+            if pid and side:
+                out[pid] = side
+        return out
     except Exception:
         return {}
 
