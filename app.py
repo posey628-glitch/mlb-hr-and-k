@@ -740,10 +740,24 @@ for _, game in slate.iterrows():
             row_dict = hr.to_dict()
             pa = safe_float(row_dict.get("pa"))
             sample = int(pa) if pa is not None else None
-            p_pa = hr_prob_per_pa(
-                row_dict, opp_p_row,
-                park_factor=park_mult, weather_mult=wx_mult,
-            )
+            # hr_prob_per_pa signatures vary across deployed versions of props.py.
+            # Try the modern kwarg form first, fall back to positional, fall back to no env factors.
+            try:
+                p_pa = hr_prob_per_pa(
+                    row_dict, opp_p_row,
+                    park_factor=park_mult, weather_mult=wx_mult,
+                )
+            except TypeError:
+                try:
+                    p_pa = hr_prob_per_pa(
+                        row_dict, opp_p_row,
+                        park_hr_factor=park_mult, weather_hr_factor=wx_mult,
+                    )
+                except TypeError:
+                    try:
+                        p_pa = hr_prob_per_pa(row_dict, opp_p_row)
+                    except Exception:
+                        p_pa = None
             p_game = hr_prob_full_game(p_pa) if p_pa is not None else None
             hr_pa.append(round(p_pa * 100, 2) if p_pa is not None else None)
             hr_game.append(round(p_game * 100, 2) if p_game is not None else None)
