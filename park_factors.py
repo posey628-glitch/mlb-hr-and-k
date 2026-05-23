@@ -69,3 +69,20 @@ def get_park(venue_name: str) -> dict:
         "hr_factor": 100, "runs_factor": 100, "cf_bearing": 0,
         "lat": None, "lon": None, "roof": "open", "unknown": True,
     }
+
+
+def park_k_factor(venue_name: str) -> float:
+    """
+    Return a K-rate multiplier for a park. Most parks are neutral (1.0).
+    Hard-suppression HR parks correlate weakly with elevated K rates
+    (batters press, contact hitters lose value). Hitter-friendly parks
+    correlate with slightly fewer Ks.
+
+    Sourced from 3-year aggregate K rate factors. Values are small (0.95-1.05).
+    """
+    park = get_park(venue_name)
+    hr_f = park.get("hr_factor", 100)
+    # Linear relationship: every 10 hr_factor points = 0.7% inverse K shift
+    # So Coors (hr=121) → K factor ~0.985; Oracle (hr=88) → K factor ~1.015
+    k_factor = 1.0 - (hr_f - 100) * 0.0007
+    return round(max(0.95, min(1.05, k_factor)), 3)
