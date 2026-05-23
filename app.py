@@ -346,7 +346,9 @@ for _, game in slate.iterrows():
     park_mult = 1.0
     if use_weather:
         try:
-            park_mult = get_park_factor(venue) or 1.0
+            park_info = get_park(venue) or {}
+            # Convert factor from 100=neutral scale to multiplier
+            park_mult = (park_info.get("hr_factor", 100) / 100.0)
         except Exception:
             park_mult = 1.0
 
