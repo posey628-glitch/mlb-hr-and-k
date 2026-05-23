@@ -557,3 +557,88 @@ def get_pitcher_traditional(season: int = CURRENT_SEASON) -> pd.DataFrame:
             continue
     df = pd.DataFrame(rows)
     return _normalize_player_df(df)
+# ----------------------------------------------------------------------------
+# Per-pitcher fallback - guarantees data for today's starters
+# ----------------------------------------------------------------------------
+
+@st.cache_data(ttl=1800)
+def get_player_season_pitching(player_id: int, season: int = CURRENT_SEASON) -> dict:
+    """Fetch one pitcher's season stats directly by ID."""
+    url = (
+        f"https://statsapi.mlb.com/api/v1/people/{player_id}/stats"
+        f"?stats=season&group=pitching&season={season}&sportId=1"
+    )
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=10)
+        r.raise_for_status()
+        splits = r.json().get("stats", [{}])[0].get("splits", [])
+        if not splits:
+            return {}
+        st_ = splits[0].get("stat", {}) or {}
+        return {
+            "era": _safe_float(st_.get("era")),
+            "whip": _safe_float(st_.get("whip")),
+            "hr9": _safe_float(st_.get("homeRunsPer9")),
+            "bb9": _safe_float(st_.get("walksPer9Inn") or st_.get("baseOnBallsPer9Inn")),
+            "k9": _safe_float(st_.get("strikeoutsPer9Inn") or st_.get("strikeOutsPer9Inn")),
+            "ip": _safe_float(st_.get("inningsPitched")),
+            "games_started": _safe_int(st_.get("gamesStarted")),
+            "strikeouts": _safe_int(st_.get("strikeOuts")),
+            "walks": _safe_int(st_.get("baseOnBalls")),
+            "earned_runs": _safe_int(st_.get("earnedRuns")),
+        }
+    except Exception:
+        return {}
+
+
+def fill_pitcher_stats_for_slate(pitcher_stats: pd.DataFrame, slate: pd.DataFrame,
+                                   season: int = CURRENT_SEASON) -> pd.DataFrame:
+    """
+    For every probable starter in the slate, if they're missing key stats
+    in pitcher_stats, fetch them individually and patch them in.
+    """
+    if pitcher_stats is None or slate is None or slate.empty:
+        return pitcher_stats
+
+    df = pitcher_stats.copy() if pitcher_stats is not None and not pitcher_stats.empty else pd.DataFrame()
+    if df.empty:
+        df = pd.DataFrame(columns=["player_id"])
+
+    for col in ["era", "whip", "k9", "bb9", "hr9", "ip", "games_started"]:
+        if col not in df.columns:
+            df[col] = pd.NA
+
+    starter_ids = set()
+    for col in ["away_pitcher_id", "home_pitcher_id"]:
+        if col in slate.columns:
+            for pid in slate[col].dropna().unique():
+                try:
+                    starter_ids.add(int(pid))
+                except (ValueError, TypeError):
+                    continue
+
+    for pid in starter_ids:
+        existing = df[df["player_id"] == pid] if "player_id" in df.columns else pd.DataFrame()
+        needs_fill = (
+            existing.empty
+            or pd.isna(existing.iloc[0].get("k9"))
+            or pd.isna(existing.iloc[0].get("era"))
+        )
+        if not needs_fill:
+            continue
+
+        stats = get_player_season_pitching(pid, season)
+        if not stats or stats.get("k9") is None:
+            continue
+
+        if existing.empty:
+            new_row = {"player_id": pid}
+            new_row.update(stats)
+            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+        else:
+            idx = existing.index[0]
+            for k, v in stats.items():
+                if v is not None and not (isinstance(v, float) and pd.isna(v)):
+                    df.at[idx, k] = v
+
+    return _normalize_player_df(df)
