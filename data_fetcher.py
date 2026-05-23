@@ -4,8 +4,6 @@ data_fetcher.py
 Pulls all data from public sources:
   - MLB Stats API (statsapi.mlb.com) - slate, probable pitchers, lineups, traditional stats
   - Baseball Savant (baseballsavant.mlb.com) - Statcast stats, arsenals, sprint speed
-
-No API keys required. Defensive parsing - one bad row never kills a batch.
 """
 
 from __future__ import annotations
@@ -28,15 +26,13 @@ HEADERS = {
 }
 
 CURRENT_SEASON = datetime.now().year
+
+
 # ----------------------------------------------------------------------------
-# Shared normalizers - keep player_id types consistent across all sources
+# Shared normalizers
 # ----------------------------------------------------------------------------
 
 def _normalize_player_df(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Ensure player_id is a consistent integer type so merges work.
-    Also rename common column aliases that Savant uses inconsistently.
-    """
     if df is None or df.empty:
         return df
     if "player_id" not in df.columns:
@@ -50,35 +46,28 @@ def _normalize_player_df(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _derive_hitter_missing(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Compute commonly-missing hitter columns from real underlying stats.
-    These are math identities (ISO = SLG - AVG), not fake defaults.
-    """
     if df is None or df.empty:
         return df
-
-    # ISO from SLG - AVG if missing or all-null
     needs_iso = "iso" not in df.columns or df["iso"].isna().all()
     if needs_iso:
         slg_col = next((c for c in ["slg", "slugging_percentage"] if c in df.columns), None)
         avg_col = next((c for c in ["batting_avg", "avg", "ba"] if c in df.columns), None)
         if slg_col and avg_col:
             df["iso"] = (df[slg_col] - df[avg_col]).round(3)
-
     return df
 
+
 # ===========================================================================
-# Safe parsers - handle MLB Stats API "-.--" and other junk values
+# Safe parsers
 # ===========================================================================
 
 def _safe_float(val):
-    """Convert to float; return None for '-.--', '', or invalid."""
     if val is None:
         return None
     if isinstance(val, (int, float)):
         try:
             f = float(val)
-            return f if not (f != f) else None  # NaN check
+            return f if not (f != f) else None
         except (TypeError, ValueError):
             return None
     s = str(val).strip()
@@ -265,9 +254,8 @@ def get_hitter_stats(season: int = CURRENT_SEASON) -> pd.DataFrame:
             if cand in df.columns:
                 df = df.rename(columns={cand: "player_id"})
                 break
-  if "pull_air_percent" in df.columns and "barrel_batted_rate" in df.columns:
+    if "pull_air_percent" in df.columns and "barrel_batted_rate" in df.columns:
         df["pulled_brl_pct"] = (df["pull_air_percent"] * df["barrel_batted_rate"] / 100).round(2)
-    # Normalize player_id type for merges + derive missing columns
     df = _normalize_player_df(df)
     df = _derive_hitter_missing(df)
     return df
@@ -280,7 +268,28 @@ def get_hitter_stats(season: int = CURRENT_SEASON) -> pd.DataFrame:
 @st.cache_data(ttl=3600)
 def get_pitcher_stats(season: int = CURRENT_SEASON) -> pd.DataFrame:
     selections = (
-       if "last_name, first_name" in df.columns:
+        "pa,k_percent,bb_percent,woba,xwoba,xiso,xba,xslg,xobp,"
+        "barrel_batted_rate,hard_hit_percent,avg_best_speed,avg_hit_angle,"
+        "whiff_percent,swing_percent,sweet_spot_percent,xwobacon,iso,babip,"
+        "launch_speed,launch_angle,p_total_pitches,p_total_swinging_strike,"
+        "csw_percent,zone_percent,in_zone_swing_miss_percent,"
+        "f_strike_percent,oz_swing_percent,z_swing_percent,"
+        "groundballs_percent,flyballs_percent,linedrives_percent,popups_percent,"
+        "pull_percent,straightaway_percent,opposite_percent,home_run"
+    )
+    url = (
+        "https://baseballsavant.mlb.com/leaderboard/custom"
+        f"?year={season}&type=pitcher&filter=&min=q&selections={selections}"
+        "&chart=false&x=pa&y=pa&r=no&chartType=beeswarm&csv=true"
+    )
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=30)
+        r.raise_for_status()
+        df = pd.read_csv(io.StringIO(r.text))
+    except Exception:
+        return pd.DataFrame()
+
+    if "last_name, first_name" in df.columns:
         df["player_name"] = df["last_name, first_name"].apply(
             lambda s: " ".join(reversed([p.strip() for p in str(s).split(",")]))
             if isinstance(s, str) and "," in s else s
@@ -462,7 +471,7 @@ def get_hitter_recent_form_trad(player_id: int, season: int = CURRENT_SEASON, n_
 
 
 # ===========================================================================
-# Traditional stats from MLB Stats API - defensive parsing
+# Traditional stats from MLB Stats API
 # ===========================================================================
 
 @st.cache_data(ttl=3600)
@@ -544,5 +553,5 @@ def get_pitcher_traditional(season: int = CURRENT_SEASON) -> pd.DataFrame:
             })
         except Exception:
             continue
-   df = pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
     return _normalize_player_df(df)
