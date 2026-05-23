@@ -611,20 +611,48 @@ for _, game in slate.iterrows():
         matchup_df["verdict"] = verdicts
         matchup_df["alert"] = signals
 
-    # Sleeper score
-    for matchup_df in [away_matchup, home_matchup]:
-        if matchup_df.empty:
-            continue
-        try:
-            matchup_df["sleeper_score"] = matchup_df.apply(
-                lambda r: compute_sleeper_score(r.to_dict()), axis=1
+  # Sleeper score - uses sleepers.py functions correctly
+    try:
+        if not away_matchup.empty:
+            away_matchup = hr_probability(
+                away_matchup,
+                pd.Series(home_p_row) if home_p_row else None,
+                hr_mult=full_hr_mult,
             )
-        except Exception:
-            matchup_df["sleeper_score"] = np.nan
+            away_matchup = find_sleepers(away_matchup, season_hr_col="home_run")
+        if not home_matchup.empty:
+            home_matchup = hr_probability(
+                home_matchup,
+                pd.Series(away_p_row) if away_p_row else None,
+                hr_mult=full_hr_mult,
+            )
+            home_matchup = find_sleepers(home_matchup, season_hr_col="home_run")
+    except Exception:
+        # Fallback: compute sleeper score directly if helpers fail
+        for matchup_df in [away_matchup, home_matchup]:
+            if matchup_df.empty:
+                continue
+            if "hr_game_pct" in matchup_df.columns and "home_run" in matchup_df.columns:
+                hr_pct = matchup_df["hr_game_pct"].rank(pct=True) * 100
+                season_pct = matchup_df["home_run"].rank(pct=True) * 100
+                matchup_df["sleeper_score"] = (hr_pct - season_pct).round(1)
 
-    # Grand slam compound probability (3 hitters in a row)
-    away_gs = grand_slam_probability(away_matchup) if not away_matchup.empty else 0.0
-    home_gs = grand_slam_probability(home_matchup) if not home_matchup.empty else 0.0
+    # Grand slam compound probability - real signature: (df, pitcher_row, hr_mult)
+    try:
+        if not away_matchup.empty:
+            away_matchup = grand_slam_probability(
+                away_matchup,
+                pd.Series(home_p_row) if home_p_row else None,
+                hr_mult=full_hr_mult,
+            )
+        if not home_matchup.empty:
+            home_matchup = grand_slam_probability(
+                home_matchup,
+                pd.Series(away_p_row) if away_p_row else None,
+                hr_mult=full_hr_mult,
+            )
+    except Exception:
+        pass
 
     # K projection
     away_k_col = away_matchup["k_pct"] if "k_pct" in away_matchup.columns else pd.Series(dtype=float)
