@@ -309,6 +309,13 @@ if show_legend:
                 "🔴 Avoid (< 7%)\n\n"
                 "⚪ Insufficient sample"
             )
+            st.markdown("**Role flags (pitchers)**")
+            st.markdown(
+                "✓ Established starter\n\n"
+                "🔄 SWING — swing-man / spot starter\n\n"
+                "⚠️ LOW IP — under 25 IP this season\n\n"
+                "🚨 RELIEVER — pure reliever / opener day"
+            )
         with leg2:
             st.markdown("**Signal column (pitchers)**")
             st.markdown(
@@ -318,16 +325,25 @@ if show_legend:
                 "🔴 Avoid (< 30)\n\n"
                 "⚪ Insufficient data"
             )
+            st.markdown("**Pitcher Test Score formula**")
+            st.markdown(
+                "Blended K/9 (30%) + Whiff% (20%) + xwOBA suppression (25%) "
+                "+ ERA (15%) + base K% (10%), then × **reliability factor**. "
+                "Relievers get 0.4 cap, low-IP/swing get scaled multiplier."
+            )
         with leg3:
             st.markdown("**Key metrics**")
             st.markdown(
                 "**HR Game%** = Probability of ≥1 HR this game (calibrated from barrel rate, pitcher, park, weather)\n\n"
                 "**HR PA%** = Per-PA HR probability\n\n"
                 "**Matchup** = 0-100 composite (xwoba, barrel, ISO, opp pitcher quality)\n\n"
-                "**Test** = Matchup × PA sample weight\n\n"
-                "**Pitch Match** = How well hitter's pitch-specific xwOBA matches what this pitcher throws\n\n"
-                "**Sleeper** = HR-prob percentile MINUS season-HR percentile. Higher = under-the-radar.\n\n"
-                "**Pick Score** = Daily top-pick composite (HR Game%, matchup, barrel, form, park/weather, pitcher quality)"
+                "**Test (hitter)** = Matchup × PA sample weight\n\n"
+                "**Test (pitcher)** = K/Whiff/xwOBA/ERA composite × reliability\n\n"
+                "**Conf** = Pitcher reliability multiplier (0.3 = unreliable, 1.0 = full)\n\n"
+                "**Proj K** = Blended K/9 × expected IP (scaled by role)\n\n"
+                "**Pitch Match** = Hitter pitch-specific xwOBA vs pitcher arsenal\n\n"
+                "**Sleeper** = HR-prob percentile MINUS season-HR percentile\n\n"
+                "**Pick Score** = Daily top-pick composite (all factors)"
             )
 
 st.divider()
@@ -338,6 +354,11 @@ st.divider()
 # ============================================================================
 
 st.subheader("🥎 Pitcher Slate Overview")
+st.caption(
+    "Role-aware scoring: relievers and short-sample pitchers get reliability-adjusted "
+    "Test/kHR/Proj K so opener days don't dominate the rankings. "
+    "Look for **🚨 RELIEVER** and **⚠️ LOW IP** flags — those scores are intentionally scaled down."
+)
 
 pitcher_recent_map = {}
 if use_recent_form and not slate.empty:
@@ -365,24 +386,38 @@ if not p_slate.empty:
     )
 
     show_cols = [c for c in [
-        "alert", "pitcher_name", "team", "home_away", "opp", "throws",
+        "alert", "role", "pitcher_name", "team", "home_away", "opp", "throws",
         "test_score", "kHR", "proj_k", "form_arrow",
-        "era", "whip", "k9", "bb9", "hr9", "ip",
-        "k_pct", "whiff_pct", "csw_pct",
+        "era", "whip", "k9", "bb9", "hr9", "ip", "games_started",
+        "k_pct", "whiff_pct",
         "xwoba_allowed", "barrel_allowed",
         "recent_era", "recent_k9", "days_rest", "avg_recent_pitches",
+        "reliability",
     ] if c in p_slate.columns]
 
     col_config = {
         "alert": st.column_config.TextColumn("Signal", width="small"),
+        "role": st.column_config.TextColumn(
+            "Role", width="small",
+            help="✓ established starter · ⚠️ LOW IP · 🔄 SWING · 🚨 RELIEVER (test score scaled down)",
+        ),
         "pitcher_name": st.column_config.TextColumn("Pitcher"),
         "team": st.column_config.TextColumn("Tm", width="small"),
         "home_away": st.column_config.TextColumn("", width="small"),
         "opp": st.column_config.TextColumn("Opp", width="small"),
         "throws": st.column_config.TextColumn("T", width="small"),
-        "test_score": st.column_config.NumberColumn("Test", format="%.1f"),
-        "kHR": st.column_config.NumberColumn("kHR", format="%.1f"),
-        "proj_k": st.column_config.NumberColumn("Proj K", format="%.1f"),
+        "test_score": st.column_config.NumberColumn(
+            "Test", format="%.1f",
+            help="0-100 composite. K-blended (30%) + Whiff (20%) + xwOBA suppression (25%) + ERA (15%) + base K% (10%), multiplied by reliability factor.",
+        ),
+        "kHR": st.column_config.NumberColumn(
+            "kHR", format="%.1f",
+            help="Strikeout-focused score, also reliability-adjusted.",
+        ),
+        "proj_k": st.column_config.NumberColumn(
+            "Proj K", format="%.1f",
+            help="Expected strikeouts: blended K/9 × expected IP / 9.",
+        ),
         "form_arrow": st.column_config.TextColumn("Trend", width="small"),
         "era": st.column_config.NumberColumn("ERA", format="%.2f"),
         "whip": st.column_config.NumberColumn("WHIP", format="%.2f"),
@@ -390,15 +425,19 @@ if not p_slate.empty:
         "bb9": st.column_config.NumberColumn("BB/9", format="%.2f"),
         "hr9": st.column_config.NumberColumn("HR/9", format="%.2f"),
         "ip": st.column_config.NumberColumn("IP", format="%.1f"),
+        "games_started": st.column_config.NumberColumn("GS", format="%d", width="small"),
         "k_pct": st.column_config.NumberColumn("K%", format="%.1f"),
         "whiff_pct": st.column_config.NumberColumn("Whiff%", format="%.1f"),
-        "csw_pct": st.column_config.NumberColumn("CSW%", format="%.1f"),
         "xwoba_allowed": st.column_config.NumberColumn("xwOBA", format="%.3f"),
         "barrel_allowed": st.column_config.NumberColumn("Brl%", format="%.1f"),
         "recent_era": st.column_config.NumberColumn("L5 ERA", format="%.2f"),
         "recent_k9": st.column_config.NumberColumn("L5 K/9", format="%.2f"),
         "days_rest": st.column_config.NumberColumn("Rest"),
         "avg_recent_pitches": st.column_config.NumberColumn("Pitches"),
+        "reliability": st.column_config.NumberColumn(
+            "Conf", format="%.2f", width="small",
+            help="Reliability factor (0.3 - 1.0). Multiplier on Test/kHR scores. Low = small sample / reliever.",
+        ),
     }
     st.dataframe(
         p_slate[show_cols], hide_index=True, use_container_width=True,
