@@ -362,10 +362,9 @@ def build_pitcher_slate(
         ip = row.get("ip")
         gs = row.get("games_started")
         gp = row.get("games_played")
-        ipo = row.get("ip_per_outing")
         if ip is None or pd.isna(ip):
-            return 0.3
-        # Hard cap: zero starts = reliever
+            return 0.5  # no data = neutral, not crash-low
+        # Hard cap: explicit zero starts = reliever
         if gs is not None and not pd.isna(gs) and gs == 0:
             return 0.4
         # If pitcher has played more games than started (relief between starts),
@@ -373,7 +372,6 @@ def build_pitcher_slate(
         if (gp is not None and gs is not None
                 and not pd.isna(gp) and not pd.isna(gs)
                 and gs > 0 and gp > gs * 1.5):
-            # Real swing role (relief appearances between starts)
             base = 0.65
         else:
             base = 1.0
@@ -381,6 +379,7 @@ def build_pitcher_slate(
         if gs is not None and not pd.isna(gs) and gs > 0:
             start_factor = min(1.0, gs / 6.0)
         else:
+            # Unknown gs - rely on IP alone
             start_factor = ip_factor
         return round(max(0.3, base * (ip_factor * 0.5 + start_factor * 0.5)), 2)
 
@@ -393,18 +392,24 @@ def build_pitcher_slate(
         ip = row.get("ip")
         gs = row.get("games_started")
         gp = row.get("games_played")
-        # Hard reliever flag if we explicitly know GS=0
+        # Hard reliever flag if we explicitly know GS=0 (real zero, not None)
         if gs is not None and not pd.isna(gs) and gs == 0:
             return "🚨 RELIEVER"
-        if ip is None or pd.isna(ip) or ip < 10:
+        # If IP is missing or very low, only flag as RELIEVER if we ALSO have
+        # evidence (e.g. gs=0 above, or very obvious low IP). If gs is None
+        # entirely, fall back to IP-based logic but don't auto-flag reliever.
+        if ip is None or pd.isna(ip):
+            return "⚠️ NO DATA"
+        if ip < 10:
             return "🚨 RELIEVER"
-        # Bulk reliever: games_played >> games_started
+        # Bulk reliever: games_played >> games_started (only if both known)
         if (gp is not None and gs is not None
                 and not pd.isna(gp) and not pd.isna(gs)
                 and gs > 0 and gp > gs * 1.5):
             return "🔄 SWING"
         if ip < 25:
             return "⚠️ LOW IP"
+        # If gs is known and low, swing role
         if gs is not None and not pd.isna(gs) and gs < 5:
             return "🔄 SWING"
         return "✓"
