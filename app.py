@@ -356,9 +356,14 @@ for _, game in slate.iterrows():
     weather = {}
     wx_mult = 1.0
     wx_summary = ""
-    if use_weather and venue in PARK_LATLON:
+   if use_weather and venue in PARKS:
         try:
-            lat, lon, cf_bearing = PARK_LATLON[venue]
+            park_info = PARKS[venue]
+            lat = park_info.get("lat")
+            lon = park_info.get("lon")
+            cf_bearing = park_info.get("cf_bearing", 0)
+            if lat is None or lon is None:
+                raise ValueError("missing coords")
             game_dt = game.get("gameTime")
             if isinstance(game_dt, pd.Timestamp):
                 wx_iso = game_dt.isoformat()
