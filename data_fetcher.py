@@ -265,8 +265,11 @@ def get_hitter_stats(season: int = CURRENT_SEASON) -> pd.DataFrame:
             if cand in df.columns:
                 df = df.rename(columns={cand: "player_id"})
                 break
-    if "pull_air_percent" in df.columns and "barrel_batted_rate" in df.columns:
+  if "pull_air_percent" in df.columns and "barrel_batted_rate" in df.columns:
         df["pulled_brl_pct"] = (df["pull_air_percent"] * df["barrel_batted_rate"] / 100).round(2)
+    # Normalize player_id type for merges + derive missing columns
+    df = _normalize_player_df(df)
+    df = _derive_hitter_missing(df)
     return df
 
 
