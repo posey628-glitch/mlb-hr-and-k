@@ -2,7 +2,7 @@
 data_fetcher.py
 ================
 Pulls all data from public sources:
-  - MLB Stats API (statsapi.mlb.com) - slate, probable pitchers, lineups, traditional stats
+  - MLB Stats API (statsapi.mlb.com) - slate, lineups, traditional stats, handedness
   - Baseball Savant (baseballsavant.mlb.com) - Statcast stats, arsenals, sprint speed
 """
 
@@ -214,7 +214,7 @@ def get_all_team_rosters(slate: pd.DataFrame) -> dict:
 
 
 # ----------------------------------------------------------------------------
-# Statcast hitter stats
+# Statcast hitter stats - min=1 to include all hitters
 # ----------------------------------------------------------------------------
 
 @st.cache_data(ttl=3600)
@@ -234,7 +234,7 @@ def get_hitter_stats(season: int = CURRENT_SEASON) -> pd.DataFrame:
     )
     url = (
         "https://baseballsavant.mlb.com/leaderboard/custom"
-        f"?year={season}&type=batter&filter=&min=q&selections={selections}"
+        f"?year={season}&type=batter&filter=&min=1&selections={selections}"
         "&chart=false&x=pa&y=pa&r=no&chartType=beeswarm&csv=true"
     )
     try:
@@ -257,7 +257,7 @@ def get_hitter_stats(season: int = CURRENT_SEASON) -> pd.DataFrame:
 
 
 # ----------------------------------------------------------------------------
-# Statcast pitcher stats
+# Statcast pitcher stats - min=1 to include all pitchers
 # ----------------------------------------------------------------------------
 
 @st.cache_data(ttl=3600)
@@ -274,7 +274,7 @@ def get_pitcher_stats(season: int = CURRENT_SEASON) -> pd.DataFrame:
     )
     url = (
         "https://baseballsavant.mlb.com/leaderboard/custom"
-        f"?year={season}&type=pitcher&filter=&min=q&selections={selections}"
+        f"?year={season}&type=pitcher&filter=&min=1&selections={selections}"
         "&chart=false&x=pa&y=pa&r=no&chartType=beeswarm&csv=true"
     )
     try:
@@ -466,7 +466,7 @@ def get_hitter_recent_form_trad(player_id: int, season: int = CURRENT_SEASON, n_
 
 
 # ----------------------------------------------------------------------------
-# Traditional stats - uses playerPool=All to catch non-qualifying players
+# Traditional stats - playerPool=All catches non-qualifying players
 # ----------------------------------------------------------------------------
 
 @st.cache_data(ttl=3600)
@@ -555,7 +555,7 @@ def get_pitcher_traditional(season: int = CURRENT_SEASON) -> pd.DataFrame:
 
 
 # ----------------------------------------------------------------------------
-# Per-pitcher fallback - guarantees data for today's starters
+# Per-pitcher fallback + handedness bulk fetch
 # ----------------------------------------------------------------------------
 
 @st.cache_data(ttl=1800)
@@ -591,8 +591,8 @@ def get_player_season_pitching(player_id: int, season: int = CURRENT_SEASON) -> 
 def fill_pitcher_stats_for_slate(pitcher_stats: pd.DataFrame, slate: pd.DataFrame,
                                    season: int = CURRENT_SEASON) -> pd.DataFrame:
     """
-    For every probable starter in the slate, if they're missing key stats
-    in pitcher_stats, fetch them individually and patch them in.
+    For every probable starter in the slate, fetch handedness and any missing
+    season stats individually so the table is complete.
     """
     if pitcher_stats is None or slate is None or slate.empty:
         return pitcher_stats
@@ -601,7 +601,7 @@ def fill_pitcher_stats_for_slate(pitcher_stats: pd.DataFrame, slate: pd.DataFram
     if df.empty:
         df = pd.DataFrame(columns=["player_id"])
 
-    for col in ["era", "whip", "k9", "bb9", "hr9", "ip", "games_started"]:
+    for col in ["era", "whip", "k9", "bb9", "hr9", "ip", "games_started", "p_throws"]:
         if col not in df.columns:
             df[col] = pd.NA
 
@@ -614,6 +614,28 @@ def fill_pitcher_stats_for_slate(pitcher_stats: pd.DataFrame, slate: pd.DataFram
                 except (ValueError, TypeError):
                     continue
 
+    # Bulk-fetch handedness for all starters at once
+    if starter_ids:
+        try:
+            ids_str = ",".join(str(p) for p in starter_ids)
+            url = f"https://statsapi.mlb.com/api/v1/people?personIds={ids_str}"
+            r = requests.get(url, headers=HEADERS, timeout=15)
+            r.raise_for_status()
+            for person in r.json().get("people", []):
+                pid = person.get("id")
+                hand = (person.get("pitchHand") or {}).get("code")
+                if pid is None or not hand:
+                    continue
+                existing = df[df["player_id"] == pid] if "player_id" in df.columns else pd.DataFrame()
+                if existing.empty:
+                    df = pd.concat([df, pd.DataFrame([{"player_id": pid, "p_throws": hand}])],
+                                      ignore_index=True)
+                else:
+                    df.at[existing.index[0], "p_throws"] = hand
+        except Exception:
+            pass
+
+    # Per-pitcher season stats fill
     for pid in starter_ids:
         existing = df[df["player_id"] == pid] if "player_id" in df.columns else pd.DataFrame()
         needs_fill = (
