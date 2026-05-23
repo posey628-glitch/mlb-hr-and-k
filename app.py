@@ -416,7 +416,9 @@ if not p_slate.empty:
         ),
         "proj_k": st.column_config.NumberColumn(
             "Proj K", format="%.1f",
-            help="Expected strikeouts: blended K/9 × expected IP / 9.",
+            help="Baseline expected strikeouts: blended K/9 × expected IP. "
+                 "Does NOT include opponent lineup adjustment — see the per-game "
+                 "K Projections tab for opp-adjusted line probabilities.",
         ),
         "form_arrow": st.column_config.TextColumn("Trend", width="small"),
         "era": st.column_config.NumberColumn("ERA", format="%.2f"),
