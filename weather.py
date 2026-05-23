@@ -88,10 +88,15 @@ def hr_multiplier(weather: dict, park: dict) -> tuple[float, str]:
 
     Heuristics calibrated to public HR/weather studies:
       - Each 10°F above 70°F:  +3% HR rate
-      - Each 1 mph net out:    +1% HR rate
-      - Each 1 mph net in:     -1% HR rate (capped at -25%)
-      - Indoors/closed roof:   weather effects zeroed out
-      - High humidity:         marginal (-1% per 20% above 60%)
+      - Each 10°F below 70°F:  -4% HR rate (cold ball deadens more than warm helps)
+      - Each 1 mph net wind out:    +1% HR rate
+      - Each 1 mph net wind in:     -1% HR rate (capped at -25%)
+      - Indoors/closed dome:        weather effects zeroed out
+      - Retractable roof:           weather effects halved (open ~50% of time)
+      - High humidity (>70%):       -2% (humid air is slightly heavier in baseball range)
+      - Low pressure (<1010 hPa):   +2% (storm fronts let balls carry)
+      - High pressure (>1020 hPa):  -2% (cold/clear/dense air suppresses)
+      - Heavy rain (>70% chance):   -10% (wet ball, possible delay)
     """
     if not weather or weather.get("error"):
         return 1.0, "Weather unavailable"
@@ -102,28 +107,35 @@ def hr_multiplier(weather: dict, park: dict) -> tuple[float, str]:
 
     summary = []
     mult = 1.0
+    roof_factor = 0.5 if roof == "retractable" else 1.0
 
-    # Temperature
+    # Temperature - asymmetric (cold suppresses more than warm boosts)
     temp = weather.get("temp_f")
     if temp is not None:
-        t_eff = (temp - 70) / 10 * 0.03
-        mult *= (1 + t_eff)
-        if temp >= 80:
+        if temp >= 70:
+            t_eff = (temp - 70) / 10 * 0.03
+        else:
+            t_eff = (temp - 70) / 10 * 0.04  # stronger cold penalty
+        mult *= (1 + t_eff * roof_factor)
+        if temp >= 85:
             summary.append(f"🌡️ {temp:.0f}°F (carries well)")
+        elif temp >= 75:
+            summary.append(f"🌡️ {temp:.0f}°F")
+        elif temp <= 45:
+            summary.append(f"🥶 {temp:.0f}°F (dead ball)")
         elif temp <= 55:
-            summary.append(f"🥶 {temp:.0f}°F (ball deadens)")
+            summary.append(f"❄️ {temp:.0f}°F (suppresses HRs)")
         else:
             summary.append(f"{temp:.0f}°F")
 
     # Wind
     wind_mph = weather.get("wind_mph", 0)
     wind_dir = weather.get("wind_dir_deg")
-    if wind_mph and wind_dir is not None and roof != "retractable":
-        # Treat retractable as 50% weather effect on average
+    if wind_mph and wind_dir is not None:
         component = wind_component_out(wind_dir, park.get("cf_bearing", 0))
         net = component * wind_mph
         wind_eff = max(-0.25, net * 0.01)
-        mult *= (1 + wind_eff)
+        mult *= (1 + wind_eff * roof_factor)
         if net >= 8:
             summary.append(f"💨 {wind_mph:.0f}mph OUT (huge HR boost)")
         elif net >= 4:
@@ -132,14 +144,39 @@ def hr_multiplier(weather: dict, park: dict) -> tuple[float, str]:
             summary.append(f"🌬️ {wind_mph:.0f}mph IN (kills flyballs)")
         elif net <= -4:
             summary.append(f"🌬️ {wind_mph:.0f}mph in")
-        else:
+        elif wind_mph >= 5:
             summary.append(f"{wind_mph:.0f}mph cross")
-    elif roof == "retractable":
-        summary.append("Retractable roof (assume neutral)")
 
-    # Precipitation
+    # Humidity - heavier air at high humidity in normal temp ranges
+    humidity = weather.get("humidity")
+    if humidity is not None and humidity > 70:
+        mult *= (1 - 0.02 * roof_factor)
+        if humidity > 85:
+            summary.append(f"💦 {humidity:.0f}% humid")
+
+    # Pressure - low pressure = ball carries (storm fronts, etc)
+    pressure = weather.get("pressure_hpa")
+    if pressure is not None:
+        if pressure < 1010:
+            mult *= (1 + 0.02 * roof_factor)
+            summary.append(f"⬇️ Low pressure {pressure:.0f}hPa (carries)")
+        elif pressure > 1020:
+            mult *= (1 - 0.02 * roof_factor)
+
+    # Precipitation - wet ball + likely delay = HRs suppressed
     pp = weather.get("precip_prob", 0)
-    if pp and pp >= 50:
-        summary.append(f"☔ {pp:.0f}% rain")
+    if pp is not None:
+        if pp >= 70:
+            mult *= (1 - 0.10 * roof_factor)
+            summary.append(f"☔ {pp:.0f}% rain (heavy)")
+        elif pp >= 40:
+            mult *= (1 - 0.04 * roof_factor)
+            summary.append(f"🌧️ {pp:.0f}% rain")
+
+    if roof == "retractable":
+        summary.append("(retractable roof: 50% weather effect)")
+
+    # Sanity bounds
+    mult = max(0.55, min(1.45, mult))
 
     return round(mult, 3), " · ".join(summary) if summary else "Neutral"
