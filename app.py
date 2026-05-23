@@ -26,7 +26,7 @@ from data_fetcher import (
     get_sprint_speed, fill_pitcher_stats_for_slate, fill_hitter_bats,
 )
 from models import build_matchup_table, build_pitcher_slate
-from sleepers import compute_sleeper_score, grand_slam_probability
+from sleepers import hr_probability, find_sleepers, grand_slam_probability
 from props import (
     hr_prob_per_pa, hr_prob_per_game, k_total_projection,
     hr_verdict, hr_signal_emoji, pitcher_signal_emoji,
