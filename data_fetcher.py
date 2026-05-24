@@ -337,8 +337,68 @@ def get_pitcher_arsenal_by_count(season: int = CURRENT_SEASON) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=1800)
-def get_pitcher_recent_form(pitcher_id: int, season: int = CURRENT_SEASON,
-                              n_starts: int = 5) -> dict:
+def get_pitcher_full_season_from_gamelog(pitcher_id: int,
+                                            season: int = CURRENT_SEASON) -> dict:
+    """
+    Compute season-total ERA/WHIP/K9/BB9/HR9/IP/GS by summing the pitcher's
+    own game log. This is independent of the /api/v1/stats?stats=season endpoint
+    that's been flaky. Same /people/{id}/stats?stats=gameLog endpoint that
+    powers recent form -- known to work.
+    """
+    url = (
+        f"https://statsapi.mlb.com/api/v1/people/{pitcher_id}/stats"
+        f"?stats=gameLog&group=pitching&season={season}&sportId=1"
+    )
+    splits = []
+    for attempt in range(2):
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=12)
+            r.raise_for_status()
+            splits = r.json().get("stats", [{}])[0].get("splits", [])
+            if splits:
+                break
+        except Exception:
+            if attempt < 1:
+                import time
+                time.sleep(0.5)
+            continue
+    if not splits:
+        return {}
+    ip_sum, er_sum, k_sum, bb_sum, hr_sum = 0.0, 0, 0, 0, 0
+    h_sum = 0
+    gs_sum = 0
+    gp_sum = 0
+    for s in splits:
+        st_ = s.get("stat", {}) or {}
+        ip_sum += _safe_float(st_.get("inningsPitched")) or 0
+        er_sum += _safe_int(st_.get("earnedRuns")) or 0
+        k_sum += _safe_int(st_.get("strikeOuts")) or 0
+        bb_sum += _safe_int(st_.get("baseOnBalls")) or 0
+        hr_sum += _safe_int(st_.get("homeRuns")) or 0
+        h_sum += _safe_int(st_.get("hits")) or 0
+        gs_sum += _safe_int(st_.get("gamesStarted")) or 0
+        gp_sum += _safe_int(st_.get("gamesPlayed")) or 0
+    if ip_sum == 0:
+        return {}
+    # WHIP = (BB + H) / IP
+    whip = round((bb_sum + h_sum) / ip_sum, 2) if ip_sum > 0 else None
+    return {
+        "era": round(er_sum * 9 / ip_sum, 2),
+        "whip": whip,
+        "k9": round(k_sum * 9 / ip_sum, 2),
+        "bb9": round(bb_sum * 9 / ip_sum, 2),
+        "hr9": round(hr_sum * 9 / ip_sum, 2),
+        "ip": round(ip_sum, 1),
+        "games_started": gs_sum,
+        "games_played": gp_sum,
+        "strikeouts": k_sum,
+        "walks": bb_sum,
+        "earned_runs": er_sum,
+        "source": "gamelog",  # marker so we know which source
+    }
+
+
+
     """
     Recent form: last N starts K/9, ERA, IP.
     Returns trending up/down arrow.
@@ -731,7 +791,13 @@ def fill_pitcher_stats_for_slate(pitcher_stats: pd.DataFrame, slate: pd.DataFram
         if not needs_fill:
             continue
 
+        # Try the standard season endpoint first
         stats = get_player_season_pitching(pid, season)
+        # Fall back to game log aggregation (independent code path - more reliable)
+        if not stats or stats.get("k9") is None or stats.get("era") is None:
+            gl_stats = get_pitcher_full_season_from_gamelog(pid, season)
+            if gl_stats and gl_stats.get("k9") is not None:
+                stats = gl_stats
         if not stats or stats.get("k9") is None:
             continue
 
