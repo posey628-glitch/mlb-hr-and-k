@@ -67,12 +67,16 @@ except ImportError:
 
 # Optional newer functions added in updated data_fetcher.py
 try:
-    from data_fetcher import get_hitter_traditional, get_pitcher_traditional
+    from data_fetcher import get_hitter_traditional, get_pitcher_traditional_safe as get_pitcher_traditional
     HAVE_TRADITIONAL = True
 except ImportError:
-    HAVE_TRADITIONAL = False
-    def get_hitter_traditional(*a, **k): return pd.DataFrame()
-    def get_pitcher_traditional(*a, **k): return pd.DataFrame()
+    try:
+        from data_fetcher import get_hitter_traditional, get_pitcher_traditional
+        HAVE_TRADITIONAL = True
+    except ImportError:
+        HAVE_TRADITIONAL = False
+        def get_hitter_traditional(*a, **k): return pd.DataFrame()
+        def get_pitcher_traditional(*a, **k): return pd.DataFrame()
 
 try:
     from data_fetcher import fill_pitcher_stats_for_slate, fill_hitter_bats
@@ -240,6 +244,9 @@ with st.sidebar:
     show_legend = st.checkbox("Show legend / glossary", value=True)
 
     st.divider()
+    if st.button("🔄 Force refresh all data", help="Clears the data cache and re-fetches from APIs. Use if you see stale or missing data."):
+        st.cache_data.clear()
+        st.rerun()
     st.caption("Real data only - empty cells mean we couldn't fetch that stat.")
 
 INSUFFICIENT_PA_THRESHOLD = pa_threshold_for_date(selected_date)
