@@ -278,79 +278,86 @@ def add_power_score(
     pitcher_barrel_allowed: float | None = None,
 ) -> pd.DataFrame:
     """
-    Compute a comprehensive Power Score (0-100) for HR likelihood.
+    Compute Power Score (0-99) for HR likelihood.
 
-    Inputs - everything that drives whether THIS hitter homers THIS game:
-      - Hitter raw power: barrel%, hard_hit%, iso, slg, exit velocity, LA
-      - Hitter form: recent_iso, recent_hr, streak_label
-      - Opposing pitcher: hr9 allowed, barrel% allowed
-      - Park: HR factor multiplier (Coors 1.21, Oracle 0.88, etc.)
-      - Weather: temp, wind, humidity, pressure, precip - all multiplied in
-      - Pitch match quality (if available)
+    Uses ABSOLUTE scoring based on real MLB thresholds (not per-lineup
+    percentile ranks), so two great hitters on the same team don't both
+    score 99 just because one is slightly better than the other.
 
-    The score is a percentile rank ACROSS THIS LINEUP, then multiplied by
-    environmental factors so a great hitter in Coors with wind blowing out
-    scores higher than the same hitter in Oracle in 50°F.
+    Each component is scored 0-100 based on where it falls between known
+    league min/max thresholds. Then weighted-averaged. Then multiplied by
+    environmental factors (park, weather, opposing pitcher).
     """
     if matchup_df is None or matchup_df.empty:
         return matchup_df
     df = matchup_df.copy()
 
-    # ---- Hitter power components (each contributes a weight) ----
-    components = []  # (column, weight, invert)
-    weights = {
-        "barrel_pct": 0.25,        # most predictive HR stat
-        "iso": 0.20,
-        "hard_hit": 0.10,
-        "avg_ev": 0.10,            # raw exit velocity
-        "la": 0.08,                # launch angle - sweet spot ~ 25-35°
-        "fb_pct": 0.08,            # flyballs become HRs
-        "pulled_brl_pct": 0.07,    # pulled barrels = HRs
-        "slg": 0.07,
-        "recent_iso": 0.05,        # current form
-    }
+    # Absolute thresholds: (column, weight, poor_value, elite_value)
+    # Poor → 0, Elite → 100, linear in between
+    specs = [
+        ("barrel_pct",     0.25, 2.0,  18.0),    # MLB range ~2-18%
+        ("iso",            0.20, 0.080, 0.300),  # ISO range ~.080-.300
+        ("hard_hit",       0.10, 25.0, 55.0),    # 25-55%
+        ("avg_ev",         0.10, 86.0, 96.0),    # 86-96 mph
+        ("fb_pct",         0.08, 18.0, 45.0),    # 18-45%
+        ("pulled_brl_pct", 0.07, 0.5,  6.0),     # 0.5-6%
+        ("slg",            0.07, 0.330, 0.560),  # .330-.560
+        ("recent_iso",     0.05, 0.080, 0.300),
+    ]
 
-    contributions = []
-    total_weight = 0
-    for col, w in weights.items():
-        if col in df.columns and df[col].notna().any():
-            ranked = (df[col].rank(pct=True) * 100)
-            # LA is special - we want "near sweet spot 25-35", not just high
-            if col == "la":
-                # Score based on proximity to 28° (HR sweet spot)
-                la_dist = (df[col] - 28).abs()
-                ranked = 100 - (la_dist.rank(pct=True) * 100)
-            weight_series = ranked.notna().astype(float) * w
-            contributions.append((weight_series, ranked.fillna(0)))
-            total_weight += w
+    def absolute_score(val, poor, elite):
+        if pd.isna(val):
+            return np.nan
+        if poor == elite:
+            return 50.0
+        scaled = (val - poor) / (elite - poor) * 100
+        return float(max(0, min(100, scaled)))
 
-    if not contributions:
-        df["power_score"] = np.nan
-        return df
+    # Compute weighted absolute score per row
+    def compute_row(row):
+        total_score = 0.0
+        total_weight = 0.0
+        for col, w, poor, elite in specs:
+            if col not in df.columns:
+                continue
+            val = row.get(col)
+            score = absolute_score(val, poor, elite)
+            if pd.notna(score):
+                total_score += score * w
+                total_weight += w
+        # Launch angle - special "sweet spot" scoring (peak ~ 28°)
+        if "la" in df.columns:
+            la = row.get("la")
+            if pd.notna(la):
+                la_dist = abs(float(la) - 28.0)
+                la_score = max(0, 100 - la_dist * 5)  # 0° away = 100; 20° away = 0
+                total_score += la_score * 0.08
+                total_weight += 0.08
+        if total_weight == 0:
+            return np.nan
+        max_weight = sum(w for _, w, _, _ in specs) + 0.08
+        completeness = total_weight / max_weight
+        # Data-completeness penalty
+        if completeness < 0.5:
+            penalty = 0.80
+        elif completeness < 0.75:
+            penalty = 0.92
+        else:
+            penalty = 1.0
+        return (total_score / total_weight) * penalty
 
-    weight_sum = sum(ws for ws, _ in contributions)
-    weighted_total = sum(ws * vs for ws, vs in contributions)
-    base_power = (weighted_total / weight_sum.replace(0, np.nan)).round(2)
-
-    # Data-completeness penalty: if hitter only has 3 of 9 components, scale down
-    completeness = (weight_sum / total_weight).clip(0, 1)
-    base_power = base_power * completeness.clip(lower=0.5)
+    base_power = df.apply(compute_row, axis=1)
 
     # ---- Environmental multipliers ----
     env_mult = float(park_mult) * float(weather_mult)
-    # Add modest pitcher HR-allowance factor
     if pitcher_hr9 is not None and not pd.isna(pitcher_hr9) and pitcher_hr9 > 0:
-        # League avg HR/9 ~ 1.20; >1.5 = punisher, <0.9 = HR-suppressor
         p_factor = pitcher_hr9 / 1.20
         p_factor = max(0.75, min(1.25, p_factor))
         env_mult *= p_factor
     if pitcher_barrel_allowed is not None and not pd.isna(pitcher_barrel_allowed):
-        # league avg barrel allowed ~ 7.5%; lower = better suppression
         b_factor = pitcher_barrel_allowed / 7.5
         b_factor = max(0.85, min(1.15, b_factor))
         env_mult *= b_factor
-
-    # Cap env multiplier so it doesn't dominate
     env_mult = max(0.6, min(1.5, env_mult))
 
     df["power_score"] = (base_power * env_mult).clip(0, 99).round(1)
