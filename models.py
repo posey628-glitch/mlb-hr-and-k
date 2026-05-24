@@ -555,7 +555,7 @@ def build_pitcher_slate(
     # Cap at 95 so the score visually never claims "100% sure"
     df["test_score"] = (raw_test * df["reliability"]).clip(upper=95).round(2)
 
-    # kHR: still K-focused but apply reliability too
+    # kHR: K-focused composite (was misleadingly named - this is a K rating)
     def _composite_khr(row):
         parts = []
         max_weight = 0.50 + 0.20 + 0.30  # = 1.0
@@ -580,6 +580,47 @@ def build_pitcher_slate(
 
     raw_khr = df.apply(_composite_khr, axis=1)
     df["kHR"] = (raw_khr * df["reliability"]).clip(upper=95).round(2)
+
+    # ------------------------------------------------------------------
+    # HR_SUPPRESS - separate score for how well pitcher prevents HRs
+    # Uses: low barrel% allowed, low xwOBA allowed, low HR/9 (when available)
+    # ------------------------------------------------------------------
+    def _hr_suppress(row):
+        parts = []
+        max_weight = 0
+        # Barrel% allowed: lower = better (invert percentile)
+        if pd.notna(row.get("barrel_allowed")):
+            barrel_pct = row.get("_barrel_pct_rank", np.nan)
+            if pd.notna(barrel_pct):
+                parts.append((100 - barrel_pct, 0.40))
+                max_weight += 0.40
+        # xwOBA allowed: lower = better (already inverted as suppress_score)
+        if pd.notna(row.get("suppress_score")):
+            parts.append((row["suppress_score"], 0.35))
+            max_weight += 0.35
+        # HR/9: lower = better
+        if pd.notna(row.get("_hr9_pct_rank")):
+            parts.append((100 - row["_hr9_pct_rank"], 0.25))
+            max_weight += 0.25
+        if not parts or max_weight == 0:
+            return np.nan
+        total_w = sum(w for _, w in parts)
+        raw = sum(v * w for v, w in parts) / total_w
+        completeness = total_w / 1.0
+        penalty = 0.85 if completeness < 0.6 else 0.95 if completeness < 0.85 else 1.0
+        return raw * penalty
+
+    # Precompute pct ranks for barrel and hr9
+    if "barrel_allowed" in df.columns:
+        df["_barrel_pct_rank"] = _safe_pct_rank(df["barrel_allowed"])
+    if "hr9" in df.columns and df["hr9"].notna().any():
+        df["_hr9_pct_rank"] = _safe_pct_rank(df["hr9"])
+
+    raw_hr_supp = df.apply(_hr_suppress, axis=1)
+    df["hr_suppress"] = (raw_hr_supp * df["reliability"]).clip(upper=95).round(2)
+
+    # Clean up internal helper columns
+    df = df.drop(columns=[c for c in ["_barrel_pct_rank", "_hr9_pct_rank"] if c in df.columns])
 
     # ------------------------------------------------------------------
     # PROJ K - reliability-adjusted, uses blended K/9 when available
