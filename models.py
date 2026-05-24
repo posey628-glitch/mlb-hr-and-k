@@ -369,6 +369,21 @@ def add_power_score(
     df["power_score"] = (base_power * env_mult).clip(0, 99).round(1)
     df["env_mult"] = round(env_mult, 3)
 
+    # MATCHUP OPPORTUNITY SCORE - separate from Power Score.
+    # This is a "the situation favors a HR today regardless of who's batting"
+    # score. Captures contact hitters in great matchups (bad pitcher, hot park,
+    # wind out) who would normally fly under the radar.
+    #
+    # Higher weight on env, lower on raw hitter power. So Horwitz (low barrel)
+    # facing a 6 ERA pitcher in Coors with wind blowing out gets a high
+    # opportunity score even though his power_score is low.
+    if base_power is not None:
+        # Take hitter contribution AT 50% (everyone gets some baseline), env at full
+        opportunity = (50 + (base_power - 50) * 0.40) * env_mult
+        df["matchup_opp"] = opportunity.clip(0, 99).round(1)
+    else:
+        df["matchup_opp"] = np.nan
+
     return df
 
 
