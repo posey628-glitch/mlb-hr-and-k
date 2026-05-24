@@ -820,6 +820,24 @@ for _, game in slate.iterrows():
         pitcher_arsenal_df=pitcher_arsenal_all,
     )
 
+    # Power Score - composite HR-likelihood incorporating park/weather/pitcher
+    try:
+        from models import add_power_score
+        away_matchup = add_power_score(
+            away_matchup,
+            park_mult=park_mult, weather_mult=wx_mult,
+            pitcher_hr9=home_p_row.get("hr9") if home_p_row else None,
+            pitcher_barrel_allowed=home_p_row.get("barrel_batted_rate") if home_p_row else None,
+        )
+        home_matchup = add_power_score(
+            home_matchup,
+            park_mult=park_mult, weather_mult=wx_mult,
+            pitcher_hr9=away_p_row.get("hr9") if away_p_row else None,
+            pitcher_barrel_allowed=away_p_row.get("barrel_batted_rate") if away_p_row else None,
+        )
+    except Exception:
+        pass
+
     # Pitch match score
     if use_pitch_match and HAVE_PITCH_MATCH:
         try:
@@ -1288,10 +1306,22 @@ def build_col_config():
         "lineup_pos": st.column_config.NumberColumn("#", width="small"),
         "bats": st.column_config.TextColumn("B", width="small"),
         "position": st.column_config.TextColumn("Pos", width="small"),
+        "power_score": st.column_config.NumberColumn(
+            "Power", format="%.1f",
+            help="Composite HR-likelihood score (0-99). Blends raw power "
+                 "(barrel%, ISO, hard-hit%, exit velocity, LA, FB%, pulled "
+                 "barrel%, SLG, recent ISO) percentile-ranked across this "
+                 "lineup, then multiplied by park × weather × pitcher HR/9 "
+                 "× pitcher barrel%-allowed. Higher = better HR play today."
+        ),
         "hr_game_pct": st.column_config.NumberColumn("HR Game%", format="%.1f%%"),
         "hr_pa_pct": st.column_config.NumberColumn("HR PA%", format="%.2f%%"),
         "matchup": st.column_config.NumberColumn("Matchup", format="%.1f"),
         "test_score": st.column_config.NumberColumn("Test", format="%.1f"),
+        "streak_label": st.column_config.TextColumn(
+            "Streak", width="small",
+            help="🔥 HR streak / hot · 🌶️ 2+ HR last 5 · ⚡ multi-HR game · ❄️ cold (no HR L10)"
+        ),
         "pa": st.column_config.NumberColumn("PA"),
         "barrel_pct": st.column_config.NumberColumn("Brl%", format="%.1f%%"),
         "iso": st.column_config.NumberColumn("ISO", format="%.3f"),
@@ -1302,7 +1332,9 @@ def build_col_config():
         "best_pitch_xwoba": st.column_config.NumberColumn("Best xwOBA", format="%.3f"),
         "worst_pitch": st.column_config.TextColumn("Worst Pitch"),
         "fb_pct": st.column_config.NumberColumn("FB%", format="%.1f%%"),
-        "la": st.column_config.NumberColumn("LA"),
+        "la": st.column_config.NumberColumn("LA", format="%.1f"),
+        "avg_ev": st.column_config.NumberColumn("EV", format="%.1f"),
+        "hard_hit": st.column_config.NumberColumn("HH%", format="%.1f%%"),
         "sprint_speed": st.column_config.NumberColumn("Sprint"),
         "k_pct": st.column_config.NumberColumn("K%", format="%.1f%%"),
         "bb_pct": st.column_config.NumberColumn("BB%", format="%.1f%%"),
@@ -1329,10 +1361,11 @@ def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
 
     cols_to_show = [c for c in [
         "alert", "player_name", "lineup_pos", "bats", "position",
-        "hr_game_pct", "hr_pa_pct", "matchup", "test_score",
+        "power_score", "hr_game_pct", "hr_pa_pct", "matchup", "test_score",
+        "streak_label",
         "pa", "barrel_pct", "iso", "xwoba", "xwobacon",
         "pitch_match_score", "best_pitch", "best_pitch_xwoba", "worst_pitch",
-        "fb_pct", "la", "sprint_speed",
+        "fb_pct", "la", "avg_ev", "hard_hit", "sprint_speed",
         "k_pct", "bb_pct", "whiff_pct",
         "home_run", "recent_hr", "sleeper_score",
     ] if c in matchup_df.columns]
