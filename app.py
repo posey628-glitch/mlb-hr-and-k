@@ -1757,6 +1757,14 @@ def build_col_config():
                  "lineup, then multiplied by park × weather × pitcher HR/9 "
                  "× pitcher barrel%-allowed. Higher = better HR play today."
         ),
+        "matchup_opp": st.column_config.NumberColumn(
+            "Opp", format="%.1f",
+            help="Matchup Opportunity score (0-99). Like Power Score but "
+                 "weighted more heavily toward environment (park, weather, "
+                 "pitcher quality) and less on the hitter's raw power. "
+                 "Catches contact hitters who happen to face a HR-friendly "
+                 "matchup today."
+        ),
         "hr_game_pct": st.column_config.NumberColumn("HR Game%", format="%.1f%%"),
         "hr_pa_pct": st.column_config.NumberColumn("HR PA%", format="%.2f%%"),
         "matchup": st.column_config.NumberColumn("Matchup", format="%.1f"),
@@ -1802,6 +1810,7 @@ def _style_matchup_df(df: pd.DataFrame):
     # color spec: (col_name, poor_val, elite_val, higher_is_better)
     color_specs = [
         ("power_score",     20,    70,   True),   # Power Score
+        ("matchup_opp",     30,    75,   True),   # Matchup Opportunity
         ("hr_game_pct",     5,     22,   True),
         ("hr_pa_pct",       1.5,   6.0,  True),
         ("matchup",         30,    75,   True),
@@ -1851,6 +1860,7 @@ def _style_matchup_df(df: pd.DataFrame):
     # Format key numeric columns to limit decimal noise
     fmt_map = {
         "power_score": "{:.1f}",
+        "matchup_opp": "{:.1f}",
         "hr_game_pct": "{:.1f}",
         "hr_pa_pct": "{:.2f}",
         "matchup": "{:.1f}",
@@ -1890,7 +1900,7 @@ def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
 
     cols_to_show = [c for c in [
         "alert", "player_name", "lineup_pos", "bats", "position",
-        "power_score", "hr_game_pct", "hr_pa_pct", "matchup", "test_score",
+        "power_score", "matchup_opp", "hr_game_pct", "hr_pa_pct", "matchup", "test_score",
         "streak_label",
         "pa", "barrel_pct", "iso", "xwoba", "xwobacon",
         "pitch_match_score", "best_pitch", "best_pitch_xwoba", "worst_pitch",
@@ -1920,6 +1930,19 @@ for _, game in slate.iterrows():
     ctx = game_context_map.get(game["gamePk"], {})
     if not ctx:
         continue
+
+    # RAIN-RISK BANNER - shown ABOVE the game header so it can't be missed
+    wx = ctx.get("weather") or {}
+    pp = wx.get("precip_prob")
+    if pp is not None and pp >= 80:
+        st.error(
+            f"🌧️ **HIGH RAIN RISK ({pp:.0f}%)** — this game may be delayed or "
+            f"postponed. Treat projections as conditional on the game being played."
+        )
+    elif pp is not None and pp >= 50:
+        st.warning(
+            f"☔ **Rain risk ({pp:.0f}%)** — possible delay. Projections still apply if game is played."
+        )
 
     away_tab = f"✈️ {game['away_team_abbr']} @ {game['home_team_abbr']}"
     home_tab = f"🏠 {game['home_team_abbr']} vs {game['away_team_abbr']}"
