@@ -537,18 +537,27 @@ def get_pitcher_traditional(season: int = CURRENT_SEASON) -> pd.DataFrame:
 
     Uses playerPool=All so non-qualifying pitchers (early-season, callups,
     long relievers spot-starting) are included. Defensive row parsing
-    handles MLB Stats API's "-.--" string values.
+    handles MLB Stats API's "-.--" string values. Retries once on failure.
     """
     url = (
         "https://statsapi.mlb.com/api/v1/stats"
         f"?stats=season&group=pitching&season={season}&sportIds=1"
         "&playerPool=All&limit=3000"
     )
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=20)
-        r.raise_for_status()
-        splits = r.json().get("stats", [{}])[0].get("splits", [])
-    except Exception:
+    splits = []
+    for attempt in range(3):
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=25)
+            r.raise_for_status()
+            splits = r.json().get("stats", [{}])[0].get("splits", [])
+            if splits:
+                break
+        except Exception:
+            if attempt < 2:
+                import time
+                time.sleep(1.5)
+            continue
+    if not splits:
         return pd.DataFrame()
 
     rows = []
@@ -590,17 +599,27 @@ def get_pitcher_traditional(season: int = CURRENT_SEASON) -> pd.DataFrame:
 
 @st.cache_data(ttl=1800)
 def get_player_season_pitching(player_id: int, season: int = CURRENT_SEASON) -> dict:
-    """Fetch one pitcher's season stats directly by ID."""
+    """Fetch one pitcher's season stats directly by ID. Retries once on failure."""
     url = (
         f"https://statsapi.mlb.com/api/v1/people/{player_id}/stats"
         f"?stats=season&group=pitching&season={season}&sportId=1"
     )
+    splits = []
+    for attempt in range(2):
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=12)
+            r.raise_for_status()
+            splits = r.json().get("stats", [{}])[0].get("splits", [])
+            if splits:
+                break
+        except Exception:
+            if attempt < 1:
+                import time
+                time.sleep(0.5)
+            continue
+    if not splits:
+        return {}
     try:
-        r = requests.get(url, headers=HEADERS, timeout=10)
-        r.raise_for_status()
-        splits = r.json().get("stats", [{}])[0].get("splits", [])
-        if not splits:
-            return {}
         st_ = splits[0].get("stat", {}) or {}
         return {
             "era": _safe_float(st_.get("era")),
