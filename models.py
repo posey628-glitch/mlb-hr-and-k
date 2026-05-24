@@ -262,12 +262,52 @@ def build_matchup_table(
     return df[keep]
 
 
+def _season_thresholds(slate_date=None):
+    """
+    Return season-aware thresholds. Earlier in season = lower bars.
+    Returns dict with: full_ip (IP for full reliability), reliever_ip (below = likely reliever),
+    full_gs (GS for full starter), swing_gs (below = swing).
+    """
+    import datetime
+    if slate_date is None:
+        slate_date = datetime.date.today()
+    try:
+        month = slate_date.month
+    except AttributeError:
+        # If slate_date is a string, try to parse
+        try:
+            slate_date = datetime.datetime.strptime(str(slate_date)[:10], "%Y-%m-%d").date()
+            month = slate_date.month
+        except Exception:
+            month = 6  # default mid-season
+    # Map month to expected starter IP at that point in season
+    # Season runs roughly Apr-Oct (months 3-10)
+    if month <= 4:        # April: ~5 starts in
+        return {"full_ip": 15, "min_ip": 5, "full_gs": 3, "min_gs": 1}
+    elif month == 5:      # May: ~9 starts in
+        return {"full_ip": 30, "min_ip": 10, "full_gs": 5, "min_gs": 2}
+    elif month == 6:      # June: ~13 starts in
+        return {"full_ip": 50, "min_ip": 15, "full_gs": 8, "min_gs": 3}
+    elif month == 7:      # July: ~17 starts in
+        return {"full_ip": 70, "min_ip": 20, "full_gs": 10, "min_gs": 4}
+    elif month == 8:      # August: ~22 starts in
+        return {"full_ip": 90, "min_ip": 25, "full_gs": 14, "min_gs": 5}
+    elif month == 9:      # September: ~28 starts in
+        return {"full_ip": 110, "min_ip": 30, "full_gs": 18, "min_gs": 6}
+    elif month == 10:     # October
+        return {"full_ip": 130, "min_ip": 30, "full_gs": 20, "min_gs": 6}
+    else:                 # Offseason / spring
+        return {"full_ip": 30, "min_ip": 10, "full_gs": 5, "min_gs": 2}
+
+
 def build_pitcher_slate(
     slate: pd.DataFrame,
     pitcher_stats: pd.DataFrame,
     pitcher_recent: dict | None = None,
+    slate_date=None,
 ) -> pd.DataFrame:
     """One row per starting pitcher with composite scores + recent form."""
+    thresholds = _season_thresholds(slate_date)
     pitchers = []
     for _, g in slate.iterrows():
         for side in ("away", "home"):
@@ -317,13 +357,39 @@ def build_pitcher_slate(
         return df
 
     # ------------------------------------------------------------------
+    # IP fallback - if MLB Stats API failed, estimate from Statcast PA
+    # Statcast 'pa' is plate appearances faced by the pitcher
+    # ~4.3 PA per inning is league average
+    # ------------------------------------------------------------------
+    have_real_ip = "ip" in df.columns and df["ip"].notna().any()
+    if not have_real_ip and "pa" in df.columns and df["pa"].notna().any():
+        df["ip"] = (df["pa"] / 4.3).round(1)
+        df["ip_estimated"] = True
+    else:
+        df["ip_estimated"] = False
+        if "ip" not in df.columns:
+            df["ip"] = np.nan
+
+    # ------------------------------------------------------------------
+    # K/9 fallback - derive from k_pct if missing
+    # Math: K/9 = (K%/100) × (PA per IP) × 9 = K_pct × 4.3/100 × 9
+    # ------------------------------------------------------------------
+    have_real_k9 = "k9" in df.columns and df["k9"].notna().any()
+    if not have_real_k9 and "k_pct" in df.columns and df["k_pct"].notna().any():
+        df["k9"] = (df["k_pct"] * 4.3 * 9 / 100).round(2)
+        df["k9_estimated"] = True
+    else:
+        df["k9_estimated"] = False
+        if "k9" not in df.columns:
+            df["k9"] = np.nan
+
+    # ------------------------------------------------------------------
     # IP PER OUTING - better signal than IP/GS since it uses games_played
     # ------------------------------------------------------------------
     def _ip_per_outing(row):
         ip = row.get("ip")
         gp = row.get("games_played")
         gs = row.get("games_started")
-        # Prefer games_played; fall back to games_started; else IP/6 guess
         if ip is None or pd.isna(ip):
             return None
         denom = gp if (gp is not None and not pd.isna(gp) and gp > 0) else gs
@@ -340,12 +406,10 @@ def build_pitcher_slate(
         ip = row.get("ip")
         era = row.get("era")
         whip = row.get("whip")
-        # ERA-WHIP inconsistency at low sample = 1 bad inning skewing ERA
         if (ip is not None and not pd.isna(ip) and ip < 20
                 and era is not None and not pd.isna(era) and era > 5.0
                 and whip is not None and not pd.isna(whip) and whip < 1.1):
             return True
-        # Statcast zeros at very low sample
         barrel = row.get("barrel_allowed")
         if (ip is not None and not pd.isna(ip) and ip < 10
                 and barrel is not None and not pd.isna(barrel) and barrel == 0):
@@ -355,62 +419,66 @@ def build_pitcher_slate(
     df["sample_noise"] = df.apply(_sample_noise, axis=1)
 
     # ------------------------------------------------------------------
-    # RELIABILITY FACTOR - penalize low-IP / non-starter pitchers
-    # Now uses ip_per_outing to detect bulk relievers masquerading as starters
+    # RELIABILITY FACTOR - season-aware thresholds + graceful no-data fallback
     # ------------------------------------------------------------------
+    full_ip = thresholds["full_ip"]
+    min_ip = thresholds["min_ip"]
+    full_gs = thresholds["full_gs"]
+    min_gs = thresholds["min_gs"]
+
     def _reliability(row):
         ip = row.get("ip")
         gs = row.get("games_started")
         gp = row.get("games_played")
+        # No IP data at all = use Statcast K% as a weak signal
         if ip is None or pd.isna(ip):
-            return 0.5  # no data = neutral, not crash-low
-        # Hard cap: explicit zero starts = reliever
+            # Don't auto-penalize if we just can't see the data
+            return 0.7
+        # Explicit zero starts = reliever
         if gs is not None and not pd.isna(gs) and gs == 0:
             return 0.4
-        # If pitcher has played more games than started (relief between starts),
-        # they're a swing role - downgrade
+        # Bulk reliever: games_played >> games_started
         if (gp is not None and gs is not None
                 and not pd.isna(gp) and not pd.isna(gs)
                 and gs > 0 and gp > gs * 1.5):
             base = 0.65
         else:
             base = 1.0
-        ip_factor = min(1.0, ip / 30.0)
+        ip_factor = min(1.0, ip / full_ip)
         if gs is not None and not pd.isna(gs) and gs > 0:
-            start_factor = min(1.0, gs / 6.0)
+            start_factor = min(1.0, gs / full_gs)
         else:
-            # Unknown gs - rely on IP alone
             start_factor = ip_factor
         return round(max(0.3, base * (ip_factor * 0.5 + start_factor * 0.5)), 2)
 
     df["reliability"] = df.apply(_reliability, axis=1)
 
     # ------------------------------------------------------------------
-    # ROLE FLAG - now uses games_played vs games_started to spot bulk relievers
+    # ROLE FLAG - season-aware, never auto-defaults to RELIEVER without evidence
     # ------------------------------------------------------------------
     def _role_flag(row):
         ip = row.get("ip")
         gs = row.get("games_started")
         gp = row.get("games_played")
-        # Hard reliever flag if we explicitly know GS=0 (real zero, not None)
+        # If we have no IP and no GS data at all, say so honestly
+        if (ip is None or pd.isna(ip)) and (gs is None or pd.isna(gs)):
+            return "❔ NO DATA"
+        # Explicit zero starts = reliever (only when we KNOW gs is 0)
         if gs is not None and not pd.isna(gs) and gs == 0:
             return "🚨 RELIEVER"
-        # If IP is missing or very low, only flag as RELIEVER if we ALSO have
-        # evidence (e.g. gs=0 above, or very obvious low IP). If gs is None
-        # entirely, fall back to IP-based logic but don't auto-flag reliever.
-        if ip is None or pd.isna(ip):
-            return "⚠️ NO DATA"
-        if ip < 10:
+        # Very low IP when we DO have IP data
+        if ip is not None and not pd.isna(ip) and ip < min_ip:
             return "🚨 RELIEVER"
-        # Bulk reliever: games_played >> games_started (only if both known)
+        # Bulk reliever between starts
         if (gp is not None and gs is not None
                 and not pd.isna(gp) and not pd.isna(gs)
                 and gs > 0 and gp > gs * 1.5):
             return "🔄 SWING"
-        if ip < 25:
+        # Low IP but not crazy low
+        if ip is not None and not pd.isna(ip) and ip < full_ip * 0.6:
             return "⚠️ LOW IP"
-        # If gs is known and low, swing role
-        if gs is not None and not pd.isna(gs) and gs < 5:
+        # Few starts
+        if gs is not None and not pd.isna(gs) and gs < min_gs:
             return "🔄 SWING"
         return "✓"
 
