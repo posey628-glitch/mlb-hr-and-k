@@ -386,6 +386,20 @@ with st.spinner("Filling in missing pitcher data..."):
     except Exception as e:
         st.warning(f"Per-pitcher fill skipped: {e}")
 
+# Per-hitter launch angle fill: pulls REAL LA from Statcast search for any
+# hitter on today's slate missing it. Cached 24h per player so the cost is
+# only paid once per day.
+if not hitter_stats.empty:
+    needs_la = ("launch_angle" not in hitter_stats.columns
+                or hitter_stats["launch_angle"].isna().all())
+    if needs_la:
+        try:
+            from data_fetcher import fill_hitter_la_for_slate
+            with st.spinner("Fetching real launch angles from Statcast (one-time, cached 24h)..."):
+                hitter_stats = fill_hitter_la_for_slate(hitter_stats, slate)
+        except Exception as e:
+            st.warning(f"LA fill skipped: {e}")
+
 # Last-resort: if IP is still completely missing for everyone, estimate from
 # Statcast PA so the model has *something* to work with (≈4.3 PA per IP)
 if not pitcher_stats.empty:
