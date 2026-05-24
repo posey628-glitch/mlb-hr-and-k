@@ -411,6 +411,30 @@ if not pitcher_stats.empty:
         if "k_percent" in pitcher_stats.columns and pitcher_stats["k_percent"].notna().any():
             pitcher_stats["k9"] = (pitcher_stats["k_percent"] * 4.3 * 9 / 100).round(2)
 
+# Rookie identification - fetch MLB debut year for all relevant player IDs
+# A "rookie" is anyone whose debut year matches the current season.
+try:
+    from data_fetcher import fetch_player_debut_years
+    from datetime import date as _date
+    cur_year = _date.today().year
+    rookie_ids = set()
+    if not pitcher_stats.empty and "player_id" in pitcher_stats.columns:
+        pids = tuple(int(x) for x in pitcher_stats["player_id"].dropna().astype(int).tolist())
+        if pids:
+            debuts = fetch_player_debut_years(pids)
+            pitcher_stats["debut_year"] = pitcher_stats["player_id"].map(debuts)
+            pitcher_stats["is_rookie"] = pitcher_stats["debut_year"] == cur_year
+            rookie_ids.update({pid for pid, yr in debuts.items() if yr == cur_year})
+    if not hitter_stats.empty and "player_id" in hitter_stats.columns:
+        h_pids = tuple(int(x) for x in hitter_stats["player_id"].dropna().astype(int).tolist())
+        if h_pids:
+            h_debuts = fetch_player_debut_years(h_pids)
+            hitter_stats["debut_year"] = hitter_stats["player_id"].map(h_debuts)
+            hitter_stats["is_rookie"] = hitter_stats["debut_year"] == cur_year
+            rookie_ids.update({pid for pid, yr in h_debuts.items() if yr == cur_year})
+except Exception:
+    pass
+
 # Sprint speed
 if use_sprint_speed:
     try:
@@ -779,8 +803,69 @@ if not p_slate.empty:
             help="Reliability factor (0.3 - 1.0). Multiplier on Test/kHR scores. Low = small sample / reliever / bulk relief role.",
         ),
     }
+    # Color-code the pitcher table
+    def _style_pitcher_df(df_in):
+        if df_in is None or df_in.empty:
+            return df_in
+        specs = [
+            # (col, poor, elite, higher_is_better)
+            ("test_score",  30,    75,    True),
+            ("kHR",         30,    80,    True),
+            ("hr_suppress", 25,    75,    True),
+            ("proj_k",      3,     8,     True),
+            ("era",         5.5,   2.5,   False),  # Lower ERA = better (poor=5.5 → red, elite=2.5 → green)
+            ("whip",        1.5,   1.0,   False),
+            ("k9",          6.5,   11,    True),
+            ("bb9",         4.5,   2.0,   False),
+            ("hr9",         1.8,   0.7,   False),
+            ("ip",          15,    50,    True),
+            ("ip_per_outing", 3.5, 6.0,   True),
+            ("k_pct",       18,    30,    True),
+            ("whiff_pct",   18,    32,    True),
+            ("xwoba_allowed", 0.350, 0.270, False),  # Lower = better
+            ("barrel_allowed", 11,  4,    False),
+            ("recent_era",  5.5,   2.5,   False),
+            ("recent_k9",   6.5,   11,    True),
+            ("reliability", 0.4,   0.9,   True),
+        ]
+        def color_cell(val, poor, elite, hb):
+            if val is None or pd.isna(val):
+                return ""
+            try:
+                v = float(val)
+            except (TypeError, ValueError):
+                return ""
+            if hb:
+                ratio = (v - poor) / (elite - poor) if elite != poor else 0.5
+            else:
+                ratio = (poor - v) / (poor - elite) if poor != elite else 0.5
+            ratio = max(0, min(1, ratio))
+            hue = ratio * 120
+            return f"background-color: hsl({hue:.0f}, 60%, 40%); color: white;"
+        styled = df_in.style
+        for col, poor, elite, hb in specs:
+            if col in df_in.columns:
+                styled = styled.map(
+                    lambda v, p=poor, e=elite, hh=hb: color_cell(v, p, e, hh),
+                    subset=[col],
+                )
+        # Number formatting
+        fmt = {
+            "test_score": "{:.1f}", "kHR": "{:.1f}", "hr_suppress": "{:.1f}",
+            "proj_k": "{:.1f}", "era": "{:.2f}", "whip": "{:.2f}",
+            "k9": "{:.2f}", "bb9": "{:.2f}", "hr9": "{:.2f}", "ip": "{:.1f}",
+            "ip_per_outing": "{:.1f}", "k_pct": "{:.1f}", "whiff_pct": "{:.1f}",
+            "xwoba_allowed": "{:.3f}", "barrel_allowed": "{:.1f}",
+            "recent_era": "{:.2f}", "recent_k9": "{:.2f}", "reliability": "{:.2f}",
+        }
+        valid_fmt = {k: v for k, v in fmt.items() if k in df_in.columns}
+        if valid_fmt:
+            styled = styled.format(valid_fmt, na_rep="—")
+        return styled
+
     st.dataframe(
-        p_slate[show_cols], hide_index=True, use_container_width=True,
+        _style_pitcher_df(p_slate[show_cols]),
+        hide_index=True, use_container_width=True,
         column_config=col_config,
     )
 
@@ -1537,12 +1622,98 @@ def build_col_config():
     }
 
 
+def _style_matchup_df(df: pd.DataFrame):
+    """
+    Returns a Styled DataFrame with color-coded columns - Kasper-style.
+    Green = good for HR play, Red = bad. Color thresholds use absolute MLB
+    benchmarks (not per-lineup percentiles) so colors mean the same thing
+    every game.
+    """
+    if df is None or df.empty:
+        return df
+
+    # color spec: (col_name, poor_val, elite_val, higher_is_better)
+    color_specs = [
+        ("power_score",     20,    70,   True),   # Power Score
+        ("hr_game_pct",     5,     22,   True),
+        ("hr_pa_pct",       1.5,   6.0,  True),
+        ("matchup",         30,    75,   True),
+        ("test_score",      30,    75,   True),
+        ("barrel_pct",      4,     15,   True),
+        ("iso",             0.110, 0.260, True),
+        ("xwoba",           0.280, 0.380, True),
+        ("xwobacon",        0.330, 0.460, True),
+        ("pitch_match_score", 35,  70,   True),
+        ("fb_pct",          22,    40,   True),
+        ("la",              5,     22,   True),   # sweet spot is ~28, but capped here
+        ("avg_ev",          87,    94,   True),
+        ("hard_hit",        30,    52,   True),
+        ("sprint_speed",    25,    29,   True),
+        ("k_pct",           18,    30,   False),  # Lower K% = better
+        ("bb_pct",          5,     12,   True),
+        ("whiff_pct",       18,    32,   False),
+        ("home_run",        3,     20,   True),
+        ("recent_hr",       0,     3,    True),
+        ("sleeper_score",   0,     30,   True),
+    ]
+
+    def color_cell(val, poor, elite, higher_better):
+        if val is None or pd.isna(val):
+            return ""
+        try:
+            v = float(val)
+        except (TypeError, ValueError):
+            return ""
+        if higher_better:
+            ratio = (v - poor) / (elite - poor) if elite != poor else 0.5
+        else:
+            ratio = (poor - v) / (poor - elite) if poor != elite else 0.5
+        ratio = max(0, min(1, ratio))
+        # Map 0→red, 0.5→yellow, 1→green - use HSL hue
+        # 0 = red (0°), 0.4 = orange (30°), 0.6 = yellow (60°), 1 = green (120°)
+        hue = ratio * 120
+        return f"background-color: hsl({hue:.0f}, 60%, 40%); color: white;"
+
+    styled = df.style
+    for col, poor, elite, higher_better in color_specs:
+        if col in df.columns:
+            styled = styled.map(
+                lambda v, p=poor, e=elite, hb=higher_better: color_cell(v, p, e, hb),
+                subset=[col],
+            )
+    # Format key numeric columns to limit decimal noise
+    fmt_map = {
+        "power_score": "{:.1f}",
+        "hr_game_pct": "{:.1f}",
+        "hr_pa_pct": "{:.2f}",
+        "matchup": "{:.1f}",
+        "test_score": "{:.1f}",
+        "barrel_pct": "{:.1f}",
+        "iso": "{:.3f}",
+        "xwoba": "{:.3f}",
+        "xwobacon": "{:.3f}",
+        "fb_pct": "{:.1f}",
+        "la": "{:.1f}",
+        "avg_ev": "{:.1f}",
+        "hard_hit": "{:.1f}",
+        "k_pct": "{:.1f}",
+        "bb_pct": "{:.1f}",
+        "whiff_pct": "{:.1f}",
+        "pitch_match_score": "{:.1f}",
+        "sleeper_score": "{:.1f}",
+        "best_pitch_xwoba": "{:.3f}",
+    }
+    valid_fmt = {k: v for k, v in fmt_map.items() if k in df.columns}
+    if valid_fmt:
+        styled = styled.format(valid_fmt, na_rep="—")
+    return styled
+
+
 def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
     if matchup_df is None or matchup_df.empty:
         st.caption(f"{team_label}: no lineup data available yet.")
         return
 
-    # Split qualified vs insufficient sample
     if "pa" in matchup_df.columns:
         qualified = matchup_df[matchup_df["pa"].notna() & (matchup_df["pa"] >= INSUFFICIENT_PA_THRESHOLD)]
         insufficient = matchup_df[~(matchup_df["pa"].notna() & (matchup_df["pa"] >= INSUFFICIENT_PA_THRESHOLD))]
@@ -1564,14 +1735,16 @@ def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
     if not qualified.empty:
         st.markdown(f"**{team_label}**")
         st.dataframe(
-            qualified[cols_to_show], hide_index=True, use_container_width=True,
+            _style_matchup_df(qualified[cols_to_show]),
+            hide_index=True, use_container_width=True,
             column_config=build_col_config(),
         )
 
     if not insufficient.empty:
         with st.expander(f"⚠️ {team_label} — Insufficient Sample ({len(insufficient)} hitters below {INSUFFICIENT_PA_THRESHOLD} PA)"):
             st.dataframe(
-                insufficient[cols_to_show], hide_index=True, use_container_width=True,
+                _style_matchup_df(insufficient[cols_to_show]),
+                hide_index=True, use_container_width=True,
                 column_config=build_col_config(),
             )
 
