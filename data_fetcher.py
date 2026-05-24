@@ -291,6 +291,37 @@ def get_hitter_stats(season: int = CURRENT_SEASON) -> pd.DataFrame:
     # Compute PulledBrl% as approximation: pull_air_percent * (barrels/BBE proxy)
     if "pull_air_percent" in df.columns and "barrel_batted_rate" in df.columns:
         df["pulled_brl_pct"] = (df["pull_air_percent"] * df["barrel_batted_rate"] / 100).round(2)
+
+    # CRITICAL: Always derive ISO at source if missing/null.
+    # Savant's leaderboard sometimes returns 'iso' as an empty column even
+    # when requested. SLG-AVG is the math definition of ISO.
+    if "iso" not in df.columns or df["iso"].isna().all():
+        for slg_col in ["slg", "xslg", "slugging_pct"]:
+            if slg_col not in df.columns:
+                continue
+            for avg_col in ["batting_avg", "avg", "ba", "xba"]:
+                if avg_col not in df.columns:
+                    continue
+                df["iso"] = (df[slg_col] - df[avg_col]).round(3)
+                break
+            if "iso" in df.columns and df["iso"].notna().any():
+                break
+
+    # CRITICAL: Always ensure LA exists from any available source name.
+    # Different Savant endpoints use launch_angle, launch_angle_avg, avg_hit_angle.
+    la_candidates = ["launch_angle", "launch_angle_avg", "avg_hit_angle", "la", "la_avg"]
+    populated_la = None
+    for cand in la_candidates:
+        if cand in df.columns and df[cand].notna().any():
+            populated_la = cand
+            break
+    if populated_la and populated_la != "launch_angle":
+        df["launch_angle"] = df[populated_la]
+    elif populated_la is None:
+        # Last resort: leave column missing rather than fake it
+        if "launch_angle" not in df.columns:
+            df["launch_angle"] = pd.NA
+
     # Normalize player_id type for merges + derive missing columns
     df = _normalize_player_df(df)
     df = _derive_hitter_missing(df)
