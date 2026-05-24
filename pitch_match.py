@@ -93,12 +93,17 @@ def pitch_match_score(
     total_weight = 0.0
     weighted_xwoba = 0.0
     breakdown = []
+    missing_usage = 0.0
     for _, r in pitcher_arsenal.iterrows():
         usage = r.get(usage_col, 0)
         if pd.isna(usage) or usage <= 0:
             continue
         pitch = r[p_name_col]
-        h_val = h_xwoba.get(pitch, 0.310)  # league avg fallback
+        h_val = h_xwoba.get(pitch)
+        if h_val is None:
+            # No real data for this pitch - skip rather than insert fake league avg
+            missing_usage += usage
+            continue
         weighted_xwoba += usage * h_val
         total_weight += usage
         breakdown.append({
@@ -108,7 +113,13 @@ def pitch_match_score(
             "contribution": float(usage * h_val),
         })
 
+    # If we have no real data for ANY pitch, return None - don't fake a score
     if total_weight == 0:
+        return {"pitch_match_score": None}
+
+    # If most of the pitcher's usage is on pitches we have no hitter data for,
+    # the score is unreliable - return None
+    if missing_usage > total_weight:
         return {"pitch_match_score": None}
 
     avg_xwoba = weighted_xwoba / total_weight
