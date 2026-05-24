@@ -88,6 +88,22 @@ def _normalize_player_df(df: pd.DataFrame) -> pd.DataFrame:
                 break
     if "player_id" in df.columns:
         df["player_id"] = pd.to_numeric(df["player_id"], errors="coerce").astype("Int64")
+
+    # Savant sometimes returns these under alternate names - normalize so
+    # downstream code finds them under one canonical name.
+    rename_map = {}
+    for alias, canonical in [
+        ("isolated_power", "iso"),
+        ("la", "launch_angle"),
+        ("ev", "launch_speed"),
+        ("hardhit_percent", "hard_hit_percent"),
+        ("barrel_percent", "barrel_batted_rate"),
+        ("xba_diff", "xba_minus_ba_diff"),
+    ]:
+        if alias in df.columns and canonical not in df.columns:
+            rename_map[alias] = canonical
+    if rename_map:
+        df = df.rename(columns=rename_map)
     return df
 
 
@@ -523,7 +539,10 @@ def get_pitcher_full_season_from_gamelog(pitcher_id: int,
 @st.cache_data(ttl=1800)
 def get_hitter_recent_form_trad(player_id: int, season: int = CURRENT_SEASON,
                                   n_games: int = 15) -> dict:
-    """Last 15 games hitter form via game log - lightweight."""
+    """Last 15 games hitter form via game log - lightweight.
+
+    Now also tracks HR streaks and hot/cold pattern indicators.
+    """
     url = (
         f"https://statsapi.mlb.com/api/v1/people/{player_id}/stats"
         f"?stats=gameLog&group=hitting&season={season}&sportId=1"
@@ -537,11 +556,17 @@ def get_hitter_recent_form_trad(player_id: int, season: int = CURRENT_SEASON,
             return {}
         ab, h, hr, k, bb, rbi = 0, 0, 0, 0, 0, 0
         d, t = 0, 0
+        # Streak tracking - per-game HR list (most recent first)
+        per_game_hr = []
+        per_game_hits = []
         for s in recent:
             st_ = s.get("stat", {})
             ab += int(st_.get("atBats", 0) or 0)
             h += int(st_.get("hits", 0) or 0)
-            hr += int(st_.get("homeRuns", 0) or 0)
+            game_hr = int(st_.get("homeRuns", 0) or 0)
+            hr += game_hr
+            per_game_hr.append(game_hr)
+            per_game_hits.append(int(st_.get("hits", 0) or 0))
             k += int(st_.get("strikeOuts", 0) or 0)
             bb += int(st_.get("baseOnBalls", 0) or 0)
             rbi += int(st_.get("rbi", 0) or 0)
@@ -549,6 +574,42 @@ def get_hitter_recent_form_trad(player_id: int, season: int = CURRENT_SEASON,
             t += int(st_.get("triples", 0) or 0)
         if ab == 0:
             return {}
+
+        # Streak metrics - reverse so most-recent game is first
+        per_game_hr_rev = list(reversed(per_game_hr))
+        # Count games since last HR (None = never homered in window)
+        games_since_hr = None
+        for i, ghr in enumerate(per_game_hr_rev):
+            if ghr > 0:
+                games_since_hr = i
+                break
+        # Consecutive games with a HR (streak)
+        consec_hr_games = 0
+        for ghr in per_game_hr_rev:
+            if ghr > 0:
+                consec_hr_games += 1
+            else:
+                break
+        # HRs in last 5, last 10 (rolling windows)
+        hr_last_5 = sum(per_game_hr_rev[:5])
+        hr_last_10 = sum(per_game_hr_rev[:10])
+        # Multi-HR games in window
+        multi_hr_games = sum(1 for ghr in per_game_hr if ghr >= 2)
+
+        # Streak label for the table
+        if consec_hr_games >= 2:
+            streak_label = f"🔥 {consec_hr_games}g HR streak"
+        elif hr_last_5 >= 3:
+            streak_label = f"🔥 {hr_last_5} HR/L5"
+        elif hr_last_5 >= 2:
+            streak_label = f"🌶️ {hr_last_5} HR/L5"
+        elif multi_hr_games >= 1:
+            streak_label = f"⚡ {multi_hr_games}x multi-HR/L{len(recent)}"
+        elif hr_last_10 == 0 and len(recent) >= 10:
+            streak_label = "❄️ no HR L10"
+        else:
+            streak_label = ""
+
         return {
             "recent_games": len(recent),
             "recent_ab": ab, "recent_h": h, "recent_hr": hr,
@@ -557,6 +618,12 @@ def get_hitter_recent_form_trad(player_id: int, season: int = CURRENT_SEASON,
             "recent_iso": round((d + 2 * t + 3 * hr) / ab, 3) if ab else 0.0,
             "recent_k_pct": round(k / (ab + bb) * 100, 1) if (ab + bb) else 0.0,
             "recent_ops_proxy": round((h + bb) / (ab + bb), 3) if (ab + bb) else 0.0,
+            "hr_streak_games": consec_hr_games,
+            "games_since_hr": games_since_hr,
+            "hr_last_5": hr_last_5,
+            "hr_last_10": hr_last_10,
+            "multi_hr_games": multi_hr_games,
+            "streak_label": streak_label,
         }
     except Exception:
         return {}
@@ -953,3 +1020,73 @@ def get_recent_form_hitter(player_id: int, season: int = CURRENT_SEASON, days: i
         }
     except Exception:
         return {}
+
+
+# ----------------------------------------------------------------------------
+# Team-level pitching - used as fallback when probable pitcher is TBD
+# ----------------------------------------------------------------------------
+
+@st.cache_data(ttl=3600)
+def get_team_pitching(team_id: int, season: int = CURRENT_SEASON) -> dict:
+    """
+    Get team-aggregate pitching stats. Used when the day's starter is TBD
+    or unknown (e.g. bullpen game). Returns dict shaped like a single
+    pitcher row so models can drop it in as a proxy.
+    """
+    url = (
+        "https://statsapi.mlb.com/api/v1/stats"
+        f"?stats=season&group=pitching&season={season}&sportIds=1"
+        f"&teamId={team_id}"
+    )
+    splits = []
+    for attempt in range(2):
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=12)
+            r.raise_for_status()
+            splits = r.json().get("stats", [{}])[0].get("splits", [])
+            if splits:
+                break
+        except Exception:
+            if attempt < 1:
+                import time
+                time.sleep(0.5)
+            continue
+    if not splits:
+        return {}
+    for s in splits:
+        try:
+            team = s.get("team", {}) or {}
+            if team.get("id") != team_id:
+                continue
+            st_ = s.get("stat", {}) or {}
+            return {
+                "player_id": None,
+                "player_name": f"Team Avg ({team.get('abbreviation', '')})",
+                "is_team_avg": True,
+                "era": _safe_float(st_.get("era")),
+                "whip": _safe_float(st_.get("whip")),
+                "hr9": _safe_float(st_.get("homeRunsPer9")),
+                "bb9": _safe_float(st_.get("walksPer9Inn") or st_.get("baseOnBallsPer9Inn")),
+                "k9": _safe_float(st_.get("strikeoutsPer9Inn") or st_.get("strikeOutsPer9Inn")),
+                "ip": _safe_float(st_.get("inningsPitched")),
+                "earned_runs": _safe_int(st_.get("earnedRuns")),
+                "home_run": _safe_int(st_.get("homeRuns")),
+            }
+        except Exception:
+            continue
+    return {}
+
+
+def get_team_pitching_proxy(team_id: int, season: int = CURRENT_SEASON,
+                              hr_penalty: float = 1.10) -> dict:
+    """
+    Wrapper that returns team pitching with a small HR-allowance penalty applied.
+    TBD/bullpen games tend to allow MORE HRs than a typical starter.
+    """
+    proxy = get_team_pitching(team_id, season)
+    if not proxy:
+        return {}
+    if proxy.get("hr9") is not None:
+        proxy["hr9_tbd_adjusted"] = round(proxy["hr9"] * hr_penalty, 2)
+    proxy["tbd_proxy"] = True
+    return proxy
