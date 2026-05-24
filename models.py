@@ -518,8 +518,10 @@ def build_pitcher_slate(
     # TEST SCORE - rebalanced. K is now 35% (was 40%), with new ERA component
     # ------------------------------------------------------------------
     # Weights: K-blended 30%, Whiff 20%, Suppress (xwOBA) 25%, ERA 15%, base K 10%
+    # Total weight = 1.0 if all components present; less means data is incomplete
     def _composite_test(row):
         parts = []
+        max_weight = 0.30 + 0.20 + 0.25 + 0.15 + 0.10  # = 1.0
         if pd.notna(row.get("k_score_blended")):
             parts.append((row["k_score_blended"], 0.30))
         if pd.notna(row.get("whiff_score")):
@@ -533,15 +535,30 @@ def build_pitcher_slate(
         if not parts:
             return np.nan
         total_w = sum(w for _, w in parts)
-        return sum(v * w for v, w in parts) / total_w
+        raw = sum(v * w for v, w in parts) / total_w
+        # Data completeness penalty: only count fully when we have all 5 components
+        # If only 3 of 5 weights are present, score gets multiplied by 0.85
+        # If only 2 of 5, by 0.75. This penalizes inflated scores from sparse data.
+        completeness = total_w / max_weight
+        if completeness < 0.5:
+            penalty = 0.80
+        elif completeness < 0.7:
+            penalty = 0.88
+        elif completeness < 0.85:
+            penalty = 0.95
+        else:
+            penalty = 1.0
+        return raw * penalty
 
     raw_test = df.apply(_composite_test, axis=1)
     # Apply reliability multiplier - relievers get scaled down
-    df["test_score"] = (raw_test * df["reliability"]).round(2)
+    # Cap at 95 so the score visually never claims "100% sure"
+    df["test_score"] = (raw_test * df["reliability"]).clip(upper=95).round(2)
 
     # kHR: still K-focused but apply reliability too
     def _composite_khr(row):
         parts = []
+        max_weight = 0.50 + 0.20 + 0.30  # = 1.0
         if pd.notna(row.get("k_score_blended")):
             parts.append((row["k_score_blended"], 0.50))
         if pd.notna(row.get("k_score")):
@@ -551,10 +568,18 @@ def build_pitcher_slate(
         if not parts:
             return np.nan
         total_w = sum(w for _, w in parts)
-        return sum(v * w for v, w in parts) / total_w
+        raw = sum(v * w for v, w in parts) / total_w
+        completeness = total_w / max_weight
+        if completeness < 0.5:
+            penalty = 0.80
+        elif completeness < 0.7:
+            penalty = 0.88
+        else:
+            penalty = 1.0
+        return raw * penalty
 
     raw_khr = df.apply(_composite_khr, axis=1)
-    df["kHR"] = (raw_khr * df["reliability"]).round(2)
+    df["kHR"] = (raw_khr * df["reliability"]).clip(upper=95).round(2)
 
     # ------------------------------------------------------------------
     # PROJ K - reliability-adjusted, uses blended K/9 when available
@@ -595,5 +620,4 @@ def build_pitcher_slate(
     else:
         df["form_arrow"] = "→"
 
-    return df.sort_values("test_score", ascending=False, na_position="last").reset_index(drop=True)
     return df.sort_values("test_score", ascending=False, na_position="last").reset_index(drop=True)
