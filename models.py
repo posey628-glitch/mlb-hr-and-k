@@ -255,6 +255,7 @@ def build_matchup_table(
         "obp", "slg", "ops", "babip",
         # Counts
         "pa", "home_run", "recent_hr", "recent_iso", "recent_avg",
+        "streak_label", "hr_streak_games", "hr_last_5", "games_since_hr",
         # Today's HR projection
         "likely_hr_pct",
     ]
@@ -463,8 +464,12 @@ def build_pitcher_slate(
         # If we have no IP and no GS data at all, say so honestly
         if (ip is None or pd.isna(ip)) and (gs is None or pd.isna(gs)):
             return "❔ NO DATA"
-        # Explicit zero starts = reliever (only when we KNOW gs is 0)
+        # Explicit zero starts:
+        #   - low IP → pure RELIEVER
+        #   - meaningful IP (25+) → BULK relief role (long reliever, sometimes opens)
         if gs is not None and not pd.isna(gs) and gs == 0:
+            if ip is not None and not pd.isna(ip) and ip >= 25:
+                return "🔄 BULK"  # long reliever / opener candidate
             return "🚨 RELIEVER"
         # Very low IP when we DO have IP data
         if ip is not None and not pd.isna(ip) and ip < min_ip:
