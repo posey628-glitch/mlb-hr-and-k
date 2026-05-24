@@ -316,19 +316,31 @@ def get_hitter_stats(season: int = CURRENT_SEASON) -> pd.DataFrame:
     ]
     populated_la = None
     for cand in la_candidates:
-        if cand in df.columns and df[cand].notna().any():
+        if cand not in df.columns:
+            continue
+        # Force-coerce to numeric - some Savant exports come back as strings
+        coerced = pd.to_numeric(df[cand], errors="coerce")
+        if coerced.notna().any():
+            df[cand] = coerced
             populated_la = cand
             break
+
     if populated_la and populated_la != "launch_angle":
         df["launch_angle"] = df[populated_la]
     elif populated_la is None:
         # No LA from leaderboard - derive a rough estimate from FB% + GB%
-        # Avg LA correlates with the FB/GB ratio
+        # Real LA correlates with the FB/GB ratio:
+        # - 50% FB → ~22° LA  (pure flyball hitter)
+        # - 50% GB → ~3° LA   (pure groundball hitter)
+        # League average ~12°
         if "flyballs_percent" in df.columns and "groundballs_percent" in df.columns:
-            # Heuristic: 50% FB ≈ 20° LA, 50% GB ≈ 0° LA, linear
-            df["launch_angle"] = (
-                (df["flyballs_percent"].fillna(25) - df["groundballs_percent"].fillna(45)) * 0.4 + 10
-            ).round(1)
+            fb = pd.to_numeric(df["flyballs_percent"], errors="coerce").fillna(25)
+            gb = pd.to_numeric(df["groundballs_percent"], errors="coerce").fillna(45)
+            df["launch_angle"] = ((fb - gb) * 0.4 + 12).round(1)
+        elif "fb_pct" in df.columns and "gb_pct" in df.columns:
+            fb = pd.to_numeric(df["fb_pct"], errors="coerce").fillna(25)
+            gb = pd.to_numeric(df["gb_pct"], errors="coerce").fillna(45)
+            df["launch_angle"] = ((fb - gb) * 0.4 + 12).round(1)
         elif "launch_angle" not in df.columns:
             df["launch_angle"] = pd.NA
 
