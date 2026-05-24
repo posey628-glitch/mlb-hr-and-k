@@ -307,8 +307,8 @@ def get_hitter_stats(season: int = CURRENT_SEASON) -> pd.DataFrame:
             if "iso" in df.columns and df["iso"].notna().any():
                 break
 
-    # CRITICAL: Always ensure LA exists from any available source name.
-    # Savant uses inconsistent naming - try every known variant
+    # LA must come from a real Statcast source. NEVER estimated/derived.
+    # Try every known column name where Savant might return real LA data.
     la_candidates = [
         "launch_angle", "launch_angle_avg", "avg_hit_angle",
         "la", "la_avg", "attack_angle", "swing_path_tilt",
@@ -318,7 +318,6 @@ def get_hitter_stats(season: int = CURRENT_SEASON) -> pd.DataFrame:
     for cand in la_candidates:
         if cand not in df.columns:
             continue
-        # Force-coerce to numeric - some Savant exports come back as strings
         coerced = pd.to_numeric(df[cand], errors="coerce")
         if coerced.notna().any():
             df[cand] = coerced
@@ -327,22 +326,38 @@ def get_hitter_stats(season: int = CURRENT_SEASON) -> pd.DataFrame:
 
     if populated_la and populated_la != "launch_angle":
         df["launch_angle"] = df[populated_la]
-    elif populated_la is None:
-        # No LA from leaderboard - derive a rough estimate from FB% + GB%
-        # Real LA correlates with the FB/GB ratio:
-        # - 50% FB → ~22° LA  (pure flyball hitter)
-        # - 50% GB → ~3° LA   (pure groundball hitter)
-        # League average ~12°
-        if "flyballs_percent" in df.columns and "groundballs_percent" in df.columns:
-            fb = pd.to_numeric(df["flyballs_percent"], errors="coerce").fillna(25)
-            gb = pd.to_numeric(df["groundballs_percent"], errors="coerce").fillna(45)
-            df["launch_angle"] = ((fb - gb) * 0.4 + 12).round(1)
-        elif "fb_pct" in df.columns and "gb_pct" in df.columns:
-            fb = pd.to_numeric(df["fb_pct"], errors="coerce").fillna(25)
-            gb = pd.to_numeric(df["gb_pct"], errors="coerce").fillna(45)
-            df["launch_angle"] = ((fb - gb) * 0.4 + 12).round(1)
-        elif "launch_angle" not in df.columns:
-            df["launch_angle"] = pd.NA
+    elif populated_la is None and "launch_angle" not in df.columns:
+        df["launch_angle"] = pd.NA
+    # Real LA only - no FB%/GB% estimation
+
+    # If LA still missing, try Savant's dedicated exit-velocity leaderboard
+    # which is a different endpoint and reliably returns launch_angle
+    if "launch_angle" in df.columns and df["launch_angle"].isna().all():
+        try:
+            ev_url = (
+                "https://baseballsavant.mlb.com/leaderboard/statcast"
+                f"?type=batter&year={season}&position=&team=&min=1&csv=true"
+            )
+            ev_r = requests.get(ev_url, headers=HEADERS, timeout=20)
+            ev_r.raise_for_status()
+            ev_df = pd.read_csv(io.StringIO(ev_r.text))
+            # The statcast leaderboard column for LA is typically 'launch_angle' or 'angle'
+            la_col = None
+            for cand in ["launch_angle", "angle", "avg_launch_angle", "avg_la"]:
+                if cand in ev_df.columns:
+                    la_col = cand
+                    break
+            id_col = None
+            for cand in ["player_id", "mlb_id", "MLBAMID", "playerid"]:
+                if cand in ev_df.columns:
+                    id_col = cand
+                    break
+            if la_col and id_col:
+                ev_df[id_col] = pd.to_numeric(ev_df[id_col], errors="coerce").astype("Int64")
+                la_map = dict(zip(ev_df[id_col], pd.to_numeric(ev_df[la_col], errors="coerce")))
+                df["launch_angle"] = df["player_id"].map(la_map)
+        except Exception:
+            pass
 
     # Normalize player_id type for merges + derive missing columns
     df = _normalize_player_df(df)
