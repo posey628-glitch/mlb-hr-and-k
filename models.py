@@ -457,6 +457,8 @@ def build_pitcher_slate(
                     "ip": r.get("ip"),
                     "games_started": r.get("games_started"),
                     "games_played": r.get("games_played"),
+                    "is_rookie": bool(r.get("is_rookie", False)),
+                    "debut_year": r.get("debut_year"),
                 })
             if pitcher_recent and pid in pitcher_recent:
                 base.update(pitcher_recent[pid])
@@ -575,34 +577,36 @@ def build_pitcher_slate(
         ip = row.get("ip")
         gs = row.get("games_started")
         gp = row.get("games_played")
+        is_rookie = row.get("is_rookie", False)
         # If we have no IP and no GS data at all, say so honestly
         if (ip is None or pd.isna(ip)) and (gs is None or pd.isna(gs)):
             return "❔ NO DATA"
+        # Rookie indicator added to any role they fall into
+        rookie_prefix = "🌱 " if (is_rookie is True) else ""
         # Explicit zero starts:
         #   - low IP → pure RELIEVER
         #   - meaningful IP (25+) → BULK relief role (long reliever, sometimes opens)
         if gs is not None and not pd.isna(gs) and gs == 0:
             if ip is not None and not pd.isna(ip) and ip >= 25:
-                return "🔄 BULK"  # long reliever / opener candidate
-            return "🚨 RELIEVER"
+                return rookie_prefix + "🔄 BULK"
+            return rookie_prefix + "🚨 RELIEVER"
         # Very low IP when we DO have IP data
         if ip is not None and not pd.isna(ip) and ip < min_ip:
-            return "🚨 RELIEVER"
+            return rookie_prefix + "🚨 RELIEVER"
         # Bulk reliever between starts - require BOTH high GP/GS ratio AND low IP/GS
-        # so a real starter with one IL stint doesn't get downgraded
         if (gp is not None and gs is not None
                 and not pd.isna(gp) and not pd.isna(gs)
                 and gs > 0 and gp > gs * 1.5):
             ip_per_start = ip / gs if (ip is not None and not pd.isna(ip) and gs > 0) else 5.0
             if ip_per_start < 4.5:
-                return "🔄 SWING"
+                return rookie_prefix + "🔄 SWING"
         # Low IP but not crazy low
         if ip is not None and not pd.isna(ip) and ip < full_ip * 0.6:
-            return "⚠️ LOW IP"
+            return rookie_prefix + "⚠️ LOW IP"
         # Few starts
         if gs is not None and not pd.isna(gs) and gs < min_gs:
-            return "🔄 SWING"
-        return "✓"
+            return rookie_prefix + "🔄 SWING"
+        return rookie_prefix + "✓" if rookie_prefix else "✓"
 
     df["role"] = df.apply(_role_flag, axis=1)
 
