@@ -18,12 +18,52 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from data_fetcher import (
-    get_slate, get_lineup, get_team_roster,
-    get_hitter_stats, get_pitcher_stats, get_pitcher_arsenal,
-    get_pitcher_recent_form, get_hitter_recent_form_trad,
-    get_sprint_speed,
-)
+# Core imports - make each one defensive so a single missing function
+# doesn't kill the whole app
+try:
+    from data_fetcher import get_slate
+except ImportError:
+    def get_slate(*a, **k): return pd.DataFrame()
+
+try:
+    from data_fetcher import get_lineup
+except ImportError:
+    def get_lineup(*a, **k): return []
+
+try:
+    from data_fetcher import get_team_roster
+except ImportError:
+    def get_team_roster(*a, **k): return []
+
+try:
+    from data_fetcher import get_hitter_stats
+except ImportError:
+    def get_hitter_stats(*a, **k): return pd.DataFrame()
+
+try:
+    from data_fetcher import get_pitcher_stats
+except ImportError:
+    def get_pitcher_stats(*a, **k): return pd.DataFrame()
+
+try:
+    from data_fetcher import get_pitcher_arsenal
+except ImportError:
+    def get_pitcher_arsenal(*a, **k): return pd.DataFrame()
+
+try:
+    from data_fetcher import get_pitcher_recent_form
+except ImportError:
+    def get_pitcher_recent_form(*a, **k): return {}
+
+try:
+    from data_fetcher import get_hitter_recent_form_trad
+except ImportError:
+    def get_hitter_recent_form_trad(*a, **k): return {}
+
+try:
+    from data_fetcher import get_sprint_speed
+except ImportError:
+    def get_sprint_speed(*a, **k): return pd.DataFrame()
 
 # Optional newer functions added in updated data_fetcher.py
 try:
