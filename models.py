@@ -293,16 +293,19 @@ def add_power_score(
     df = matchup_df.copy()
 
     # Absolute thresholds: (column, weight, poor_value, elite_value)
-    # Poor → 0, Elite → 100, linear in between
+    # Poor → 0, Elite → 100, linear in between.
+    # "Elite" should be a near-ceiling that even MLB's best rarely hit.
+    # We set elite ABOVE the actual top of the league so even Judge tops out
+    # around 75-80, leaving headroom for env factors.
     specs = [
-        ("barrel_pct",     0.25, 2.0,  18.0),    # MLB range ~2-18%
-        ("iso",            0.20, 0.080, 0.300),  # ISO range ~.080-.300
-        ("hard_hit",       0.10, 25.0, 55.0),    # 25-55%
-        ("avg_ev",         0.10, 86.0, 96.0),    # 86-96 mph
-        ("fb_pct",         0.08, 18.0, 45.0),    # 18-45%
-        ("pulled_brl_pct", 0.07, 0.5,  6.0),     # 0.5-6%
-        ("slg",            0.07, 0.330, 0.560),  # .330-.560
-        ("recent_iso",     0.05, 0.080, 0.300),
+        ("barrel_pct",     0.25, 2.0,  25.0),    # Elite raised: top is ~22%, so 25 = nobody hits 100
+        ("iso",            0.20, 0.080, 0.350),  # Top is ~.330
+        ("hard_hit",       0.10, 25.0, 65.0),    # Top is ~62
+        ("avg_ev",         0.10, 86.0, 98.0),    # Top is ~96.5
+        ("fb_pct",         0.08, 18.0, 50.0),    # 50 is rare
+        ("pulled_brl_pct", 0.07, 0.5,  9.0),     # Top ~8
+        ("slg",            0.07, 0.330, 0.620),  # Top ~.610
+        ("recent_iso",     0.05, 0.080, 0.350),
     ]
 
     def absolute_score(val, poor, elite):
@@ -349,16 +352,22 @@ def add_power_score(
     base_power = df.apply(compute_row, axis=1)
 
     # ---- Environmental multipliers ----
-    env_mult = float(park_mult) * float(weather_mult)
+    # Use SOFTER combination: take average of factors rather than full multiply,
+    # to prevent stacking pile-ups at the 99 cap. A 1.50 cap on full multiply
+    # was still too generous when 4 factors all push the same direction.
+    env_factors = [float(park_mult), float(weather_mult)]
     if pitcher_hr9 is not None and not pd.isna(pitcher_hr9) and pitcher_hr9 > 0:
         p_factor = pitcher_hr9 / 1.20
-        p_factor = max(0.75, min(1.25, p_factor))
-        env_mult *= p_factor
+        env_factors.append(max(0.75, min(1.25, p_factor)))
     if pitcher_barrel_allowed is not None and not pd.isna(pitcher_barrel_allowed):
         b_factor = pitcher_barrel_allowed / 7.5
-        b_factor = max(0.85, min(1.15, b_factor))
-        env_mult *= b_factor
-    env_mult = max(0.6, min(1.5, env_mult))
+        env_factors.append(max(0.85, min(1.15, b_factor)))
+
+    # Geometric mean is gentler than full multiplication for stacked factors
+    import math
+    log_sum = sum(math.log(f) for f in env_factors)
+    env_mult = math.exp(log_sum / len(env_factors)) ** 1.5  # Power 1.5 keeps some kick
+    env_mult = max(0.65, min(1.30, env_mult))
 
     df["power_score"] = (base_power * env_mult).clip(0, 99).round(1)
     df["env_mult"] = round(env_mult, 3)
