@@ -340,14 +340,11 @@ def add_power_score(
             return np.nan
         max_weight = sum(w for _, w, _, _ in specs) + 0.08
         completeness = total_weight / max_weight
-        # Data-completeness penalty
-        if completeness < 0.5:
-            penalty = 0.80
-        elif completeness < 0.75:
-            penalty = 0.92
-        else:
-            penalty = 1.0
-        return (total_score / total_weight) * penalty
+        # Hard threshold: if we have <60% of components, return NaN
+        # (don't fake a score from sparse data)
+        if completeness < 0.60:
+            return np.nan
+        return total_score / total_weight
 
     base_power = df.apply(compute_row, axis=1)
 
