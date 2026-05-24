@@ -164,14 +164,26 @@ def hr_multiplier(weather: dict, park: dict) -> tuple[float, str]:
             mult *= (1 - 0.02 * roof_factor)
 
     # Precipitation - wet ball + likely delay = HRs suppressed
+    # Heavy rain has multiple suppressing effects:
+    # - Wet ball doesn't carry (less spin retention, more drag)
+    # - Cold/damp conditions
+    # - Reduced exit velocity from rain on contact
+    # - PPD risk means projections shouldn't pile up green if game won't be played
     pp = weather.get("precip_prob", 0)
     if pp is not None:
-        if pp >= 70:
-            mult *= (1 - 0.10 * roof_factor)
+        if pp >= 80:
+            # Likely PPD or delay - strong suppression
+            mult *= (1 - 0.25 * roof_factor)
+            summary.append(f"🌧️ {pp:.0f}% RAIN (likely delay/PPD)")
+        elif pp >= 60:
+            mult *= (1 - 0.15 * roof_factor)
             summary.append(f"☔ {pp:.0f}% rain (heavy)")
         elif pp >= 40:
-            mult *= (1 - 0.04 * roof_factor)
+            mult *= (1 - 0.08 * roof_factor)
             summary.append(f"🌧️ {pp:.0f}% rain")
+        elif pp >= 25:
+            mult *= (1 - 0.03 * roof_factor)
+            summary.append(f"💧 {pp:.0f}% drizzle risk")
 
     if roof == "retractable":
         summary.append("(retractable roof: 50% weather effect)")
