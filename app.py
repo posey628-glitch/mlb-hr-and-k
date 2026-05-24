@@ -249,7 +249,27 @@ with st.sidebar:
         st.rerun()
     st.caption("Real data only - empty cells mean we couldn't fetch that stat.")
 
-INSUFFICIENT_PA_THRESHOLD = pa_threshold_for_date(selected_date)
+    st.subheader("PA threshold")
+    _auto_pa = pa_threshold_for_date(selected_date)
+    pa_mode = st.radio(
+        "Minimum PA to show in main table",
+        ["Auto (season-aware)", "Custom"],
+        index=0,
+        help=(
+            "Auto scales with time of season: Apr 40 / May 80 / Jun 120 / "
+            "Jul 160 / Aug+ 200. Hitters below threshold show in 'Insufficient "
+            "Sample' section. Use Custom to include more players (call-ups, "
+            "platoon guys) you want to project HRs for."
+        ),
+    )
+    if pa_mode == "Custom":
+        INSUFFICIENT_PA_THRESHOLD = st.number_input(
+            "Custom PA threshold", min_value=1, max_value=400,
+            value=_auto_pa, step=10,
+        )
+    else:
+        INSUFFICIENT_PA_THRESHOLD = _auto_pa
+        st.caption(f"Auto threshold for {selected_date.strftime('%b %Y')}: **{_auto_pa} PA**")
 
 
 # ============================================================================
@@ -637,9 +657,9 @@ for _, game in slate.iterrows():
     weather = {}
     wx_mult = 1.0
     wx_summary = ""
-    if use_weather and venue in PARKS:
+    if use_weather and venue:
         try:
-            park_info = PARKS[venue]
+            park_info = get_park(venue)  # has fuzzy fallback for unknown parks
             lat = park_info.get("lat")
             lon = park_info.get("lon")
             cf_bearing = park_info.get("cf_bearing", 0)
@@ -652,7 +672,7 @@ for _, game in slate.iterrows():
                 wx_iso = None
             weather = fetch_weather(lat, lon, wx_iso) or {}
             wx_mult, _summary = hr_multiplier(weather, park_info)
-            wx_summary = weather.get("summary", "")
+            wx_summary = weather.get("summary", "") or _summary
         except Exception:
             weather = {}
             wx_mult = 1.0
@@ -680,31 +700,42 @@ for _, game in slate.iterrows():
         except Exception:
             vegas_row = {}
 
+    def _fill_to_nine(existing_lineup, team_id):
+        """Pad lineup to 9 position players using active roster as fallback."""
+        if not team_id:
+            return existing_lineup
+        existing_ids = {p.get("id") for p in existing_lineup if p.get("id")}
+        try:
+            roster = get_team_roster(int(team_id))
+        except Exception:
+            return existing_lineup
+        # Filter to position players only (skip P, SP, RP, TWP)
+        position_players = [
+            p for p in roster
+            if p.get("position") and str(p.get("position")).upper() not in
+                ("P", "SP", "RP", "TWP")
+            and p.get("id") not in existing_ids
+        ]
+        # Pad up to 9 total
+        needed = max(0, 9 - len(existing_lineup))
+        for p in position_players[:needed]:
+            existing_lineup.append({
+                "id": p.get("id"), "name": p.get("name"),
+                "position": p.get("position"), "bats": p.get("bats"),
+            })
+        return existing_lineup
+
     try:
         away_lineup = get_lineup(int(game["gamePk"]), "away")
     except Exception:
         away_lineup = []
-    if not away_lineup:
-        try:
-            away_lineup = [
-                {"id": p["id"], "name": p["name"], "position": p["position"]}
-                for p in get_team_roster(int(game["away_team_id"]))[:9]
-            ]
-        except Exception:
-            away_lineup = []
+    away_lineup = _fill_to_nine(away_lineup, game.get("away_team_id"))
 
     try:
         home_lineup = get_lineup(int(game["gamePk"]), "home")
     except Exception:
         home_lineup = []
-    if not home_lineup:
-        try:
-            home_lineup = [
-                {"id": p["id"], "name": p["name"], "position": p["position"]}
-                for p in get_team_roster(int(game["home_team_id"]))[:9]
-            ]
-        except Exception:
-            home_lineup = []
+    home_lineup = _fill_to_nine(home_lineup, game.get("home_team_id"))
 
     # Backfill batting handedness for any hitters missing it
     needs_bats_ids = set()
@@ -735,6 +766,22 @@ for _, game in slate.iterrows():
         rows = pitcher_stats[pitcher_stats["player_id"] == home_p_id]
         if len(rows):
             home_p_row = rows.iloc[0].to_dict()
+
+    # TBD pitcher fallback - if a probable pitcher is missing or unknown,
+    # use team-level pitching as a proxy so hitters facing TBD still get
+    # a sensible projection (flagged with tbd_proxy=True).
+    try:
+        from data_fetcher import get_team_pitching_proxy as _tbd_proxy
+        if not away_p_row and game.get("away_team_id"):
+            proxy = _tbd_proxy(int(game["away_team_id"]))
+            if proxy:
+                away_p_row = proxy
+        if not home_p_row and game.get("home_team_id"):
+            proxy = _tbd_proxy(int(game["home_team_id"]))
+            if proxy:
+                home_p_row = proxy
+    except Exception:
+        pass
 
     if use_recent_form:
         try:
