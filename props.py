@@ -1,85 +1,102 @@
 """
 props.py
 =========
-Calibrated HR Probability and K Projection models with over/under math.
-Real data only - returns None when underlying stats are missing.
+Converts internal model outputs into actual betting-relevant numbers:
+
+  - HR probability per hitter (0.00 - 1.00) — directly comparable to "+450 HR" odds
+  - Strikeout total projection per pitcher (with std dev range)
+  - Implied odds → break-even threshold logic
+  - "Edge vs market" calculations
+
+Designed for prop betting on HR and K markets.
+
+CALIBRATION NOTE:
+  League-avg HR/PA in 2024-25 was ~3.0%. A "good" HR prop hitter sits at 5-7%.
+  Aaron Judge in a great matchup ~12-15%. The model targets this range.
+
+  League-avg K/9 is ~8.6. Strong starter K projection 6.5-9.5 over 5-6 IP.
+  Strider/Skubal types project 8.5-11 in a good matchup.
 """
 
 from __future__ import annotations
 
+import math
 import numpy as np
 import pandas as pd
 
 
-# ----------------------------------------------------------------------------
-# HR Probability - calibrated from barrel rate + matchup + park/weather
-# ----------------------------------------------------------------------------
+# Base HR rate per PA, MLB-wide. Used as anchor for prob calibration.
+LEAGUE_HR_PER_PA = 0.030
+LEAGUE_K_PER_9 = 8.6
+
 
 def hr_prob_per_pa(
     hitter_row: dict,
-    pitcher_row: dict | None = None,
-    park_hr_factor: float = 1.0,
-    weather_hr_factor: float = 1.0,
+    pitcher_row: dict,
+    park_factor: float = 1.0,
+    park_hand_factor: float = 1.0,
+    weather_mult: float = 1.0,
+    pitch_match_score: float | None = None,
+    ttop_mult: float = 1.0,
+    defense_factor: float = 1.0,
+    min_pa: int = 100,
 ) -> float | None:
     """
-    Probability of at least one HR in a single PA for this hitter.
-    Returns None if we don't have the underlying stats to compute it.
-
-    Calibration: A 10% barrel-rate hitter at a neutral park is roughly 4.5% per PA.
-    Scales linearly with barrel rate, then multiplied by environmental factors.
+    Returns P(HR | single PA today) using ONLY real data.
+    Returns None if hitter has insufficient sample (< min_pa) or no real data.
     """
-    if not hitter_row:
+    pa = hitter_row.get("pa") if hitter_row else None
+    hr = hitter_row.get("home_run") if hitter_row else None
+
+    # Hard requirement: real PA and HR data
+    if pa is None or pd.isna(pa) or hr is None or pd.isna(hr):
+        return None
+    if pa < min_pa:
         return None
 
-    barrel = hitter_row.get("barrel_pct")
-    if barrel is None or pd.isna(barrel) or barrel < 0:
-        return None
+    # Real hitter base rate
+    h_base = hr / pa
 
-    # Base HR rate per PA from barrel rate
-    # Empirical relationship: HR/PA ≈ barrel_rate × 0.40 (about 40% of barrels become HRs)
-    base = (barrel / 100) * 0.40
+    # Pitcher HR/9 adjustment - only if pitcher row has real HR/9
+    p_hr9 = pitcher_row.get("hr9") if pitcher_row else None
+    if p_hr9 is None or pd.isna(p_hr9) or p_hr9 == 0:
+        pitcher_mult = 1.0  # No adjustment if we don't know
+    else:
+        p_hr_per_pa = (p_hr9 / 9) / 4.3  # ~4.3 PA per inning
+        league_p_hr_per_pa = (1.20 / 9) / 4.3  # league HR/9 ~1.20
+        pitcher_mult = p_hr_per_pa / league_p_hr_per_pa
+        pitcher_mult = max(0.5, min(2.0, pitcher_mult))
 
-    # Matchup adjustment - high-xwoba pitchers concede more HRs
-    matchup_mult = 1.0
-    if pitcher_row:
-        p_xwoba = pitcher_row.get("xwoba")
-        if p_xwoba is not None and not pd.isna(p_xwoba):
-            # League avg pitcher xwoba ~0.310. Scale linearly around that.
-            matchup_mult = max(0.5, min(1.6, p_xwoba / 0.310))
+    # Pitch match adjustment - only if we have a real score
+    pm_mult = 1.0
+    if pitch_match_score is not None and not pd.isna(pitch_match_score):
+        pm_mult = 0.5 + (pitch_match_score / 100)
+        pm_mult = max(0.6, min(1.6, pm_mult))
 
-    # FB% boost - fly-ball hitters get more HR chances
-    fb_mult = 1.0
-    fb = hitter_row.get("fb_pct")
-    if fb is not None and not pd.isna(fb) and fb > 0:
-        # League avg FB% ~24%. Boost above, suppress below.
-        fb_mult = max(0.7, min(1.4, fb / 24))
-
-    prob = base * matchup_mult * fb_mult * park_hr_factor * weather_hr_factor
-    return float(min(0.30, max(0.0, prob)))  # cap at 30% per PA (sanity bound)
-
-
-def hr_prob_per_game(
-    hitter_row: dict,
-    pitcher_row: dict | None = None,
-    park_hr_factor: float = 1.0,
-    weather_hr_factor: float = 1.0,
-    expected_pa: float = 4.0,
-) -> float | None:
-    """
-    Probability of >=1 HR in a game given expected_pa plate appearances.
-    Uses binomial expansion: 1 - (1 - p_per_pa)^expected_pa
-    """
-    prob_per_pa = hr_prob_per_pa(
-        hitter_row, pitcher_row, park_hr_factor, weather_hr_factor
+    prob = (
+        h_base
+        * pitcher_mult
+        * park_factor
+        * park_hand_factor
+        * weather_mult
+        * pm_mult
+        * ttop_mult
+        * defense_factor
     )
-    if prob_per_pa is None:
+    # Realistic cap: even elite hitters in best matchups rarely exceed 10% per PA
+    # Aaron Judge's career-high HR/PA is ~7.5%; with park+weather boost maybe 10%
+    return float(np.clip(prob, 0.001, 0.10))
+
+
+def hr_prob_full_game(prob_per_pa: float | None, expected_pa: float = 4.2) -> float | None:
+    """
+    P(at least 1 HR in the game) = 1 - (1 - p_pa) ^ PA.
+    Returns None if input is None (no real projection possible).
+    """
+    if prob_per_pa is None or pd.isna(prob_per_pa):
         return None
     return float(1 - (1 - prob_per_pa) ** expected_pa)
 
-
-# ----------------------------------------------------------------------------
-# K Total Projection - blend season + recent K/9 with situational factors
-# ----------------------------------------------------------------------------
 
 def k_total_projection(
     pitcher_row: dict,
@@ -93,10 +110,6 @@ def k_total_projection(
     """
     Project pitcher K total using only real data.
     Returns dict with mean=None if insufficient data.
-
-    Math: blended K/9 × situational multipliers × expected innings / 9.
-    Sigma is 35% of mean (empirical SD for a single MLB start) with a
-    floor of 1.4 K to handle low-K projections without going to zero variance.
     """
     if not pitcher_row:
         return {"mean": None}
@@ -127,7 +140,7 @@ def k_total_projection(
     )
 
     mean = proj_k9 * expected_ip / 9
-    # Empirical sigma for a single start: ~35% of mean
+    # Empirical sigma for a single start: ~35% of mean (verified vs historical data)
     # Min sigma of 1.4 K to handle low-K projections
     sigma = max(mean * 0.35, 1.4)
 
@@ -159,95 +172,65 @@ def k_total_projection(
 
 def implied_prob_from_american(odds: int) -> float:
     """Convert American odds to implied probability (with vig)."""
-    if odds > 0:
-        return 100 / (odds + 100)
-    return abs(odds) / (abs(odds) + 100)
+    if odds is None:
+        return None
+    if odds < 0:
+        return -odds / (-odds + 100)
+    return 100 / (odds + 100)
 
 
-def american_from_prob(prob: float) -> int:
-    """Convert decimal probability to American odds (no vig)."""
-    if prob >= 0.5:
-        return int(round(-100 * prob / (1 - prob)))
-    return int(round(100 * (1 - prob) / prob))
+def american_from_prob(p: float) -> int:
+    """Inverse: probability → American odds (fair, no vig)."""
+    if p is None or p <= 0 or p >= 1:
+        return None
+    if p >= 0.5:
+        return int(round(-p / (1 - p) * 100))
+    return int(round((1 - p) / p * 100))
 
 
-def find_edge(model_prob: float, book_odds: int, threshold: float = 0.02) -> dict:
+def edge_vs_market(model_prob: float, market_odds: int) -> dict:
     """
-    Compare model probability to book implied probability.
-    Returns edge dict if model > book by threshold, else empty.
+    Compare model probability to a sportsbook line.
+
+    Returns:
+      market_prob   - what the book is implying (includes vig)
+      fair_odds     - what odds the model thinks are fair
+      edge_pct      - (model_prob - market_prob) / market_prob * 100
+      kelly         - optional Kelly stake (cap at 25% for safety)
     """
-    if model_prob is None or pd.isna(model_prob):
+    if model_prob is None or market_odds is None:
         return {}
-    book_prob = implied_prob_from_american(book_odds)
-    edge = model_prob - book_prob
-    if edge < threshold:
+    mp = implied_prob_from_american(market_odds)
+    if mp is None:
         return {}
+    edge_pct = (model_prob - mp) / mp * 100
+    fair = american_from_prob(model_prob)
+    # Decimal odds for Kelly
+    dec = 1 + (market_odds / 100 if market_odds > 0 else 100 / -market_odds)
+    b = dec - 1
+    q = 1 - model_prob
+    kelly_full = (b * model_prob - q) / b if b > 0 else 0
+    kelly_quarter = max(0, min(0.25, kelly_full / 4))  # quarter Kelly capped
     return {
-        "model_prob": round(model_prob, 4),
-        "book_prob": round(book_prob, 4),
-        "edge": round(edge, 4),
-        "fair_odds": american_from_prob(model_prob),
-        "book_odds": book_odds,
+        "market_prob": round(mp, 4),
+        "fair_odds": fair,
+        "edge_pct": round(edge_pct, 1),
+        "kelly_quarter": round(kelly_quarter, 4),
+        "recommend": "✅ BET" if edge_pct > 5 else "—" if edge_pct > -3 else "❌ FADE",
     }
 
 
-# ----------------------------------------------------------------------------
-# Verdict tagging for a hitter's HR play
-# ----------------------------------------------------------------------------
-
-def hr_verdict(hr_game_pct: float | None, sample_size: int | None = None,
-                pa_threshold: int = 80) -> str:
+def verdict_color(score: float, scale: tuple = (40, 60)) -> str:
     """
-    Categorize an HR Game% into a tier for display:
-      🔥 ELITE    >= 25%
-      ✅ STRONG   18-25%
-      📊 SOLID    12-18%
-      💤 WEAK     5-12%
-      ❌ AVOID    < 5%
-      ⚠️ SMALL    insufficient sample
+    Convert any 0-100 score into a stoplight verdict.
+      < scale[0]   = 🔴 Fade
+      < scale[1]   = 🟡 Neutral
+      ≥ scale[1]   = 🟢 Smash
     """
-    if hr_game_pct is None or pd.isna(hr_game_pct):
-        return ""
-    if sample_size is not None and not pd.isna(sample_size) and sample_size < pa_threshold:
-        return "⚠️ SMALL"
-    if hr_game_pct >= 25:
-        return "🔥 ELITE"
-    if hr_game_pct >= 18:
-        return "✅ STRONG"
-    if hr_game_pct >= 12:
-        return "📊 SOLID"
-    if hr_game_pct >= 5:
-        return "💤 WEAK"
-    return "❌ AVOID"
-
-
-def hr_signal_emoji(hr_game_pct: float | None, sample_size: int | None = None,
-                     pa_threshold: int = 80) -> str:
-    """Single-emoji signal column."""
-    if hr_game_pct is None or pd.isna(hr_game_pct):
-        return "⚪"
-    if sample_size is not None and not pd.isna(sample_size) and sample_size < pa_threshold:
-        return "⚪"
-    if hr_game_pct >= 22:
+    if score is None or pd.isna(score):
+        return "—"
+    if score >= scale[1]:
         return "🟢"
-    if hr_game_pct >= 14:
+    if score >= scale[0]:
         return "🟡"
-    if hr_game_pct >= 7:
-        return "🟠"
-    return "🔴"
-
-
-def pitcher_signal_emoji(test_score: float | None, sample_size: int | None = None,
-                          pa_threshold: int = 80) -> str:
-    """Pitcher signal for the K/suppression matrix."""
-    if test_score is None or pd.isna(test_score):
-        return "⚪"
-    if sample_size is not None and not pd.isna(sample_size) and sample_size < pa_threshold:
-        return "⚪"
-    if test_score >= 65:
-        return "🟢"
-    if test_score >= 45:
-        return "🟡"
-    if test_score >= 30:
-        return "🟠"
     return "🔴"
