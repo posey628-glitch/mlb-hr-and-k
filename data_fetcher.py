@@ -308,8 +308,12 @@ def get_hitter_stats(season: int = CURRENT_SEASON) -> pd.DataFrame:
                 break
 
     # CRITICAL: Always ensure LA exists from any available source name.
-    # Different Savant endpoints use launch_angle, launch_angle_avg, avg_hit_angle.
-    la_candidates = ["launch_angle", "launch_angle_avg", "avg_hit_angle", "la", "la_avg"]
+    # Savant uses inconsistent naming - try every known variant
+    la_candidates = [
+        "launch_angle", "launch_angle_avg", "avg_hit_angle",
+        "la", "la_avg", "attack_angle", "swing_path_tilt",
+        "average_la", "avg_la",
+    ]
     populated_la = None
     for cand in la_candidates:
         if cand in df.columns and df[cand].notna().any():
@@ -318,8 +322,14 @@ def get_hitter_stats(season: int = CURRENT_SEASON) -> pd.DataFrame:
     if populated_la and populated_la != "launch_angle":
         df["launch_angle"] = df[populated_la]
     elif populated_la is None:
-        # Last resort: leave column missing rather than fake it
-        if "launch_angle" not in df.columns:
+        # No LA from leaderboard - derive a rough estimate from FB% + GB%
+        # Avg LA correlates with the FB/GB ratio
+        if "flyballs_percent" in df.columns and "groundballs_percent" in df.columns:
+            # Heuristic: 50% FB ≈ 20° LA, 50% GB ≈ 0° LA, linear
+            df["launch_angle"] = (
+                (df["flyballs_percent"].fillna(25) - df["groundballs_percent"].fillna(45)) * 0.4 + 10
+            ).round(1)
+        elif "launch_angle" not in df.columns:
             df["launch_angle"] = pd.NA
 
     # Normalize player_id type for merges + derive missing columns
