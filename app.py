@@ -445,7 +445,7 @@ if not p_slate.empty:
 
     show_cols = [c for c in [
         "alert", "role", "warn", "pitcher_name", "team", "home_away", "opp", "throws",
-        "test_score", "kHR", "proj_k", "form_arrow",
+        "test_score", "kHR", "hr_suppress", "proj_k", "form_arrow",
         "era", "whip", "k9", "bb9", "hr9",
         "ip", "games_started", "games_played", "ip_per_outing",
         "k_pct", "whiff_pct",
@@ -477,10 +477,16 @@ if not p_slate.empty:
                  "A score of 80+ means top of today's slate, not a probability.",
         ),
         "kHR": st.column_config.NumberColumn(
-            "kHR", format="%.1f",
+            "K Rating", format="%.1f",
             help="Strikeout-focused percentile rank vs today's slate (0-95). "
-                 "Composite of K%, Whiff%, and blended K/9, × reliability. "
-                 "High kHR = top K play for this slate, not a probability.",
+                 "Composite of K%, Whiff%, blended K/9 × reliability. "
+                 "HIGH = top K play. Does NOT measure HR allowance — see HR Supp for that.",
+        ),
+        "hr_suppress": st.column_config.NumberColumn(
+            "HR Supp", format="%.1f",
+            help="HR-suppression percentile rank vs today's slate (0-95). "
+                 "Composite of low barrel% allowed, low xwOBA allowed, low HR/9 × reliability. "
+                 "HIGH = pitcher is hard to homer off of.",
         ),
         "proj_k": st.column_config.NumberColumn(
             "Proj K", format="%.1f",
