@@ -335,6 +335,19 @@ with st.sidebar:
         INSUFFICIENT_PA_THRESHOLD = _auto_pa
         st.caption(f"Auto threshold for {selected_date.strftime('%b %Y')}: **{_auto_pa} PA**")
 
+    st.subheader("📈 Backtest")
+    try:
+        from backtest import list_snapshots
+        existing = list_snapshots()
+        if existing:
+            st.caption(f"Snapshots saved: {len(existing)} (most recent: {existing[-1]})")
+        else:
+            st.caption("No snapshots yet. Save today's projections via button below the slate.")
+    except Exception:
+        st.caption("Backtest module unavailable")
+    show_backtest = st.checkbox("Show backtest panel", value=False,
+                                  help="See accuracy of past projections vs actual outcomes.")
+
 
 # ============================================================================
 # DATA LOAD
@@ -463,6 +476,124 @@ hdr_col1.metric("Games", n_games)
 hdr_col2.metric("Pitchers w/ data", int(n_pitchers))
 hdr_col3.metric("Hitters w/ data", int(n_hitters))
 hdr_col4.metric("PA threshold", INSUFFICIENT_PA_THRESHOLD)
+
+if show_backtest:
+    with st.expander("📈 Backtest — projection accuracy vs actual outcomes", expanded=True):
+        try:
+            from backtest import (
+                list_snapshots, load_snapshot,
+                fetch_hitter_outcomes, fetch_pitcher_outcomes,
+                evaluate_hitter_projections, evaluate_pitcher_projections,
+            )
+            snaps = list_snapshots()
+            if not snaps:
+                st.info(
+                    "No snapshots saved yet. Below the slate is a 💾 Save Snapshot "
+                    "button — click it after lineups lock. Come back tomorrow to "
+                    "see how the predictions performed."
+                )
+            else:
+                snap_choice = st.selectbox(
+                    "Evaluate snapshot from:",
+                    options=snaps,
+                    index=len(snaps) - 1,
+                    help="Pick a date to compare projections vs what actually happened.",
+                )
+                if st.button("🔍 Evaluate this snapshot"):
+                    with st.spinner("Fetching actual outcomes..."):
+                        snapshot = load_snapshot(snap_choice)
+                        if not snapshot:
+                            st.error(f"Could not load snapshot for {snap_choice}")
+                        else:
+                            hitter_actuals = fetch_hitter_outcomes(snap_choice)
+                            pitcher_actuals = fetch_pitcher_outcomes(snap_choice)
+
+                            h_metrics = evaluate_hitter_projections(snapshot, hitter_actuals)
+                            p_metrics = evaluate_pitcher_projections(snapshot, pitcher_actuals)
+
+                            st.markdown(f"### Results for {snap_choice}")
+
+                            if h_metrics and not h_metrics.get("error"):
+                                st.markdown("#### 🎯 Hitter projection accuracy")
+                                m1, m2, m3, m4 = st.columns(4)
+                                m1.metric("Hitters tracked", h_metrics.get("hitters_who_played", 0))
+                                m2.metric("Total HRs", h_metrics.get("total_actual_hrs", 0))
+                                m3.metric("Slate HR rate",
+                                            f"{h_metrics.get('actual_hr_rate_pct', 0)}%")
+                                t10_hr = h_metrics.get("top10_hr_hit_rate", 0)
+                                m4.metric("Top-10 HR pick hit rate", f"{t10_hr}%")
+
+                                # Show calibration table
+                                bands = h_metrics.get("hr_pct_bands", [])
+                                if bands:
+                                    st.markdown("**HR Game% calibration** (predicted vs actual hit rate by band)")
+                                    bdf = pd.DataFrame(bands)
+                                    st.dataframe(bdf, hide_index=True, use_container_width=True,
+                                                column_config={
+                                                    "band": "Predicted band",
+                                                    "n": "N hitters",
+                                                    "predicted_rate": st.column_config.NumberColumn("Avg predicted", format="%.1f%%"),
+                                                    "actual_rate": st.column_config.NumberColumn("Actual HR rate", format="%.1f%%"),
+                                                    "calibration_error": st.column_config.NumberColumn("Error", format="%.1f"),
+                                                })
+                                    st.caption(
+                                        "Calibration error near 0 = predictions match reality. "
+                                        "Positive = model under-predicted (homered more than expected). "
+                                        "Negative = model over-predicted."
+                                    )
+
+                                # Power Score bands
+                                ps_bands = h_metrics.get("power_score_bands", [])
+                                if ps_bands:
+                                    st.markdown("**Power Score band accuracy**")
+                                    psdf = pd.DataFrame(ps_bands)
+                                    st.dataframe(psdf, hide_index=True, use_container_width=True)
+
+                                # Top 10 detail
+                                t10 = h_metrics.get("top10_hr_predictions", [])
+                                if t10:
+                                    st.markdown(f"**Top 10 HR predictions:** {h_metrics.get('top10_hr_hit_rate')}% hit rate")
+                                    t10df = pd.DataFrame(t10)
+                                    t10df["result"] = t10df["homered"].apply(
+                                        lambda x: "✅ HR" if x else "—"
+                                    )
+                                    st.dataframe(t10df[["name", "predicted_hr_pct", "result"]],
+                                                 hide_index=True, use_container_width=True)
+
+                                # Sleeper accuracy
+                                t10s = h_metrics.get("top10_sleeper_predictions", [])
+                                if t10s:
+                                    st.markdown(f"**Top 10 Sleeper picks:** {h_metrics.get('top10_sleeper_hit_rate')}% hit rate")
+                                    t10sdf = pd.DataFrame(t10s)
+                                    t10sdf["result"] = t10sdf["homered"].apply(
+                                        lambda x: "✅ HR" if x else "—"
+                                    )
+                                    st.dataframe(t10sdf[["name", "sleeper_score", "result"]],
+                                                 hide_index=True, use_container_width=True)
+
+                            if p_metrics and not p_metrics.get("error"):
+                                st.markdown("#### ⚾ Pitcher K projection accuracy")
+                                pm1, pm2, pm3 = st.columns(3)
+                                pm1.metric("Pitchers tracked", p_metrics.get("total_pitchers_matched", 0))
+                                pm2.metric("K RMSE", f"{p_metrics.get('k_projection_rmse', 0):.2f}")
+                                pm3.metric("K bias", f"{p_metrics.get('k_projection_bias', 0):+.2f}",
+                                            help="Positive = model under-projected. Negative = over-projected.")
+
+                                detail = p_metrics.get("k_projections_detail", [])
+                                if detail:
+                                    pdf = pd.DataFrame(detail)
+                                    st.dataframe(pdf, hide_index=True, use_container_width=True,
+                                                column_config={
+                                                    "name": "Pitcher",
+                                                    "projected_k": st.column_config.NumberColumn("Proj K", format="%.1f"),
+                                                    "actual_k": "Actual K",
+                                                    "actual_ip": st.column_config.NumberColumn("IP", format="%.1f"),
+                                                    "diff": st.column_config.NumberColumn("Δ", format="%+.1f"),
+                                                })
+                            if not h_metrics and not p_metrics:
+                                st.warning("Snapshot loaded but no actual outcomes matched. Possible if games haven't been played yet.")
+        except Exception as e:
+            st.error(f"Backtest panel error: {e}")
 
 if show_diagnostic:
     with st.expander("🔬 Data diagnostic — column completeness"):
@@ -1471,6 +1602,25 @@ if all_hitters:
         qualified = combined_all[combined_all["pa"].notna() & (combined_all["pa"] >= INSUFFICIENT_PA_THRESHOLD)]
     else:
         qualified = combined_all
+
+    # Save-snapshot button for backtest tracking
+    snap_col1, snap_col2 = st.columns([1, 4])
+    with snap_col1:
+        if st.button("💾 Save snapshot", help="Save today's projections so they can be evaluated against actual outcomes tomorrow."):
+            try:
+                from backtest import save_snapshot
+                ok = save_snapshot(selected_date, combined_all, p_slate)
+                if ok:
+                    st.success(f"Saved snapshot for {selected_date}")
+                else:
+                    st.error("Snapshot save failed")
+            except Exception as e:
+                st.error(f"Backtest module error: {e}")
+    with snap_col2:
+        st.caption(
+            "Click after lineups lock to capture today's predictions. "
+            "Tomorrow, use the Backtest panel to see hit rates."
+        )
 
     col_left, col_mid, col_right = st.columns(3)
 
