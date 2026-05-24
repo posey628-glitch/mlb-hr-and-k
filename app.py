@@ -255,6 +255,17 @@ with st.spinner("Filling in missing pitcher data..."):
     except Exception as e:
         st.warning(f"Per-pitcher fill skipped: {e}")
 
+# Last-resort: if IP is still completely missing for everyone, estimate from
+# Statcast PA so the model has *something* to work with (≈4.3 PA per IP)
+if not pitcher_stats.empty:
+    if "ip" not in pitcher_stats.columns or pitcher_stats["ip"].isna().all():
+        if "pa" in pitcher_stats.columns and pitcher_stats["pa"].notna().any():
+            pitcher_stats["ip"] = (pitcher_stats["pa"] / 4.3).round(1)
+    # Also if k9 is missing entirely, derive from k_percent
+    if "k9" not in pitcher_stats.columns or pitcher_stats["k9"].isna().all():
+        if "k_percent" in pitcher_stats.columns and pitcher_stats["k_percent"].notna().any():
+            pitcher_stats["k9"] = (pitcher_stats["k_percent"] * 4.3 * 9 / 100).round(2)
+
 # Sprint speed
 if use_sprint_speed:
     try:
@@ -382,7 +393,34 @@ if use_recent_form and not slate.empty:
             except Exception:
                 pitcher_recent_map[pid] = {}
 
-p_slate = build_pitcher_slate(slate, pitcher_stats, pitcher_recent=pitcher_recent_map)
+p_slate = build_pitcher_slate(slate, pitcher_stats, pitcher_recent=pitcher_recent_map,
+                                slate_date=selected_date)
+
+# ----- DATA AVAILABILITY WARNING -----
+# If MLB Stats API data is mostly missing, warn the user explicitly so they
+# don't think the model is broken when it's actually a data fetch issue.
+if not p_slate.empty:
+    has_real_ip = "ip" in p_slate.columns and p_slate["ip"].notna().any()
+    has_real_era = "era" in p_slate.columns and p_slate["era"].notna().any()
+    has_real_k9 = "k9" in p_slate.columns and p_slate["k9"].notna().any()
+    estimated_ip = bool(p_slate.get("ip_estimated", pd.Series([False])).any()) if "ip_estimated" in p_slate.columns else False
+    estimated_k9 = bool(p_slate.get("k9_estimated", pd.Series([False])).any()) if "k9_estimated" in p_slate.columns else False
+
+    issues = []
+    if not has_real_era:
+        issues.append("ERA / WHIP / HR/9 (MLB Stats API)")
+    if estimated_ip:
+        issues.append("IP (estimated from Statcast PA)")
+    if estimated_k9:
+        issues.append("K/9 (estimated from K%)")
+
+    if issues:
+        st.warning(
+            "**⚠️ Some pitcher data couldn't be fetched from MLB Stats API.** "
+            "Missing or estimated: " + ", ".join(issues) +
+            ". Scores may be less accurate this load — refresh the page to retry, "
+            "or it may resolve next refresh if MLB's API was rate-limiting."
+        )
 
 if not p_slate.empty:
     # Add signal emoji
