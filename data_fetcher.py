@@ -982,6 +982,48 @@ def fill_hitter_bats(lineups: list, ids: set | None = None) -> dict:
         return {}
 
 
+@st.cache_data(ttl=86400)
+def fetch_player_debut_years(ids: tuple) -> dict:
+    """
+    Bulk-fetch MLB debut year for player IDs. Used for rookie detection.
+    Returns {player_id: debut_year_int}. Cached 24h.
+    """
+    if not ids:
+        return {}
+    try:
+        ids_str = ",".join(str(p) for p in ids)
+        url = (
+            f"https://statsapi.mlb.com/api/v1/people?personIds={ids_str}"
+            "&hydrate=mlbDebutDate"
+        )
+        r = requests.get(url, headers=HEADERS, timeout=15)
+        r.raise_for_status()
+        out = {}
+        for person in r.json().get("people", []):
+            pid = person.get("id")
+            debut = person.get("mlbDebutDate")
+            if pid and debut:
+                try:
+                    out[pid] = int(debut[:4])
+                except (ValueError, TypeError):
+                    continue
+        return out
+    except Exception:
+        return {}
+
+
+def is_rookie(debut_year: int | None, current_year: int = CURRENT_SEASON) -> bool:
+    """
+    A player is a rookie if their MLB debut is this year or the prior offseason.
+    Strictly: debut_year == current_year means they're a definite rookie.
+    debut_year == current_year - 1 with limited PA could also be a rookie,
+    but that requires PA threshold checking which we leave to the caller.
+    """
+    if debut_year is None:
+        return False
+    return debut_year == current_year
+
+
 @st.cache_data(ttl=86400)  # cache for 24h - LA changes slowly
 def get_hitter_launch_angle_season(player_id: int, season: int = CURRENT_SEASON) -> float | None:
     """
