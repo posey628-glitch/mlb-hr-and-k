@@ -596,3 +596,4 @@ def build_pitcher_slate(
         df["form_arrow"] = "→"
 
     return df.sort_values("test_score", ascending=False, na_position="last").reset_index(drop=True)
+    return df.sort_values("test_score", ascending=False, na_position="last").reset_index(drop=True)
