@@ -632,13 +632,14 @@ def get_hitter_traditional(season: int = CURRENT_SEASON) -> pd.DataFrame:
 
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=900)  # Shortened from 3600 to 15min so failures recover faster
 def get_pitcher_traditional(season: int = CURRENT_SEASON) -> pd.DataFrame:
     """Pull season ERA, WHIP, HR/9, K/9, BB/9 for all pitchers.
 
     Uses playerPool=All so non-qualifying pitchers (early-season, callups,
-    long relievers spot-starting) are included. Defensive row parsing
-    handles MLB Stats API's "-.--" string values. Retries once on failure.
+    long relievers spot-starting) are included. Retries 3x; if all fail OR
+    return empty, we DON'T cache - by raising an exception that streamlit
+    won't cache, then catching it to return empty. Next refresh tries again.
     """
     url = (
         "https://statsapi.mlb.com/api/v1/stats"
@@ -646,6 +647,7 @@ def get_pitcher_traditional(season: int = CURRENT_SEASON) -> pd.DataFrame:
         "&playerPool=All&limit=3000"
     )
     splits = []
+    last_err = None
     for attempt in range(3):
         try:
             r = requests.get(url, headers=HEADERS, timeout=25)
@@ -653,13 +655,16 @@ def get_pitcher_traditional(season: int = CURRENT_SEASON) -> pd.DataFrame:
             splits = r.json().get("stats", [{}])[0].get("splits", [])
             if splits:
                 break
-        except Exception:
+        except Exception as e:
+            last_err = e
             if attempt < 2:
                 import time
                 time.sleep(1.5)
             continue
+
+    # CRITICAL: if we have no data, raise so the cache doesn't store empty
     if not splits:
-        return pd.DataFrame()
+        raise RuntimeError(f"MLB Stats API returned no pitcher data (last error: {last_err})")
 
     rows = []
     for s in splits:
@@ -690,8 +695,19 @@ def get_pitcher_traditional(season: int = CURRENT_SEASON) -> pd.DataFrame:
         except Exception:
             continue
 
+    if not rows:
+        raise RuntimeError("MLB Stats API returned splits but no usable rows")
+
     df = pd.DataFrame(rows)
     return _normalize_player_df(df)
+
+
+def get_pitcher_traditional_safe(season: int = CURRENT_SEASON) -> pd.DataFrame:
+    """Wrapper that catches the cache-bust exception and returns empty df."""
+    try:
+        return get_pitcher_traditional(season)
+    except Exception:
+        return pd.DataFrame()
 
 
 # ----------------------------------------------------------------------------
