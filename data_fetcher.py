@@ -493,7 +493,9 @@ def get_pitcher_full_season_from_gamelog(pitcher_id: int,
     }
 
 
-
+@st.cache_data(ttl=1800)
+def get_pitcher_recent_form(pitcher_id: int, season: int = CURRENT_SEASON,
+                              n_starts: int = 5) -> dict:
     """
     Recent form: last N starts K/9, ERA, IP.
     Returns trending up/down arrow.
