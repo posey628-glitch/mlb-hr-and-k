@@ -354,6 +354,42 @@ if show_diagnostic:
             ])
             st.dataframe(avail, hide_index=True, use_container_width=True)
 
+    # Live network probe - this is the critical diagnostic
+    with st.expander("🌐 Live API connectivity probe (click to run)"):
+        if st.button("Run probe"):
+            import requests
+            tests = [
+                ("MLB Stats API schedule",
+                 "https://statsapi.mlb.com/api/v1/schedule?sportId=1"),
+                ("MLB Stats API season pitching (the failing one)",
+                 "https://statsapi.mlb.com/api/v1/stats?stats=season&group=pitching&season=2025&sportIds=1&limit=10"),
+                ("MLB Stats API single player (Skenes 694973)",
+                 "https://statsapi.mlb.com/api/v1/people/694973/stats?stats=season&group=pitching&season=2025&sportId=1"),
+                ("MLB Stats API people endpoint",
+                 "https://statsapi.mlb.com/api/v1/people?personIds=694973"),
+                ("Baseball Savant (control - we know this works)",
+                 "https://baseballsavant.mlb.com/leaderboard/custom?year=2025&type=pitcher&filter=&min=q&selections=pa&csv=true"),
+            ]
+            results = []
+            for name, url in tests:
+                try:
+                    r = requests.get(url, timeout=10,
+                        headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json, text/csv, */*"})
+                    status = r.status_code
+                    size = len(r.content)
+                    has_content = "yes" if size > 200 else f"empty ({size}b)"
+                    results.append({"endpoint": name, "status": status, "size_bytes": size, "has_content": has_content})
+                except Exception as e:
+                    results.append({"endpoint": name, "status": "ERROR", "size_bytes": 0,
+                                      "has_content": str(e)[:80]})
+            st.dataframe(pd.DataFrame(results), hide_index=True, use_container_width=True)
+            st.caption(
+                "If statsapi.mlb.com endpoints show errors/empty but Baseball Savant works, "
+                "MLB Stats API is being blocked from Streamlit Cloud's IP range or "
+                "rate-limited. If everything fails, it's a network issue. If everything "
+                "works, the failure is happening elsewhere in the pipeline."
+            )
+
 if show_legend:
     with st.expander("📖 Legend & glossary"):
         leg1, leg2, leg3 = st.columns(3)
