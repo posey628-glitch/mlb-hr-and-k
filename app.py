@@ -495,6 +495,81 @@ if show_diagnostic:
                 "works, the failure is happening elsewhere in the pipeline."
             )
 
+    with st.expander("🎯 LA-specific diagnostic (click to find which Savant URL returns launch angle)"):
+        st.caption(
+            "Tests 5 different Savant endpoints and shows EXACTLY which columns "
+            "each returns. We're looking for a 'launch_angle' or similar column "
+            "with real numeric values."
+        )
+        if st.button("Probe for LA"):
+            import requests
+            la_tests = [
+                ("Custom leaderboard - basic LA selection",
+                 "https://baseballsavant.mlb.com/leaderboard/custom"
+                 "?year=2025&type=batter&filter=&min=1"
+                 "&selections=launch_angle,launch_speed,avg_hit_angle"
+                 "&chart=false&x=pa&y=pa&r=no&csv=true"),
+                ("Statcast leaderboard endpoint",
+                 "https://baseballsavant.mlb.com/leaderboard/statcast"
+                 "?type=batter&year=2025&position=&team=&min=1&csv=true"),
+                ("Exit velocity & barrels leaderboard",
+                 "https://baseballsavant.mlb.com/leaderboard/exit-velocity"
+                 "?type=batter&year=2025&min=1&csv=true"),
+                ("Statcast search - one player (Aaron Judge 592450)",
+                 "https://baseballsavant.mlb.com/statcast_search/csv"
+                 "?all=true&hfPT=&hfAB=&hfGT=R%7C&hfPR=&hfZ=&stadium=&hfBBL="
+                 "&hfNewZones=&hfPull=&hfC=&hfSea=2025%7C&hfSit=&player_type=batter"
+                 "&hfOuts=&opponent=&pitcher_throws=&batter_stands=&hfSA="
+                 "&game_date_gt=2025-03-01&game_date_lt=2025-10-31"
+                 "&batters_lookup%5B%5D=592450&team=&position=&hfRO="
+                 "&home_road=&hfFlag=&metric_1=&hfInn=&min_pitches=0"
+                 "&min_results=0&group_by=name&sort_col=pitches"
+                 "&player_event_sort=api_p_release_speed&sort_order=desc"
+                 "&min_pas=0&type=details"),
+                ("Player page CSV (Aaron Judge)",
+                 "https://baseballsavant.mlb.com/savant-player/aaron-judge-592450"
+                 "?stats=statcast-r-hitting-mlb"),
+            ]
+            for name, url in la_tests:
+                st.markdown(f"**{name}**")
+                try:
+                    r = requests.get(url, timeout=20,
+                        headers={"User-Agent": "Mozilla/5.0",
+                                  "Accept": "application/json, text/csv, */*"})
+                    st.write(f"Status: {r.status_code}, Size: {len(r.content)} bytes")
+                    if r.status_code == 200 and len(r.content) > 200:
+                        # Try parsing as CSV
+                        try:
+                            df_p = pd.read_csv(io.StringIO(r.text))
+                            la_like = [c for c in df_p.columns
+                                       if any(k in c.lower() for k in ["launch", "angle", "_la", "la_"])]
+                            st.write(f"Rows: {len(df_p)}, Total columns: {len(df_p.columns)}")
+                            st.write(f"**LA-like columns found:** `{la_like}`")
+                            if la_like:
+                                # Show sample values
+                                sample = df_p[la_like].head(3)
+                                st.dataframe(sample)
+                                # Show stats - are these populated?
+                                for col in la_like:
+                                    coerced = pd.to_numeric(df_p[col], errors="coerce")
+                                    n_pop = coerced.notna().sum()
+                                    st.write(f"  `{col}`: {n_pop}/{len(df_p)} populated, "
+                                             f"mean={coerced.mean():.2f}" if n_pop else
+                                             f"  `{col}`: 0 populated")
+                            else:
+                                # Show first 10 column names so we can spot it
+                                st.write(f"First 10 cols: {list(df_p.columns[:10])}")
+                                st.write(f"All cols matching 'a': {[c for c in df_p.columns if 'a' in c.lower()][:15]}")
+                        except Exception as parse_err:
+                            st.write(f"Couldn't parse CSV: {parse_err}")
+                            # Show first 500 chars of response
+                            st.code(r.text[:500])
+                    else:
+                        st.write(f"❌ Failed or empty response")
+                except Exception as e:
+                    st.write(f"❌ Error: {e}")
+                st.markdown("---")
+
 if show_legend:
     with st.expander("📖 Legend & glossary"):
         leg1, leg2, leg3 = st.columns(3)
@@ -737,7 +812,7 @@ for _, game in slate.iterrows():
     wx_summary = ""
     if use_weather and venue:
         try:
-            park_info = get_park(venue)  # has fuzzy fallback for unknown parks
+            park_info = get_park(venue)
             lat = park_info.get("lat")
             lon = park_info.get("lon")
             cf_bearing = park_info.get("cf_bearing", 0)
@@ -749,11 +824,23 @@ for _, game in slate.iterrows():
             else:
                 wx_iso = None
             weather = fetch_weather(lat, lon, wx_iso) or {}
-            wx_mult, _summary = hr_multiplier(weather, park_info)
-            wx_summary = weather.get("summary", "") or _summary
-        except Exception:
-            weather = {}
+            if weather.get("error"):
+                wx_summary = f"Weather API error: {weather.get('error', '')[:50]}"
+            else:
+                wx_mult, _summary = hr_multiplier(weather, park_info)
+                wx_summary = _summary or "Neutral"
+                # Hard rain warning - >80% chance suggests likely delay/postponement
+                pp = weather.get("precip_prob")
+                if pp is not None and pp >= 80:
+                    wx_summary = f"⚠️ HEAVY RAIN ({pp:.0f}%) — possible delay/PPD — " + wx_summary
+        except Exception as e:
+            weather = {"error": str(e)}
             wx_mult = 1.0
+            wx_summary = f"Weather failed: {str(e)[:60]}"
+    elif not use_weather:
+        wx_summary = "Weather disabled"
+    elif not venue:
+        wx_summary = "No venue info"
 
     full_hr_mult = park_mult * wx_mult
 
@@ -1512,13 +1599,27 @@ for _, game in slate.iterrows():
         st.metric("Venue", game.get("venue", "—"))
     with info_cols[1]:
         wx = ctx.get("weather") or {}
-        if wx:
-            temp = wx.get("temp_f", "—")
-            wind = wx.get("wind_mph", "—")
-            wind_dir = wx.get("wind_dir", "—")
-            st.metric("Weather", f"{temp}°F · {wind} mph {wind_dir}")
+        if wx and not wx.get("error") and wx.get("temp_f") is not None:
+            temp = wx.get("temp_f")
+            wind = wx.get("wind_mph", 0)
+            wind_dir_deg = wx.get("wind_dir_deg")
+            # Convert degrees to compass direction
+            if wind_dir_deg is not None:
+                dirs = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+                idx = int((wind_dir_deg + 22.5) / 45) % 8
+                wind_dir = dirs[idx]
+            else:
+                wind_dir = ""
+            pp = wx.get("precip_prob", 0) or 0
+            rain_str = f" · ☔{pp:.0f}%" if pp >= 30 else ""
+            st.metric(
+                "Weather",
+                f"{temp:.0f}°F · {wind:.0f}mph {wind_dir}{rain_str}",
+                help=ctx.get("summary", ""),
+            )
         else:
-            st.metric("Weather", "—")
+            wx_help = ctx.get("summary", "Weather not loaded")
+            st.metric("Weather", "—", help=wx_help)
     with info_cols[2]:
         st.metric("Park × Wx", f"{ctx.get('hr_mult', 1.0):.2f}×")
     with info_cols[3]:
@@ -1527,6 +1628,47 @@ for _, game in slate.iterrows():
             st.metric("Vegas total", f"{vg['total']:.1f}")
         else:
             st.metric("Vegas total", "—")
+
+    # Per-game Top HR Hitter + Top Sleeper, combining both lineups
+    am = ctx.get("away_matchup")
+    hm = ctx.get("home_matchup")
+    pickable = []
+    if am is not None and not am.empty:
+        a_copy = am.copy()
+        a_copy["_team"] = game.get("away_team_abbr", "")
+        pickable.append(a_copy)
+    if hm is not None and not hm.empty:
+        h_copy = hm.copy()
+        h_copy["_team"] = game.get("home_team_abbr", "")
+        pickable.append(h_copy)
+    if pickable:
+        combined = pd.concat(pickable, ignore_index=True)
+        pick_cols = st.columns(2)
+        with pick_cols[0]:
+            if "hr_game_pct" in combined.columns:
+                valid = combined.dropna(subset=["hr_game_pct"])
+                if not valid.empty:
+                    top = valid.sort_values("hr_game_pct", ascending=False).iloc[0]
+                    pct = top.get("hr_game_pct", 0)
+                    alert = top.get("alert", "")
+                    st.markdown(
+                        f"**🎯 Best HR Play**: {alert} **{top['player_name']}** "
+                        f"({top['_team']}) — {pct:.1f}% HR Game"
+                    )
+        with pick_cols[1]:
+            if "sleeper_score" in combined.columns:
+                valid = combined.dropna(subset=["sleeper_score"])
+                if not valid.empty:
+                    # Filter: sleeper means meaningful HR upside despite low season pace
+                    sleepers_only = valid[valid["sleeper_score"] > 0]
+                    if not sleepers_only.empty:
+                        sl = sleepers_only.sort_values("sleeper_score", ascending=False).iloc[0]
+                        sc = sl.get("sleeper_score", 0)
+                        hr_pct = sl.get("hr_game_pct", 0) or 0
+                        st.markdown(
+                            f"**💎 Best Sleeper**: **{sl['player_name']}** "
+                            f"({sl['_team']}) — sleeper {sc:.1f}, HR {hr_pct:.1f}%"
+                        )
 
     tabs = st.tabs([away_tab, home_tab, "🎯 K Projections"])
     with tabs[0]:
