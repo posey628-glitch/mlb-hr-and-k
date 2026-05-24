@@ -1524,7 +1524,24 @@ if all_hitters_for_picks:
         else:
             q["pick_score"] = q.get("hr_game_pct", 0)
 
-        top5 = q.sort_values("pick_score", ascending=False).head(5).reset_index(drop=True)
+        # Diversity rule: max 2 picks per game so the top 5 doesn't pile up
+        # on one matchup. Greedy selection: sort by pick_score, take in order,
+        # skipping any that would exceed 2-per-game.
+        q_sorted = q.sort_values("pick_score", ascending=False)
+        picks = []
+        game_count = {}
+        for _, row in q_sorted.iterrows():
+            g = row.get("game", "")
+            if game_count.get(g, 0) >= 2:
+                continue
+            picks.append(row)
+            game_count[g] = game_count.get(g, 0) + 1
+            if len(picks) >= 5:
+                break
+        if picks:
+            top5 = pd.DataFrame(picks).reset_index(drop=True)
+        else:
+            top5 = q_sorted.head(5).reset_index(drop=True)
         top5["rank"] = range(1, len(top5) + 1)
 
         cols_to_show = [c for c in [
