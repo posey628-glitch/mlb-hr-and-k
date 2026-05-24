@@ -547,13 +547,18 @@ def build_pitcher_slate(
         # Explicit zero starts = reliever
         if gs is not None and not pd.isna(gs) and gs == 0:
             return 0.4
-        # Bulk reliever: games_played >> games_started
+        # Bulk reliever: games_played >> games_started AND low IP per start
+        # (a real starter with 8 GS and 12 GP because of an IL stint shouldn't
+        # be downgraded - check IP/GS too)
+        bulk_relief = False
         if (gp is not None and gs is not None
                 and not pd.isna(gp) and not pd.isna(gs)
                 and gs > 0 and gp > gs * 1.5):
-            base = 0.65
-        else:
-            base = 1.0
+            ip_per_start = ip / gs if gs > 0 else 0
+            # True bulk reliever role: <4.5 IP per game-started (he's not really starting)
+            if ip_per_start < 4.5:
+                bulk_relief = True
+        base = 0.65 if bulk_relief else 1.0
         ip_factor = min(1.0, ip / full_ip)
         if gs is not None and not pd.isna(gs) and gs > 0:
             start_factor = min(1.0, gs / full_gs)
@@ -583,11 +588,14 @@ def build_pitcher_slate(
         # Very low IP when we DO have IP data
         if ip is not None and not pd.isna(ip) and ip < min_ip:
             return "🚨 RELIEVER"
-        # Bulk reliever between starts
+        # Bulk reliever between starts - require BOTH high GP/GS ratio AND low IP/GS
+        # so a real starter with one IL stint doesn't get downgraded
         if (gp is not None and gs is not None
                 and not pd.isna(gp) and not pd.isna(gs)
                 and gs > 0 and gp > gs * 1.5):
-            return "🔄 SWING"
+            ip_per_start = ip / gs if (ip is not None and not pd.isna(ip) and gs > 0) else 5.0
+            if ip_per_start < 4.5:
+                return "🔄 SWING"
         # Low IP but not crazy low
         if ip is not None and not pd.isna(ip) and ip < full_ip * 0.6:
             return "⚠️ LOW IP"
