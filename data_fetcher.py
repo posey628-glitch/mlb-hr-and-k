@@ -249,16 +249,26 @@ def get_hitter_stats(season: int = CURRENT_SEASON) -> pd.DataFrame:
 
 @st.cache_data(ttl=3600)
 def get_pitcher_stats(season: int = CURRENT_SEASON) -> pd.DataFrame:
-    """Season-level Statcast pitcher stats - expanded."""
+    """Season-level Statcast pitcher stats - expanded.
+
+    Now requests stats that let us derive ERA-equivalents independently of
+    MLB Stats API: xera, slg (SLG against), obp (OBP against), hits, walks,
+    earned_runs, home_run, etc. This way if MLB Stats API is unreachable
+    (which happens on Streamlit Cloud), we still have everything we need.
+    """
     selections = (
-        "pa,k_percent,bb_percent,woba,xwoba,xiso,xba,xslg,xobp,"
+        # Core Statcast
+        "pa,k_percent,bb_percent,woba,xwoba,xiso,xba,xslg,xobp,xera,"
         "barrel_batted_rate,hard_hit_percent,avg_best_speed,avg_hit_angle,"
         "whiff_percent,swing_percent,sweet_spot_percent,xwobacon,iso,babip,"
         "launch_speed,launch_angle,p_total_pitches,p_total_swinging_strike,"
         "csw_percent,zone_percent,in_zone_swing_miss_percent,"
         "f_strike_percent,oz_swing_percent,z_swing_percent,"
         "groundballs_percent,flyballs_percent,linedrives_percent,popups_percent,"
-        "pull_percent,straightaway_percent,opposite_percent,home_run"
+        "pull_percent,straightaway_percent,opposite_percent,"
+        # Real outcome stats (ERA-equivalent derivation)
+        "home_run,slg,obp,batting_avg,hits,walks_drawn,earned_runs,"
+        "ab,strikeout,plate_appearances"
     )
     url = (
         "https://baseballsavant.mlb.com/leaderboard/custom"
@@ -274,6 +284,37 @@ def get_pitcher_stats(season: int = CURRENT_SEASON) -> pd.DataFrame:
             if isinstance(s, str) and "," in s else s
         )
     df = _normalize_player_df(df)
+
+    # ------------------------------------------------------------------
+    # SAVANT-DERIVED ERA/WHIP equivalents - work even when MLB Stats API dies
+    # ------------------------------------------------------------------
+    # Statcast 'pa' is plate appearances faced. ~4.3 PA per IP league average.
+    if "pa" in df.columns:
+        df["ip_savant"] = (df["pa"] / 4.3).round(1)
+        # If MLB Stats API gave us real IP later, that will overwrite this.
+        # For now, use ip_savant as the IP value.
+        df["ip"] = df["ip_savant"]
+    # K/9 from K% × 4.3 PA per IP
+    if "k_percent" in df.columns:
+        df["k9_savant"] = (df["k_percent"] * 4.3 * 9 / 100).round(2)
+        df["k9"] = df["k9_savant"]
+    # BB/9 from BB% × 4.3 PA per IP
+    if "bb_percent" in df.columns:
+        df["bb9_savant"] = (df["bb_percent"] * 4.3 * 9 / 100).round(2)
+        df["bb9"] = df["bb9_savant"]
+    # WHIP from (H + BB) / IP - if Savant gave us hits and walks
+    if "hits" in df.columns and "walks_drawn" in df.columns and "ip_savant" in df.columns:
+        df["whip_savant"] = ((df["hits"] + df["walks_drawn"]) / df["ip_savant"].replace(0, pd.NA)).round(2)
+        df["whip"] = df["whip_savant"]
+    # ERA from earned_runs × 9 / IP
+    if "earned_runs" in df.columns and "ip_savant" in df.columns:
+        df["era_savant"] = (df["earned_runs"] * 9 / df["ip_savant"].replace(0, pd.NA)).round(2)
+        df["era"] = df["era_savant"]
+    # HR/9 from home_run × 9 / IP
+    if "home_run" in df.columns and "ip_savant" in df.columns:
+        df["hr9_savant"] = (df["home_run"] * 9 / df["ip_savant"].replace(0, pd.NA)).round(2)
+        df["hr9"] = df["hr9_savant"]
+
     return df
 
 
