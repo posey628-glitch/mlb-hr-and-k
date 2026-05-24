@@ -123,14 +123,45 @@ except Exception:
     def get_similar_arsenal_aggregate(*a, **k): return None
 
 try:
-    from pitch_match import pitch_match_score
-    # Wrapper to maintain the old call signature in app code
-    def pitch_match_score_for_hitter(*args, **kwargs):
-        return pitch_match_score(*args, **kwargs)
+    from pitch_match import pitch_match_score, get_hitter_pitch_arsenal
+    # Lazy-load hitter arsenal df once for the wrapper
+    _hitter_arsenal_cache = {"df": None}
+    def _get_hitter_arsenal():
+        if _hitter_arsenal_cache["df"] is None:
+            try:
+                _hitter_arsenal_cache["df"] = get_hitter_pitch_arsenal()
+            except Exception:
+                _hitter_arsenal_cache["df"] = pd.DataFrame()
+        return _hitter_arsenal_cache["df"]
+
+    # Wrapper bridging old call signature in app.py to real function
+    def pitch_match_score_for_hitter(batter_id, pitcher_row, pitcher_arsenal_df):
+        """
+        Old call: (batter_id, pitcher_row_dict, full_pitcher_arsenal_df)
+        New call: (batter_id, single_pitcher_arsenal_df, single_hitter_arsenal_df)
+        """
+        try:
+            # Filter the big pitcher arsenal df to just this pitcher
+            p_id = pitcher_row.get("player_id") if hasattr(pitcher_row, "get") else None
+            if p_id is None or pitcher_arsenal_df is None or pitcher_arsenal_df.empty:
+                return {"pitch_match_score": None}
+            this_pitcher_arsenal = pitcher_arsenal_df[
+                pitcher_arsenal_df["player_id"] == p_id
+            ] if "player_id" in pitcher_arsenal_df.columns else pd.DataFrame()
+            if this_pitcher_arsenal.empty:
+                return {"pitch_match_score": None}
+            # Filter hitter arsenal to this batter
+            hit_arsenal_df = _get_hitter_arsenal()
+            this_hitter_arsenal = hit_arsenal_df[
+                hit_arsenal_df["player_id"] == batter_id
+            ] if not hit_arsenal_df.empty and "player_id" in hit_arsenal_df.columns else pd.DataFrame()
+            return pitch_match_score(batter_id, this_pitcher_arsenal, this_hitter_arsenal)
+        except Exception:
+            return {"pitch_match_score": None}
     HAVE_PITCH_MATCH = True
 except Exception:
     HAVE_PITCH_MATCH = False
-    def pitch_match_score_for_hitter(*a, **k): return None
+    def pitch_match_score_for_hitter(*a, **k): return {"pitch_match_score": None}
 
 try:
     from game_context import get_umpire_for_game, get_catcher_framing, get_vegas_totals
@@ -885,7 +916,7 @@ for _, game in slate.iterrows():
                         ps = pitch_match_score_for_hitter(
                             int(pid), home_p_row, pitcher_arsenal_all
                         )
-                        pitch_scores.append(ps.get("score") if isinstance(ps, dict) else ps)
+                        pitch_scores.append(ps.get("pitch_match_score") if isinstance(ps, dict) else ps)
                     except Exception:
                         pitch_scores.append(None)
                 away_matchup["pitch_match_score"] = pitch_scores
@@ -930,7 +961,7 @@ for _, game in slate.iterrows():
                         ps = pitch_match_score_for_hitter(
                             int(pid), away_p_row, pitcher_arsenal_all
                         )
-                        pitch_scores.append(ps.get("score") if isinstance(ps, dict) else ps)
+                        pitch_scores.append(ps.get("pitch_match_score") if isinstance(ps, dict) else ps)
                     except Exception:
                         pitch_scores.append(None)
                 home_matchup["pitch_match_score"] = pitch_scores
