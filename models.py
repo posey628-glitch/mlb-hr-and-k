@@ -154,31 +154,38 @@ def build_matchup_table(
         "k_percent": "k_pct",
         "bb_percent": "bb_pct",
         "avg_best_speed": "avg_ev",
+        "exit_velocity_avg": "avg_ev",
+        "launch_speed": "avg_ev",
         "sweet_spot_percent": "sweet_spot_pct",
         "flyballs_percent": "fb_pct",
         "groundballs_percent": "gb_pct",
         "linedrives_percent": "ld_pct",
         "whiff_percent": "whiff_pct",
-        # Savant uses launch_angle_avg in CSV exports
+        # Savant uses several names for launch angle
         "launch_angle": "la",
         "launch_angle_avg": "la",
-        "avg_hit_angle": "la",  # another variant
-        # Savant uses isolated_power for ISO in CSV exports
+        "avg_hit_angle": "la",
+        "la_avg": "la",
+        # Savant uses isolated_power for ISO in some exports
         "isolated_power": "iso",
+        "iso_power": "iso",
         "pull_air_percent": "pull_air_pct",
     }
     df = df.rename(columns=rename)
 
-    # If we now have multiple "la" columns from the rename, dedupe
+    # Drop dupes from the rename collision
     if isinstance(df.columns, pd.Index) and df.columns.duplicated().any():
         df = df.loc[:, ~df.columns.duplicated()]
 
-    # Derive ISO from xslg-xba if still missing (math identity from real data)
+    # If ISO is STILL missing, derive from SLG - AVG
     if "iso" not in df.columns or df["iso"].isna().all():
         slg_col = next((c for c in ["slg", "xslg"] if c in df.columns), None)
-        avg_col = next((c for c in ["batting_avg", "avg", "xba"] if c in df.columns), None)
+        avg_col = next((c for c in ["batting_avg", "avg", "ba", "xba"] if c in df.columns), None)
         if slg_col and avg_col:
             df["iso"] = (df[slg_col] - df[avg_col]).round(3)
+
+    # If LA is still missing entirely but we have any launch_speed_angle data,
+    # leave it blank (no derivation - it's a real measurement, not an identity)
 
     df["k_pct_inv"] = -df["k_pct"] if "k_pct" in df.columns else np.nan
 
@@ -261,6 +268,95 @@ def build_matchup_table(
     ]
     keep = [c for c in display_cols if c in df.columns]
     return df[keep]
+
+
+def add_power_score(
+    matchup_df: pd.DataFrame,
+    park_mult: float = 1.0,
+    weather_mult: float = 1.0,
+    pitcher_hr9: float | None = None,
+    pitcher_barrel_allowed: float | None = None,
+) -> pd.DataFrame:
+    """
+    Compute a comprehensive Power Score (0-100) for HR likelihood.
+
+    Inputs - everything that drives whether THIS hitter homers THIS game:
+      - Hitter raw power: barrel%, hard_hit%, iso, slg, exit velocity, LA
+      - Hitter form: recent_iso, recent_hr, streak_label
+      - Opposing pitcher: hr9 allowed, barrel% allowed
+      - Park: HR factor multiplier (Coors 1.21, Oracle 0.88, etc.)
+      - Weather: temp, wind, humidity, pressure, precip - all multiplied in
+      - Pitch match quality (if available)
+
+    The score is a percentile rank ACROSS THIS LINEUP, then multiplied by
+    environmental factors so a great hitter in Coors with wind blowing out
+    scores higher than the same hitter in Oracle in 50°F.
+    """
+    if matchup_df is None or matchup_df.empty:
+        return matchup_df
+    df = matchup_df.copy()
+
+    # ---- Hitter power components (each contributes a weight) ----
+    components = []  # (column, weight, invert)
+    weights = {
+        "barrel_pct": 0.25,        # most predictive HR stat
+        "iso": 0.20,
+        "hard_hit": 0.10,
+        "avg_ev": 0.10,            # raw exit velocity
+        "la": 0.08,                # launch angle - sweet spot ~ 25-35°
+        "fb_pct": 0.08,            # flyballs become HRs
+        "pulled_brl_pct": 0.07,    # pulled barrels = HRs
+        "slg": 0.07,
+        "recent_iso": 0.05,        # current form
+    }
+
+    contributions = []
+    total_weight = 0
+    for col, w in weights.items():
+        if col in df.columns and df[col].notna().any():
+            ranked = (df[col].rank(pct=True) * 100)
+            # LA is special - we want "near sweet spot 25-35", not just high
+            if col == "la":
+                # Score based on proximity to 28° (HR sweet spot)
+                la_dist = (df[col] - 28).abs()
+                ranked = 100 - (la_dist.rank(pct=True) * 100)
+            weight_series = ranked.notna().astype(float) * w
+            contributions.append((weight_series, ranked.fillna(0)))
+            total_weight += w
+
+    if not contributions:
+        df["power_score"] = np.nan
+        return df
+
+    weight_sum = sum(ws for ws, _ in contributions)
+    weighted_total = sum(ws * vs for ws, vs in contributions)
+    base_power = (weighted_total / weight_sum.replace(0, np.nan)).round(2)
+
+    # Data-completeness penalty: if hitter only has 3 of 9 components, scale down
+    completeness = (weight_sum / total_weight).clip(0, 1)
+    base_power = base_power * completeness.clip(lower=0.5)
+
+    # ---- Environmental multipliers ----
+    env_mult = float(park_mult) * float(weather_mult)
+    # Add modest pitcher HR-allowance factor
+    if pitcher_hr9 is not None and not pd.isna(pitcher_hr9) and pitcher_hr9 > 0:
+        # League avg HR/9 ~ 1.20; >1.5 = punisher, <0.9 = HR-suppressor
+        p_factor = pitcher_hr9 / 1.20
+        p_factor = max(0.75, min(1.25, p_factor))
+        env_mult *= p_factor
+    if pitcher_barrel_allowed is not None and not pd.isna(pitcher_barrel_allowed):
+        # league avg barrel allowed ~ 7.5%; lower = better suppression
+        b_factor = pitcher_barrel_allowed / 7.5
+        b_factor = max(0.85, min(1.15, b_factor))
+        env_mult *= b_factor
+
+    # Cap env multiplier so it doesn't dominate
+    env_mult = max(0.6, min(1.5, env_mult))
+
+    df["power_score"] = (base_power * env_mult).clip(0, 99).round(1)
+    df["env_mult"] = round(env_mult, 3)
+
+    return df
 
 
 def _season_thresholds(slate_date=None):
