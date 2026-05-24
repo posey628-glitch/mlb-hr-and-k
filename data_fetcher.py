@@ -330,34 +330,53 @@ def get_hitter_stats(season: int = CURRENT_SEASON) -> pd.DataFrame:
         df["launch_angle"] = pd.NA
     # Real LA only - no FB%/GB% estimation
 
-    # If LA still missing, try Savant's dedicated exit-velocity leaderboard
-    # which is a different endpoint and reliably returns launch_angle
+    # If LA still missing, try a sequence of Savant endpoints known to return it.
+    # Each is independent and uses a different URL pattern.
     if "launch_angle" in df.columns and df["launch_angle"].isna().all():
-        try:
-            ev_url = (
-                "https://baseballsavant.mlb.com/leaderboard/statcast"
-                f"?type=batter&year={season}&position=&team=&min=1&csv=true"
-            )
-            ev_r = requests.get(ev_url, headers=HEADERS, timeout=20)
-            ev_r.raise_for_status()
-            ev_df = pd.read_csv(io.StringIO(ev_r.text))
-            # The statcast leaderboard column for LA is typically 'launch_angle' or 'angle'
-            la_col = None
-            for cand in ["launch_angle", "angle", "avg_launch_angle", "avg_la"]:
-                if cand in ev_df.columns:
-                    la_col = cand
-                    break
-            id_col = None
-            for cand in ["player_id", "mlb_id", "MLBAMID", "playerid"]:
-                if cand in ev_df.columns:
-                    id_col = cand
-                    break
-            if la_col and id_col:
-                ev_df[id_col] = pd.to_numeric(ev_df[id_col], errors="coerce").astype("Int64")
-                la_map = dict(zip(ev_df[id_col], pd.to_numeric(ev_df[la_col], errors="coerce")))
-                df["launch_angle"] = df["player_id"].map(la_map)
-        except Exception:
-            pass
+        la_urls = [
+            # Exit velocity & launch angle leaderboard
+            f"https://baseballsavant.mlb.com/leaderboard/statcast"
+            f"?type=batter&year={season}&position=&team=&min=1&csv=true",
+            # Custom leaderboard with explicit launch_angle selection
+            f"https://baseballsavant.mlb.com/leaderboard/custom"
+            f"?year={season}&type=batter&filter=&min=1"
+            f"&selections=pa,launch_angle,launch_speed,avg_hit_angle"
+            f"&chart=false&x=pa&y=pa&r=no&csv=true",
+            # Statcast batted-ball leaderboard
+            f"https://baseballsavant.mlb.com/leaderboard/exit-velocity"
+            f"?type=batter&year={season}&min=1&csv=true",
+        ]
+        for url in la_urls:
+            try:
+                rr = requests.get(url, headers=HEADERS, timeout=20)
+                rr.raise_for_status()
+                ev_df = pd.read_csv(io.StringIO(rr.text))
+                if ev_df.empty:
+                    continue
+                # Find LA column under any known name
+                la_col = None
+                for cand in ["launch_angle", "avg_hit_angle", "angle",
+                              "avg_launch_angle", "avg_la", "la"]:
+                    if cand in ev_df.columns:
+                        coerced = pd.to_numeric(ev_df[cand], errors="coerce")
+                        if coerced.notna().any():
+                            ev_df[cand] = coerced
+                            la_col = cand
+                            break
+                # Find ID column
+                id_col = None
+                for cand in ["player_id", "mlb_id", "MLBAMID", "playerid", "id"]:
+                    if cand in ev_df.columns:
+                        id_col = cand
+                        break
+                if la_col and id_col:
+                    ev_df[id_col] = pd.to_numeric(ev_df[id_col], errors="coerce").astype("Int64")
+                    la_map = dict(zip(ev_df[id_col], ev_df[la_col]))
+                    df["launch_angle"] = df["player_id"].map(la_map)
+                    if df["launch_angle"].notna().any():
+                        break  # success - stop trying more URLs
+            except Exception:
+                continue
 
     # Normalize player_id type for merges + derive missing columns
     df = _normalize_player_df(df)
@@ -961,6 +980,103 @@ def fill_hitter_bats(lineups: list, ids: set | None = None) -> dict:
         return out
     except Exception:
         return {}
+
+
+@st.cache_data(ttl=86400)  # cache for 24h - LA changes slowly
+def get_hitter_launch_angle_season(player_id: int, season: int = CURRENT_SEASON) -> float | None:
+    """
+    Pull real season-long launch angle for ONE hitter from Statcast search.
+    This is the bulletproof source - reads raw batted-ball events and
+    computes the player's actual average launch angle.
+
+    Returns None if no batted-ball data exists for this player.
+    """
+    from datetime import date
+    end = date.today()
+    start = date(season, 3, 1)  # season start (early March covers spring + reg)
+    url = (
+        "https://baseballsavant.mlb.com/statcast_search/csv"
+        f"?all=true&hfPT=&hfAB=&hfGT=R%7C&hfPR=&hfZ=&stadium=&hfBBL=&hfNewZones="
+        f"&hfPull=&hfC=&hfSea={season}%7C&hfSit=&player_type=batter&hfOuts=&opponent="
+        f"&pitcher_throws=&batter_stands=&hfSA=&game_date_gt={start.isoformat()}"
+        f"&game_date_lt={end.isoformat()}&batters_lookup%5B%5D={player_id}"
+        f"&team=&position=&hfRO=&home_road=&hfFlag=&metric_1=&hfInn=&min_pitches=0"
+        f"&min_results=0&group_by=name&sort_col=pitches"
+        f"&player_event_sort=api_p_release_speed&sort_order=desc&min_pas=0&type=details"
+    )
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=30)
+        r.raise_for_status()
+        df = pd.read_csv(io.StringIO(r.text))
+        if df.empty:
+            return None
+        # Only count batted balls (type == 'X')
+        bbe = df[df["type"] == "X"] if "type" in df.columns else df
+        if bbe.empty or "launch_angle" not in bbe.columns:
+            return None
+        la_series = pd.to_numeric(bbe["launch_angle"], errors="coerce")
+        la_series = la_series.dropna()
+        if la_series.empty:
+            return None
+        return round(float(la_series.mean()), 1)
+    except Exception:
+        return None
+
+
+def fill_hitter_la_for_slate(hitter_stats: pd.DataFrame, slate: pd.DataFrame,
+                                season: int = CURRENT_SEASON) -> pd.DataFrame:
+    """
+    For every hitter projected to play today, if launch_angle is missing,
+    fetch it from Statcast search. Only ~150-200 hitters per slate so
+    this is tractable. Cached for 24h per player.
+
+    Returns the hitter_stats df with launch_angle patched in.
+    """
+    if hitter_stats is None or hitter_stats.empty:
+        return hitter_stats
+    if "launch_angle" not in hitter_stats.columns:
+        hitter_stats = hitter_stats.copy()
+        hitter_stats["launch_angle"] = pd.NA
+
+    # Collect hitter IDs from today's slate's team rosters - any player likely to play
+    relevant_ids = set()
+    if not slate.empty:
+        for _, g in slate.iterrows():
+            for col in ("away_team_id", "home_team_id"):
+                tid = g.get(col)
+                if tid is None or pd.isna(tid):
+                    continue
+                try:
+                    roster = get_team_roster(int(tid))
+                    for p in roster:
+                        pid = p.get("id")
+                        if pid:
+                            relevant_ids.add(int(pid))
+                except Exception:
+                    continue
+
+    if not relevant_ids:
+        return hitter_stats
+
+    # Only fetch for hitters in pitcher_stats who are missing LA
+    df = hitter_stats.copy()
+    df["player_id"] = pd.to_numeric(df["player_id"], errors="coerce").astype("Int64")
+    missing_la_ids = set()
+    for pid in relevant_ids:
+        rows = df[df["player_id"] == pid]
+        if rows.empty:
+            continue
+        existing_la = rows.iloc[0].get("launch_angle")
+        if existing_la is None or pd.isna(existing_la):
+            missing_la_ids.add(pid)
+
+    # Fetch LA per player and patch in (silently skip failures)
+    for pid in missing_la_ids:
+        la = get_hitter_launch_angle_season(pid, season)
+        if la is not None:
+            df.loc[df["player_id"] == pid, "launch_angle"] = la
+
+    return df
 
 
 def fill_pitcher_stats_for_slate(pitcher_stats: pd.DataFrame, slate: pd.DataFrame,
