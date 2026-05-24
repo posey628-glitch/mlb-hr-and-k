@@ -112,22 +112,55 @@ except ImportError:
 from weather import fetch_weather, hr_multiplier
 
 try:
-    from splits import get_career_bvp_aggregate, get_similar_arsenal_aggregate
+    from splits import bvp_for_lineup, hitter_vs_similar
+    # Aliased for older app code that used the wrong names
+    get_career_bvp_aggregate = bvp_for_lineup
+    get_similar_arsenal_aggregate = hitter_vs_similar
     HAVE_SPLITS = True
 except Exception:
     HAVE_SPLITS = False
+    def get_career_bvp_aggregate(*a, **k): return None
+    def get_similar_arsenal_aggregate(*a, **k): return None
 
 try:
-    from pitch_match import pitch_match_score_for_hitter
+    from pitch_match import pitch_match_score
+    # Wrapper to maintain the old call signature in app code
+    def pitch_match_score_for_hitter(*args, **kwargs):
+        return pitch_match_score(*args, **kwargs)
     HAVE_PITCH_MATCH = True
 except Exception:
     HAVE_PITCH_MATCH = False
+    def pitch_match_score_for_hitter(*a, **k): return None
 
 try:
-    from game_context import get_umpire_for_game, get_catcher_framing_for_game, get_vegas_for_game
+    from game_context import get_umpire_for_game, get_catcher_framing, get_vegas_totals
+    # Aliases for app code using old names
+    def get_catcher_framing_for_game(*a, **k):
+        # Old call signature was (game_pk); new is (season).
+        # The framing data doesn't actually vary game-by-game, so just return season data.
+        try:
+            return get_catcher_framing()
+        except Exception:
+            return {}
+    def get_vegas_for_game(game_pk, *a, **k):
+        try:
+            from datetime import date
+            totals = get_vegas_totals(date.today().isoformat())
+            if totals is None or (hasattr(totals, "empty") and totals.empty):
+                return None
+            # Try to find a row matching this game
+            if "gamePk" in totals.columns:
+                m = totals[totals["gamePk"] == game_pk]
+                return m.iloc[0].to_dict() if len(m) else None
+            return None
+        except Exception:
+            return None
     HAVE_GAME_CONTEXT = True
 except Exception:
     HAVE_GAME_CONTEXT = False
+    def get_umpire_for_game(*a, **k): return {}
+    def get_catcher_framing_for_game(*a, **k): return {}
+    def get_vegas_for_game(*a, **k): return None
 
 
 # ============================================================================
@@ -1222,7 +1255,7 @@ if all_hitters:
     else:
         qualified = combined_all
 
-    col_left, col_right = st.columns(2)
+    col_left, col_mid, col_right = st.columns(3)
 
     with col_left:
         st.markdown("**🎯 Top 10 HR Plays**")
@@ -1232,8 +1265,8 @@ if all_hitters:
             ).head(10)
             if not top_hr.empty:
                 cols = [c for c in [
-                    "player_name", "team", "game", "opp_pitcher",
-                    "hr_game_pct", "hr_pa_pct", "barrel_pct", "iso", "matchup",
+                    "player_name", "team", "game",
+                    "hr_game_pct", "barrel_pct", "iso",
                 ] if c in top_hr.columns]
                 disp = top_hr[cols].copy().reset_index(drop=True)
                 st.dataframe(
@@ -1242,27 +1275,58 @@ if all_hitters:
                         "player_name": st.column_config.TextColumn("Hitter"),
                         "team": st.column_config.TextColumn("Tm"),
                         "game": st.column_config.TextColumn("Game"),
-                        "opp_pitcher": st.column_config.TextColumn("vs Pitcher"),
-                        "hr_game_pct": st.column_config.NumberColumn("HR Game%", format="%.1f%%"),
-                        "hr_pa_pct": st.column_config.NumberColumn("HR PA%", format="%.2f%%"),
+                        "hr_game_pct": st.column_config.NumberColumn("HR%", format="%.1f%%"),
                         "barrel_pct": st.column_config.NumberColumn("Brl%", format="%.1f%%"),
                         "iso": st.column_config.NumberColumn("ISO", format="%.3f"),
-                        "matchup": st.column_config.NumberColumn("Matchup", format="%.1f"),
                     },
                 )
             else:
                 st.caption("No HR projections available.")
 
+    with col_mid:
+        st.markdown("**💪 Top 10 Power**")
+        st.caption("Composite incl. park, weather, matchup")
+        if "power_score" in qualified.columns:
+            top_pow = qualified.dropna(subset=["power_score"]).sort_values(
+                "power_score", ascending=False
+            ).head(10)
+            if not top_pow.empty:
+                cols = [c for c in [
+                    "player_name", "team", "game",
+                    "power_score", "barrel_pct", "avg_ev",
+                ] if c in top_pow.columns]
+                disp = top_pow[cols].copy().reset_index(drop=True)
+                st.dataframe(
+                    disp, hide_index=True, use_container_width=True,
+                    column_config={
+                        "player_name": st.column_config.TextColumn("Hitter"),
+                        "team": st.column_config.TextColumn("Tm"),
+                        "game": st.column_config.TextColumn("Game"),
+                        "power_score": st.column_config.NumberColumn(
+                            "Power", format="%.1f",
+                            help="HR-likelihood composite blending raw power, "
+                                 "form, park, weather, and pitcher.",
+                        ),
+                        "barrel_pct": st.column_config.NumberColumn("Brl%", format="%.1f%%"),
+                        "avg_ev": st.column_config.NumberColumn("EV", format="%.1f"),
+                    },
+                )
+            else:
+                st.caption("Power scores not yet computed.")
+        else:
+            st.caption("Power Score requires per-game context to load.")
+
     with col_right:
         st.markdown("**💎 Top 10 Sleepers**")
+        st.caption("Under-the-radar HR upside")
         if "sleeper_score" in qualified.columns:
             top_sleep = qualified.dropna(subset=["sleeper_score"]).sort_values(
                 "sleeper_score", ascending=False
             ).head(10)
             if not top_sleep.empty:
                 cols = [c for c in [
-                    "player_name", "team", "game", "opp_pitcher",
-                    "sleeper_score", "hr_game_pct", "home_run", "recent_hr", "barrel_pct",
+                    "player_name", "team", "game",
+                    "sleeper_score", "hr_game_pct", "barrel_pct",
                 ] if c in top_sleep.columns]
                 disp = top_sleep[cols].copy().reset_index(drop=True)
                 st.dataframe(
@@ -1271,16 +1335,11 @@ if all_hitters:
                         "player_name": st.column_config.TextColumn("Hitter"),
                         "team": st.column_config.TextColumn("Tm"),
                         "game": st.column_config.TextColumn("Game"),
-                        "opp_pitcher": st.column_config.TextColumn("vs Pitcher"),
                         "sleeper_score": st.column_config.NumberColumn(
-                            "Sleeper",
-                            format="%.1f",
-                            help="HR prob percentile MINUS season HR percentile. "
-                                 "Higher = bigger surprise candidate.",
+                            "Sleeper", format="%.1f",
+                            help="HR prob percentile MINUS season HR percentile.",
                         ),
-                        "hr_game_pct": st.column_config.NumberColumn("HR Game%", format="%.1f%%"),
-                        "home_run": st.column_config.NumberColumn("Season HR", format="%d"),
-                        "recent_hr": st.column_config.NumberColumn("L15 HR", format="%d"),
+                        "hr_game_pct": st.column_config.NumberColumn("HR%", format="%.1f%%"),
                         "barrel_pct": st.column_config.NumberColumn("Brl%", format="%.1f%%"),
                     },
                 )
