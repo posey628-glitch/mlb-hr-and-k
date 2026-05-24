@@ -393,8 +393,12 @@ if use_recent_form and not slate.empty:
             except Exception:
                 pitcher_recent_map[pid] = {}
 
-p_slate = build_pitcher_slate(slate, pitcher_stats, pitcher_recent=pitcher_recent_map,
-                                slate_date=selected_date)
+try:
+    p_slate = build_pitcher_slate(slate, pitcher_stats, pitcher_recent=pitcher_recent_map,
+                                    slate_date=selected_date)
+except TypeError:
+    # Older models.py doesn't accept slate_date - call without it
+    p_slate = build_pitcher_slate(slate, pitcher_stats, pitcher_recent=pitcher_recent_map)
 
 # ----- DATA AVAILABILITY WARNING -----
 # If MLB Stats API data is mostly missing, warn the user explicitly so they
@@ -467,11 +471,16 @@ if not p_slate.empty:
         "throws": st.column_config.TextColumn("T", width="small"),
         "test_score": st.column_config.NumberColumn(
             "Test", format="%.1f",
-            help="0-100 composite. K-blended (30%) + Whiff (20%) + xwOBA suppression (25%) + ERA (15%) + base K% (10%), multiplied by reliability factor.",
+            help="Percentile rank vs other pitchers on TODAY's slate (0-95). "
+                 "Composite of K-blended (30%) + Whiff (20%) + xwOBA suppression (25%) "
+                 "+ ERA (15%) + base K% (10%), × reliability factor × data-completeness penalty. "
+                 "A score of 80+ means top of today's slate, not a probability.",
         ),
         "kHR": st.column_config.NumberColumn(
             "kHR", format="%.1f",
-            help="Strikeout-focused score, also reliability-adjusted.",
+            help="Strikeout-focused percentile rank vs today's slate (0-95). "
+                 "Composite of K%, Whiff%, and blended K/9, × reliability. "
+                 "High kHR = top K play for this slate, not a probability.",
         ),
         "proj_k": st.column_config.NumberColumn(
             "Proj K", format="%.1f",
