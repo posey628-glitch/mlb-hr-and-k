@@ -33,6 +33,44 @@ CURRENT_SEASON = datetime.now().year
 
 
 # ----------------------------------------------------------------------------
+# Safe parsers - handle MLB Stats API "-.--" and other junk values
+# ----------------------------------------------------------------------------
+
+def _safe_float(val):
+    """Convert API value to float; return None for '-.--', '', or invalid."""
+    if val is None:
+        return None
+    if isinstance(val, (int, float)):
+        try:
+            f = float(val)
+            return f if not (f != f) else None  # NaN check
+        except (TypeError, ValueError):
+            return None
+    s = str(val).strip()
+    if s in ("", "-.--", "--", "-", ".---", "null", "None"):
+        return None
+    try:
+        return float(s)
+    except (ValueError, TypeError):
+        return None
+
+
+def _safe_int(val):
+    """Convert API value to int; return None for '-.--', '', or invalid."""
+    if val is None:
+        return None
+    if isinstance(val, int):
+        return val
+    s = str(val).strip()
+    if s in ("", "-.--", "--", "-", "null", "None"):
+        return None
+    try:
+        return int(float(s))
+    except (ValueError, TypeError):
+        return None
+
+
+# ----------------------------------------------------------------------------
 # Shared normalizers - keep player_id types consistent across all sources
 # ----------------------------------------------------------------------------
 
