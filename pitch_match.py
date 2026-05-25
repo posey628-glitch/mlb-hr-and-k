@@ -158,7 +158,9 @@ def pitch_match_score(
 
     avg_xwoba = weighted_xwoba / total_weight
     # Convert to 0-100 score (xwOBA range ~0.250 - 0.450)
-    score = max(0, min(100, (avg_xwoba - 0.250) / 0.200 * 100))
+    # Convert to 0-100 score - widened from 0.250-0.450 to 0.200-0.450
+    # so very bad matchups (< 0.250 xwOBA) get spread out instead of all at 0
+    score = max(0, min(100, (avg_xwoba - 0.200) / 0.250 * 100))
 
     # HR-specific score: prefer barrel, fall back to SLG, else None
     pitch_hr_score = None
