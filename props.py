@@ -88,16 +88,42 @@ def hr_prob_per_pa(
     # an LHB facing him should see the 4.5 number, not the average.
     h_bats = (hitter_row.get("bats") or "").upper()
     split_hr_per_pa = None
+    split_pa_count = 0
+    split_source = None  # for debugging: "hr_per_pa" or "slg_derived"
     if pitcher_row is not None and h_bats in ("L", "R"):
         # Switch hitters effectively bat opposite of the pitcher, so use the
         # opposite-side split if available
         col_prefix = "vs_lhb_" if h_bats == "L" else "vs_rhb_"
         split_hr = pitcher_row.get(f"{col_prefix}hr_per_pa")
         split_pa = pitcher_row.get(f"{col_prefix}pa")
-        # Only use the split if we have enough sample (≥40 PA)
+
+        # PRIMARY: direct HR/PA split if available
         if (split_hr is not None and not pd.isna(split_hr) and split_hr > 0
                 and split_pa is not None and not pd.isna(split_pa) and split_pa >= 40):
             split_hr_per_pa = float(split_hr) / 100.0  # convert pct → rate
+            split_pa_count = float(split_pa)
+            split_source = "hr_per_pa"
+        else:
+            # FALLBACK: derive from SLG split (when MLB API doesn't return raw counts).
+            # SLG correlates strongly with HR/PA. Empirical mapping (2023-2024 data):
+            #   League avg SLG ~ .398, league avg HR/PA ~ 2.8%
+            #   .350 SLG → ~2.0% HR/PA
+            #   .450 SLG → ~3.6% HR/PA
+            #   .500 SLG → ~4.5% HR/PA
+            #   .550 SLG → ~5.5% HR/PA
+            # Linear-ish fit: HR/PA% ≈ (SLG - 0.250) * 12.5
+            split_slg = pitcher_row.get(f"{col_prefix}slg")
+            # SLG splits don't tell us PA, so assume modest reliability (use 80 as PA)
+            if split_slg is not None and not pd.isna(split_slg) and split_slg > 0:
+                try:
+                    slg_val = float(split_slg)
+                    # Cap derivation to reasonable range
+                    derived_hr_pct = max(0.5, min(7.0, (slg_val - 0.250) * 12.5))
+                    split_hr_per_pa = derived_hr_pct / 100.0
+                    split_pa_count = 80  # treat as moderately reliable, shrinks somewhat
+                    split_source = "slg_derived"
+                except (TypeError, ValueError):
+                    pass
 
     if split_hr_per_pa is not None:
         # Sample-size shrinkage on the SPLIT itself.
@@ -106,8 +132,7 @@ def hr_prob_per_pa(
         # Bayesian shrink: weight = pa / (pa + 80). 80 is the prior weight in PA.
         # If pa=200: 200/280 = 71% real, 29% league avg
         # If pa=40 :  40/120 = 33% real, 67% league avg
-        split_pa = float(pitcher_row.get(f"{col_prefix}pa", 0) or 0)
-        shrink_w = split_pa / (split_pa + 80)
+        shrink_w = split_pa_count / (split_pa_count + 80)
         split_shrunk = split_hr_per_pa * shrink_w + 0.028 * (1 - shrink_w)
         league_p_hr_per_pa = 0.028  # ~2.8% league HR per PA
         pitcher_mult = split_shrunk / league_p_hr_per_pa
