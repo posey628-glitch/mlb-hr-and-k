@@ -777,6 +777,48 @@ if show_legend:
                 "**Pick Score** = Daily top-pick composite (all factors)"
             )
 
+        # Concrete scale guide - what's "good" vs "bad" for each metric
+        st.markdown("---")
+        st.markdown("**📏 What's Good vs Bad — Real MLB Scales**")
+        scale_col1, scale_col2 = st.columns(2)
+        with scale_col1:
+            st.markdown(
+                "**HITTER metrics** (higher = better unless noted)\n\n"
+                "| Metric | Poor | Avg | Good | Elite |\n"
+                "|---|---|---|---|---|\n"
+                "| Barrel% | <4 | 6-9 | 10-14 | 15+ |\n"
+                "| ISO | <.110 | .140-.180 | .200-.260 | .280+ |\n"
+                "| xwOBA | <.290 | .310-.340 | .350-.380 | .400+ |\n"
+                "| Hard-Hit% | <30 | 35-45 | 48-55 | 58+ |\n"
+                "| Exit Velo | <87 | 89-91 | 92-94 | 95+ |\n"
+                "| HR Game% | <5% | 8-12% | 15-20% | 22-25% (~max) |\n"
+                "| Power Score | <30 | 40-55 | 60-75 | 85-99 |\n"
+                "| K% ⬇️ | 30+ | 22-28 | 17-22 | <17 |\n"
+            )
+        with scale_col2:
+            st.markdown(
+                "**PITCHER metrics** (HR-suppression: higher = better)\n\n"
+                "| Metric | Poor | Avg | Good | Elite |\n"
+                "|---|---|---|---|---|\n"
+                "| ERA ⬇️ | 5.0+ | 4.0-4.5 | 3.0-3.7 | <2.7 |\n"
+                "| WHIP ⬇️ | 1.45+ | 1.20-1.35 | 1.05-1.20 | <1.05 |\n"
+                "| K/9 | <7 | 8.0-9.0 | 9.5-11 | 12+ |\n"
+                "| HR/9 ⬇️ | 1.8+ | 1.1-1.4 | 0.7-1.0 | <0.7 |\n"
+                "| xwOBA Allowed ⬇️ | .340+ | .310-.330 | .280-.305 | <.275 |\n"
+                "| Barrel Allowed% ⬇️ | 10+ | 7-9 | 5-6 | <5 |\n"
+                "| Test Score | <30 | 40-55 | 60-75 | 80+ |\n"
+                "| HR Suppress | <50 | 55-70 | 75-85 | 90+ |\n"
+                "| **Opp K%** | 18-20 | 21-23 | 24-26 | 27+ |\n"
+                "| **Opp HR%** ⬇️ | 4.0+ | 2.5-3.5 | 1.8-2.4 | <1.8 |\n"
+            )
+        st.caption(
+            "⬇️ = lower is better. The color coding in the tables uses these "
+            "thresholds (red = poor, yellow = avg, green = elite). Opp K% and "
+            "Opp HR% are colored from the PITCHER's perspective: high Opp K% "
+            "is green (he'll get more strikeouts) and high Opp HR% is red "
+            "(he's facing a power lineup)."
+        )
+
 st.divider()
 
 
@@ -952,12 +994,20 @@ if not p_slate.empty:
         "xwoba_allowed": st.column_config.NumberColumn("xwOBA", format="%.3f"),
         "barrel_allowed": st.column_config.NumberColumn("Brl%", format="%.1f"),
         "opp_k_pct": st.column_config.NumberColumn(
-            "Opp K%", format="%.1f",
-            help="Opponent team's season K%. Higher = pitcher should get more Ks against this lineup.",
+            "Opp K%", format="%.1f%%",
+            help=(
+                "Opposing team's season K rate (% of PAs ending in strikeout).\n"
+                "League avg ~22.5%. Higher = pitcher should get more Ks.\n"
+                "Range: 18% (very contact-heavy) to 28% (whiff-prone team)."
+            ),
         ),
         "opp_hr_per_pa": st.column_config.NumberColumn(
-            "Opp HR/PA", format="%.2f",
-            help="Opponent team's HRs per plate appearance %. Higher = pitcher faces a power-heavy lineup.",
+            "Opp HR%", format="%.2f%%",
+            help=(
+                "Opposing team's HR rate per plate appearance (%).\n"
+                "League avg ~2.8%. Higher = pitcher faces more power.\n"
+                "Range: 1.5% (low-power lineup) to 4.5% (Dodgers/Yankees-type)."
+            ),
         ),
         "recent_era": st.column_config.NumberColumn("L5 ERA", format="%.2f"),
         "recent_k9": st.column_config.NumberColumn("L5 K/9", format="%.2f"),
@@ -1375,7 +1425,20 @@ for _, game in slate.iterrows():
                         p_pa = hr_prob_per_pa(row_dict, opp_p_row)
                     except Exception:
                         p_pa = None
-            p_game = hr_prob_full_game(p_pa) if p_pa is not None else None
+            # Lineup-spot-aware expected PA per game
+            # Real MLB averages: 1st=4.6, 2nd=4.5, 3rd=4.4, 4th=4.3, 5th=4.2,
+            # 6th=4.1, 7th=4.0, 8th=3.9, 9th=3.8
+            lp = row_dict.get("lineup_pos")
+            if lp is not None and not pd.isna(lp):
+                try:
+                    lp_int = int(lp)
+                    expected_pa = max(3.6, 4.7 - (lp_int - 1) * 0.1)
+                except (ValueError, TypeError):
+                    expected_pa = 4.2
+            else:
+                expected_pa = 4.2
+
+            p_game = hr_prob_full_game(p_pa, expected_pa=expected_pa) if p_pa is not None else None
             hr_pa.append(round(p_pa * 100, 2) if p_pa is not None else None)
             hr_game.append(round(p_game * 100, 2) if p_game is not None else None)
             verdicts.append(hr_verdict(
