@@ -127,6 +127,9 @@ def build_matchup_table(
         row["lineup_pos"] = i
         row["position"] = p.get("position", "")
         row["bats"] = p.get("bats", "")
+        # Mark whether this row came from a real lineup or roster-padding fallback.
+        # Used downstream so we don't apply lineup-spot PA scaling to fake positions.
+        row["is_roster_fill"] = bool(p.get("is_roster_fill", False))
         # Inject recent form if provided
         if recent_form_dict and p.get("id") in recent_form_dict:
             for k, v in recent_form_dict[p["id"]].items():
@@ -194,10 +197,18 @@ def build_matchup_table(
     df["hr_form"] = _score_from_weights(df, SCORING_WEIGHTS["hr_form"])
     df["ceiling"] = _score_from_weights(df, SCORING_WEIGHTS["ceiling"])
 
-    # Test Score = matchup × (PA sample weight). NaN matchup → NaN Test.
+    # Test Score = matchup × PA sample weight, BLENDED with recent form so it's
+    # meaningfully different from matchup (which is mostly season stats).
+    # 70% matchup + 30% hr_form weighted by PA reliability.
     if "pa" in df.columns:
         pa_factor = (df["pa"] / 150.0).clip(0.5, 1.0)
-        df["test_score"] = (df["matchup"] * pa_factor).round(2)
+        # Blend matchup with hr_form (recent trend) - this is what makes test_score
+        # different from matchup. Players hot recently get boosted vs season-only.
+        if "hr_form" in df.columns:
+            blended = df["matchup"] * 0.70 + df["hr_form"] * 0.30
+            df["test_score"] = (blended * pa_factor).round(2)
+        else:
+            df["test_score"] = (df["matchup"] * pa_factor).round(2)
     else:
         df["test_score"] = df["matchup"]
 
