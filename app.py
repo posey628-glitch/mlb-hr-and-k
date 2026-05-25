@@ -372,22 +372,53 @@ hitter_trad = get_hitter_traditional() if not slate.empty else pd.DataFrame()
 pitcher_trad = get_pitcher_traditional() if not slate.empty else pd.DataFrame()
 
 # Merge traditional stats - force player_id types to match
+# CRITICAL: use combine_first style merge so we never overwrite Savant values
+# with trad-API NaN. Only fill in where Savant data is missing.
 if not hitter_trad.empty and "player_id" in hitter_stats.columns:
     hitter_stats["player_id"] = pd.to_numeric(hitter_stats["player_id"], errors="coerce").astype("Int64")
     hitter_trad["player_id"] = pd.to_numeric(hitter_trad["player_id"], errors="coerce").astype("Int64")
     drop = [c for c in ["player_name"] if c in hitter_trad.columns]
+    # Use _trad suffix and then manually coalesce afterward
     hitter_stats = hitter_stats.merge(
         hitter_trad.drop(columns=drop, errors="ignore"),
-        on="player_id", how="left", suffixes=("", "_t"),
+        on="player_id", how="left", suffixes=("", "_trad"),
     )
+    # Coalesce: keep Savant value, fall back to trad if Savant is NaN
+    for col in ["obp", "slg", "ops", "avg", "home_run", "rbi", "runs", "sb"]:
+        trad_col = f"{col}_trad"
+        if trad_col in hitter_stats.columns:
+            if col in hitter_stats.columns:
+                hitter_stats[col] = hitter_stats[col].fillna(hitter_stats[trad_col])
+            else:
+                hitter_stats[col] = hitter_stats[trad_col]
+            hitter_stats = hitter_stats.drop(columns=[trad_col])
+
 if not pitcher_trad.empty and "player_id" in pitcher_stats.columns:
     pitcher_stats["player_id"] = pd.to_numeric(pitcher_stats["player_id"], errors="coerce").astype("Int64")
     pitcher_trad["player_id"] = pd.to_numeric(pitcher_trad["player_id"], errors="coerce").astype("Int64")
     drop = [c for c in ["player_name"] if c in pitcher_trad.columns]
     pitcher_stats = pitcher_stats.merge(
         pitcher_trad.drop(columns=drop, errors="ignore"),
-        on="player_id", how="left", suffixes=("", "_t"),
+        on="player_id", how="left", suffixes=("", "_trad"),
     )
+    # Coalesce era, whip, ip, hr9, k9 from trad if Savant didn't provide
+    for col in ["era", "whip", "ip", "hr9", "k9", "bb9"]:
+        trad_col = f"{col}_trad"
+        if trad_col in pitcher_stats.columns:
+            if col in pitcher_stats.columns:
+                pitcher_stats[col] = pitcher_stats[col].fillna(pitcher_stats[trad_col])
+            else:
+                pitcher_stats[col] = pitcher_stats[trad_col]
+            pitcher_stats = pitcher_stats.drop(columns=[trad_col])
+
+# If OBP/SLG still missing after both sources, derive from Statcast components:
+# OPS we have; OBP ≈ (hits + walks) / PA fallback; SLG = ISO + AVG
+if "slg" in hitter_stats.columns and hitter_stats["slg"].isna().all():
+    if "iso" in hitter_stats.columns and "avg" in hitter_stats.columns:
+        hitter_stats["slg"] = (hitter_stats["iso"] + hitter_stats["avg"]).round(3)
+if "obp" in hitter_stats.columns and hitter_stats["obp"].isna().all():
+    # No clean derivation available - leave NaN, will auto-hide
+    pass
 
 # Backstop: derive ISO from SLG - AVG if Statcast didn't supply it
 if "iso" not in hitter_stats.columns or hitter_stats["iso"].isna().all():
