@@ -188,7 +188,9 @@ def build_matchup_table(
         slg_col = next((c for c in ["slg", "xslg"] if c in df.columns), None)
         avg_col = next((c for c in ["batting_avg", "avg", "ba", "xba"] if c in df.columns), None)
         if slg_col and avg_col:
-            df["iso"] = (df[slg_col] - df[avg_col]).round(3)
+            # ISO = SLG - AVG. Always non-negative in real samples but can be
+            # negative in tiny samples where AVG > SLG due to all singles.
+            df["iso"] = (df[slg_col] - df[avg_col]).clip(lower=0).round(3)
 
     # If LA is still missing entirely but we have any launch_speed_angle data,
     # leave it blank (no derivation - it's a real measurement, not an identity)
