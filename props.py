@@ -54,8 +54,22 @@ def hr_prob_per_pa(
     if pa < min_pa:
         return None
 
-    # Real hitter base rate
-    h_base = hr / pa
+    # Real hitter base rate - BLENDED with barrel-based expected HR/PA
+    # to reduce noise from small/lucky samples.
+    # xHR/PA = barrel% × 0.50 (about half of barreled balls become HRs in air)
+    # Blend weight grows with sample size: 100 PA → 30% observed / 70% xHR;
+    # 300 PA → 60% observed / 40% xHR; 600 PA → 80% observed / 20% xHR.
+    h_observed = hr / pa
+    barrel_pct = hitter_row.get("barrel_pct")
+    if barrel_pct is not None and not pd.isna(barrel_pct) and barrel_pct > 0:
+        h_xhr = float(barrel_pct) / 100 * 0.50
+        # Weight observed by sample size (asymptote at 0.80)
+        observed_weight = min(0.80, 0.30 + (pa - 100) / 500 * 0.50)
+        observed_weight = max(0.30, observed_weight)
+        h_base = h_observed * observed_weight + h_xhr * (1 - observed_weight)
+    else:
+        # No barrel data - fall back to observed only
+        h_base = h_observed
 
     # Pitcher HR/9 adjustment - only if pitcher row has real HR/9
     p_hr9 = pitcher_row.get("hr9") if pitcher_row else None
