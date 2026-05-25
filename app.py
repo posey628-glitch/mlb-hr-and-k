@@ -804,12 +804,27 @@ if use_recent_form and not slate.empty:
             except Exception:
                 pitcher_recent_map[pid] = {}
 
+# Team hitting aggregates - lets pitcher K projections account for opponent K%
+try:
+    from data_fetcher import get_team_hitting_aggregates
+    team_hit_df = get_team_hitting_aggregates()
+    if not team_hit_df.empty and "team_abbr" in team_hit_df.columns:
+        team_hit_map = team_hit_df.set_index("team_abbr").to_dict("index")
+    else:
+        team_hit_map = {}
+except Exception:
+    team_hit_map = {}
+
 try:
     p_slate = build_pitcher_slate(slate, pitcher_stats, pitcher_recent=pitcher_recent_map,
-                                    slate_date=selected_date)
+                                    slate_date=selected_date, team_hit_map=team_hit_map)
 except TypeError:
-    # Older models.py doesn't accept slate_date - call without it
-    p_slate = build_pitcher_slate(slate, pitcher_stats, pitcher_recent=pitcher_recent_map)
+    # Older models.py doesn't accept team_hit_map - call without it
+    try:
+        p_slate = build_pitcher_slate(slate, pitcher_stats, pitcher_recent=pitcher_recent_map,
+                                        slate_date=selected_date)
+    except TypeError:
+        p_slate = build_pitcher_slate(slate, pitcher_stats, pitcher_recent=pitcher_recent_map)
 
 # ----- DATA AVAILABILITY WARNING -----
 # If MLB Stats API data is mostly missing, warn the user explicitly so they
@@ -861,6 +876,7 @@ if not p_slate.empty:
         "ip", "games_started", "games_played", "ip_per_outing",
         "k_pct", "whiff_pct",
         "xwoba_allowed", "barrel_allowed",
+        "opp_k_pct", "opp_hr_per_pa",
         "recent_era", "recent_k9", "days_rest", "avg_recent_pitches",
         "reliability",
     ] if c in p_slate.columns]
@@ -925,6 +941,14 @@ if not p_slate.empty:
         "whiff_pct": st.column_config.NumberColumn("Whiff%", format="%.1f"),
         "xwoba_allowed": st.column_config.NumberColumn("xwOBA", format="%.3f"),
         "barrel_allowed": st.column_config.NumberColumn("Brl%", format="%.1f"),
+        "opp_k_pct": st.column_config.NumberColumn(
+            "Opp K%", format="%.1f",
+            help="Opponent team's season K%. Higher = pitcher should get more Ks against this lineup.",
+        ),
+        "opp_hr_per_pa": st.column_config.NumberColumn(
+            "Opp HR/PA", format="%.2f",
+            help="Opponent team's HRs per plate appearance %. Higher = pitcher faces a power-heavy lineup.",
+        ),
         "recent_era": st.column_config.NumberColumn("L5 ERA", format="%.2f"),
         "recent_k9": st.column_config.NumberColumn("L5 K/9", format="%.2f"),
         "days_rest": st.column_config.NumberColumn("Rest"),
@@ -955,6 +979,8 @@ if not p_slate.empty:
             ("whiff_pct",   18,    32,    True),
             ("xwoba_allowed", 0.350, 0.270, False),  # Lower = better
             ("barrel_allowed", 11,  4,    False),
+            ("opp_k_pct",      18,  28,   True),    # For PITCHER perspective: higher opp K% = good
+            ("opp_hr_per_pa",  4.0, 1.5,  False),   # For PITCHER perspective: lower opp HR rate = good
             ("recent_era",  5.5,   2.5,   False),
             ("recent_k9",   6.5,   11,    True),
             ("reliability", 0.4,   0.9,   True),
@@ -987,6 +1013,7 @@ if not p_slate.empty:
             "k9": "{:.2f}", "bb9": "{:.2f}", "hr9": "{:.2f}", "ip": "{:.1f}",
             "ip_per_outing": "{:.1f}", "k_pct": "{:.1f}", "whiff_pct": "{:.1f}",
             "xwoba_allowed": "{:.3f}", "barrel_allowed": "{:.1f}",
+            "opp_k_pct": "{:.1f}", "opp_hr_per_pa": "{:.2f}",
             "recent_era": "{:.2f}", "recent_k9": "{:.2f}", "reliability": "{:.2f}",
         }
         valid_fmt = {k: v for k, v in fmt.items() if k in df_in.columns}
@@ -1320,12 +1347,12 @@ for _, game in slate.iterrows():
                 # BUT re-apply the soft squash so we don't blow past the cap.
                 if p_pa is not None:
                     raw = float(p_pa) * pitch_hr_mult
-                    # Soft squash: same logic as in props.py
-                    if raw <= 0.05:
+                    # Soft squash: same logic as in props.py (6.5% per-PA ceiling)
+                    if raw <= 0.04:
                         p_pa = raw
                     else:
-                        excess = raw - 0.05
-                        p_pa = 0.05 + 0.03 * np.tanh(excess / 0.03)
+                        excess = raw - 0.04
+                        p_pa = 0.04 + 0.025 * np.tanh(excess / 0.025)
                     p_pa = max(0.001, p_pa)
             except TypeError:
                 try:
@@ -1620,8 +1647,8 @@ if all_hitters:
     else:
         qualified = combined_all
 
-    # Save-snapshot + full export buttons
-    snap_col1, snap_col2, snap_col3 = st.columns([1.2, 1.2, 3])
+    # Save-snapshot + full export buttons - always render
+    snap_col1, snap_col2, snap_col3 = st.columns([1.2, 1.5, 3])
     with snap_col1:
         if st.button("💾 Save snapshot", help="Save today's projections so they can be evaluated against actual outcomes tomorrow."):
             try:
@@ -1635,53 +1662,63 @@ if all_hitters:
                 st.error(f"Backtest module error: {e}")
 
     with snap_col2:
-        # Build a combined Excel file: all hitters + all pitchers + top picks in one
+        # Build combined export - try Excel, fall back to CSV-bundle
+        import io as _io
+        from datetime import datetime as _dt
         try:
-            import io as _io
-            from datetime import datetime as _dt
-            buffer = _io.BytesIO()
+            import openpyxl  # noqa: F401
+            HAS_OPENPYXL = True
+        except Exception:
+            HAS_OPENPYXL = False
+
+        if HAS_OPENPYXL:
             try:
-                # openpyxl needs to be installed
+                buffer = _io.BytesIO()
                 with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+                    sheets_written = 0
                     if combined_all is not None and not combined_all.empty:
-                        # Add team and game columns if not present
-                        export_hitters = combined_all.copy()
-                        export_hitters.to_excel(writer, sheet_name="Hitters", index=False)
+                        combined_all.to_excel(writer, sheet_name="Hitters", index=False)
+                        sheets_written += 1
                     if p_slate is not None and not p_slate.empty:
                         p_slate.to_excel(writer, sheet_name="Pitchers", index=False)
-                    # Stack top-of-day leaderboards too
+                        sheets_written += 1
                     if "hr_game_pct" in qualified.columns:
                         top_hr = qualified.dropna(subset=["hr_game_pct"]).sort_values(
-                            "hr_game_pct", ascending=False
-                        ).head(20)
+                            "hr_game_pct", ascending=False).head(20)
                         if not top_hr.empty:
                             top_hr.to_excel(writer, sheet_name="Top 20 HR", index=False)
                     if "power_score" in qualified.columns:
                         top_pow = qualified.dropna(subset=["power_score"]).sort_values(
-                            "power_score", ascending=False
-                        ).head(20)
+                            "power_score", ascending=False).head(20)
                         if not top_pow.empty:
                             top_pow.to_excel(writer, sheet_name="Top 20 Power", index=False)
                     if "sleeper_score" in qualified.columns:
                         top_sl = qualified.dropna(subset=["sleeper_score"]).sort_values(
-                            "sleeper_score", ascending=False
-                        ).head(20)
+                            "sleeper_score", ascending=False).head(20)
                         if not top_sl.empty:
                             top_sl.to_excel(writer, sheet_name="Top 20 Sleepers", index=False)
+                    # Ensure at least one sheet exists (openpyxl errors on empty)
+                    if sheets_written == 0:
+                        pd.DataFrame({"empty": ["no data"]}).to_excel(
+                            writer, sheet_name="Empty", index=False)
                 buffer.seek(0)
                 st.download_button(
                     "📥 Export ALL to Excel",
-                    data=buffer,
+                    data=buffer.getvalue(),
                     file_name=f"posey_mlb_{_dt.now().strftime('%Y-%m-%d_%H-%M')}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    help="Download every table (hitters, pitchers, top lists) as one Excel file with separate sheets.",
+                    help="Hitters + Pitchers + Top lists in one Excel workbook.",
                 )
-            except ImportError:
-                # Fallback: combined CSV (one big sheet)
+            except Exception as e:
+                st.error(f"Excel export failed: {str(e)[:100]}")
+        else:
+            # Fallback: combined CSV with sections
+            try:
                 csv_buf = _io.StringIO()
+                csv_buf.write("=== HITTERS ===\n")
                 if combined_all is not None and not combined_all.empty:
                     combined_all.to_csv(csv_buf, index=False)
-                    csv_buf.write("\n\n=== PITCHER SLATE ===\n\n")
+                csv_buf.write("\n\n=== PITCHERS ===\n")
                 if p_slate is not None and not p_slate.empty:
                     p_slate.to_csv(csv_buf, index=False)
                 st.download_button(
@@ -1689,15 +1726,16 @@ if all_hitters:
                     data=csv_buf.getvalue(),
                     file_name=f"posey_mlb_{_dt.now().strftime('%Y-%m-%d_%H-%M')}.csv",
                     mime="text/csv",
-                    help="Excel writer unavailable - combined CSV with hitters then pitchers.",
+                    help="Combined CSV - openpyxl not installed for Excel export.",
                 )
-        except Exception as e:
-            st.caption(f"Export error: {str(e)[:80]}")
+                st.caption("ℹ️ Add `openpyxl` to requirements.txt for Excel output")
+            except Exception as e:
+                st.error(f"CSV export failed: {str(e)[:100]}")
 
     with snap_col3:
         st.caption(
-            "📥 Export = full slate (hitters + pitchers + top lists) in one file. "
-            "💾 Snapshot = save for tomorrow's backtest comparison."
+            "📥 **Export** = full slate (hitters + pitchers + top lists) in one file. "
+            "💾 **Snapshot** = save for tomorrow's backtest comparison."
         )
 
     col_left, col_mid, col_right = st.columns(3)
