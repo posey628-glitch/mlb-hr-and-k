@@ -1317,8 +1317,16 @@ for _, game in slate.iterrows():
                     pitch_match_score=row_dict.get("pitch_match_score"),
                 )
                 # Apply pitch_hr_score as an additional fine adjustment
+                # BUT re-apply the soft squash so we don't blow past the cap.
                 if p_pa is not None:
-                    p_pa = float(p_pa) * pitch_hr_mult
+                    raw = float(p_pa) * pitch_hr_mult
+                    # Soft squash: same logic as in props.py
+                    if raw <= 0.05:
+                        p_pa = raw
+                    else:
+                        excess = raw - 0.05
+                        p_pa = 0.05 + 0.03 * np.tanh(excess / 0.03)
+                    p_pa = max(0.001, p_pa)
             except TypeError:
                 try:
                     p_pa = hr_prob_per_pa(
@@ -1612,8 +1620,8 @@ if all_hitters:
     else:
         qualified = combined_all
 
-    # Save-snapshot button for backtest tracking
-    snap_col1, snap_col2 = st.columns([1, 4])
+    # Save-snapshot + full export buttons
+    snap_col1, snap_col2, snap_col3 = st.columns([1.2, 1.2, 3])
     with snap_col1:
         if st.button("💾 Save snapshot", help="Save today's projections so they can be evaluated against actual outcomes tomorrow."):
             try:
@@ -1625,10 +1633,71 @@ if all_hitters:
                     st.error("Snapshot save failed")
             except Exception as e:
                 st.error(f"Backtest module error: {e}")
+
     with snap_col2:
+        # Build a combined Excel file: all hitters + all pitchers + top picks in one
+        try:
+            import io as _io
+            from datetime import datetime as _dt
+            buffer = _io.BytesIO()
+            try:
+                # openpyxl needs to be installed
+                with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+                    if combined_all is not None and not combined_all.empty:
+                        # Add team and game columns if not present
+                        export_hitters = combined_all.copy()
+                        export_hitters.to_excel(writer, sheet_name="Hitters", index=False)
+                    if p_slate is not None and not p_slate.empty:
+                        p_slate.to_excel(writer, sheet_name="Pitchers", index=False)
+                    # Stack top-of-day leaderboards too
+                    if "hr_game_pct" in qualified.columns:
+                        top_hr = qualified.dropna(subset=["hr_game_pct"]).sort_values(
+                            "hr_game_pct", ascending=False
+                        ).head(20)
+                        if not top_hr.empty:
+                            top_hr.to_excel(writer, sheet_name="Top 20 HR", index=False)
+                    if "power_score" in qualified.columns:
+                        top_pow = qualified.dropna(subset=["power_score"]).sort_values(
+                            "power_score", ascending=False
+                        ).head(20)
+                        if not top_pow.empty:
+                            top_pow.to_excel(writer, sheet_name="Top 20 Power", index=False)
+                    if "sleeper_score" in qualified.columns:
+                        top_sl = qualified.dropna(subset=["sleeper_score"]).sort_values(
+                            "sleeper_score", ascending=False
+                        ).head(20)
+                        if not top_sl.empty:
+                            top_sl.to_excel(writer, sheet_name="Top 20 Sleepers", index=False)
+                buffer.seek(0)
+                st.download_button(
+                    "📥 Export ALL to Excel",
+                    data=buffer,
+                    file_name=f"posey_mlb_{_dt.now().strftime('%Y-%m-%d_%H-%M')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    help="Download every table (hitters, pitchers, top lists) as one Excel file with separate sheets.",
+                )
+            except ImportError:
+                # Fallback: combined CSV (one big sheet)
+                csv_buf = _io.StringIO()
+                if combined_all is not None and not combined_all.empty:
+                    combined_all.to_csv(csv_buf, index=False)
+                    csv_buf.write("\n\n=== PITCHER SLATE ===\n\n")
+                if p_slate is not None and not p_slate.empty:
+                    p_slate.to_csv(csv_buf, index=False)
+                st.download_button(
+                    "📥 Export ALL to CSV",
+                    data=csv_buf.getvalue(),
+                    file_name=f"posey_mlb_{_dt.now().strftime('%Y-%m-%d_%H-%M')}.csv",
+                    mime="text/csv",
+                    help="Excel writer unavailable - combined CSV with hitters then pitchers.",
+                )
+        except Exception as e:
+            st.caption(f"Export error: {str(e)[:80]}")
+
+    with snap_col3:
         st.caption(
-            "Click after lineups lock to capture today's predictions. "
-            "Tomorrow, use the Backtest panel to see hit rates."
+            "📥 Export = full slate (hitters + pitchers + top lists) in one file. "
+            "💾 Snapshot = save for tomorrow's backtest comparison."
         )
 
     col_left, col_mid, col_right = st.columns(3)
