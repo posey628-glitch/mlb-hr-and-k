@@ -23,12 +23,39 @@ import streamlit as st
 
 
 @st.cache_data(ttl=1800)
-def fetch_weather(lat: float, lon: float, when: datetime) -> dict:
-    """Return weather forecast nearest to `when` for the given coords."""
+def fetch_weather(lat: float, lon: float, when) -> dict:
+    """Return weather forecast nearest to `when` for the given coords.
+
+    `when` accepts datetime, pd.Timestamp, ISO string, or None.
+    """
     if lat is None or lon is None:
         return {}
 
-    iso = when.strftime("%Y-%m-%d")
+    # Normalize `when` to a datetime
+    if when is None:
+        target_dt = datetime.now()
+    elif isinstance(when, str):
+        try:
+            # Handle timezone suffixes by stripping them for simplicity
+            cleaned = when.replace("Z", "+00:00")
+            target_dt = datetime.fromisoformat(cleaned)
+            # Strip timezone for naive comparison later
+            if target_dt.tzinfo is not None:
+                target_dt = target_dt.replace(tzinfo=None)
+        except (ValueError, TypeError):
+            target_dt = datetime.now()
+    elif hasattr(when, "strftime"):
+        # datetime or pd.Timestamp
+        target_dt = when
+        if hasattr(target_dt, "tz_localize") and getattr(target_dt, "tz", None) is not None:
+            try:
+                target_dt = target_dt.tz_convert(None)
+            except Exception:
+                pass
+    else:
+        target_dt = datetime.now()
+
+    iso = target_dt.strftime("%Y-%m-%d")
     url = (
         "https://api.open-meteo.com/v1/forecast"
         f"?latitude={lat}&longitude={lon}"
@@ -48,10 +75,17 @@ def fetch_weather(lat: float, lon: float, when: datetime) -> dict:
     if not hourly.get("time"):
         return {}
 
-    # Find the hour nearest game time
-    times = [datetime.fromisoformat(t) for t in hourly["time"]]
-    target = when.replace(tzinfo=None)
-    idx = min(range(len(times)), key=lambda i: abs((times[i] - target).total_seconds()))
+    # Find the hour nearest target time
+    try:
+        times = [datetime.fromisoformat(t) for t in hourly["time"]]
+        target = target_dt.replace(tzinfo=None) if hasattr(target_dt, "replace") else target_dt
+        # Make sure target has no tzinfo for comparison
+        if hasattr(target, "tzinfo") and target.tzinfo is not None:
+            target = target.replace(tzinfo=None)
+        idx = min(range(len(times)), key=lambda i: abs((times[i] - target).total_seconds()))
+    except Exception:
+        # Fall back to midday hour
+        idx = min(12, len(hourly["time"]) - 1)
 
     return {
         "temp_f":       hourly["temperature_2m"][idx],
@@ -60,7 +94,7 @@ def fetch_weather(lat: float, lon: float, when: datetime) -> dict:
         "wind_mph":     hourly["wind_speed_10m"][idx],
         "wind_dir_deg": hourly["wind_direction_10m"][idx],
         "pressure_hpa": hourly["surface_pressure"][idx],
-        "time": times[idx].isoformat(),
+        "time": hourly["time"][idx],
     }
 
 
