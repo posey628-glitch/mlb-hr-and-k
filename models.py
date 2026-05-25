@@ -461,6 +461,16 @@ def build_pitcher_slate(
             base["opp_k_pct"] = opp_agg.get("k_pct")
             base["opp_hr_per_pa"] = opp_agg.get("hr_per_pa")
             base["opp_iso"] = opp_agg.get("iso")
+
+            # Park HR factor at this venue (for hr_suppress adjustment)
+            try:
+                from park_factors import get_park
+                venue = g.get("venue", "")
+                park_info = get_park(venue) if venue else {}
+                hr_factor = park_info.get("hr_factor", 100)
+                base["park_hr_factor"] = round(float(hr_factor) / 100, 3)
+            except Exception:
+                base["park_hr_factor"] = 1.0
             if len(row) > 0:
                 r = row.iloc[0].to_dict()
                 base.update({
@@ -737,38 +747,46 @@ def build_pitcher_slate(
 
     # ------------------------------------------------------------------
     # HR_SUPPRESS - separate score for how well pitcher prevents HRs
-    # Uses: low barrel% allowed, low xwOBA allowed, low HR/9 (when available)
+    # Uses: low barrel% allowed, low xwOBA allowed, low HR/9, AND
+    # batted-ball mix (low FB% allowed / high GB% = HR suppression)
     # ------------------------------------------------------------------
     def _hr_suppress(row):
         parts = []
-        max_weight = 0
         # Barrel% allowed: lower = better (invert percentile)
         if pd.notna(row.get("barrel_allowed")):
             barrel_pct = row.get("_barrel_pct_rank", np.nan)
             if pd.notna(barrel_pct):
-                parts.append((100 - barrel_pct, 0.40))
-                max_weight += 0.40
-        # xwOBA allowed: lower = better (already inverted as suppress_score)
+                parts.append((100 - barrel_pct, 0.32))
+        # xwOBA allowed: lower = better
         if pd.notna(row.get("suppress_score")):
-            parts.append((row["suppress_score"], 0.35))
-            max_weight += 0.35
+            parts.append((row["suppress_score"], 0.28))
         # HR/9: lower = better
         if pd.notna(row.get("_hr9_pct_rank")):
-            parts.append((100 - row["_hr9_pct_rank"], 0.25))
-            max_weight += 0.25
-        if not parts or max_weight == 0:
+            parts.append((100 - row["_hr9_pct_rank"], 0.20))
+        # FB allowed: lower = better (fewer flyballs → fewer HRs)
+        if pd.notna(row.get("_fb_allowed_rank")):
+            parts.append((100 - row["_fb_allowed_rank"], 0.12))
+        # GB allowed: higher = better (groundball pitchers suppress HRs)
+        if pd.notna(row.get("_gb_allowed_rank")):
+            parts.append((row["_gb_allowed_rank"], 0.08))
+        if not parts:
             return np.nan
         total_w = sum(w for _, w in parts)
         raw = sum(v * w for v, w in parts) / total_w
+        # Completeness penalty if not all components present (max total w = 1.0)
         completeness = total_w / 1.0
         penalty = 0.85 if completeness < 0.6 else 0.95 if completeness < 0.85 else 1.0
         return raw * penalty
 
-    # Precompute pct ranks for barrel and hr9
+    # Precompute pct ranks for barrel, hr9, fb_allowed, gb_allowed
     if "barrel_allowed" in df.columns:
         df["_barrel_pct_rank"] = _safe_pct_rank(df["barrel_allowed"])
     if "hr9" in df.columns and df["hr9"].notna().any():
         df["_hr9_pct_rank"] = _safe_pct_rank(df["hr9"])
+    if "fb_allowed" in df.columns and df["fb_allowed"].notna().any():
+        df["_fb_allowed_rank"] = _safe_pct_rank(df["fb_allowed"])
+    if "gb_allowed" in df.columns and df["gb_allowed"].notna().any():
+        df["_gb_allowed_rank"] = _safe_pct_rank(df["gb_allowed"])
 
     raw_hr_supp = df.apply(_hr_suppress, axis=1)
 
@@ -783,10 +801,28 @@ def build_pitcher_slate(
         return max(0.85, min(1.15, mult))
     df["opp_hr_mult"] = df.apply(_opp_hr_mult, axis=1)
 
-    df["hr_suppress"] = (raw_hr_supp * df["reliability"] * df["opp_hr_mult"]).clip(upper=95).round(2)
+    # Park HR factor: pitcher in Coors has tougher suppression environment
+    # park_hr_factor of 1.21 (Coors) → suppress drops by ~15%
+    # park_hr_factor of 0.88 (Oracle) → suppress boosts by ~10%
+    def _park_suppress_mult(row):
+        pf = row.get("park_hr_factor")
+        if pf is None or pd.isna(pf):
+            return 1.0
+        # Inverse relationship: higher park HR factor = harder to suppress
+        # Use 2 - pf (so 1.20 park → 0.80 mult, 0.90 park → 1.10 mult)
+        mult = 2 - float(pf)
+        return max(0.80, min(1.15, mult))
+    df["park_suppress_mult"] = df.apply(_park_suppress_mult, axis=1)
+
+    df["hr_suppress"] = (
+        raw_hr_supp * df["reliability"] * df["opp_hr_mult"] * df["park_suppress_mult"]
+    ).clip(upper=95).round(2)
 
     # Clean up internal helper columns
-    df = df.drop(columns=[c for c in ["_barrel_pct_rank", "_hr9_pct_rank"] if c in df.columns])
+    df = df.drop(columns=[c for c in [
+        "_barrel_pct_rank", "_hr9_pct_rank",
+        "_fb_allowed_rank", "_gb_allowed_rank"
+    ] if c in df.columns])
 
     # ------------------------------------------------------------------
     # PROJ K - reliability-adjusted, uses blended K/9 when available
