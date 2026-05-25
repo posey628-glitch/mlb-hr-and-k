@@ -1219,97 +1219,43 @@ for _, game in slate.iterrows():
     except Exception:
         pass
 
-    # Pitch match score
+    # Pitch match score - single call per hitter, captures all outputs
+    def _apply_pitch_match(matchup_df, opp_p_row):
+        if not opp_p_row or matchup_df is None or matchup_df.empty:
+            return
+        scores, hr_scores, bests, bestxw, worsts = [], [], [], [], []
+        for _, hitter_row in matchup_df.iterrows():
+            pid = hitter_row.get("player_id")
+            ps = None
+            if pid is not None and not pd.isna(pid):
+                try:
+                    ps = pitch_match_score_for_hitter(
+                        int(pid), opp_p_row, pitcher_arsenal_all
+                    )
+                except Exception:
+                    ps = None
+            if isinstance(ps, dict):
+                scores.append(ps.get("pitch_match_score"))
+                hr_scores.append(ps.get("pitch_hr_score"))
+                bests.append(ps.get("best_pitch"))
+                bestxw.append(ps.get("best_pitch_xwoba"))
+                worsts.append(ps.get("worst_pitch"))
+            else:
+                scores.append(None)
+                hr_scores.append(None)
+                bests.append(None)
+                bestxw.append(None)
+                worsts.append(None)
+        matchup_df["pitch_match_score"] = scores
+        matchup_df["pitch_hr_score"] = hr_scores
+        matchup_df["best_pitch"] = bests
+        matchup_df["best_pitch_xwoba"] = bestxw
+        matchup_df["worst_pitch"] = worsts
+
     if use_pitch_match and HAVE_PITCH_MATCH:
         try:
-            if home_p_row and not away_matchup.empty:
-                pitch_scores = []
-                for _, hitter_row in away_matchup.iterrows():
-                    pid = hitter_row.get("player_id")
-                    if pid is None or pd.isna(pid):
-                        pitch_scores.append(None)
-                        continue
-                    try:
-                        ps = pitch_match_score_for_hitter(
-                            int(pid), home_p_row, pitcher_arsenal_all
-                        )
-                        pitch_scores.append(ps.get("pitch_match_score") if isinstance(ps, dict) else ps)
-                    except Exception:
-                        pitch_scores.append(None)
-                away_matchup["pitch_match_score"] = pitch_scores
-                # Best pitch + worst pitch labels
-                best_pitch_data = []
-                for _, hitter_row in away_matchup.iterrows():
-                    pid = hitter_row.get("player_id")
-                    if pid is None or pd.isna(pid):
-                        best_pitch_data.append({"best_pitch": None, "best_pitch_xwoba": None,
-                                                  "worst_pitch": None})
-                        continue
-                    try:
-                        ps = pitch_match_score_for_hitter(
-                            int(pid), home_p_row, pitcher_arsenal_all
-                        )
-                        if isinstance(ps, dict):
-                            best_pitch_data.append({
-                                "best_pitch": ps.get("best_pitch"),
-                                "best_pitch_xwoba": ps.get("best_pitch_xwoba"),
-                                "worst_pitch": ps.get("worst_pitch"),
-                            })
-                        else:
-                            best_pitch_data.append({"best_pitch": None,
-                                                      "best_pitch_xwoba": None,
-                                                      "worst_pitch": None})
-                    except Exception:
-                        best_pitch_data.append({"best_pitch": None,
-                                                  "best_pitch_xwoba": None,
-                                                  "worst_pitch": None})
-                bpd_df = pd.DataFrame(best_pitch_data)
-                for c in ["best_pitch", "best_pitch_xwoba", "worst_pitch"]:
-                    away_matchup[c] = bpd_df[c].values
-
-            if away_p_row and not home_matchup.empty:
-                pitch_scores = []
-                for _, hitter_row in home_matchup.iterrows():
-                    pid = hitter_row.get("player_id")
-                    if pid is None or pd.isna(pid):
-                        pitch_scores.append(None)
-                        continue
-                    try:
-                        ps = pitch_match_score_for_hitter(
-                            int(pid), away_p_row, pitcher_arsenal_all
-                        )
-                        pitch_scores.append(ps.get("pitch_match_score") if isinstance(ps, dict) else ps)
-                    except Exception:
-                        pitch_scores.append(None)
-                home_matchup["pitch_match_score"] = pitch_scores
-                best_pitch_data = []
-                for _, hitter_row in home_matchup.iterrows():
-                    pid = hitter_row.get("player_id")
-                    if pid is None or pd.isna(pid):
-                        best_pitch_data.append({"best_pitch": None, "best_pitch_xwoba": None,
-                                                  "worst_pitch": None})
-                        continue
-                    try:
-                        ps = pitch_match_score_for_hitter(
-                            int(pid), away_p_row, pitcher_arsenal_all
-                        )
-                        if isinstance(ps, dict):
-                            best_pitch_data.append({
-                                "best_pitch": ps.get("best_pitch"),
-                                "best_pitch_xwoba": ps.get("best_pitch_xwoba"),
-                                "worst_pitch": ps.get("worst_pitch"),
-                            })
-                        else:
-                            best_pitch_data.append({"best_pitch": None,
-                                                      "best_pitch_xwoba": None,
-                                                      "worst_pitch": None})
-                    except Exception:
-                        best_pitch_data.append({"best_pitch": None,
-                                                  "best_pitch_xwoba": None,
-                                                  "worst_pitch": None})
-                bpd_df = pd.DataFrame(best_pitch_data)
-                for c in ["best_pitch", "best_pitch_xwoba", "worst_pitch"]:
-                    home_matchup[c] = bpd_df[c].values
+            _apply_pitch_match(away_matchup, home_p_row)
+            _apply_pitch_match(home_matchup, away_p_row)
         except Exception:
             pass
 
@@ -1353,11 +1299,26 @@ for _, game in slate.iterrows():
             # Combined park factor for this specific hitter: hand-aware × pull-wind
             hitter_park_mult = hand_park * pull_mult
 
+            # Pitch-type HR match multiplier
+            # 50 = neutral, 90 = great barrel rates vs this pitcher's arsenal,
+            # 10 = poor barrel rates. Modest 0.85x to 1.15x multiplier.
+            pitch_hr_score = row_dict.get("pitch_hr_score")
+            if pitch_hr_score is not None and not pd.isna(pitch_hr_score):
+                # Center on 50 -> 1.0, +/- 1 score = 0.003 multiplier shift
+                pitch_hr_mult = 1.0 + (pitch_hr_score - 50) * 0.003
+                pitch_hr_mult = max(0.85, min(1.15, pitch_hr_mult))
+            else:
+                pitch_hr_mult = 1.0
+
             try:
                 p_pa = hr_prob_per_pa(
                     row_dict, opp_p_row,
                     park_factor=hitter_park_mult, weather_mult=wx_mult,
+                    pitch_match_score=row_dict.get("pitch_match_score"),
                 )
+                # Apply pitch_hr_score as an additional fine adjustment
+                if p_pa is not None:
+                    p_pa = float(p_pa) * pitch_hr_mult
             except TypeError:
                 try:
                     p_pa = hr_prob_per_pa(
@@ -1809,7 +1770,17 @@ def build_col_config():
         "iso": st.column_config.NumberColumn("ISO", format="%.3f"),
         "xwoba": st.column_config.NumberColumn("xwOBA", format="%.3f"),
         "xwobacon": st.column_config.NumberColumn("xwOBAcon", format="%.3f"),
-        "pitch_match_score": st.column_config.NumberColumn("Pitch Match", format="%.1f"),
+        "pitch_match_score": st.column_config.NumberColumn(
+            "Pitch Match", format="%.1f",
+            help="xwOBA-weighted matchup score (0-100). Higher = hitter's per-pitch xwOBA "
+                 "matches well against pitcher's arsenal usage.",
+        ),
+        "pitch_hr_score": st.column_config.NumberColumn(
+            "Pitch HR", format="%.1f",
+            help="HR-specific matchup score (0-100). Weighs pitcher's pitch usage "
+                 "against hitter's barrel%/SLG vs each pitch type. >70 = hitter has "
+                 "elite power vs this pitcher's arsenal.",
+        ),
         "best_pitch": st.column_config.TextColumn("Best Pitch"),
         "best_pitch_xwoba": st.column_config.NumberColumn("Best xwOBA", format="%.3f"),
         "worst_pitch": st.column_config.TextColumn("Worst Pitch"),
@@ -1851,6 +1822,7 @@ def _style_matchup_df(df: pd.DataFrame):
         ("xwoba",           0.280, 0.380, True),
         ("xwobacon",        0.330, 0.460, True),
         ("pitch_match_score", 35,  70,   True),
+        ("pitch_hr_score",    30,  75,   True),
         ("fb_pct",          22,    40,   True),
         ("la",              5,     22,   True),   # sweet spot is ~28, but capped here
         ("avg_ev",          87,    94,   True),
@@ -1908,6 +1880,7 @@ def _style_matchup_df(df: pd.DataFrame):
         "bb_pct": "{:.1f}",
         "whiff_pct": "{:.1f}",
         "pitch_match_score": "{:.1f}",
+        "pitch_hr_score": "{:.1f}",
         "sleeper_score": "{:.1f}",
         "best_pitch_xwoba": "{:.3f}",
     }
@@ -1934,7 +1907,7 @@ def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
         "power_score", "matchup_opp", "hr_game_pct", "hr_pa_pct", "matchup", "test_score",
         "streak_label",
         "pa", "barrel_pct", "iso", "xwoba", "xwobacon",
-        "pitch_match_score", "best_pitch", "best_pitch_xwoba", "worst_pitch",
+        "pitch_match_score", "pitch_hr_score", "best_pitch", "best_pitch_xwoba", "worst_pitch",
         "fb_pct", "la", "avg_ev", "hard_hit", "sprint_speed",
         "k_pct", "bb_pct", "whiff_pct",
         "home_run", "recent_hr", "sleeper_score",
