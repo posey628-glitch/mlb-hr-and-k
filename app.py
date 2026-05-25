@@ -1669,15 +1669,17 @@ for gpk, ctx in game_context_map.items():
 if unconfirmed_games:
     n_total = len(game_context_map)
     n_unconf = len(unconfirmed_games)
+    n_conf = n_total - n_unconf
     # Categorize: imminent (< 2hr), upcoming (2-6hr), later (6hr+)
     imminent = [u for u in unconfirmed_with_time if u[2] is not None and u[2] < 2]
     soon = [u for u in unconfirmed_with_time if u[2] is not None and 2 <= u[2] < 6]
     later = [u for u in unconfirmed_with_time if u[2] is not None and u[2] >= 6]
     no_time = [u for u in unconfirmed_with_time if u[2] is None]
 
+    confirmed_note = f" ✅ {n_conf} game{'s' if n_conf != 1 else ''} fully confirmed." if n_conf else ""
     msg_parts = [
-        f"⚠️ **{n_unconf}/{n_total} games have unconfirmed lineups.** "
-        f"For these teams: hitters sorted by season PA (likely starters first), "
+        f"⚠️ **{n_unconf}/{n_total} games have unconfirmed lineups.**{confirmed_note} "
+        f"For unconfirmed teams: hitters sorted by season PA (likely starters first), "
         f"the # column shows '—', and lineup-position PA scaling is DISABLED "
         f"(everyone uses 4.2 PA = league avg)."
     ]
@@ -1694,15 +1696,24 @@ if unconfirmed_games:
         labels = ", ".join([u[0] for u in no_time[:5]])
         msg_parts.append(f"\n\n❓ **Unknown time:** {labels}")
     st.warning("".join(msg_parts))
+else:
+    n_total = len(game_context_map)
+    if n_total > 0:
+        st.success(f"✅ **All {n_total} games have confirmed lineups** — projections use real batting positions.")
 
 
 # ============================================================================
 # TOP 5 PICKS OF THE DAY — combined HR signal across all factors
 # ============================================================================
-st.subheader("🏆 Top 5 Picks of the Day")
+st.subheader("🏆 Top 10 Picks of the Day")
 st.caption(
-    "Highest-confidence HR plays combining: HR Game%, matchup score, weather/park boost, "
-    "recent form, barrel rate, and opposing pitcher quality. Qualified samples only."
+    "Best HR plays combining: HR Game%, matchup, recent form, power, "
+    "park/weather, pitch-specific match, and lineup confirmation. "
+    "**Note:** A hitter facing an ace (Misiorowski-tier) can still appear "
+    "if they have an elite per-pitch match against that pitcher's arsenal. "
+    "Check the Matchup column — if it's <50, the model is acknowledging the "
+    "tough matchup but other factors are compensating. Max 2 per game; "
+    "max 3 if slate is small."
 )
 
 # Gather all qualified hitters with game context
@@ -1820,26 +1831,42 @@ if all_hitters_for_picks:
         q_sorted = q.sort_values("pick_score", ascending=False)
         picks = []
         game_count = {}
+        # First pass: max 2 per game (diversity rule)
         for _, row in q_sorted.iterrows():
             g = row.get("game", "")
             if game_count.get(g, 0) >= 2:
                 continue
             picks.append(row)
             game_count[g] = game_count.get(g, 0) + 1
-            if len(picks) >= 5:
+            if len(picks) >= 10:
                 break
+        # Second pass: if we have <10 picks (small slate), allow up to 3 per game
+        if len(picks) < 10:
+            picks_set = {(r.get("player_name"), r.get("team")) for r in picks}
+            for _, row in q_sorted.iterrows():
+                key = (row.get("player_name"), row.get("team"))
+                if key in picks_set:
+                    continue
+                g = row.get("game", "")
+                if game_count.get(g, 0) >= 3:
+                    continue
+                picks.append(row)
+                picks_set.add(key)
+                game_count[g] = game_count.get(g, 0) + 1
+                if len(picks) >= 10:
+                    break
         if picks:
-            top5 = pd.DataFrame(picks).reset_index(drop=True)
+            top10 = pd.DataFrame(picks).reset_index(drop=True)
         else:
-            top5 = q_sorted.head(5).reset_index(drop=True)
-        top5["rank"] = range(1, len(top5) + 1)
+            top10 = q_sorted.head(10).reset_index(drop=True)
+        top10["rank"] = range(1, len(top10) + 1)
 
         cols_to_show = [c for c in [
             "rank", "player_name", "team", "game", "opp_pitcher",
             "pick_score", "hr_game_pct", "matchup", "barrel_pct",
             "hr_form", "env_boost",
-        ] if c in top5.columns]
-        disp = top5[cols_to_show].copy()
+        ] if c in top10.columns]
+        disp = top10[cols_to_show].copy()
 
         st.dataframe(
             disp, hide_index=True, use_container_width=True,
@@ -1852,7 +1879,12 @@ if all_hitters_for_picks:
                 "pick_score": st.column_config.NumberColumn(
                     "Pick Score",
                     format="%.1f",
-                    help="0-100 composite of HR Game%, matchup, barrel, form, park/weather, pitcher quality.",
+                    help=(
+                        "0-100 composite. Blends: HR Game% (25%), matchup quality (15%), "
+                        "power score (15%), pitch-HR match (10%), recent form (12%), "
+                        "sleeper lift (8%), env boost (15%). Plus +3 for confirmed "
+                        "lineup, -2 for roster-fill."
+                    ),
                 ),
                 "hr_game_pct": st.column_config.NumberColumn("HR Game%", format="%.1f%%"),
                 "matchup": st.column_config.NumberColumn("Matchup", format="%.1f"),
@@ -1865,11 +1897,13 @@ if all_hitters_for_picks:
                 ),
             },
         )
+        # Store for export
+        top_picks_export = top10.copy()
         glance = " · ".join(
             f"**#{r['rank']} {r['player_name']}** ({r['team']}, {r.get('hr_game_pct', 0):.1f}%)"
-            for _, r in top5.iterrows()
+            for _, r in top10.head(5).iterrows()
         )
-        st.markdown(glance)
+        st.markdown(f"**Top 5 at a glance:** {glance}")
     else:
         st.caption("Not enough qualified hitters with HR projections yet.")
 else:
@@ -1960,6 +1994,18 @@ if all_hitters:
                             "sleeper_score", ascending=False).head(20)
                         if not top_sl.empty:
                             top_sl.to_excel(writer, sheet_name="Top 20 Sleepers", index=False)
+                    # NEW: Top 10 Grand Slam scores
+                    if "gs_score" in qualified.columns and qualified["gs_score"].notna().any():
+                        top_gs_export = qualified.dropna(subset=["gs_score"]).sort_values(
+                            "gs_score", ascending=False).head(10)
+                        if not top_gs_export.empty:
+                            top_gs_export.to_excel(writer, sheet_name="Top 10 Grand Slam", index=False)
+                    # NEW: Top 10 Picks (the curated daily picks from Top Picks section)
+                    try:
+                        if 'top_picks_export' in dir() and top_picks_export is not None and not top_picks_export.empty:
+                            top_picks_export.to_excel(writer, sheet_name="Top 10 Picks", index=False)
+                    except Exception:
+                        pass
                     # Ensure at least one sheet exists (openpyxl errors on empty)
                     if sheets_written == 0:
                         pd.DataFrame({"empty": ["no data"]}).to_excel(
@@ -2091,6 +2137,49 @@ if all_hitters:
                 )
             else:
                 st.caption("No sleeper scores computed yet.")
+
+    # ====================================================================
+    # Top 10 Grand Slam — new leaderboard
+    # ====================================================================
+    if "gs_score" in qualified.columns and qualified["gs_score"].notna().any():
+        st.markdown("---")
+        st.markdown("**⚡ Top 10 Grand Slam Opportunities**")
+        st.caption(
+            "Per-hitter grand slam score: combines HR probability × lineup traffic "
+            "(runners on base from teammates' OBP and pitcher's WHIP). High score = "
+            "elite power hitter ALSO getting bases-loaded chances tonight. Note: "
+            "lineup traffic estimates are more accurate when batting order is "
+            "confirmed."
+        )
+        top_gs = qualified.dropna(subset=["gs_score"]).sort_values(
+            "gs_score", ascending=False
+        ).head(10)
+        if not top_gs.empty:
+            gs_cols = [c for c in [
+                "player_name", "team", "game", "lineup_pos",
+                "gs_score", "hr_game_pct", "barrel_pct", "iso",
+            ] if c in top_gs.columns]
+            gs_disp = top_gs[gs_cols].copy().reset_index(drop=True)
+            st.dataframe(
+                gs_disp, hide_index=True, use_container_width=True,
+                column_config={
+                    "player_name": st.column_config.TextColumn("Hitter"),
+                    "team": st.column_config.TextColumn("Tm"),
+                    "game": st.column_config.TextColumn("Game"),
+                    "lineup_pos": st.column_config.NumberColumn(
+                        "#", help="Batting order if confirmed; '—' otherwise.",
+                    ),
+                    "gs_score": st.column_config.NumberColumn(
+                        "GS Score", format="%.1f",
+                        help="Grand Slam composite. 0-100 scale.",
+                    ),
+                    "hr_game_pct": st.column_config.NumberColumn("HR%", format="%.1f%%"),
+                    "barrel_pct": st.column_config.NumberColumn("Brl%", format="%.1f%%"),
+                    "iso": st.column_config.NumberColumn("ISO", format="%.3f"),
+                },
+            )
+        else:
+            st.caption("No grand slam scores computed yet.")
 else:
     st.caption("Waiting for matchup data to populate.")
 
