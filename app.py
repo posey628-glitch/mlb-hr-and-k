@@ -1178,6 +1178,25 @@ for _, game in slate.iterrows():
 
     full_hr_mult = park_mult * wx_mult
 
+    # ===== HR Environment Flag =====
+    # Categorize the COMBINED park × weather × wind impact for hitters
+    # This gives users an immediate "is this a HR-friendly spot?" signal.
+    hr_env_flag = ""
+    hr_env_color = ""  # for st.success/info/warning/error
+    if full_hr_mult >= 1.15:
+        hr_env_flag = f"🔥 **HR-FRIENDLY ENVIRONMENT** (boost: {full_hr_mult:.2f}×) — favor hitters/sluggers, avoid pitchers"
+        hr_env_color = "success"
+    elif full_hr_mult >= 1.08:
+        hr_env_flag = f"⬆️ **Slightly HR-friendly** ({full_hr_mult:.2f}×) — modest hitter boost"
+        hr_env_color = "info"
+    elif full_hr_mult <= 0.85:
+        hr_env_flag = f"❄️ **HR-HOSTILE ENVIRONMENT** ({full_hr_mult:.2f}×) — favor pitchers, avoid hitter HR props"
+        hr_env_color = "error"
+    elif full_hr_mult <= 0.92:
+        hr_env_flag = f"⬇️ **Slightly HR-hostile** ({full_hr_mult:.2f}×) — pitchers preferred"
+        hr_env_color = "warning"
+    # else: neutral, no flag
+
     # Umpire + catcher framing
     ump = {}
     framing = {}
@@ -1614,6 +1633,8 @@ for _, game in slate.iterrows():
         "pull_wind_summary": list(pull_summaries.keys()) if 'pull_summaries' in dir() else [],
         "away_lineup_confirmed": away_confirmed,
         "home_lineup_confirmed": home_confirmed,
+        "hr_env_flag": hr_env_flag,
+        "hr_env_color": hr_env_color,
     }
     matchup_tables[game["gamePk"]] = (away_matchup, home_matchup)
 
@@ -2541,10 +2562,41 @@ for _, game in slate.iterrows():
             unconfirmed.append(game.get("home_team_abbr", "HOME"))
         st.warning(
             f"⚠️ **Lineup not yet posted for {', '.join(unconfirmed)}** — "
-            "showing alphabetical roster fill. Lineup-position-based PA scaling "
-            "is DISABLED for this game; all hitters use league-avg 4.2 PA. "
-            "Refresh after lineups post for accurate per-PA projections."
+            "hitters sorted by season PA (likely starters first). The # column "
+            "shows '—' and lineup-position PA scaling is DISABLED for this game "
+            "(everyone uses 4.2 PA = league avg). Refresh after lineups post."
         )
+
+    # Rain delay warning (>50% precipitation chance)
+    wx_info = ctx.get("weather") or {}
+    precip = wx_info.get("precip_prob")
+    if precip is not None and not pd.isna(precip):
+        if precip >= 80:
+            st.error(
+                f"🌧️ **HEAVY RAIN — {precip:.0f}% precipitation probability.** "
+                f"Game may be delayed or postponed. Reduce position sizes / "
+                f"consider waiting until lineups + game status confirmed."
+            )
+        elif precip >= 50:
+            st.warning(
+                f"🌦️ **Rain possible — {precip:.0f}% precipitation.** "
+                f"Conditions may slow ball flight, suppress HR potential."
+            )
+
+    # HR environment flag - prominent color-coded summary
+    hr_env_flag = ctx.get("hr_env_flag", "")
+    hr_env_color = ctx.get("hr_env_color", "")
+    if hr_env_flag:
+        if hr_env_color == "success":
+            st.success(hr_env_flag)
+        elif hr_env_color == "info":
+            st.info(hr_env_flag)
+        elif hr_env_color == "warning":
+            st.warning(hr_env_flag)
+        elif hr_env_color == "error":
+            st.error(hr_env_flag)
+        else:
+            st.caption(hr_env_flag)
 
     # Pull-wind interaction summary, if applicable
     pull_summaries = ctx.get("pull_wind_summary", [])
