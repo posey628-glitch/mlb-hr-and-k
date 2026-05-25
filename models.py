@@ -512,6 +512,11 @@ def build_pitcher_slate(
                     "is_rookie": bool(r.get("is_rookie", False)),
                     "debut_year": r.get("debut_year"),
                 })
+                # Copy ALL vs_lhb_* and vs_rhb_* handedness split columns
+                # (they were being dropped previously, breaking the platoon mult)
+                for k, v in r.items():
+                    if isinstance(k, str) and (k.startswith("vs_lhb_") or k.startswith("vs_rhb_")):
+                        base[k] = v
             if pitcher_recent and pid in pitcher_recent:
                 base.update(pitcher_recent[pid])
             pitchers.append(base)
