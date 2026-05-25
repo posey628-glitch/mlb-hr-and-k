@@ -2064,7 +2064,7 @@ if all_hitters:
                             top_sl.to_excel(writer, sheet_name="Top 20 Sleepers", index=False)
                     # NEW: Top 10 Grand Slam scores
                     if "gs_score" in qualified.columns and qualified["gs_score"].notna().any():
-                        top_gs_export = qualified.dropna(subset=["gs_score"]).sort_values(
+                        top_gs_export = qualified.dropna(subset=["gs_score", "hr_game_pct"]).sort_values(
                             "gs_score", ascending=False).head(10)
                         if not top_gs_export.empty:
                             top_gs_export.to_excel(writer, sheet_name="Top 10 Grand Slam", index=False)
@@ -2230,7 +2230,12 @@ if all_hitters:
             "lineup traffic estimates are more accurate when batting order is "
             "confirmed."
         )
-        top_gs = qualified.dropna(subset=["gs_score"]).sort_values(
+        # CRITICAL FIX: Filter out players whose hr_game_pct is NaN (small sample).
+        # Without this filter, low-PA players like Conforto (80 PA) and Goldschmidt
+        # (98 PA) ranked #1-#3 with NaN HR%, because their hr_score (composite) was
+        # high but hr_game_pct correctly returned NaN for insufficient sample.
+        # We can't make grand slam projections without a valid HR probability.
+        top_gs = qualified.dropna(subset=["gs_score", "hr_game_pct"]).sort_values(
             "gs_score", ascending=False
         ).head(10)
         if not top_gs.empty:
