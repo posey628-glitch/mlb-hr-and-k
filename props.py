@@ -83,9 +83,12 @@ def hr_prob_per_pa(
         * ttop_mult
         * defense_factor
     )
-    # Realistic cap: even elite hitters in best matchups rarely exceed 10% per PA
-    # Aaron Judge's career-high HR/PA is ~7.5%; with park+weather boost maybe 10%
-    return float(np.clip(prob, 0.001, 0.10))
+    # Realistic cap on per-PA HR rate.
+    # Real-world reference: Aaron Judge's career-best per-PA HR rate is ~8.5%
+    # (62-HR season 2022). Even Judge facing the worst pitcher in Coors with
+    # wind out doesn't produce 10% per-PA. Cap at 7.5% as the absolute ceiling.
+    # This gives a full-game max of 1 - 0.925^4.2 = 27.7% which matches reality.
+    return float(np.clip(prob, 0.001, 0.075))
 
 
 def hr_prob_full_game(prob_per_pa: float | None, expected_pa: float = 4.2) -> float | None:
