@@ -296,12 +296,14 @@ with st.sidebar:
 
     st.subheader("Data sources")
     use_recent_form = st.checkbox("Recent form (L15)", value=True)
-    use_sprint_speed = st.checkbox("Sprint speed", value=True)
     use_pitch_match = st.checkbox("Pitch match score", value=HAVE_PITCH_MATCH)
     use_bvp = st.checkbox("Batter vs Pitcher history", value=HAVE_SPLITS)
     use_weather = st.checkbox("Weather + park factors", value=True)
     use_ump = st.checkbox("Umpire + catcher framing", value=HAVE_GAME_CONTEXT)
     use_vegas = st.checkbox("Vegas totals", value=HAVE_GAME_CONTEXT)
+    # Sprint speed has no impact on HR or K projections - removed from UI.
+    # If you want speed-based metrics (steals, infield hits) in the future, re-enable.
+    use_sprint_speed = False
 
     st.subheader("Display")
     show_diagnostic = st.checkbox("Show data diagnostic", value=False)
@@ -808,11 +810,16 @@ if use_recent_form and not slate.empty:
 try:
     from data_fetcher import get_team_hitting_aggregates
     team_hit_df = get_team_hitting_aggregates()
-    if not team_hit_df.empty and "team_abbr" in team_hit_df.columns:
-        team_hit_map = team_hit_df.set_index("team_abbr").to_dict("index")
-    else:
-        team_hit_map = {}
-except Exception:
+    team_hit_map = {}
+    if not team_hit_df.empty:
+        # Index by both team_abbr and team_id for robust lookup
+        for _, row in team_hit_df.iterrows():
+            row_d = row.to_dict()
+            if pd.notna(row.get("team_abbr")):
+                team_hit_map[row["team_abbr"]] = row_d
+            if pd.notna(row.get("team_id")):
+                team_hit_map[int(row["team_id"])] = row_d
+except Exception as e:
     team_hit_map = {}
 
 try:
@@ -880,6 +887,9 @@ if not p_slate.empty:
         "recent_era", "recent_k9", "days_rest", "avg_recent_pitches",
         "reliability",
     ] if c in p_slate.columns]
+
+    # Auto-hide empty columns
+    show_cols = [c for c in show_cols if p_slate[c].notna().any()]
 
     col_config = {
         "alert": st.column_config.TextColumn("Signal", width="small"),
@@ -2015,10 +2025,13 @@ def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
         "streak_label",
         "pa", "barrel_pct", "iso", "xwoba", "xwobacon",
         "pitch_match_score", "pitch_hr_score", "best_pitch", "best_pitch_xwoba", "worst_pitch",
-        "fb_pct", "la", "avg_ev", "hard_hit", "sprint_speed",
+        "fb_pct", "la", "avg_ev", "hard_hit",
         "k_pct", "bb_pct", "whiff_pct",
         "home_run", "recent_hr", "sleeper_score",
     ] if c in matchup_df.columns]
+
+    # Auto-hide columns that are completely empty (no point showing them)
+    cols_to_show = [c for c in cols_to_show if matchup_df[c].notna().any()]
 
     if not qualified.empty:
         st.markdown(f"**{team_label}**")
