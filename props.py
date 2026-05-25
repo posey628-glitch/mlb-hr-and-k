@@ -83,12 +83,18 @@ def hr_prob_per_pa(
         * ttop_mult
         * defense_factor
     )
-    # Realistic cap on per-PA HR rate.
-    # Real-world reference: Aaron Judge's career-best per-PA HR rate is ~8.5%
-    # (62-HR season 2022). Even Judge facing the worst pitcher in Coors with
-    # wind out doesn't produce 10% per-PA. Cap at 7.5% as the absolute ceiling.
-    # This gives a full-game max of 1 - 0.925^4.2 = 27.7% which matches reality.
-    return float(np.clip(prob, 0.001, 0.075))
+    # Use a SOFT squash instead of hard clip so two elite hitters in great
+    # matchups don't both land at exactly the same cap value.
+    # Below 5% per PA: pass through linearly.
+    # Above 5%: asymptotically approach 8% via tanh-like squash.
+    # Result: elite hitters in great matchups span 5.5-7.5% (not all clipped).
+    if prob <= 0.05:
+        squashed = prob
+    else:
+        excess = prob - 0.05
+        # tanh squash: scales excess so it asymptotes at 0.03 (so max = 0.08)
+        squashed = 0.05 + 0.03 * np.tanh(excess / 0.03)
+    return float(max(0.001, squashed))
 
 
 def hr_prob_full_game(prob_per_pa: float | None, expected_pa: float = 4.2) -> float | None:
