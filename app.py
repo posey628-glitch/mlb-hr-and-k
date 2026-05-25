@@ -1469,12 +1469,13 @@ for _, game in slate.iterrows():
                 # BUT re-apply the soft squash so we don't blow past the cap.
                 if p_pa is not None:
                     raw = float(p_pa) * pitch_hr_mult
-                    # Soft squash: same logic as in props.py (6.5% per-PA ceiling)
+                    # Soft squash: same logic as in props.py (7.0% per-PA ceiling,
+                    # wider differentiation band)
                     if raw <= 0.04:
                         p_pa = raw
                     else:
                         excess = raw - 0.04
-                        p_pa = 0.04 + 0.025 * np.tanh(excess / 0.025)
+                        p_pa = 0.04 + 0.030 * np.tanh(excess / 0.040)
                     p_pa = max(0.001, p_pa)
             except TypeError:
                 try:
