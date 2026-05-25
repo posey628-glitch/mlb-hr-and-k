@@ -84,23 +84,30 @@ def hr_probability(
     components = (weighted_score / weight_sums.replace(0, np.nan))
 
     # Apply today's park × weather multiplier
-    df["hr_prob"] = (components * hr_mult).round(2)
+    # Naming note: this is a 0-100 COMPOSITE SCORE (not a probability).
+    # We keep `hr_prob` as a column alias for backward compatibility with
+    # downstream code, but the canonical name is `hr_score`.
+    score = (components * hr_mult).round(2)
+    df["hr_score"] = score
+    df["hr_prob"] = score  # alias - same value
     df["hr_mult_today"] = hr_mult
     return df
 
 
 def find_sleepers(hr_df: pd.DataFrame, season_hr_col: str = "home_run") -> pd.DataFrame:
     """
-    Flag hitters whose today HR_PROB greatly exceeds their season HR pace.
+    Flag hitters whose today HR_SCORE greatly exceeds their season HR pace.
 
-    Sleeper score = HR_PROB percentile MINUS season HR percentile.
+    Sleeper score = today's HR_SCORE percentile MINUS season HR percentile.
     Real data only - NaN if either input missing.
     """
     df = hr_df.copy()
     if df.empty:
         return df
 
-    hr_pct = df["hr_prob"].rank(pct=True) * 100 if "hr_prob" in df.columns else pd.Series([np.nan] * len(df))
+    # Use hr_score if present, fall back to hr_prob (legacy)
+    score_col = "hr_score" if "hr_score" in df.columns else "hr_prob"
+    hr_pct = df[score_col].rank(pct=True) * 100 if score_col in df.columns else pd.Series([np.nan] * len(df))
     if season_hr_col in df.columns:
         season_pct = df[season_hr_col].rank(pct=True) * 100
     else:
@@ -155,10 +162,10 @@ def grand_slam_probability(
     else:
         lineup_factor = 1.0
 
-    # 4) Per-hitter HR rate (re-use hr_prob if present, else compute quickly)
-    if "hr_prob" not in df.columns:
+    # 4) Per-hitter HR rate (re-use hr_score if present, else compute quickly)
+    if "hr_score" not in df.columns:
         df = hr_probability(df, pitcher_row, hr_mult)
-    base_hr = df["hr_prob"] / 100.0  # normalize 0-1
+    base_hr = df["hr_score"] / 100.0  # normalize 0-1
 
     # Compound it
     df["gs_score"] = (
