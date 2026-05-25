@@ -562,8 +562,21 @@ def _fetch_pitcher_splits_single(pitcher_id: int, season: int) -> dict:
                 if pa and pa > 0:
                     out[f"vs_{label}_pa"] = pa
                 if denom and denom > 0:
+                    # If HR field exists, use it. If MISSING but split has decent
+                    # sample (PA>=20) AND SLG is modest (<.400), assume 0 HRs
+                    # (the API often omits zero-count fields for "good" pitchers
+                    # who gave up no HRs to one side). This was the Yesavage bug:
+                    # 54 PA, .269 SLG, no HR field = should be 0% not NaN.
                     if hr is not None:
                         out[f"vs_{label}_hr_per_pa"] = round(hr / denom * 100, 3)
+                    elif pa and pa >= 20 and slg is not None:
+                        try:
+                            slg_f = float(slg)
+                            if slg_f < 0.400:
+                                # Low SLG with no HR field reported = likely 0 HRs
+                                out[f"vs_{label}_hr_per_pa"] = 0.0
+                        except (TypeError, ValueError):
+                            pass
                     if k is not None:
                         out[f"vs_{label}_k_percent"] = round(k / denom * 100, 2)
                     if bb is not None:
