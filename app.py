@@ -1968,8 +1968,44 @@ def build_col_config():
                  "Catches contact hitters who happen to face a HR-friendly "
                  "matchup today."
         ),
-        "hr_game_pct": st.column_config.NumberColumn("HR Game%", format="%.1f%%"),
-        "hr_pa_pct": st.column_config.NumberColumn("HR PA%", format="%.2f%%"),
+        "hr_game_pct": st.column_config.NumberColumn(
+            "HR Game%", format="%.1f%%",
+            help=(
+                "TRUE PROBABILITY of hitting ≥1 HR this game. "
+                "Calculated from per-PA HR rate × expected PA (lineup-spot aware). "
+                "Max realistic value ~26% (leadoff elite) to 22% (#9 spot). "
+                "This is the betting probability."
+            ),
+        ),
+        "hr_pa_pct": st.column_config.NumberColumn(
+            "HR PA%", format="%.2f%%",
+            help=(
+                "TRUE PROBABILITY of hitting a HR on any single plate appearance. "
+                "Blends observed HR/PA with barrel-derived xHR/PA to reduce noise. "
+                "League avg ~2.8%. Elite (Judge-tier) caps near 6.5%."
+            ),
+        ),
+        "likely_hr_pct": st.column_config.NumberColumn(
+            "Likely HR%", format="%.2f%%",
+            help=(
+                "CONTEXT-FREE hitter trait (barrel × FB% × 0.75). "
+                "Represents the hitter's underlying HR-producing skill regardless "
+                "of who they face. Use HR PA% / HR Game% for today's actual matchup. "
+                "Range: 0-5%."
+            ),
+        ),
+        "hr_score": st.column_config.NumberColumn(
+            "HR Score", format="%.1f",
+            help=(
+                "0-100 COMPOSITE SCORE (not a probability). "
+                "Combines barrel%, ISO, xwOBA, recent form × today's park/weather mult. "
+                "Used as input to sleeper_score percentile rank."
+            ),
+        ),
+        "hr_prob": st.column_config.NumberColumn(
+            "HR Score (alias)", format="%.1f",
+            help="Same value as HR Score - kept for backward compatibility.",
+        ),
         "matchup": st.column_config.NumberColumn("Matchup", format="%.1f"),
         "test_score": st.column_config.NumberColumn("Test", format="%.1f"),
         "streak_label": st.column_config.TextColumn(
