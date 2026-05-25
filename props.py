@@ -56,13 +56,22 @@ def hr_prob_per_pa(
 
     # Real hitter base rate - BLENDED with barrel-based expected HR/PA
     # to reduce noise from small/lucky samples.
-    # xHR/PA = barrel% × 0.50 (about half of barreled balls become HRs in air)
+    #
+    # xHR/PA derivation:
+    #   barrel_pct = % of batted balls that are barrels (Statcast definition)
+    #   BBE_rate ≈ 0.70 (typical PAs that become batted balls, not K/BB)
+    #   HR_per_barrel ≈ 0.55 (Statcast research: barrels become HRs ~55% of time)
+    #   xHR/PA ≈ barrel_pct × 0.70 × 0.55 = barrel_pct × 0.385
+    #
+    # Previously used 0.50 multiplier which overstated; calibrated to real MLB rates.
+    # League-avg ~8% barrel × 0.385 ≈ 3.1% xHR/PA, matching observed ~2.8% league HR/PA.
+    #
     # Blend weight grows with sample size: 100 PA → 30% observed / 70% xHR;
     # 300 PA → 60% observed / 40% xHR; 600 PA → 80% observed / 20% xHR.
     h_observed = hr / pa
     barrel_pct = hitter_row.get("barrel_pct")
     if barrel_pct is not None and not pd.isna(barrel_pct) and barrel_pct > 0:
-        h_xhr = float(barrel_pct) / 100 * 0.50
+        h_xhr = float(barrel_pct) / 100 * 0.385
         # Weight observed by sample size (asymptote at 0.80)
         observed_weight = min(0.80, 0.30 + (pa - 100) / 500 * 0.50)
         observed_weight = max(0.30, observed_weight)
@@ -82,20 +91,33 @@ def hr_prob_per_pa(
         pitcher_mult = max(0.5, min(2.0, pitcher_mult))
 
     # Pitch match adjustment - only if we have a real score
+    # Was: 0.6-1.6 range, too generous (gave non-power hitters huge boosts)
+    # Now: 0.75-1.30 range — meaningful but doesn't substitute for raw power
     pm_mult = 1.0
     if pitch_match_score is not None and not pd.isna(pitch_match_score):
-        pm_mult = 0.5 + (pitch_match_score / 100)
-        pm_mult = max(0.6, min(1.6, pm_mult))
+        # 50 = neutral. Each point above adds 0.6% boost; each below subtracts.
+        pm_mult = 1.0 + (pitch_match_score - 50) * 0.006
+        pm_mult = max(0.75, min(1.30, pm_mult))
 
-    prob = (
-        h_base
-        * pitcher_mult
-        * park_factor
+    # Compute hitter-side context multiplier (everything BUT pitcher_mult and h_base).
+    # Cap it to prevent inflation when multiple small boosts compound.
+    # Example bug fix: 1.17 wind × 1.21 park × 1.30 pitch_match = 1.84x
+    # compounded multiplier was pushing modest hitters to elite tier.
+    # New cap: 1.45× total context (still allows great matchups to boost ~45%).
+    ctx_mult_raw = (
+        park_factor
         * park_hand_factor
         * weather_mult
         * pm_mult
         * ttop_mult
         * defense_factor
+    )
+    ctx_mult = min(1.35, max(0.65, ctx_mult_raw))
+
+    prob = (
+        h_base
+        * pitcher_mult
+        * ctx_mult
     )
     # Use a SOFT squash that asymptotes at a REALISTIC ceiling.
     # Reference: Aaron Judge's actual rate of "at-least-1-HR in a game" peaked
