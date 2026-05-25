@@ -1773,7 +1773,7 @@ def build_col_config():
             "Streak", width="small",
             help="🔥 HR streak / hot · 🌶️ 2+ HR last 5 · ⚡ multi-HR game · ❄️ cold (no HR L10)"
         ),
-        "pa": st.column_config.NumberColumn("PA"),
+        "pa": st.column_config.NumberColumn("PA", format="%d"),
         "barrel_pct": st.column_config.NumberColumn("Brl%", format="%.1f%%"),
         "iso": st.column_config.NumberColumn("ISO", format="%.3f"),
         "xwoba": st.column_config.NumberColumn("xwOBA", format="%.3f"),
@@ -1786,12 +1786,12 @@ def build_col_config():
         "la": st.column_config.NumberColumn("LA", format="%.1f"),
         "avg_ev": st.column_config.NumberColumn("EV", format="%.1f"),
         "hard_hit": st.column_config.NumberColumn("HH%", format="%.1f%%"),
-        "sprint_speed": st.column_config.NumberColumn("Sprint"),
+        "sprint_speed": st.column_config.NumberColumn("Sprint", format="%.1f"),
         "k_pct": st.column_config.NumberColumn("K%", format="%.1f%%"),
         "bb_pct": st.column_config.NumberColumn("BB%", format="%.1f%%"),
         "whiff_pct": st.column_config.NumberColumn("Whiff%", format="%.1f%%"),
         "home_run": st.column_config.NumberColumn("HR", format="%d"),
-        "recent_hr": st.column_config.NumberColumn("L15 HR"),
+        "recent_hr": st.column_config.NumberColumn("L15 HR", format="%d"),
         "sleeper_score": st.column_config.NumberColumn("Sleeper", format="%.1f"),
         "verdict": st.column_config.TextColumn("Verdict"),
     }
@@ -1947,10 +1947,27 @@ for _, game in slate.iterrows():
     away_tab = f"✈️ {game['away_team_abbr']} @ {game['home_team_abbr']}"
     home_tab = f"🏠 {game['home_team_abbr']} vs {game['away_team_abbr']}"
 
-    # Game header
+    # Game header with start time
     away_k_mean = ctx["away_k_proj"].get("mean") if ctx.get("away_k_proj") else None
     home_k_mean = ctx["home_k_proj"].get("mean") if ctx.get("home_k_proj") else None
+
+    # Format game time to user's local timezone (assumes ET, which is most common)
+    game_dt = game.get("gameTime")
+    time_str = ""
+    if isinstance(game_dt, pd.Timestamp):
+        try:
+            # Convert UTC to US Eastern (most common for MLB schedules)
+            local_dt = game_dt.tz_convert("US/Eastern") if game_dt.tzinfo else game_dt
+            time_str = local_dt.strftime("%-I:%M %p ET")
+        except Exception:
+            try:
+                time_str = game_dt.strftime("%H:%M")
+            except Exception:
+                time_str = ""
+
     header_bits = [f"### {game['away_team_abbr']} @ {game['home_team_abbr']}"]
+    if time_str:
+        header_bits.append(f"🕐 {time_str}")
     if game.get("away_pitcher") and game.get("home_pitcher"):
         header_bits.append(
             f"**{game['away_pitcher']}** vs **{game['home_pitcher']}**"
