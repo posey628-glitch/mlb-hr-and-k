@@ -491,6 +491,66 @@ def get_pitcher_stats(season: int = CURRENT_SEASON) -> pd.DataFrame:
 
 
 # ----------------------------------------------------------------------------
+# Pitcher splits vs LHB / vs RHB - critical for handedness matchup analysis
+# ----------------------------------------------------------------------------
+
+@st.cache_data(ttl=3600)
+def get_pitcher_handedness_splits(season: int = CURRENT_SEASON) -> pd.DataFrame:
+    """
+    Returns one row per pitcher with vs_lhb_* and vs_rhb_* prefixed columns
+    showing xwoba, k_pct, hr_per_pa, barrel_pct allowed to each side.
+
+    This lets the model differentiate between a RHP who crushes RHB but gets
+    crushed by LHB, vs one who's balanced. Critical for HR projection.
+    """
+    selections = "pa,xwoba,k_percent,bb_percent,barrel_batted_rate,hard_hit_percent,home_run,slg"
+
+    frames = []
+    for stand, label in [("L", "lhb"), ("R", "rhb")]:
+        url = (
+            "https://baseballsavant.mlb.com/leaderboard/custom"
+            f"?year={season}&type=pitcher&filter=&min=20&selections={selections}"
+            f"&chart=false&x=pa&y=pa&r=no&chartType=beeswarm&csv=true&hfStands={stand}"
+        )
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=30)
+            r.raise_for_status()
+            df = pd.read_csv(io.StringIO(r.text))
+            if df.empty:
+                continue
+            df = _normalize_player_df(df)
+            if "player_id" not in df.columns:
+                continue
+            # Rename all stat columns with vs_lhb_ / vs_rhb_ prefix
+            rename_map = {}
+            keep_cols = ["player_id"]
+            for col in df.columns:
+                if col == "player_id":
+                    continue
+                if col in ["pa", "xwoba", "k_percent", "bb_percent", "barrel_batted_rate",
+                          "hard_hit_percent", "home_run", "slg"]:
+                    rename_map[col] = f"vs_{label}_{col}"
+                    keep_cols.append(f"vs_{label}_{col}")
+            df = df.rename(columns=rename_map)[["player_id"] + [v for v in rename_map.values()]]
+            # Derive hr_per_pa for each split
+            hr_col = f"vs_{label}_home_run"
+            pa_col = f"vs_{label}_pa"
+            if hr_col in df.columns and pa_col in df.columns:
+                df[f"vs_{label}_hr_per_pa"] = (df[hr_col] / df[pa_col] * 100).round(3)
+            frames.append(df)
+        except Exception:
+            continue
+
+    if not frames:
+        return pd.DataFrame()
+    # Merge L and R splits on player_id
+    result = frames[0]
+    for f in frames[1:]:
+        result = result.merge(f, on="player_id", how="outer")
+    return result
+
+
+# ----------------------------------------------------------------------------
 # Pitcher arsenal (pitch-mix, velo, spin, swing/miss per pitch type)
 # ----------------------------------------------------------------------------
 
