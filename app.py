@@ -2583,6 +2583,18 @@ def build_col_config():
         "iso": st.column_config.NumberColumn("ISO", format="%.3f"),
         "xwoba": st.column_config.NumberColumn("xwOBA", format="%.3f"),
         "xwobacon": st.column_config.NumberColumn("xwOBAcon", format="%.3f"),
+        "obp": st.column_config.NumberColumn(
+            "OBP", format="%.3f",
+            help="On-base percentage. Reaches base safely / PA. League avg ~.320.",
+        ),
+        "slg": st.column_config.NumberColumn(
+            "SLG", format="%.3f",
+            help="Slugging percentage. Total bases / AB. League avg ~.398.",
+        ),
+        "ops": st.column_config.NumberColumn(
+            "OPS", format="%.3f",
+            help="On-base + Slugging. League avg ~.720. Elite hitters > .900.",
+        ),
         "pitch_match_score": st.column_config.NumberColumn(
             "Pitch Match", format="%.1f",
             help="xwOBA-weighted matchup score (0-100). Higher = hitter's per-pitch xwOBA "
@@ -2734,6 +2746,7 @@ def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
         "power_score", "matchup_opp", "hr_game_pct", "hr_pa_pct", "matchup", "test_score",
         "streak_label",
         "pa", "barrel_pct", "iso", "xwoba", "xwobacon",
+        "obp", "slg", "ops",
         "pitch_match_score", "pitch_hr_score", "best_pitch", "best_pitch_xwoba", "worst_pitch",
         "fb_pct", "la", "avg_ev", "hard_hit",
         "k_pct", "bb_pct", "whiff_pct",
