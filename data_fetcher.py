@@ -494,60 +494,95 @@ def get_pitcher_stats(season: int = CURRENT_SEASON) -> pd.DataFrame:
 # Pitcher splits vs LHB / vs RHB - critical for handedness matchup analysis
 # ----------------------------------------------------------------------------
 
-@st.cache_data(ttl=3600)
-def get_pitcher_handedness_splits(season: int = CURRENT_SEASON) -> pd.DataFrame:
+def _fetch_pitcher_splits_single(pitcher_id: int, season: int) -> dict:
     """
-    Returns one row per pitcher with vs_lhb_* and vs_rhb_* prefixed columns
-    showing xwoba, k_pct, hr_per_pa, barrel_pct allowed to each side.
-
-    This lets the model differentiate between a RHP who crushes RHB but gets
-    crushed by LHB, vs one who's balanced. Critical for HR projection.
+    Fetch a single pitcher's vs-LHB and vs-RHB splits from MLB Stats API.
+    Returns dict with keys like vs_lhb_pa, vs_lhb_hr_per_pa, vs_lhb_avg, etc.
     """
-    selections = "pa,xwoba,k_percent,bb_percent,barrel_batted_rate,hard_hit_percent,home_run,slg"
-
-    frames = []
-    for stand, label in [("L", "lhb"), ("R", "rhb")]:
-        url = (
-            "https://baseballsavant.mlb.com/leaderboard/custom"
-            f"?year={season}&type=pitcher&filter=&min=20&selections={selections}"
-            f"&chart=false&x=pa&y=pa&r=no&chartType=beeswarm&csv=true&hfStands={stand}"
-        )
-        try:
-            r = requests.get(url, headers=HEADERS, timeout=30)
-            r.raise_for_status()
-            df = pd.read_csv(io.StringIO(r.text))
-            if df.empty:
-                continue
-            df = _normalize_player_df(df)
-            if "player_id" not in df.columns:
-                continue
-            # Rename all stat columns with vs_lhb_ / vs_rhb_ prefix
-            rename_map = {}
-            keep_cols = ["player_id"]
-            for col in df.columns:
-                if col == "player_id":
+    out = {}
+    url = (
+        f"https://statsapi.mlb.com/api/v1/people/{pitcher_id}/stats"
+        f"?stats=statSplits&sitCodes=vl,vr&group=pitching&season={season}"
+    )
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=15)
+        if r.status_code != 200:
+            return out
+        data = r.json()
+        for stat_group in data.get("stats", []):
+            for split in stat_group.get("splits", []):
+                code = split.get("split", {}).get("code", "")
+                if code == "vl":
+                    label = "lhb"
+                elif code == "vr":
+                    label = "rhb"
+                else:
                     continue
-                if col in ["pa", "xwoba", "k_percent", "bb_percent", "barrel_batted_rate",
-                          "hard_hit_percent", "home_run", "slg"]:
-                    rename_map[col] = f"vs_{label}_{col}"
-                    keep_cols.append(f"vs_{label}_{col}")
-            df = df.rename(columns=rename_map)[["player_id"] + [v for v in rename_map.values()]]
-            # Derive hr_per_pa for each split
-            hr_col = f"vs_{label}_home_run"
-            pa_col = f"vs_{label}_pa"
-            if hr_col in df.columns and pa_col in df.columns:
-                df[f"vs_{label}_hr_per_pa"] = (df[hr_col] / df[pa_col] * 100).round(3)
-            frames.append(df)
-        except Exception:
-            continue
+                stat = split.get("stat", {})
+                pa = stat.get("plateAppearances")
+                hr = stat.get("homeRuns")
+                k = stat.get("strikeOuts")
+                bb = stat.get("baseOnBalls")
+                avg = stat.get("avg")
+                obp = stat.get("obp")
+                slg = stat.get("slg")
+                try:
+                    pa = int(pa) if pa is not None else None
+                    hr = int(hr) if hr is not None else None
+                    k = int(k) if k is not None else None
+                    bb = int(bb) if bb is not None else None
+                except (TypeError, ValueError):
+                    pass
+                if pa is not None:
+                    out[f"vs_{label}_pa"] = pa
+                if hr is not None and pa and pa > 0:
+                    out[f"vs_{label}_hr_per_pa"] = round(hr / pa * 100, 3)
+                if k is not None and pa and pa > 0:
+                    out[f"vs_{label}_k_percent"] = round(k / pa * 100, 2)
+                if bb is not None and pa and pa > 0:
+                    out[f"vs_{label}_bb_percent"] = round(bb / pa * 100, 2)
+                if avg:
+                    try: out[f"vs_{label}_avg"] = float(avg)
+                    except (TypeError, ValueError): pass
+                if obp:
+                    try: out[f"vs_{label}_obp"] = float(obp)
+                    except (TypeError, ValueError): pass
+                if slg:
+                    try: out[f"vs_{label}_slg"] = float(slg)
+                    except (TypeError, ValueError): pass
+    except Exception:
+        pass
+    return out
 
-    if not frames:
+
+@st.cache_data(ttl=3600)
+def get_pitcher_handedness_splits(season: int = CURRENT_SEASON, pitcher_ids: tuple = ()) -> pd.DataFrame:
+    """
+    Fetch vs-LHB and vs-RHB splits from MLB Stats API for the given pitcher IDs.
+
+    Why MLB Stats API instead of Savant: Savant's /custom endpoint doesn't
+    accept hfStands param reliably; statSplits via the MLB API IS documented
+    and stable.
+
+    Pass the list of pitcher_ids from today's slate to avoid fetching
+    splits for every pitcher in the league (~700 calls).
+    """
+    if not pitcher_ids:
         return pd.DataFrame()
-    # Merge L and R splits on player_id
-    result = frames[0]
-    for f in frames[1:]:
-        result = result.merge(f, on="player_id", how="outer")
-    return result
+
+    rows = []
+    for pid in pitcher_ids:
+        try:
+            pid_int = int(pid)
+        except (TypeError, ValueError):
+            continue
+        splits = _fetch_pitcher_splits_single(pid_int, season)
+        if splits:
+            splits["player_id"] = pid_int
+            rows.append(splits)
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows)
 
 
 # ----------------------------------------------------------------------------
