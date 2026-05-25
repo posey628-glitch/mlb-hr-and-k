@@ -1204,6 +1204,11 @@ for _, game in slate.iterrows():
 
         Returns (lineup, is_confirmed) where is_confirmed = True only if
         MLB has actually posted the lineup (not roster-padded).
+
+        IMPORTANT: When using roster fill, we sort by season PA (descending)
+        so the most-used position players appear first. Alphabetical order
+        (the API default) was producing nonsense lineups where e.g. Pete
+        Alonso would show up "batting 9th" just because A comes after L.
         """
         is_confirmed = len(existing_lineup) >= 8  # At least 8 of 9 = real lineup
         if not team_id:
@@ -1220,6 +1225,26 @@ for _, game in slate.iterrows():
                 ("P", "SP", "RP", "TWP")
             and p.get("id") not in existing_ids
         ]
+        # SORT by season PA so likely starters come first.
+        # This makes the roster-fill "lineup" produce sensible expected_PA
+        # estimates instead of alphabetical noise.
+        pa_lookup = {}
+        try:
+            if not hitter_stats.empty and "player_id" in hitter_stats.columns:
+                for _, hs_row in hitter_stats.iterrows():
+                    pid = hs_row.get("player_id")
+                    pa_val = hs_row.get("pa")
+                    if pd.notna(pid) and pd.notna(pa_val):
+                        try:
+                            pa_lookup[int(pid)] = float(pa_val)
+                        except (ValueError, TypeError):
+                            continue
+        except Exception:
+            pass
+        position_players.sort(
+            key=lambda p: pa_lookup.get(int(p.get("id", 0)) if p.get("id") else 0, 0),
+            reverse=True,
+        )
         # Pad up to 9 total
         needed = max(0, 9 - len(existing_lineup))
         for p in position_players[:needed]:
@@ -1593,6 +1618,38 @@ for _, game in slate.iterrows():
 
 
 st.divider()
+
+
+# ============================================================================
+# LINEUP CONFIRMATION BANNER - tells user upfront if many games are unconfirmed
+# ============================================================================
+unconfirmed_games = []
+for gpk, ctx in game_context_map.items():
+    g_rows = slate[slate["gamePk"] == gpk]
+    if g_rows.empty:
+        continue
+    g = g_rows.iloc[0]
+    away_conf = ctx.get("away_lineup_confirmed", True)
+    home_conf = ctx.get("home_lineup_confirmed", True)
+    if not away_conf or not home_conf:
+        sides = []
+        if not away_conf:
+            sides.append(g.get("away_team_abbr", "AWAY"))
+        if not home_conf:
+            sides.append(g.get("home_team_abbr", "HOME"))
+        unconfirmed_games.append(f"{'/'.join(sides)} ({g.get('away_team_abbr')}@{g.get('home_team_abbr')})")
+
+if unconfirmed_games:
+    n_total = len(game_context_map)
+    n_unconf = len(unconfirmed_games)
+    st.warning(
+        f"⚠️ **{n_unconf}/{n_total} games have unconfirmed lineups** — MLB hasn't "
+        f"posted the actual batting order yet for: {', '.join(unconfirmed_games[:5])}"
+        f"{'...' if len(unconfirmed_games) > 5 else ''}. "
+        f"For those teams, hitters are sorted by season PA (likely starters first), "
+        f"and **lineup-position PA scaling is DISABLED** (all use 4.2 PA). "
+        f"**For best accuracy, refresh after 4-5 PM ET for evening games.**"
+    )
 
 
 # ============================================================================
