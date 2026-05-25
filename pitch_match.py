@@ -108,34 +108,57 @@ def pitch_match_score(
         if brl is not None and not pd.isna(brl):
             h_barrel[pitch] = float(brl)
 
-    # Weight by pitcher usage - compute both xwOBA-based and HR-based scores
+    # Weight by pitcher usage - BUT apply real-world adaptation:
+    # MLB pitchers and analytics teams DO adjust pitch mix vs specific hitters.
+    # If hitter has elite xwOBA vs a pitch (>.400), pitcher throws ~50% less of it.
+    # If hitter is weak vs a pitch (<.250), pitcher throws ~30% more of it.
+    # League average xwOBA ~.310 = neutral, no usage adjustment.
+    # Reference: actual data shows pitch mix shifts ~20-40% based on hitter weakness.
     total_weight = 0.0
     weighted_xwoba = 0.0
     weighted_slg = 0.0
     weighted_barrel = 0.0
-    has_slg = 0.0  # weight covered by SLG data
+    has_slg = 0.0
     has_barrel = 0.0
     breakdown = []
     missing_usage = 0.0
     for _, r in pitcher_arsenal.iterrows():
-        usage = r.get(usage_col, 0)
-        if pd.isna(usage) or usage <= 0:
+        usage_raw = r.get(usage_col, 0)
+        if pd.isna(usage_raw) or usage_raw <= 0:
             continue
         pitch = r[p_name_col]
         h_val = h_xwoba.get(pitch)
         if h_val is None:
-            missing_usage += usage
+            missing_usage += usage_raw
             continue
+
+        # ADAPTIVE USAGE: shift toward pitches hitter is weaker against
+        # h_val = hitter's xwOBA vs this pitch
+        # If h_val > 0.380 (elite), pitcher avoids → 0.55× usage
+        # If h_val 0.340-0.380 (good), pitcher reduces → 0.75× usage
+        # If h_val 0.280-0.340 (avg), no change → 1.0× usage
+        # If h_val 0.240-0.280 (weak), pitcher uses more → 1.20× usage
+        # If h_val < 0.240 (very weak), pitcher throws lots → 1.35× usage
+        if h_val >= 0.380:
+            adapt_factor = 0.55
+        elif h_val >= 0.340:
+            adapt_factor = 0.75
+        elif h_val >= 0.280:
+            adapt_factor = 1.0
+        elif h_val >= 0.240:
+            adapt_factor = 1.20
+        else:
+            adapt_factor = 1.35
+        usage = usage_raw * adapt_factor
+
         weighted_xwoba += usage * h_val
         total_weight += usage
 
-        # SLG-by-pitch (for HR matching)
         slg_val = h_slg.get(pitch)
         if slg_val is not None:
             weighted_slg += usage * slg_val
             has_slg += usage
 
-        # Barrel by pitch (best HR signal)
         brl_val = h_barrel.get(pitch)
         if brl_val is not None:
             weighted_barrel += usage * brl_val
@@ -143,7 +166,9 @@ def pitch_match_score(
 
         breakdown.append({
             "pitch": pitch,
-            "pitcher_usage": float(usage),
+            "pitcher_usage_raw": float(usage_raw),
+            "pitcher_usage_adjusted": float(usage),
+            "adapt_factor": adapt_factor,
             "hitter_xwoba_vs": float(h_val),
             "hitter_slg_vs": slg_val,
             "hitter_barrel_vs": brl_val,
@@ -166,15 +191,19 @@ def pitch_match_score(
     pitch_hr_score = None
     pitch_hr_basis = None
     if has_barrel > total_weight * 0.5:
-        # >50% of pitcher usage has barrel data for this hitter
         avg_barrel = weighted_barrel / has_barrel
         # Convert to 0-100 (barrel% range ~2-18%)
-        pitch_hr_score = round(max(0, min(100, (avg_barrel - 2.0) / 16.0 * 100)), 1)
+        # CALIBRATION FIX: raised elite ceiling from 18% to 22% so only true
+        # mash-the-pitcher-on-every-pitch matchups hit 100. Schmitt at 14.9%
+        # overall barrel was hitting 100 because his per-pitch barrel vs the
+        # pitcher's secondary pitches was elite. Now Schmitt-tier matchups
+        # land around 70-80, leaving 90+ for genuine "barrel everything" cases.
+        pitch_hr_score = round(max(0, min(100, (avg_barrel - 2.0) / 20.0 * 100)), 1)
         pitch_hr_basis = "barrel"
     elif has_slg > total_weight * 0.5:
         avg_slg = weighted_slg / has_slg
-        # Convert to 0-100 (SLG range ~.300 - .600)
-        pitch_hr_score = round(max(0, min(100, (avg_slg - 0.300) / 0.300 * 100)), 1)
+        # Convert to 0-100 (SLG range ~.300 - .650)
+        pitch_hr_score = round(max(0, min(100, (avg_slg - 0.300) / 0.350 * 100)), 1)
         pitch_hr_basis = "slg"
 
     # Best and worst pitch for this hitter in this matchup (by xwOBA)
@@ -189,7 +218,8 @@ def pitch_match_score(
         "weighted_xwoba": round(avg_xwoba, 3),
         "best_pitch": best["pitch"] if best else None,
         "best_pitch_xwoba": best["hitter_xwoba_vs"] if best else None,
-        "best_pitch_usage": best["pitcher_usage"] if best else None,
+        # use adjusted (post-adapt) usage as the displayed value
+        "best_pitch_usage": best.get("pitcher_usage_adjusted", best.get("pitcher_usage_raw", 0)) if best else None,
         "worst_pitch": worst["pitch"] if worst else None,
         "worst_pitch_xwoba": worst["hitter_xwoba_vs"] if worst else None,
         "breakdown": breakdown,
