@@ -362,6 +362,53 @@ if slate.empty:
     st.warning(f"No MLB games found on {selected_date}. Try another date.")
     st.stop()
 
+# ============================================================================
+# FILTER: hide games that are already in progress or final
+# ============================================================================
+# When user is checking the slate mid-day, the 1pm games are already started
+# and the data is no longer actionable for HR props. Only show upcoming games.
+hide_started = st.sidebar.checkbox(
+    "Hide games already started/final",
+    value=True,
+    help=(
+        "Removes games whose first pitch was before 'now'. "
+        "Uncheck if you want to review every game on the schedule including in-progress ones."
+    ),
+)
+if hide_started and selected_date == datetime.now().date():
+    try:
+        now_utc = pd.Timestamp.utcnow().tz_localize("UTC")
+        if "gameTime" in slate.columns:
+            def _is_upcoming(t):
+                if pd.isna(t):
+                    return True  # if no time, default to showing
+                try:
+                    if hasattr(t, "tzinfo") and t.tzinfo is not None:
+                        return t > now_utc
+                    # Assume UTC if naive
+                    return pd.Timestamp(t).tz_localize("UTC") > now_utc
+                except Exception:
+                    return True
+            mask = slate["gameTime"].apply(_is_upcoming)
+            n_filtered = (~mask).sum()
+            slate = slate[mask].reset_index(drop=True)
+            if n_filtered > 0:
+                st.info(
+                    f"⏱️ Hiding {n_filtered} game{'s' if n_filtered != 1 else ''} "
+                    f"that already started. Uncheck 'Hide games already started/final' "
+                    f"in sidebar to see them."
+                )
+    except Exception as _e:
+        # If filtering fails for any reason, don't block the user — show everything
+        pass
+
+if slate.empty:
+    st.warning(
+        f"All games on {selected_date} have started or finished. "
+        f"Uncheck 'Hide games already started/final' in sidebar to see them."
+    )
+    st.stop()
+
 # Statcast pulls
 hitter_stats = get_hitter_stats() if not slate.empty else pd.DataFrame()
 pitcher_stats = get_pitcher_stats() if not slate.empty else pd.DataFrame()
@@ -2027,6 +2074,17 @@ if all_hitters:
                             top_picks_export.to_excel(writer, sheet_name="Top 10 Picks", index=False)
                     except Exception:
                         pass
+                    # NEW: Green Signal sheets - hitters & pitchers with 🟢 alert
+                    if combined_all is not None and "alert" in combined_all.columns:
+                        green_hitters = combined_all[combined_all["alert"] == "🟢"].sort_values(
+                            "hr_game_pct", ascending=False, na_position="last")
+                        if not green_hitters.empty:
+                            green_hitters.to_excel(writer, sheet_name="Green Hitters", index=False)
+                    if p_slate is not None and "alert" in p_slate.columns:
+                        green_pitchers = p_slate[p_slate["alert"] == "🟢"].sort_values(
+                            "test_score", ascending=False, na_position="last")
+                        if not green_pitchers.empty:
+                            green_pitchers.to_excel(writer, sheet_name="Green Pitchers", index=False)
                     # Ensure at least one sheet exists (openpyxl errors on empty)
                     if sheets_written == 0:
                         pd.DataFrame({"empty": ["no data"]}).to_excel(
