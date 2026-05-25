@@ -1313,27 +1313,56 @@ for _, game in slate.iterrows():
         except Exception:
             pass
 
-    # HR probability per hitter
+    # HR probability per hitter - now with hand-aware park + pull-wind multipliers
+    from park_factors import get_park_hand_factor, wind_pull_side_multiplier
+
+    venue_name = game.get("venue", "")
+    wind_mph = (weather or {}).get("wind_mph")
+    wind_dir = (weather or {}).get("wind_dir_deg")
+    pull_summaries = {}  # for displaying in game header
+
     for matchup_df, opp_p_row in [(away_matchup, home_p_row), (home_matchup, away_p_row)]:
-        if matchup_df.empty:
+        if matchup_df is None or matchup_df.empty:
             continue
         hr_pa, hr_game, verdicts, signals = [], [], [], []
+        pull_mults_col = []
         for _, hr in matchup_df.iterrows():
             row_dict = hr.to_dict()
             pa = safe_float(row_dict.get("pa"))
             sample = int(pa) if pa is not None else None
-            # hr_prob_per_pa signatures vary across deployed versions of props.py.
-            # Try the modern kwarg form first, fall back to positional, fall back to no env factors.
+            bats = row_dict.get("bats", "R") or "R"
+
+            # Hand-aware park factor (replaces the generic park_mult for this hitter)
+            try:
+                hand_park = get_park_hand_factor(venue_name, bats)
+            except Exception:
+                hand_park = park_mult
+
+            # Pull-side wind multiplier
+            try:
+                pull_mult, pull_summary = wind_pull_side_multiplier(
+                    venue_name, bats, wind_mph, wind_dir
+                )
+                if pull_summary:
+                    pull_summaries[pull_summary] = pull_summaries.get(pull_summary, 0) + 1
+            except Exception:
+                pull_mult = 1.0
+
+            pull_mults_col.append(round(pull_mult, 3))
+
+            # Combined park factor for this specific hitter: hand-aware × pull-wind
+            hitter_park_mult = hand_park * pull_mult
+
             try:
                 p_pa = hr_prob_per_pa(
                     row_dict, opp_p_row,
-                    park_factor=park_mult, weather_mult=wx_mult,
+                    park_factor=hitter_park_mult, weather_mult=wx_mult,
                 )
             except TypeError:
                 try:
                     p_pa = hr_prob_per_pa(
                         row_dict, opp_p_row,
-                        park_hr_factor=park_mult, weather_hr_factor=wx_mult,
+                        park_hr_factor=hitter_park_mult, weather_hr_factor=wx_mult,
                     )
                 except TypeError:
                     try:
@@ -1355,6 +1384,7 @@ for _, game in slate.iterrows():
         matchup_df["hr_game_pct"] = hr_game
         matchup_df["verdict"] = verdicts
         matchup_df["alert"] = signals
+        matchup_df["pull_wind_mult"] = pull_mults_col
 
     # Sleeper score - uses sleepers.py functions correctly
     try:
@@ -1440,6 +1470,7 @@ for _, game in slate.iterrows():
         "away_p_row": away_p_row, "home_p_row": home_p_row,
         "away_k_proj": away_k_proj, "home_k_proj": home_k_proj,
         "away_gs": away_gs, "home_gs": home_gs,
+        "pull_wind_summary": list(pull_summaries.keys()) if 'pull_summaries' in dir() else [],
     }
     matchup_tables[game["gamePk"]] = (away_matchup, home_matchup)
 
@@ -1958,10 +1989,11 @@ for _, game in slate.iterrows():
         try:
             # Convert UTC to US Eastern (most common for MLB schedules)
             local_dt = game_dt.tz_convert("US/Eastern") if game_dt.tzinfo else game_dt
-            time_str = local_dt.strftime("%-I:%M %p ET")
+            # 12-hour format, strip leading zero on hour (Windows-safe)
+            time_str = local_dt.strftime("%I:%M %p ET").lstrip("0")
         except Exception:
             try:
-                time_str = game_dt.strftime("%H:%M")
+                time_str = game_dt.strftime("%I:%M %p").lstrip("0")
             except Exception:
                 time_str = ""
 
@@ -1973,6 +2005,12 @@ for _, game in slate.iterrows():
             f"**{game['away_pitcher']}** vs **{game['home_pitcher']}**"
         )
     st.markdown(" · ".join(header_bits))
+
+    # Pull-wind interaction summary, if applicable
+    pull_summaries = ctx.get("pull_wind_summary", [])
+    if pull_summaries:
+        pull_msg = " · ".join(pull_summaries)
+        st.caption(f"🎯 **Pull-side wind:** {pull_msg}")
 
     info_cols = st.columns(4)
     with info_cols[0]:
