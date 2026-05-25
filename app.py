@@ -1626,7 +1626,15 @@ st.divider()
 # ============================================================================
 unconfirmed_games = []
 unconfirmed_with_time = []  # tuples of (label, hours_until_first_pitch)
-now_et = pd.Timestamp.now(tz="US/Eastern")
+# Try US/Eastern, fall back to UTC if zoneinfo can't find it (Python 3.14 + missing tzdata)
+try:
+    now_et = pd.Timestamp.now(tz="US/Eastern")
+except Exception:
+    try:
+        now_et = pd.Timestamp.now(tz="America/New_York")
+    except Exception:
+        # Last resort: UTC. Time-to-game calc will be off by ET offset but app won't crash.
+        now_et = pd.Timestamp.now(tz="UTC")
 for gpk, ctx in game_context_map.items():
     g_rows = slate[slate["gamePk"] == gpk]
     if g_rows.empty:
