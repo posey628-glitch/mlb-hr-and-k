@@ -319,6 +319,39 @@ def pitcher_signal_emoji(test_score, sample_size=None, pa_threshold=80):
     return "🔴"
 
 
+def pitcher_grade(test_score, hr_suppress=None, sample_size=None, pa_threshold=80):
+    """Letter grade + label for pitchers — matches BetGravy style.
+
+    Combines test_score (K-focused) and hr_suppress (HR-friendly avoidance)
+    to produce a pitcher matchup grade from the batter's perspective:
+
+      EXPLOITABLE+ : test ≤ 30 OR hr_suppress ≤ 30  (target this pitcher)
+      EXPLOITABLE  : test ≤ 45 OR hr_suppress ≤ 45
+      MIXED        : test 45-65, hr_suppress 45-65 (neutral)
+      TOUGH        : test ≥ 65 AND hr_suppress ≥ 65
+      ELITE        : test ≥ 80 AND hr_suppress ≥ 75 (avoid HR plays here)
+    """
+    if test_score is None or pd.isna(test_score):
+        return "—"
+    if sample_size is not None and not pd.isna(sample_size) and sample_size < pa_threshold:
+        return "—"
+    hr_s = hr_suppress if (hr_suppress is not None and not pd.isna(hr_suppress)) else test_score
+    # Combined indicator - higher = harder to score against
+    combined_min = min(test_score, hr_s)
+    combined_max = max(test_score, hr_s)
+    avg = (test_score + hr_s) / 2
+
+    if avg >= 80 and combined_min >= 70:
+        return "ELITE"
+    if avg >= 65 and combined_min >= 55:
+        return "TOUGH"
+    if combined_max <= 30 or combined_min <= 25:
+        return "EXPLOIT+"
+    if combined_max <= 45 or combined_min <= 35:
+        return "EXPLOIT"
+    return "MIXED"
+
+
 
 # ============================================================================
 # SIDEBAR
@@ -449,10 +482,21 @@ pitcher_stats = get_pitcher_stats() if not slate.empty else pd.DataFrame()
 pitcher_arsenal_all = get_pitcher_arsenal() if not slate.empty else pd.DataFrame()
 
 # Pitcher handedness splits (vs LHB / vs RHB)
-# Merge into pitcher_stats so the slate includes them.
+# Use MLB Stats API statSplits which IS documented and works on Streamlit Cloud.
+# We only fetch splits for pitchers in TODAY'S slate (typically 26-30 pitchers)
+# instead of every pitcher in the league.
 try:
     from data_fetcher import get_pitcher_handedness_splits
-    pitcher_splits = get_pitcher_handedness_splits() if not slate.empty else pd.DataFrame()
+    slate_pitcher_ids = []
+    for col in ["away_pitcher_id", "home_pitcher_id"]:
+        if col in slate.columns:
+            for pid in slate[col].dropna().unique():
+                try:
+                    slate_pitcher_ids.append(int(pid))
+                except (TypeError, ValueError):
+                    continue
+    slate_pitcher_ids = tuple(set(slate_pitcher_ids))
+    pitcher_splits = get_pitcher_handedness_splits(pitcher_ids=slate_pitcher_ids) if slate_pitcher_ids else pd.DataFrame()
     if (pitcher_splits is not None and not pitcher_splits.empty
             and "player_id" in pitcher_stats.columns):
         pitcher_stats["player_id"] = pd.to_numeric(
@@ -469,7 +513,7 @@ try:
                 on="player_id", how="left"
             )
 except Exception as _e:
-    # Don't block app if Savant splits fetch fails
+    # Don't block app if MLB Stats API splits fetch fails
     pass
 
 # Traditional stats
@@ -1044,6 +1088,14 @@ if not p_slate.empty:
                                           INSUFFICIENT_PA_THRESHOLD),
         axis=1,
     )
+    # Add letter-style matchup grade (EXPLOITABLE/MIXED/TOUGH/ELITE)
+    p_slate["grade"] = p_slate.apply(
+        lambda r: pitcher_grade(
+            r.get("test_score"), r.get("hr_suppress"), r.get("pa"),
+            INSUFFICIENT_PA_THRESHOLD,
+        ),
+        axis=1,
+    )
 
     # Add a visible warning flag column combining role + sample_noise
     if not p_slate.empty:
@@ -1055,15 +1107,17 @@ if not p_slate.empty:
         p_slate["warn"] = p_slate.apply(_warn_flag, axis=1)
 
     show_cols = [c for c in [
-        "alert", "role", "warn", "pitcher_name", "team", "home_away", "opp", "throws",
+        "alert", "grade", "role", "warn", "pitcher_name", "team", "home_away", "opp", "throws",
         "test_score", "kHR", "hr_suppress", "proj_k", "form_arrow",
         "era", "whip", "k9", "bb9", "hr9",
         "ip", "games_started", "games_played", "ip_per_outing",
         "k_pct", "whiff_pct",
         "xwoba_allowed", "barrel_allowed",
-        # NEW: handedness splits
-        "vs_lhb_xwoba", "vs_lhb_hr_per_pa", "vs_lhb_k_percent",
-        "vs_rhb_xwoba", "vs_rhb_hr_per_pa", "vs_rhb_k_percent",
+        # NEW: handedness splits (MLB Stats API fields)
+        "vs_lhb_pa", "vs_lhb_avg", "vs_lhb_obp", "vs_lhb_slg",
+        "vs_lhb_hr_per_pa", "vs_lhb_k_percent",
+        "vs_rhb_pa", "vs_rhb_avg", "vs_rhb_obp", "vs_rhb_slg",
+        "vs_rhb_hr_per_pa", "vs_rhb_k_percent",
         "opp_k_pct", "opp_hr_per_pa",
         "recent_era", "recent_k9", "days_rest", "avg_recent_pitches",
         "reliability",
@@ -1074,6 +1128,18 @@ if not p_slate.empty:
 
     col_config = {
         "alert": st.column_config.TextColumn("Signal", width="small"),
+        "grade": st.column_config.TextColumn(
+            "Matchup", width="small",
+            help=(
+                "Matchup grade from the BATTER's perspective:\n"
+                "EXPLOIT+ = target these pitchers (worst test/suppress scores)\n"
+                "EXPLOIT  = solid HR target, somewhat exploitable\n"
+                "MIXED    = neutral, no edge either way\n"
+                "TOUGH    = avoid HR plays, pitcher has the edge\n"
+                "ELITE    = strong avoid (top suppress + top K stuff)\n"
+                "—        = insufficient sample"
+            ),
+        ),
         "role": st.column_config.TextColumn(
             "Role", width="small",
             help="✓ established starter · ⚠️ LOW IP · 🔄 SWING · 🚨 RELIEVER (test score scaled down)",
@@ -1132,41 +1198,43 @@ if not p_slate.empty:
         "whiff_pct": st.column_config.NumberColumn("Whiff%", format="%.1f"),
         "xwoba_allowed": st.column_config.NumberColumn("xwOBA", format="%.3f"),
         "barrel_allowed": st.column_config.NumberColumn("Brl%", format="%.1f"),
-        # Handedness splits
-        "vs_lhb_xwoba": st.column_config.NumberColumn(
-            "vs LHB xwOBA", format="%.3f",
-            help=(
-                "xwOBA allowed to left-handed batters this season.\n"
-                "<.280 = elite vs LHB, .280-.320 = avg, >.350 = exploitable.\n"
-                "Critical for predicting HRs when an LHB is in the box."
-            ),
+        # Handedness splits (from MLB Stats API statSplits endpoint)
+        "vs_lhb_pa": st.column_config.NumberColumn(
+            "vs L PA", format="%d",
+            help="Plate appearances vs LHB this season. Larger = more reliable split.",
+        ),
+        "vs_lhb_avg": st.column_config.NumberColumn(
+            "vs L AVG", format="%.3f",
+            help="Batting avg allowed to LHB. <.220 = elite, .280+ = LHB hit this pitcher.",
+        ),
+        "vs_lhb_obp": st.column_config.NumberColumn("vs L OBP", format="%.3f"),
+        "vs_lhb_slg": st.column_config.NumberColumn(
+            "vs L SLG", format="%.3f",
+            help="Slugging allowed to LHB. .500+ = LHB crush this pitcher.",
         ),
         "vs_lhb_hr_per_pa": st.column_config.NumberColumn(
-            "vs LHB HR%", format="%.2f%%",
+            "vs L HR%", format="%.2f%%",
             help=(
                 "HR rate per PA allowed to LHB. League avg ~2.8%.\n"
-                "<2% = strong, >4% = LHB crush this pitcher.\n"
-                "When LHB faces this pitcher, the model uses THIS rate not overall."
+                "<2% = strong, >4% = LHB hammer this pitcher.\n"
+                "Model uses THIS rate (not overall HR/9) when LHB at bat."
             ),
         ),
         "vs_lhb_k_percent": st.column_config.NumberColumn(
-            "vs LHB K%", format="%.1f%%",
-            help="Strikeout rate vs LHB. >25% = strong, <18% = pitcher struggles vs LHB.",
+            "vs L K%", format="%.1f%%",
+            help="K rate vs LHB. >25% strong; <18% pitcher struggles vs LHB.",
         ),
-        "vs_rhb_xwoba": st.column_config.NumberColumn(
-            "vs RHB xwOBA", format="%.3f",
-            help=(
-                "xwOBA allowed to right-handed batters this season.\n"
-                "Same scale as vs LHB. Used in HR projection when RHB at plate."
-            ),
-        ),
+        "vs_rhb_pa": st.column_config.NumberColumn("vs R PA", format="%d"),
+        "vs_rhb_avg": st.column_config.NumberColumn("vs R AVG", format="%.3f"),
+        "vs_rhb_obp": st.column_config.NumberColumn("vs R OBP", format="%.3f"),
+        "vs_rhb_slg": st.column_config.NumberColumn("vs R SLG", format="%.3f"),
         "vs_rhb_hr_per_pa": st.column_config.NumberColumn(
-            "vs RHB HR%", format="%.2f%%",
+            "vs R HR%", format="%.2f%%",
             help="HR rate per PA allowed to RHB. League avg ~2.8%.",
         ),
         "vs_rhb_k_percent": st.column_config.NumberColumn(
-            "vs RHB K%", format="%.1f%%",
-            help="Strikeout rate vs RHB.",
+            "vs R K%", format="%.1f%%",
+            help="K rate vs RHB.",
         ),
         "opp_k_pct": st.column_config.NumberColumn(
             "Opp K%", format="%.1f%%",
