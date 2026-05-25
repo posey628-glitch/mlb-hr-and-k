@@ -83,17 +83,18 @@ def hr_prob_per_pa(
         * ttop_mult
         * defense_factor
     )
-    # Use a SOFT squash instead of hard clip so two elite hitters in great
-    # matchups don't both land at exactly the same cap value.
-    # Below 5% per PA: pass through linearly.
-    # Above 5%: asymptotically approach 8% via tanh-like squash.
-    # Result: elite hitters in great matchups span 5.5-7.5% (not all clipped).
-    if prob <= 0.05:
+    # Use a SOFT squash that asymptotes at a REALISTIC ceiling.
+    # Reference: Aaron Judge's actual rate of "at-least-1-HR in a game" peaked
+    # at ~25% in his 62-HR 2022 season. Even in his best matchups he rarely
+    # hit 30% game-level HR probability.
+    # Per-PA asymptote = 6.5%, which gives full-game max = 1 - 0.935^4.2 = 24.6%.
+    # Soto in a great matchup will land around 22-24% (was 28-29% before).
+    if prob <= 0.04:
         squashed = prob
     else:
-        excess = prob - 0.05
-        # tanh squash: scales excess so it asymptotes at 0.03 (so max = 0.08)
-        squashed = 0.05 + 0.03 * np.tanh(excess / 0.03)
+        excess = prob - 0.04
+        # tanh squash: asymptotes at 0.025 (so max = 0.065 = 6.5% per PA)
+        squashed = 0.04 + 0.025 * np.tanh(excess / 0.025)
     return float(max(0.001, squashed))
 
 
