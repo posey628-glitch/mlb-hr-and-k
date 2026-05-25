@@ -1725,6 +1725,17 @@ for _, game in slate.iterrows():
             #   - The whole game's lineup is confirmed
             # Otherwise default to 4.2 (league average) for everyone, because
             # roster-fill positions are alphabetical and not predictive.
+            #
+            # NEW (May 2026): Home/Away PA adjustment.
+            # Away teams average ~4.31 PA per game; home teams ~4.21 PA per game.
+            # The reason: home team doesn't bat in the bottom of the 9th when
+            # they're winning (~50% of games). Documented historically.
+            # The effect: away hitters get ~2% more HR chances per game.
+            is_away_team = (matchup_df is away_matchup)
+            # Home/away offset: away gets +0.05 PA, home gets -0.05 PA
+            # (centered around 4.2 league avg)
+            ha_offset = 0.05 if is_away_team else -0.05
+
             lp = row_dict.get("lineup_pos")
             is_fill = row_dict.get("is_roster_fill", False)
             game_confirmed = (
@@ -1734,12 +1745,13 @@ for _, game in slate.iterrows():
                     and not is_fill and game_confirmed):
                 try:
                     lp_int = int(lp)
-                    expected_pa = max(3.6, 4.7 - (lp_int - 1) * 0.1)
+                    # Base PA by lineup position; add home/away offset
+                    expected_pa = max(3.6, 4.7 - (lp_int - 1) * 0.1) + ha_offset
                 except (ValueError, TypeError):
-                    expected_pa = 4.2
+                    expected_pa = 4.2 + ha_offset
             else:
-                # Default to league avg - don't pretend roster order = lineup order
-                expected_pa = 4.2
+                # Default to league avg + home/away offset
+                expected_pa = 4.2 + ha_offset
 
             p_game = hr_prob_full_game(p_pa, expected_pa=expected_pa) if p_pa is not None else None
             hr_pa.append(round(p_pa * 100, 2) if p_pa is not None else None)
