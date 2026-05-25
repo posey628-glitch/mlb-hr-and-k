@@ -100,8 +100,17 @@ def hr_prob_per_pa(
             split_hr_per_pa = float(split_hr) / 100.0  # convert pct → rate
 
     if split_hr_per_pa is not None:
+        # Sample-size shrinkage on the SPLIT itself.
+        # League avg HR/PA ≈ 2.8%. A pitcher with 30 PA vs LHB has noisy splits;
+        # a pitcher with 200 PA vs LHB has reliable splits.
+        # Bayesian shrink: weight = pa / (pa + 80). 80 is the prior weight in PA.
+        # If pa=200: 200/280 = 71% real, 29% league avg
+        # If pa=40 :  40/120 = 33% real, 67% league avg
+        split_pa = float(pitcher_row.get(f"{col_prefix}pa", 0) or 0)
+        shrink_w = split_pa / (split_pa + 80)
+        split_shrunk = split_hr_per_pa * shrink_w + 0.028 * (1 - shrink_w)
         league_p_hr_per_pa = 0.028  # ~2.8% league HR per PA
-        pitcher_mult = split_hr_per_pa / league_p_hr_per_pa
+        pitcher_mult = split_shrunk / league_p_hr_per_pa
         pitcher_mult = max(0.5, min(2.0, pitcher_mult))
     elif p_hr9 is None or pd.isna(p_hr9) or p_hr9 == 0:
         pitcher_mult = 1.0  # No adjustment if we don't know
