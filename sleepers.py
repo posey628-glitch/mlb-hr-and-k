@@ -167,10 +167,12 @@ def grand_slam_probability(
         df = hr_probability(df, pitcher_row, hr_mult)
     base_hr = df["hr_score"] / 100.0  # normalize 0-1
 
-    # Compound it
+    # Compound it (cap at 100 - it's a 0-100 score, not unbounded)
     df["gs_score"] = (
-        base_hr * df["order_traffic"] * pitcher_traffic * lineup_factor * hr_mult * 100
-    ).round(2)
+        (base_hr * df["order_traffic"] * pitcher_traffic * lineup_factor * hr_mult * 100)
+        .clip(upper=100)
+        .round(2)
+    )
     df["gs_traffic_factor"] = round(pitcher_traffic * lineup_factor, 3)
 
     return df.sort_values("gs_score", ascending=False)
