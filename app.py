@@ -1200,14 +1200,19 @@ for _, game in slate.iterrows():
             vegas_row = {}
 
     def _fill_to_nine(existing_lineup, team_id):
-        """Pad lineup to 9 position players using active roster as fallback."""
+        """Pad lineup to 9 position players using active roster as fallback.
+
+        Returns (lineup, is_confirmed) where is_confirmed = True only if
+        MLB has actually posted the lineup (not roster-padded).
+        """
+        is_confirmed = len(existing_lineup) >= 8  # At least 8 of 9 = real lineup
         if not team_id:
-            return existing_lineup
+            return existing_lineup, is_confirmed
         existing_ids = {p.get("id") for p in existing_lineup if p.get("id")}
         try:
             roster = get_team_roster(int(team_id))
         except Exception:
-            return existing_lineup
+            return existing_lineup, is_confirmed
         # Filter to position players only (skip P, SP, RP, TWP)
         position_players = [
             p for p in roster
@@ -1221,20 +1226,21 @@ for _, game in slate.iterrows():
             existing_lineup.append({
                 "id": p.get("id"), "name": p.get("name"),
                 "position": p.get("position"), "bats": p.get("bats"),
+                "is_roster_fill": True,  # mark these as not real lineup positions
             })
-        return existing_lineup
+        return existing_lineup, is_confirmed
 
     try:
         away_lineup = get_lineup(int(game["gamePk"]), "away")
     except Exception:
         away_lineup = []
-    away_lineup = _fill_to_nine(away_lineup, game.get("away_team_id"))
+    away_lineup, away_confirmed = _fill_to_nine(away_lineup, game.get("away_team_id"))
 
     try:
         home_lineup = get_lineup(int(game["gamePk"]), "home")
     except Exception:
         home_lineup = []
-    home_lineup = _fill_to_nine(home_lineup, game.get("home_team_id"))
+    home_lineup, home_confirmed = _fill_to_nine(home_lineup, game.get("home_team_id"))
 
     # Backfill batting handedness for any hitters missing it
     needs_bats_ids = set()
@@ -1457,16 +1463,25 @@ for _, game in slate.iterrows():
                     except Exception:
                         p_pa = None
             # Lineup-spot-aware expected PA per game
-            # Real MLB averages: 1st=4.6, 2nd=4.5, 3rd=4.4, 4th=4.3, 5th=4.2,
-            # 6th=4.1, 7th=4.0, 8th=3.9, 9th=3.8
+            # ONLY use lineup-position scaling when:
+            #   - This player is in a REAL posted lineup (not roster-fill)
+            #   - The whole game's lineup is confirmed
+            # Otherwise default to 4.2 (league average) for everyone, because
+            # roster-fill positions are alphabetical and not predictive.
             lp = row_dict.get("lineup_pos")
-            if lp is not None and not pd.isna(lp):
+            is_fill = row_dict.get("is_roster_fill", False)
+            game_confirmed = (
+                away_confirmed if matchup_df is away_matchup else home_confirmed
+            )
+            if (lp is not None and not pd.isna(lp)
+                    and not is_fill and game_confirmed):
                 try:
                     lp_int = int(lp)
                     expected_pa = max(3.6, 4.7 - (lp_int - 1) * 0.1)
                 except (ValueError, TypeError):
                     expected_pa = 4.2
             else:
+                # Default to league avg - don't pretend roster order = lineup order
                 expected_pa = 4.2
 
             p_game = hr_prob_full_game(p_pa, expected_pa=expected_pa) if p_pa is not None else None
@@ -1571,6 +1586,8 @@ for _, game in slate.iterrows():
         "away_k_proj": away_k_proj, "home_k_proj": home_k_proj,
         "away_gs": away_gs, "home_gs": home_gs,
         "pull_wind_summary": list(pull_summaries.keys()) if 'pull_summaries' in dir() else [],
+        "away_lineup_confirmed": away_confirmed,
+        "home_lineup_confirmed": home_confirmed,
     }
     matchup_tables[game["gamePk"]] = (away_matchup, home_matchup)
 
@@ -1947,9 +1964,26 @@ st.caption("Real data only. Empty cells = data not available for that player.")
 
 def build_col_config():
     return {
-        "alert": st.column_config.TextColumn("Signal", width="small"),
+        "alert": st.column_config.TextColumn(
+            "Signal", width="small",
+            help=(
+                "🟢 = ELITE (HR Game% ≥ 22%) — top-tier HR play\n"
+                "🟡 = STRONG (14-22%) — solid HR consideration\n"
+                "🟠 = DECENT (7-14%) — middle of pack\n"
+                "🔴 = WEAK (< 7%) — avoid for HR props\n"
+                "⚪ = INSUFFICIENT SAMPLE — player has too few PA (< threshold) "
+                "for a reliable projection. NOT a sleeper indicator."
+            ),
+        ),
         "player_name": st.column_config.TextColumn("Hitter"),
-        "lineup_pos": st.column_config.NumberColumn("#", width="small"),
+        "lineup_pos": st.column_config.NumberColumn(
+            "#", width="small",
+            help=(
+                "Batting order position from MLB's posted lineup. "
+                "If lineup hasn't posted yet, this is alphabetical roster order "
+                "(see warning above each game)."
+            ),
+        ),
         "bats": st.column_config.TextColumn("B", width="small"),
         "position": st.column_config.TextColumn("Pos", width="small"),
         "power_score": st.column_config.NumberColumn(
@@ -2006,8 +2040,23 @@ def build_col_config():
             "HR Score (alias)", format="%.1f",
             help="Same value as HR Score - kept for backward compatibility.",
         ),
-        "matchup": st.column_config.NumberColumn("Matchup", format="%.1f"),
-        "test_score": st.column_config.NumberColumn("Test", format="%.1f"),
+        "matchup": st.column_config.NumberColumn(
+            "Matchup", format="%.1f",
+            help=(
+                "0-100 composite of SEASON stats vs opposing pitcher: "
+                "xwOBA, barrel%, ISO, recent HR + pitcher xwOBA-allowed, "
+                "barrel-allowed, HR/9. Pure quality measure."
+            ),
+        ),
+        "test_score": st.column_config.NumberColumn(
+            "Test", format="%.1f",
+            help=(
+                "0-100 score blending: 70% Matchup (season vs today's pitcher) + "
+                "30% Recent Form (last 15 games), scaled by PA reliability. "
+                "Different from Matchup because it incorporates hot/cold streaks. "
+                "Hot hitter facing same pitcher = higher Test than Matchup."
+            ),
+        ),
         "streak_label": st.column_config.TextColumn(
             "Streak", width="small",
             help="🔥 HR streak / hot · 🌶️ 2+ HR last 5 · ⚡ multi-HR game · ❄️ cold (no HR L10)"
@@ -2229,6 +2278,22 @@ for _, game in slate.iterrows():
         )
     st.markdown(" · ".join(header_bits))
 
+    # Lineup confirmation status - warn if using roster-fill
+    away_conf = ctx.get("away_lineup_confirmed", True)
+    home_conf = ctx.get("home_lineup_confirmed", True)
+    if not away_conf or not home_conf:
+        unconfirmed = []
+        if not away_conf:
+            unconfirmed.append(game.get("away_team_abbr", "AWAY"))
+        if not home_conf:
+            unconfirmed.append(game.get("home_team_abbr", "HOME"))
+        st.warning(
+            f"⚠️ **Lineup not yet posted for {', '.join(unconfirmed)}** — "
+            "showing alphabetical roster fill. Lineup-position-based PA scaling "
+            "is DISABLED for this game; all hitters use league-avg 4.2 PA. "
+            "Refresh after lineups post for accurate per-PA projections."
+        )
+
     # Pull-wind interaction summary, if applicable
     pull_summaries = ctx.get("pull_wind_summary", [])
     if pull_summaries:
@@ -2357,7 +2422,13 @@ for _, game in slate.iterrows():
                 )
 
     if use_bvp or not pitcher_arsenal_all.empty:
-        with st.expander("🔬 Supplemental (BvP + Arsenals)"):
+        with st.expander("🔬 Deep dive: Pitcher arsenal + historical BvP"):
+            st.caption(
+                "**What this shows:** the actual pitches each pitcher throws (usage %, "
+                "velocity, xwOBA allowed) and any career-history batter-vs-pitcher "
+                "stats. Use this to spot if a hitter has seen this pitcher 10+ times "
+                "and crushed them, or to see what pitches the pitcher leans on."
+            )
             sub1, sub2 = st.columns(2)
             with sub1:
                 if use_bvp:
