@@ -498,6 +498,9 @@ def _fetch_pitcher_splits_single(pitcher_id: int, season: int) -> dict:
     """
     Fetch a single pitcher's vs-LHB and vs-RHB splits from MLB Stats API.
     Returns dict with keys like vs_lhb_pa, vs_lhb_hr_per_pa, vs_lhb_avg, etc.
+
+    MLB Stats API field names vary; try several variations and derive
+    HR% / K% from atBats if plateAppearances isn't returned.
     """
     out = {}
     url = (
@@ -519,28 +522,52 @@ def _fetch_pitcher_splits_single(pitcher_id: int, season: int) -> dict:
                 else:
                     continue
                 stat = split.get("stat", {})
-                pa = stat.get("plateAppearances")
-                hr = stat.get("homeRuns")
-                k = stat.get("strikeOuts")
-                bb = stat.get("baseOnBalls")
-                avg = stat.get("avg")
-                obp = stat.get("obp")
-                slg = stat.get("slg")
-                try:
-                    pa = int(pa) if pa is not None else None
-                    hr = int(hr) if hr is not None else None
-                    k = int(k) if k is not None else None
-                    bb = int(bb) if bb is not None else None
-                except (TypeError, ValueError):
-                    pass
-                if pa is not None:
+
+                # Try multiple field names (MLB API has variations)
+                pa = (stat.get("plateAppearances") or stat.get("battersFaced")
+                      or stat.get("totalBattersFaced") or stat.get("pa"))
+                ab = stat.get("atBats") or stat.get("ab")
+                hr = stat.get("homeRuns") or stat.get("hr")
+                k = stat.get("strikeOuts") or stat.get("strikeouts") or stat.get("so")
+                bb = (stat.get("baseOnBalls") or stat.get("walks")
+                      or stat.get("bb") or stat.get("baseonballs"))
+                avg = stat.get("avg") or stat.get("battingAverage")
+                obp = stat.get("obp") or stat.get("onBasePercentage")
+                slg = stat.get("slg") or stat.get("sluggingPercentage")
+                hits = stat.get("hits") or stat.get("h")
+
+                # Type-cast counts safely
+                def _to_int(v):
+                    if v is None: return None
+                    try: return int(v)
+                    except (TypeError, ValueError):
+                        try: return int(float(v))
+                        except (TypeError, ValueError): return None
+
+                pa = _to_int(pa)
+                ab = _to_int(ab)
+                hr = _to_int(hr)
+                k = _to_int(k)
+                bb = _to_int(bb)
+                hits = _to_int(hits)
+
+                # If PA is missing but we have AB and BB, derive: PA ≈ AB + BB
+                # (ignoring HBP/SF which are small).
+                if (pa is None or pa == 0) and ab and bb is not None:
+                    pa = ab + bb
+
+                # If still no PA, fall back to AB for denominator (less precise)
+                denom = pa if (pa and pa > 0) else ab
+
+                if pa and pa > 0:
                     out[f"vs_{label}_pa"] = pa
-                if hr is not None and pa and pa > 0:
-                    out[f"vs_{label}_hr_per_pa"] = round(hr / pa * 100, 3)
-                if k is not None and pa and pa > 0:
-                    out[f"vs_{label}_k_percent"] = round(k / pa * 100, 2)
-                if bb is not None and pa and pa > 0:
-                    out[f"vs_{label}_bb_percent"] = round(bb / pa * 100, 2)
+                if denom and denom > 0:
+                    if hr is not None:
+                        out[f"vs_{label}_hr_per_pa"] = round(hr / denom * 100, 3)
+                    if k is not None:
+                        out[f"vs_{label}_k_percent"] = round(k / denom * 100, 2)
+                    if bb is not None:
+                        out[f"vs_{label}_bb_percent"] = round(bb / denom * 100, 2)
                 if avg:
                     try: out[f"vs_{label}_avg"] = float(avg)
                     except (TypeError, ValueError): pass
