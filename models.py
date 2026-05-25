@@ -1,291 +1,890 @@
 """
-props.py
-=========
-Converts internal model outputs into actual betting-relevant numbers:
+models.py
+==========
+Composite scoring + full column coverage matching the Kasper-style dashboard.
 
-  - HR probability per hitter (0.00 - 1.00) — directly comparable to "+450 HR" odds
-  - Strikeout total projection per pitcher (with std dev range)
-  - Implied odds → break-even threshold logic
-  - "Edge vs market" calculations
+Composites (mirrors screenshots exactly):
+  - Matchup Score
+  - Test Score (matchup discounted for sample size)
+  - Ceiling
+  - Zone Fit
+  - HR Form (with directional arrow ↑ / → / ↓)
+  - kHR (expected K rate vs this matchup)
+  - "Likely HR%" (estimated per-PA HR probability today)
 
-Designed for prop betting on HR and K markets.
-
-CALIBRATION NOTE:
-  League-avg HR/PA in 2024-25 was ~3.0%. A "good" HR prop hitter sits at 5-7%.
-  Aaron Judge in a great matchup ~12-15%. The model targets this range.
-
-  League-avg K/9 is ~8.6. Strong starter K projection 6.5-9.5 over 5-6 IP.
-  Strider/Skubal types project 8.5-11 in a good matchup.
+All scores 0-100, percentile-ranked across the slate.
 """
 
 from __future__ import annotations
 
-import math
 import numpy as np
 import pandas as pd
 
 
-# Base HR rate per PA, MLB-wide. Used as anchor for prob calibration.
-LEAGUE_HR_PER_PA = 0.030
-LEAGUE_K_PER_9 = 8.6
+SCORING_WEIGHTS = {
+    "matchup": {
+        "xwoba": 0.20,
+        "iso": 0.12,
+        "barrel_pct": 0.13,
+        "hard_hit": 0.08,
+        "k_pct_inv": 0.10,
+        "sweet_spot_pct": 0.05,
+        "pitcher_xwoba": 0.15,
+        "pitcher_k_inv": 0.10,
+        "pitcher_barrel_allowed": 0.07,
+    },
+    "hr_form": {
+        "barrel_pct": 0.30,
+        "iso": 0.25,
+        "hard_hit": 0.15,
+        "avg_ev": 0.10,
+        "fb_pct": 0.10,
+        "pulled_brl_pct": 0.10,
+    },
+    "ceiling": {
+        "iso": 0.25,
+        "barrel_pct": 0.25,
+        "pulled_brl_pct": 0.15,
+        "xwoba": 0.15,
+        "hard_hit": 0.10,
+        "pitcher_barrel_allowed": 0.10,
+    },
+}
 
 
-def hr_prob_per_pa(
-    hitter_row: dict,
-    pitcher_row: dict,
-    park_factor: float = 1.0,
-    park_hand_factor: float = 1.0,
+def _safe_pct_rank(s: pd.Series) -> pd.Series:
+    """
+    Percentile rank 0-100. NaNs stay NaN — no fake-50 defaults.
+    Composite scores will then also be NaN for players with missing data,
+    which is honest.
+    """
+    return (s.rank(pct=True) * 100)
+
+
+def _score_from_weights(df: pd.DataFrame, weights: dict, neg: tuple = ()) -> pd.Series:
+    """
+    Weighted sum of percentile-ranked columns.
+    - Rows with NO data in any weighted column → NaN (honest)
+    - Rows with partial data → score scaled by weights of columns that DO have data
+    - Columns in `neg` are inverted (lower raw = higher score)
+    """
+    contributions = []   # list of (weight_series, ranked_series) tuples
+    for col, w in weights.items():
+        if col not in df.columns:
+            continue
+        ranked = _safe_pct_rank(df[col])
+        if col in neg:
+            ranked = 100 - ranked
+        # Per-row weight: 0 where data is missing, w where present
+        weight_present = ranked.notna().astype(float) * w
+        contributions.append((weight_present, ranked.fillna(0)))
+
+    if not contributions:
+        return pd.Series([np.nan] * len(df), index=df.index)
+
+    total_weight = sum(wp for wp, _ in contributions)
+    weighted_sum = sum(wp * r for wp, r in contributions)
+
+    # Where total_weight is 0 (no real data at all), score is NaN
+    score = weighted_sum / total_weight.replace(0, np.nan)
+    return score.round(2)
+
+
+def _form_arrow(recent: float, season: float, threshold: float = 0.10) -> str:
+    """Compare recent rolling form vs season baseline."""
+    if pd.isna(recent) or pd.isna(season) or season == 0:
+        return "→"
+    diff = (recent - season) / abs(season)
+    if diff > threshold:
+        return "↑"
+    if diff < -threshold:
+        return "↓"
+    return "→"
+
+
+def build_matchup_table(
+    lineup: list[dict],
+    pitcher_row: pd.Series | None,
+    hitter_stats: pd.DataFrame,
+    pitcher_stats: pd.DataFrame,
+    recent_form_dict: dict | None = None,  # {player_id: {recent_iso, recent_avg, ...}}
+    pitcher_arsenal_df: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """
+    Build the matchup table with ALL columns from the screenshots.
+    """
+    if not lineup:
+        return pd.DataFrame()
+
+    ids = [p["id"] for p in lineup if p.get("id")]
+    h = hitter_stats[hitter_stats["player_id"].isin(ids)].copy() if "player_id" in hitter_stats.columns else hitter_stats.copy()
+
+    rows = []
+    for i, p in enumerate(lineup, start=1):
+        match = h[h["player_id"] == p["id"]] if "player_id" in h.columns else pd.DataFrame()
+        row = match.iloc[0].to_dict() if len(match) else {"player_id": p.get("id")}
+        row["player_name"] = p["name"]
+        is_fill = bool(p.get("is_roster_fill", False))
+        # Mark whether this row came from a real lineup or roster-padding fallback.
+        # Used downstream so we don't apply lineup-spot PA scaling to fake positions.
+        row["is_roster_fill"] = is_fill
+        # If roster-fill, set lineup_pos to NaN so the column displays "—" rather
+        # than a misleading synthetic position number. Real-lineup rows get 1-9.
+        row["lineup_pos"] = i if not is_fill else np.nan
+        row["position"] = p.get("position", "")
+        row["bats"] = p.get("bats", "")
+        # Inject recent form if provided
+        if recent_form_dict and p.get("id") in recent_form_dict:
+            for k, v in recent_form_dict[p["id"]].items():
+                row[k] = v
+        rows.append(row)
+    df = pd.DataFrame(rows)
+
+    # Pitcher context columns (same value for whole lineup)
+    if pitcher_row is not None and not pitcher_row.empty:
+        df["pitcher_xwoba"] = pitcher_row.get("xwoba", np.nan)
+        df["pitcher_k_pct"] = pitcher_row.get("k_percent", np.nan)
+        df["pitcher_k_inv"] = -1 * df["pitcher_k_pct"]
+        df["pitcher_barrel_allowed"] = pitcher_row.get("barrel_batted_rate", np.nan)
+        df["pitcher_hr"] = pitcher_row.get("home_run", np.nan)
+        df["pitcher_whiff"] = pitcher_row.get("whiff_percent", np.nan)
+    else:
+        df["pitcher_xwoba"] = np.nan
+        df["pitcher_k_inv"] = np.nan
+        df["pitcher_barrel_allowed"] = np.nan
+
+    # Normalize column names to consistent shorts
+    rename = {
+        "barrel_batted_rate": "barrel_pct",
+        "hard_hit_percent": "hard_hit",
+        "k_percent": "k_pct",
+        "bb_percent": "bb_pct",
+        "avg_best_speed": "avg_ev",
+        "exit_velocity_avg": "avg_ev",
+        "launch_speed": "avg_ev",
+        "sweet_spot_percent": "sweet_spot_pct",
+        "flyballs_percent": "fb_pct",
+        "groundballs_percent": "gb_pct",
+        "linedrives_percent": "ld_pct",
+        "whiff_percent": "whiff_pct",
+        # Savant uses several names for launch angle
+        "launch_angle": "la",
+        "launch_angle_avg": "la",
+        "avg_hit_angle": "la",
+        "la_avg": "la",
+        # Savant uses isolated_power for ISO in some exports
+        "isolated_power": "iso",
+        "iso_power": "iso",
+        "pull_air_percent": "pull_air_pct",
+    }
+    df = df.rename(columns=rename)
+
+    # Drop dupes from the rename collision
+    if isinstance(df.columns, pd.Index) and df.columns.duplicated().any():
+        df = df.loc[:, ~df.columns.duplicated()]
+
+    # If ISO is STILL missing, derive from SLG - AVG
+    if "iso" not in df.columns or df["iso"].isna().all():
+        slg_col = next((c for c in ["slg", "xslg"] if c in df.columns), None)
+        avg_col = next((c for c in ["batting_avg", "avg", "ba", "xba"] if c in df.columns), None)
+        if slg_col and avg_col:
+            df["iso"] = (df[slg_col] - df[avg_col]).round(3)
+
+    # If LA is still missing entirely but we have any launch_speed_angle data,
+    # leave it blank (no derivation - it's a real measurement, not an identity)
+
+    df["k_pct_inv"] = -df["k_pct"] if "k_pct" in df.columns else np.nan
+
+    # Composite scores
+    df["matchup"] = _score_from_weights(df, SCORING_WEIGHTS["matchup"])
+    df["hr_form"] = _score_from_weights(df, SCORING_WEIGHTS["hr_form"])
+    df["ceiling"] = _score_from_weights(df, SCORING_WEIGHTS["ceiling"])
+
+    # Test Score = matchup × PA sample weight, BLENDED with recent form so it's
+    # meaningfully different from matchup (which is mostly season stats).
+    # 70% matchup + 30% hr_form weighted by PA reliability.
+    if "pa" in df.columns:
+        pa_factor = (df["pa"] / 150.0).clip(0.5, 1.0)
+        # Blend matchup with hr_form (recent trend) - this is what makes test_score
+        # different from matchup. Players hot recently get boosted vs season-only.
+        if "hr_form" in df.columns:
+            blended = df["matchup"] * 0.70 + df["hr_form"] * 0.30
+            df["test_score"] = (blended * pa_factor).round(2)
+        else:
+            df["test_score"] = (df["matchup"] * pa_factor).round(2)
+    else:
+        df["test_score"] = df["matchup"]
+
+    # Zone Fit: only if real data exists - no fake xwoba defaults
+    if "xwobacon" in df.columns and df["xwobacon"].notna().any():
+        base = _safe_pct_rank(df["xwobacon"]) / 100
+        if "pitcher_xwoba" in df.columns and not df["pitcher_xwoba"].isna().all():
+            p_factor = ((df["pitcher_xwoba"] - 0.250) / 0.150).clip(0, 1)
+            df["zone_fit"] = (base * 0.5 + p_factor * 0.5).round(3)
+        else:
+            df["zone_fit"] = base.round(3)
+    else:
+        df["zone_fit"] = np.nan
+
+    # kHR - real data only. NaN K% → NaN kHR
+    if "k_pct" in df.columns and "pitcher_k_pct" in df.columns:
+        df["k_combined"] = (df["k_pct"] + df["pitcher_k_pct"]) / 2
+        df["kHR"] = (100 - _safe_pct_rank(df["k_combined"])).round(2)
+    else:
+        df["kHR"] = np.nan
+
+    # HR Form arrow
+    if "recent_iso" in df.columns and "iso" in df.columns:
+        df["hr_form_arrow"] = df.apply(
+            lambda r: _form_arrow(r.get("recent_iso"), r.get("iso")), axis=1
+        )
+        df["hr_form_label"] = df.apply(
+            lambda r: f"{r['hr_form']:.0f}% {r['hr_form_arrow']}"
+            if pd.notna(r.get("hr_form")) else "—", axis=1
+        )
+    else:
+        df["hr_form_arrow"] = "→"
+        df["hr_form_label"] = df["hr_form"].apply(
+            lambda x: f"{x:.0f}% →" if pd.notna(x) else "—"
+        )
+
+    # "Likely HR%" - only if real data
+    if "barrel_pct" in df.columns and "fb_pct" in df.columns:
+        df["likely_hr_pct"] = ((df["barrel_pct"] * df["fb_pct"] / 100) * 0.75).round(2)
+    elif "barrel_pct" in df.columns:
+        df["likely_hr_pct"] = (df["barrel_pct"] * 0.35).round(2)
+    else:
+        df["likely_hr_pct"] = np.nan
+
+    # Drop synthetic pitches/bip estimates — they were 100% derived, not real
+
+    # Final column order matching the screenshots
+    display_cols = [
+        "player_id", "player_name", "lineup_pos", "position", "bats",
+        # Composites (matching screenshot order)
+        "matchup", "test_score", "ceiling", "zone_fit",
+        "hr_form", "hr_form_label", "hr_form_arrow", "kHR",
+        # Pitches / BIP / ISO / xwOBA family
+        "pitches", "bip", "iso", "xwoba", "xwobacon",
+        # Quality of contact
+        "barrel_pct", "pulled_brl_pct", "hard_hit", "sweet_spot_pct",
+        "fb_pct", "gb_pct", "ld_pct",
+        "la", "avg_ev",
+        # Plate discipline
+        "k_pct", "bb_pct", "whiff_pct", "swing_percent",
+        # Rates
+        "obp", "slg", "ops", "babip",
+        # Counts
+        "pa", "home_run", "recent_hr", "recent_iso", "recent_avg",
+        "streak_label", "hr_streak_games", "hr_last_5", "games_since_hr",
+        # Today's HR projection
+        "likely_hr_pct",
+    ]
+    keep = [c for c in display_cols if c in df.columns]
+    return df[keep]
+
+
+def add_power_score(
+    matchup_df: pd.DataFrame,
+    park_mult: float = 1.0,
     weather_mult: float = 1.0,
-    pitch_match_score: float | None = None,
-    ttop_mult: float = 1.0,
-    defense_factor: float = 1.0,
-    min_pa: int = 100,
-) -> float | None:
+    pitcher_hr9: float | None = None,
+    pitcher_barrel_allowed: float | None = None,
+) -> pd.DataFrame:
     """
-    Returns P(HR | single PA today) using ONLY real data.
-    Returns None if hitter has insufficient sample (< min_pa) or no real data.
+    Compute Power Score (0-99) for HR likelihood.
+
+    Uses ABSOLUTE scoring based on real MLB thresholds (not per-lineup
+    percentile ranks), so two great hitters on the same team don't both
+    score 99 just because one is slightly better than the other.
+
+    Each component is scored 0-100 based on where it falls between known
+    league min/max thresholds. Then weighted-averaged. Then multiplied by
+    environmental factors (park, weather, opposing pitcher).
     """
-    pa = hitter_row.get("pa") if hitter_row else None
-    hr = hitter_row.get("home_run") if hitter_row else None
+    if matchup_df is None or matchup_df.empty:
+        return matchup_df
+    df = matchup_df.copy()
 
-    # Hard requirement: real PA and HR data
-    if pa is None or pd.isna(pa) or hr is None or pd.isna(hr):
-        return None
-    if pa < min_pa:
-        return None
+    # Absolute thresholds: (column, weight, poor_value, elite_value)
+    # Poor → 0, Elite → 100, linear in between.
+    # "Elite" should be a near-ceiling that even MLB's best rarely hit.
+    # We set elite ABOVE the actual top of the league so even Judge tops out
+    # around 75-80, leaving headroom for env factors.
+    specs = [
+        ("barrel_pct",     0.25, 2.0,  25.0),    # Elite raised: top is ~22%, so 25 = nobody hits 100
+        ("iso",            0.20, 0.080, 0.350),  # Top is ~.330
+        ("hard_hit",       0.10, 25.0, 65.0),    # Top is ~62
+        ("avg_ev",         0.10, 86.0, 98.0),    # Top is ~96.5
+        ("fb_pct",         0.08, 18.0, 50.0),    # 50 is rare
+        ("pulled_brl_pct", 0.07, 0.5,  9.0),     # Top ~8
+        ("slg",            0.07, 0.330, 0.620),  # Top ~.610
+        ("recent_iso",     0.05, 0.080, 0.350),
+    ]
 
-    # Real hitter base rate - BLENDED with barrel-based expected HR/PA
-    # to reduce noise from small/lucky samples.
+    def absolute_score(val, poor, elite):
+        if pd.isna(val):
+            return np.nan
+        if poor == elite:
+            return 50.0
+        scaled = (val - poor) / (elite - poor) * 100
+        return float(max(0, min(100, scaled)))
+
+    # Compute weighted absolute score per row
+    def compute_row(row):
+        total_score = 0.0
+        total_weight = 0.0
+        for col, w, poor, elite in specs:
+            if col not in df.columns:
+                continue
+            val = row.get(col)
+            score = absolute_score(val, poor, elite)
+            if pd.notna(score):
+                total_score += score * w
+                total_weight += w
+        # Launch angle - special "sweet spot" scoring (peak ~ 28°)
+        if "la" in df.columns:
+            la = row.get("la")
+            if pd.notna(la):
+                la_dist = abs(float(la) - 28.0)
+                la_score = max(0, 100 - la_dist * 5)  # 0° away = 100; 20° away = 0
+                total_score += la_score * 0.08
+                total_weight += 0.08
+        if total_weight == 0:
+            return np.nan
+        max_weight = sum(w for _, w, _, _ in specs) + 0.08
+        completeness = total_weight / max_weight
+        # Hard threshold: if we have <60% of components, return NaN
+        # (don't fake a score from sparse data)
+        if completeness < 0.60:
+            return np.nan
+        return total_score / total_weight
+
+    base_power = df.apply(compute_row, axis=1)
+
+    # ---- Environmental multipliers ----
+    # Use SOFTER combination: take average of factors rather than full multiply,
+    # to prevent stacking pile-ups at the 99 cap. A 1.50 cap on full multiply
+    # was still too generous when 4 factors all push the same direction.
+    env_factors = [float(park_mult), float(weather_mult)]
+    if pitcher_hr9 is not None and not pd.isna(pitcher_hr9) and pitcher_hr9 > 0:
+        p_factor = pitcher_hr9 / 1.20
+        env_factors.append(max(0.75, min(1.25, p_factor)))
+    if pitcher_barrel_allowed is not None and not pd.isna(pitcher_barrel_allowed):
+        b_factor = pitcher_barrel_allowed / 7.5
+        env_factors.append(max(0.85, min(1.15, b_factor)))
+
+    # Geometric mean is gentler than full multiplication for stacked factors
+    import math
+    log_sum = sum(math.log(f) for f in env_factors)
+    env_mult = math.exp(log_sum / len(env_factors)) ** 1.5  # Power 1.5 keeps some kick
+    env_mult = max(0.65, min(1.30, env_mult))
+
+    df["power_score"] = (base_power * env_mult).clip(0, 99).round(1)
+    df["env_mult"] = round(env_mult, 3)
+
+    # MATCHUP OPPORTUNITY SCORE - separate from Power Score.
+    # This is a "the situation favors a HR today regardless of who's batting"
+    # score. Captures contact hitters in great matchups (bad pitcher, hot park,
+    # wind out) who would normally fly under the radar.
     #
-    # xHR/PA derivation:
-    #   barrel_pct = % of batted balls that are barrels (Statcast definition)
-    #   BBE_rate ≈ 0.70 (typical PAs that become batted balls, not K/BB)
-    #   HR_per_barrel ≈ 0.55 (Statcast research: barrels become HRs ~55% of time)
-    #   xHR/PA ≈ barrel_pct × 0.70 × 0.55 = barrel_pct × 0.385
-    #
-    # Previously used 0.50 multiplier which overstated; calibrated to real MLB rates.
-    # League-avg ~8% barrel × 0.385 ≈ 3.1% xHR/PA, matching observed ~2.8% league HR/PA.
-    #
-    # Blend weight grows with sample size: 100 PA → 30% observed / 70% xHR;
-    # 300 PA → 60% observed / 40% xHR; 600 PA → 80% observed / 20% xHR.
-    h_observed = hr / pa
-    barrel_pct = hitter_row.get("barrel_pct")
-    if barrel_pct is not None and not pd.isna(barrel_pct) and barrel_pct > 0:
-        h_xhr = float(barrel_pct) / 100 * 0.385
-        # Weight observed by sample size (asymptote at 0.80)
-        observed_weight = min(0.80, 0.30 + (pa - 100) / 500 * 0.50)
-        observed_weight = max(0.30, observed_weight)
-        h_base = h_observed * observed_weight + h_xhr * (1 - observed_weight)
+    # Higher weight on env, lower on raw hitter power. So Horwitz (low barrel)
+    # facing a 6 ERA pitcher in Coors with wind blowing out gets a high
+    # opportunity score even though his power_score is low.
+    if base_power is not None:
+        # Take hitter contribution AT 50% (everyone gets some baseline), env at full
+        opportunity = (50 + (base_power - 50) * 0.40) * env_mult
+        df["matchup_opp"] = opportunity.clip(0, 99).round(1)
     else:
-        # No barrel data - fall back to observed only
-        h_base = h_observed
+        df["matchup_opp"] = np.nan
 
-    # Pitcher HR/9 adjustment - only if pitcher row has real HR/9
-    p_hr9 = pitcher_row.get("hr9") if pitcher_row else None
-    if p_hr9 is None or pd.isna(p_hr9) or p_hr9 == 0:
-        pitcher_mult = 1.0  # No adjustment if we don't know
+    return df
+
+
+def _season_thresholds(slate_date=None):
+    """
+    Return season-aware thresholds. Earlier in season = lower bars.
+    Returns dict with: full_ip (IP for full reliability), reliever_ip (below = likely reliever),
+    full_gs (GS for full starter), swing_gs (below = swing).
+    """
+    import datetime
+    if slate_date is None:
+        slate_date = datetime.date.today()
+    try:
+        month = slate_date.month
+    except AttributeError:
+        # If slate_date is a string, try to parse
+        try:
+            slate_date = datetime.datetime.strptime(str(slate_date)[:10], "%Y-%m-%d").date()
+            month = slate_date.month
+        except Exception:
+            month = 6  # default mid-season
+    # Map month to expected starter IP at that point in season
+    # Season runs roughly Apr-Oct (months 3-10)
+    if month <= 4:        # April: ~5 starts in
+        return {"full_ip": 15, "min_ip": 5, "full_gs": 3, "min_gs": 1}
+    elif month == 5:      # May: ~9 starts in
+        return {"full_ip": 30, "min_ip": 10, "full_gs": 5, "min_gs": 2}
+    elif month == 6:      # June: ~13 starts in
+        return {"full_ip": 50, "min_ip": 15, "full_gs": 8, "min_gs": 3}
+    elif month == 7:      # July: ~17 starts in
+        return {"full_ip": 70, "min_ip": 20, "full_gs": 10, "min_gs": 4}
+    elif month == 8:      # August: ~22 starts in
+        return {"full_ip": 90, "min_ip": 25, "full_gs": 14, "min_gs": 5}
+    elif month == 9:      # September: ~28 starts in
+        return {"full_ip": 110, "min_ip": 30, "full_gs": 18, "min_gs": 6}
+    elif month == 10:     # October
+        return {"full_ip": 130, "min_ip": 30, "full_gs": 20, "min_gs": 6}
+    else:                 # Offseason / spring
+        return {"full_ip": 30, "min_ip": 10, "full_gs": 5, "min_gs": 2}
+
+
+def build_pitcher_slate(
+    slate: pd.DataFrame,
+    pitcher_stats: pd.DataFrame,
+    pitcher_recent: dict | None = None,
+    slate_date=None,
+    team_hit_map: dict | None = None,
+) -> pd.DataFrame:
+    """One row per starting pitcher with composite scores + recent form."""
+    thresholds = _season_thresholds(slate_date)
+    pitchers = []
+    for _, g in slate.iterrows():
+        for side in ("away", "home"):
+            pid = g[f"{side}_pitcher_id"]
+            if pid is None or pd.isna(pid):
+                continue
+            row = pitcher_stats[pitcher_stats["player_id"] == pid]
+            opp_abbr = g[f"{'home' if side == 'away' else 'away'}_team_abbr"]
+            base = {
+                "pitcher_id": pid,
+                "pitcher_name": g[f"{side}_pitcher"],
+                "team": g[f"{side}_team_abbr"],
+                "opp": opp_abbr,
+                "home_away": "@" if side == "away" else "vs",
+                "game_pk": g["gamePk"],
+            }
+            # Opposing team aggregates - lookup by abbr first, then by team_id
+            opp_team_id = g.get(f"{'home' if side == 'away' else 'away'}_team_id")
+            opp_agg = (team_hit_map or {}).get(opp_abbr) or {}
+            if not opp_agg and opp_team_id is not None and not pd.isna(opp_team_id):
+                try:
+                    opp_agg = (team_hit_map or {}).get(int(opp_team_id)) or {}
+                except (ValueError, TypeError):
+                    opp_agg = {}
+            base["opp_k_pct"] = opp_agg.get("k_pct")
+            base["opp_hr_per_pa"] = opp_agg.get("hr_per_pa")
+            base["opp_iso"] = opp_agg.get("iso")
+
+            # Park HR factor at this venue (for hr_suppress adjustment)
+            try:
+                from park_factors import get_park
+                venue = g.get("venue", "")
+                park_info = get_park(venue) if venue else {}
+                hr_factor = park_info.get("hr_factor", 100)
+                base["park_hr_factor"] = round(float(hr_factor) / 100, 3)
+            except Exception:
+                base["park_hr_factor"] = 1.0
+            if len(row) > 0:
+                r = row.iloc[0].to_dict()
+                base.update({
+                    "throws": r.get("p_throws"),
+                    "pa": r.get("pa"),
+                    "xwoba_allowed": r.get("xwoba"),
+                    "k_pct": r.get("k_percent"),
+                    "bb_pct": r.get("bb_percent"),
+                    "barrel_allowed": r.get("barrel_batted_rate"),
+                    "hard_hit_allowed": r.get("hard_hit_percent"),
+                    "whiff_pct": r.get("whiff_percent"),
+                    "csw_pct": r.get("csw_percent"),
+                    "zone_pct": r.get("zone_percent"),
+                    "fb_allowed": r.get("flyballs_percent"),
+                    "gb_allowed": r.get("groundballs_percent"),
+                    "hr_allowed": r.get("home_run"),
+                    "era": r.get("era"),
+                    "whip": r.get("whip"),
+                    "hr9": r.get("hr9"),
+                    "k9": r.get("k9"),
+                    "bb9": r.get("bb9"),
+                    "ip": r.get("ip"),
+                    "games_started": r.get("games_started"),
+                    "games_played": r.get("games_played"),
+                    "is_rookie": bool(r.get("is_rookie", False)),
+                    "debut_year": r.get("debut_year"),
+                })
+            if pitcher_recent and pid in pitcher_recent:
+                base.update(pitcher_recent[pid])
+            pitchers.append(base)
+
+    df = pd.DataFrame(pitchers)
+    if df.empty:
+        return df
+
+    # ------------------------------------------------------------------
+    # IP fallback - if MLB Stats API failed, estimate from Statcast PA
+    # Statcast 'pa' is plate appearances faced by the pitcher
+    # ~4.3 PA per inning is league average
+    # ------------------------------------------------------------------
+    have_real_ip = "ip" in df.columns and df["ip"].notna().any()
+    if not have_real_ip and "pa" in df.columns and df["pa"].notna().any():
+        df["ip"] = (df["pa"] / 4.3).round(1)
+        df["ip_estimated"] = True
     else:
-        p_hr_per_pa = (p_hr9 / 9) / 4.3  # ~4.3 PA per inning
-        league_p_hr_per_pa = (1.20 / 9) / 4.3  # league HR/9 ~1.20
-        pitcher_mult = p_hr_per_pa / league_p_hr_per_pa
-        pitcher_mult = max(0.5, min(2.0, pitcher_mult))
+        df["ip_estimated"] = False
+        if "ip" not in df.columns:
+            df["ip"] = np.nan
 
-    # Pitch match adjustment - only if we have a real score
-    # Was: 0.6-1.6 range, too generous (gave non-power hitters huge boosts)
-    # Now: 0.75-1.30 range — meaningful but doesn't substitute for raw power
-    pm_mult = 1.0
-    if pitch_match_score is not None and not pd.isna(pitch_match_score):
-        # 50 = neutral. Each point above adds 0.6% boost; each below subtracts.
-        pm_mult = 1.0 + (pitch_match_score - 50) * 0.006
-        pm_mult = max(0.75, min(1.30, pm_mult))
-
-    # Compute hitter-side context multiplier (everything BUT pitcher_mult and h_base).
-    # Cap it to prevent inflation when multiple small boosts compound.
-    # Example bug fix: 1.17 wind × 1.21 park × 1.30 pitch_match = 1.84x
-    # compounded multiplier was pushing modest hitters to elite tier.
-    # New cap: 1.45× total context (still allows great matchups to boost ~45%).
-    ctx_mult_raw = (
-        park_factor
-        * park_hand_factor
-        * weather_mult
-        * pm_mult
-        * ttop_mult
-        * defense_factor
-    )
-    ctx_mult = min(1.35, max(0.65, ctx_mult_raw))
-
-    prob = (
-        h_base
-        * pitcher_mult
-        * ctx_mult
-    )
-    # Use a SOFT squash that asymptotes at a REALISTIC ceiling.
-    # Reference: Aaron Judge's actual rate of "at-least-1-HR in a game" peaked
-    # at ~25% in his 62-HR 2022 season.
-    #
-    # NEW BEHAVIOR (May 2026 update): Loosened the squash so elite hitters
-    # show meaningful differentiation. Previously all 13 elites clustered
-    # at 6.0-6.2% per PA (visible as identical hr_game_pct in top picks).
-    # Now:
-    #   - Below 4% per PA: linear pass-through (no squash)
-    #   - 4-5%: gentle squash (some compression)
-    #   - 5-7%: stronger squash (most differentiation happens here)
-    #   - Asymptote: 7.0% per PA (max game = 1 - 0.93^4.2 = 26.4%)
-    # This gives Judge (~20% barrel + great matchup) clear separation from
-    # Schwarber (~26% barrel + great matchup).
-    if prob <= 0.04:
-        squashed = prob
+    # ------------------------------------------------------------------
+    # K/9 fallback - derive from k_pct if missing
+    # Math: K/9 = (K%/100) × (PA per IP) × 9 = K_pct × 4.3/100 × 9
+    # ------------------------------------------------------------------
+    have_real_k9 = "k9" in df.columns and df["k9"].notna().any()
+    if not have_real_k9 and "k_pct" in df.columns and df["k_pct"].notna().any():
+        df["k9"] = (df["k_pct"] * 4.3 * 9 / 100).round(2)
+        df["k9_estimated"] = True
     else:
-        excess = prob - 0.04
-        # tanh squash: asymptotes at 0.030 (so max = 0.07 = 7.0% per PA)
-        # Scale parameter widened to 0.040 so differentiation stays wider
-        squashed = 0.04 + 0.030 * np.tanh(excess / 0.040)
-    return float(max(0.001, squashed))
+        df["k9_estimated"] = False
+        if "k9" not in df.columns:
+            df["k9"] = np.nan
 
+    # ------------------------------------------------------------------
+    # IP PER OUTING - better signal than IP/GS since it uses games_played
+    # ------------------------------------------------------------------
+    def _ip_per_outing(row):
+        ip = row.get("ip")
+        gp = row.get("games_played")
+        gs = row.get("games_started")
+        if ip is None or pd.isna(ip):
+            return None
+        denom = gp if (gp is not None and not pd.isna(gp) and gp > 0) else gs
+        if denom is None or pd.isna(denom) or denom == 0:
+            return None
+        return round(float(ip) / float(denom), 2)
 
-def hr_prob_full_game(prob_per_pa: float | None, expected_pa: float = 4.2) -> float | None:
-    """
-    P(at least 1 HR in the game) = 1 - (1 - p_pa) ^ PA.
-    Returns None if input is None (no real projection possible).
-    """
-    if prob_per_pa is None or pd.isna(prob_per_pa):
-        return None
-    return float(1 - (1 - prob_per_pa) ** expected_pa)
+    df["ip_per_outing"] = df.apply(_ip_per_outing, axis=1)
 
+    # ------------------------------------------------------------------
+    # SAMPLE NOISE FLAG - catches stat inconsistencies (high ERA + low WHIP, etc)
+    # ------------------------------------------------------------------
+    def _sample_noise(row):
+        ip = row.get("ip")
+        era = row.get("era")
+        whip = row.get("whip")
+        if (ip is not None and not pd.isna(ip) and ip < 20
+                and era is not None and not pd.isna(era) and era > 5.0
+                and whip is not None and not pd.isna(whip) and whip < 1.1):
+            return True
+        barrel = row.get("barrel_allowed")
+        if (ip is not None and not pd.isna(ip) and ip < 10
+                and barrel is not None and not pd.isna(barrel) and barrel == 0):
+            return True
+        return False
 
-def k_total_projection(
-    pitcher_row: dict,
-    opp_lineup_k_pct: float | None,
-    ump_k_factor: float = 1.0,
-    catcher_framing_factor: float = 1.0,
-    park_k_factor: float = 1.0,
-    expected_ip: float = 5.5,
-    recent_k9_weight: float = 0.35,
-) -> dict:
-    """
-    Project pitcher K total using only real data.
-    Returns dict with mean=None if insufficient data.
-    """
-    if not pitcher_row:
-        return {"mean": None}
+    df["sample_noise"] = df.apply(_sample_noise, axis=1)
 
-    # Real season K/9 required
-    season_k9 = pitcher_row.get("k9")
-    if season_k9 is None or pd.isna(season_k9) or season_k9 == 0:
-        return {"mean": None}
+    # ------------------------------------------------------------------
+    # RELIABILITY FACTOR - season-aware thresholds + graceful no-data fallback
+    # ------------------------------------------------------------------
+    full_ip = thresholds["full_ip"]
+    min_ip = thresholds["min_ip"]
+    full_gs = thresholds["full_gs"]
+    min_gs = thresholds["min_gs"]
 
-    recent_k9 = pitcher_row.get("recent_k9")
-    if recent_k9 is not None and not pd.isna(recent_k9) and recent_k9 > 0:
-        blended_k9 = recent_k9 * recent_k9_weight + season_k9 * (1 - recent_k9_weight)
+    def _reliability(row):
+        ip = row.get("ip")
+        gs = row.get("games_started")
+        gp = row.get("games_played")
+        # No IP data at all = use Statcast K% as a weak signal
+        if ip is None or pd.isna(ip):
+            # Don't auto-penalize if we just can't see the data
+            return 0.7
+        # Explicit zero starts = reliever
+        if gs is not None and not pd.isna(gs) and gs == 0:
+            return 0.4
+        # Bulk reliever: games_played >> games_started AND low IP per start
+        # (a real starter with 8 GS and 12 GP because of an IL stint shouldn't
+        # be downgraded - check IP/GS too)
+        bulk_relief = False
+        if (gp is not None and gs is not None
+                and not pd.isna(gp) and not pd.isna(gs)
+                and gs > 0 and gp > gs * 1.5):
+            ip_per_start = ip / gs if gs > 0 else 0
+            # True bulk reliever role: <4.5 IP per game-started (he's not really starting)
+            if ip_per_start < 4.5:
+                bulk_relief = True
+        base = 0.65 if bulk_relief else 1.0
+        ip_factor = min(1.0, ip / full_ip)
+        if gs is not None and not pd.isna(gs) and gs > 0:
+            start_factor = min(1.0, gs / full_gs)
+        else:
+            start_factor = ip_factor
+        return round(max(0.3, base * (ip_factor * 0.5 + start_factor * 0.5)), 2)
+
+    df["reliability"] = df.apply(_reliability, axis=1)
+
+    # ------------------------------------------------------------------
+    # ROLE FLAG - season-aware, never auto-defaults to RELIEVER without evidence
+    # ------------------------------------------------------------------
+    def _role_flag(row):
+        ip = row.get("ip")
+        gs = row.get("games_started")
+        gp = row.get("games_played")
+        is_rookie = row.get("is_rookie", False)
+        # If we have no IP and no GS data at all, say so honestly
+        if (ip is None or pd.isna(ip)) and (gs is None or pd.isna(gs)):
+            return "❔ NO DATA"
+        # Rookie indicator added to any role they fall into
+        rookie_prefix = "🌱 " if (is_rookie is True) else ""
+        # Explicit zero starts:
+        #   - low IP → pure RELIEVER
+        #   - meaningful IP (25+) → BULK relief role (long reliever, sometimes opens)
+        if gs is not None and not pd.isna(gs) and gs == 0:
+            if ip is not None and not pd.isna(ip) and ip >= 25:
+                return rookie_prefix + "🔄 BULK"
+            return rookie_prefix + "🚨 RELIEVER"
+        # Very low IP when we DO have IP data
+        if ip is not None and not pd.isna(ip) and ip < min_ip:
+            return rookie_prefix + "🚨 RELIEVER"
+        # Bulk reliever between starts - require BOTH high GP/GS ratio AND low IP/GS
+        if (gp is not None and gs is not None
+                and not pd.isna(gp) and not pd.isna(gs)
+                and gs > 0 and gp > gs * 1.5):
+            ip_per_start = ip / gs if (ip is not None and not pd.isna(ip) and gs > 0) else 5.0
+            if ip_per_start < 4.5:
+                return rookie_prefix + "🔄 SWING"
+        # Low IP but not crazy low
+        if ip is not None and not pd.isna(ip) and ip < full_ip * 0.6:
+            return rookie_prefix + "⚠️ LOW IP"
+        # Few starts
+        if gs is not None and not pd.isna(gs) and gs < min_gs:
+            return rookie_prefix + "🔄 SWING"
+        return rookie_prefix + "✓" if rookie_prefix else "✓"
+
+    df["role"] = df.apply(_role_flag, axis=1)
+
+    # ------------------------------------------------------------------
+    # COMPOSITE SCORE COMPONENTS - real data only, no fake-50 defaults
+    # ------------------------------------------------------------------
+    df["k_score"] = _safe_pct_rank(df["k_pct"]) if "k_pct" in df.columns else np.nan
+    df["whiff_score"] = _safe_pct_rank(df["whiff_pct"]) if "whiff_pct" in df.columns else np.nan
+    # Suppression: lower xwOBA = better
+    if "xwoba_allowed" in df.columns and df["xwoba_allowed"].notna().any():
+        df["suppress_score"] = 100 - _safe_pct_rank(df["xwoba_allowed"])
     else:
-        blended_k9 = season_k9  # no recent data, use season as-is
-
-    # Opposing lineup adjustment - only if real data
-    if opp_lineup_k_pct is None or pd.isna(opp_lineup_k_pct):
-        lineup_adj = 1.0  # no adjustment when we don't have it
+        df["suppress_score"] = np.nan
+    # ERA component: lower ERA = better
+    if "era" in df.columns and df["era"].notna().any():
+        df["era_score"] = 100 - _safe_pct_rank(df["era"])
     else:
-        lineup_adj = opp_lineup_k_pct / 22  # league avg ~22%
+        df["era_score"] = np.nan
 
-    proj_k9 = (
-        blended_k9
-        * lineup_adj
-        * ump_k_factor
-        * catcher_framing_factor
-        * park_k_factor
-    )
+    # Recent form blend: shift weight onto current performance
+    # BUT cap recent_k9 contribution - relievers can K 2 in 1 IP (k9=18) which
+    # isn't sustainable over a multi-inning outing. Cap recent at 1.4x season K9.
+    if "recent_k9" in df.columns and df["recent_k9"].notna().any() and "k9" in df.columns:
+        season_k9 = df["k9"].fillna(0)
+        # Cap recent K9 at 1.4 × season K9 (prevents tiny-sample explosions)
+        recent_capped = df["recent_k9"].fillna(season_k9).clip(upper=season_k9 * 1.4)
+        # If season K9 itself is 0/missing (no real data), don't blend
+        blended_k9 = recent_capped * 0.35 + season_k9 * 0.65
+        df["blended_k9"] = blended_k9.round(2)
+        df["k_score_blended"] = _safe_pct_rank(blended_k9)
+    else:
+        df["k_score_blended"] = df["k_score"]
 
-    mean = proj_k9 * expected_ip / 9
-    # Empirical sigma for a single start: ~35% of mean (verified vs historical data)
-    # Min sigma of 1.4 K to handle low-K projections
-    sigma = max(mean * 0.35, 1.4)
+    # ------------------------------------------------------------------
+    # TEST SCORE - rebalanced. K is now 35% (was 40%), with new ERA component
+    # ------------------------------------------------------------------
+    # Weights: K-blended 30%, Whiff 20%, Suppress (xwOBA) 25%, ERA 15%, base K 10%
+    # Total weight = 1.0 if all components present; less means data is incomplete
+    def _composite_test(row):
+        parts = []
+        max_weight = 0.30 + 0.20 + 0.25 + 0.15 + 0.10  # = 1.0
+        if pd.notna(row.get("k_score_blended")):
+            parts.append((row["k_score_blended"], 0.30))
+        if pd.notna(row.get("whiff_score")):
+            parts.append((row["whiff_score"], 0.20))
+        if pd.notna(row.get("suppress_score")):
+            parts.append((row["suppress_score"], 0.25))
+        if pd.notna(row.get("era_score")):
+            parts.append((row["era_score"], 0.15))
+        if pd.notna(row.get("k_score")):
+            parts.append((row["k_score"], 0.10))
+        if not parts:
+            return np.nan
+        total_w = sum(w for _, w in parts)
+        raw = sum(v * w for v, w in parts) / total_w
+        # Data completeness penalty: only count fully when we have all 5 components
+        # If only 3 of 5 weights are present, score gets multiplied by 0.85
+        # If only 2 of 5, by 0.75. This penalizes inflated scores from sparse data.
+        completeness = total_w / max_weight
+        if completeness < 0.5:
+            penalty = 0.80
+        elif completeness < 0.7:
+            penalty = 0.88
+        elif completeness < 0.85:
+            penalty = 0.95
+        else:
+            penalty = 1.0
+        return raw * penalty
 
-    def p_over(line):
-        """
-        P(K total > line). Lines like 5.5 mean "more than 5.5 strikeouts",
-        i.e. 6 or more, so we DON'T add a continuity correction since line is
-        already at the half-integer.
-        """
-        from math import erf, sqrt
-        if sigma <= 0:
-            return 0.5
-        z = (line - mean) / (sigma * sqrt(2))
-        return float(1 - 0.5 * (1 + erf(z)))
+    raw_test = df.apply(_composite_test, axis=1)
+    # Apply reliability multiplier - relievers get scaled down
+    # Cap at 95 so the score visually never claims "100% sure"
+    df["test_score"] = (raw_test * df["reliability"]).clip(upper=95).round(2)
 
-    return {
-        "mean": round(mean, 2),
-        "low": round(mean - sigma, 2),
-        "high": round(mean + sigma, 2),
-        "sigma": round(sigma, 2),
-        "blended_k9": round(blended_k9, 2),
-        "lineup_adj": round(lineup_adj, 3),
-        "p_over_5.5": round(p_over(5.5), 3),
-        "p_over_6.5": round(p_over(6.5), 3),
-        "p_over_7.5": round(p_over(7.5), 3),
-        "p_over_8.5": round(p_over(8.5), 3),
-    }
+    # kHR: K-focused composite (was misleadingly named - this is a K rating)
+    def _composite_khr(row):
+        parts = []
+        max_weight = 0.50 + 0.20 + 0.30  # = 1.0
+        if pd.notna(row.get("k_score_blended")):
+            parts.append((row["k_score_blended"], 0.50))
+        if pd.notna(row.get("k_score")):
+            parts.append((row["k_score"], 0.20))
+        if pd.notna(row.get("whiff_score")):
+            parts.append((row["whiff_score"], 0.30))
+        if not parts:
+            return np.nan
+        total_w = sum(w for _, w in parts)
+        raw = sum(v * w for v, w in parts) / total_w
+        completeness = total_w / max_weight
+        if completeness < 0.5:
+            penalty = 0.80
+        elif completeness < 0.7:
+            penalty = 0.88
+        else:
+            penalty = 1.0
+        return raw * penalty
 
+    raw_khr = df.apply(_composite_khr, axis=1)
+    df["kHR"] = (raw_khr * df["reliability"]).clip(upper=95).round(2)
 
-def implied_prob_from_american(odds: int) -> float:
-    """Convert American odds to implied probability (with vig)."""
-    if odds is None:
-        return None
-    if odds < 0:
-        return -odds / (-odds + 100)
-    return 100 / (odds + 100)
+    # ------------------------------------------------------------------
+    # HR_SUPPRESS - separate score for how well pitcher prevents HRs
+    # Uses: low barrel% allowed, low xwOBA allowed, low HR/9, AND
+    # batted-ball mix (low FB% allowed / high GB% = HR suppression)
+    # ------------------------------------------------------------------
+    def _hr_suppress(row):
+        parts = []
+        # Barrel% allowed: lower = better (invert percentile)
+        if pd.notna(row.get("barrel_allowed")):
+            barrel_pct = row.get("_barrel_pct_rank", np.nan)
+            if pd.notna(barrel_pct):
+                parts.append((100 - barrel_pct, 0.32))
+        # xwOBA allowed: lower = better
+        if pd.notna(row.get("suppress_score")):
+            parts.append((row["suppress_score"], 0.28))
+        # HR/9: lower = better
+        if pd.notna(row.get("_hr9_pct_rank")):
+            parts.append((100 - row["_hr9_pct_rank"], 0.20))
+        # FB allowed: lower = better (fewer flyballs → fewer HRs)
+        if pd.notna(row.get("_fb_allowed_rank")):
+            parts.append((100 - row["_fb_allowed_rank"], 0.12))
+        # GB allowed: higher = better (groundball pitchers suppress HRs)
+        if pd.notna(row.get("_gb_allowed_rank")):
+            parts.append((row["_gb_allowed_rank"], 0.08))
+        if not parts:
+            return np.nan
+        total_w = sum(w for _, w in parts)
+        raw = sum(v * w for v, w in parts) / total_w
+        # Completeness penalty if not all components present (max total w = 1.0)
+        completeness = total_w / 1.0
+        penalty = 0.85 if completeness < 0.6 else 0.95 if completeness < 0.85 else 1.0
+        return raw * penalty
 
+    # Precompute pct ranks for barrel, hr9, fb_allowed, gb_allowed
+    if "barrel_allowed" in df.columns:
+        df["_barrel_pct_rank"] = _safe_pct_rank(df["barrel_allowed"])
+    if "hr9" in df.columns and df["hr9"].notna().any():
+        df["_hr9_pct_rank"] = _safe_pct_rank(df["hr9"])
+    if "fb_allowed" in df.columns and df["fb_allowed"].notna().any():
+        df["_fb_allowed_rank"] = _safe_pct_rank(df["fb_allowed"])
+    if "gb_allowed" in df.columns and df["gb_allowed"].notna().any():
+        df["_gb_allowed_rank"] = _safe_pct_rank(df["gb_allowed"])
 
-def american_from_prob(p: float) -> int:
-    """Inverse: probability → American odds (fair, no vig)."""
-    if p is None or p <= 0 or p >= 1:
-        return None
-    if p >= 0.5:
-        return int(round(-p / (1 - p) * 100))
-    return int(round((1 - p) / p * 100))
+    raw_hr_supp = df.apply(_hr_suppress, axis=1)
 
+    # Opponent HR factor: if facing a high-HR team, suppress score should drop
+    # (pitcher is in a tougher spot). League-avg HR/PA ~ 2.8%.
+    # Each 1pp above league avg = -5% to suppress score; capped at ±15%.
+    def _opp_hr_mult(row):
+        opp_hr = row.get("opp_hr_per_pa")
+        if opp_hr is None or pd.isna(opp_hr):
+            return 1.0
+        mult = 1 - (float(opp_hr) - 2.8) * 0.05
+        return max(0.85, min(1.15, mult))
+    df["opp_hr_mult"] = df.apply(_opp_hr_mult, axis=1)
 
-def edge_vs_market(model_prob: float, market_odds: int) -> dict:
-    """
-    Compare model probability to a sportsbook line.
+    # Park HR factor: pitcher in Coors has tougher suppression environment
+    # park_hr_factor of 1.21 (Coors) → suppress drops by ~15%
+    # park_hr_factor of 0.88 (Oracle) → suppress boosts by ~10%
+    def _park_suppress_mult(row):
+        pf = row.get("park_hr_factor")
+        if pf is None or pd.isna(pf):
+            return 1.0
+        # Inverse relationship: higher park HR factor = harder to suppress
+        # Use 2 - pf (so 1.20 park → 0.80 mult, 0.90 park → 1.10 mult)
+        mult = 2 - float(pf)
+        return max(0.80, min(1.15, mult))
+    df["park_suppress_mult"] = df.apply(_park_suppress_mult, axis=1)
 
-    Returns:
-      market_prob   - what the book is implying (includes vig)
-      fair_odds     - what odds the model thinks are fair
-      edge_pct      - (model_prob - market_prob) / market_prob * 100
-      kelly         - optional Kelly stake (cap at 25% for safety)
-    """
-    if model_prob is None or market_odds is None:
-        return {}
-    mp = implied_prob_from_american(market_odds)
-    if mp is None:
-        return {}
-    edge_pct = (model_prob - mp) / mp * 100
-    fair = american_from_prob(model_prob)
-    # Decimal odds for Kelly
-    dec = 1 + (market_odds / 100 if market_odds > 0 else 100 / -market_odds)
-    b = dec - 1
-    q = 1 - model_prob
-    kelly_full = (b * model_prob - q) / b if b > 0 else 0
-    kelly_quarter = max(0, min(0.25, kelly_full / 4))  # quarter Kelly capped
-    return {
-        "market_prob": round(mp, 4),
-        "fair_odds": fair,
-        "edge_pct": round(edge_pct, 1),
-        "kelly_quarter": round(kelly_quarter, 4),
-        "recommend": "✅ BET" if edge_pct > 5 else "—" if edge_pct > -3 else "❌ FADE",
-    }
+    df["hr_suppress"] = (
+        raw_hr_supp * df["reliability"] * df["opp_hr_mult"] * df["park_suppress_mult"]
+    ).clip(upper=95).round(2)
 
+    # Clean up internal helper columns
+    df = df.drop(columns=[c for c in [
+        "_barrel_pct_rank", "_hr9_pct_rank",
+        "_fb_allowed_rank", "_gb_allowed_rank"
+    ] if c in df.columns])
 
-def verdict_color(score: float, scale: tuple = (40, 60)) -> str:
-    """
-    Convert any 0-100 score into a stoplight verdict.
-      < scale[0]   = 🔴 Fade
-      < scale[1]   = 🟡 Neutral
-      ≥ scale[1]   = 🟢 Smash
-    """
-    if score is None or pd.isna(score):
-        return "—"
-    if score >= scale[1]:
-        return "🟢"
-    if score >= scale[0]:
-        return "🟡"
-    return "🔴"
+    # ------------------------------------------------------------------
+    # PROJ K - reliability-adjusted, uses blended K/9 when available
+    # NOW ALSO accounts for opposing team's actual K%:
+    #   - If opp K% > league avg (22%), more strikeouts expected → boost
+    #   - If opp K% < league avg, fewer strikeouts → reduce
+    # ------------------------------------------------------------------
+    if "k9" in df.columns:
+        effective_k9 = df.get("blended_k9", df["k9"]).fillna(df["k9"])
+        def _expected_ip(row):
+            ip = row.get("ip")
+            gs = row.get("games_started")
+            if gs is not None and not pd.isna(gs) and gs == 0:
+                return 1.5
+            if ip is None or pd.isna(ip) or ip < 10:
+                return 2.0
+            if gs is not None and not pd.isna(gs) and gs < 5:
+                return 3.5
+            if ip < 25:
+                return 4.0
+            return 5.5
+        df["expected_ip"] = df.apply(_expected_ip, axis=1)
+
+        # Opponent K% adjustment (capped at ±15% to prevent over-correction)
+        def _opp_k_mult(row):
+            opp_k = row.get("opp_k_pct")
+            if opp_k is None or pd.isna(opp_k):
+                return 1.0
+            # League avg K% ~ 22.5%. Every 1pp deviation → 4.5% K change.
+            mult = 1 + (float(opp_k) - 22.5) * 0.045
+            return max(0.85, min(1.15, mult))
+        df["opp_k_mult"] = df.apply(_opp_k_mult, axis=1)
+
+        df["proj_k"] = (effective_k9 * df["expected_ip"] / 9 * df["opp_k_mult"]).round(1)
+
+    # Form arrow: recent ERA vs season ERA (negate so "improvement" = lower ERA = up arrow)
+    if "recent_era" in df.columns and "era" in df.columns:
+        def _safe_form(r):
+            recent = r.get("recent_era")
+            season = r.get("era")
+            if recent is None or pd.isna(recent) or season is None or pd.isna(season):
+                return "→"
+            try:
+                return _form_arrow(-float(recent), -float(season))
+            except (TypeError, ValueError):
+                return "→"
+        df["form_arrow"] = df.apply(_safe_form, axis=1)
+    else:
+        df["form_arrow"] = "→"
+
+    return df.sort_values("test_score", ascending=False, na_position="last").reset_index(drop=True)
