@@ -124,12 +124,15 @@ def build_matchup_table(
         match = h[h["player_id"] == p["id"]] if "player_id" in h.columns else pd.DataFrame()
         row = match.iloc[0].to_dict() if len(match) else {"player_id": p.get("id")}
         row["player_name"] = p["name"]
-        row["lineup_pos"] = i
-        row["position"] = p.get("position", "")
-        row["bats"] = p.get("bats", "")
+        is_fill = bool(p.get("is_roster_fill", False))
         # Mark whether this row came from a real lineup or roster-padding fallback.
         # Used downstream so we don't apply lineup-spot PA scaling to fake positions.
-        row["is_roster_fill"] = bool(p.get("is_roster_fill", False))
+        row["is_roster_fill"] = is_fill
+        # If roster-fill, set lineup_pos to NaN so the column displays "—" rather
+        # than a misleading synthetic position number. Real-lineup rows get 1-9.
+        row["lineup_pos"] = i if not is_fill else np.nan
+        row["position"] = p.get("position", "")
+        row["bats"] = p.get("bats", "")
         # Inject recent form if provided
         if recent_form_dict and p.get("id") in recent_form_dict:
             for k, v in recent_form_dict[p["id"]].items():
