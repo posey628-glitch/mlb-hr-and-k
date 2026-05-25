@@ -90,6 +90,22 @@ def hr_prob_per_pa(
         pitcher_mult = p_hr_per_pa / league_p_hr_per_pa
         pitcher_mult = max(0.5, min(2.0, pitcher_mult))
 
+    # PLATOON ADVANTAGE multiplier
+    # Real MLB data: opposite-handed matchups produce ~12% more HRs than same-side
+    # (LHB vs RHP: 1.07x baseline; LHB vs LHP: 0.94x; RHB vs LHP: 1.06x; RHB vs RHP: 0.96x)
+    # Switch hitters get the favorable side, so always neutral or slightly +
+    platoon_mult = 1.0
+    h_bats = (hitter_row.get("bats") or "").upper()
+    p_throws = (pitcher_row.get("p_throws") or pitcher_row.get("throws") or "").upper() if pitcher_row else ""
+    if h_bats and p_throws and h_bats != "S":
+        if h_bats != p_throws:
+            # Opposite handedness - HR boost
+            platoon_mult = 1.07 if h_bats == "L" else 1.06
+        else:
+            # Same handedness - HR suppress
+            platoon_mult = 0.94 if h_bats == "L" else 0.96
+    # Switch hitters (S) stay at 1.0 since they hit the favorable side
+
     # Pitch match adjustment - only if we have a real score
     # Was: 0.6-1.6 range, too generous (gave non-power hitters huge boosts)
     # Now: 0.75-1.30 range — meaningful but doesn't substitute for raw power
@@ -103,7 +119,7 @@ def hr_prob_per_pa(
     # Cap it to prevent inflation when multiple small boosts compound.
     # Example bug fix: 1.17 wind × 1.21 park × 1.30 pitch_match = 1.84x
     # compounded multiplier was pushing modest hitters to elite tier.
-    # New cap: 1.45× total context (still allows great matchups to boost ~45%).
+    # New cap: 1.35× total context (still allows great matchups to boost ~35%).
     ctx_mult_raw = (
         park_factor
         * park_hand_factor
@@ -111,6 +127,7 @@ def hr_prob_per_pa(
         * pm_mult
         * ttop_mult
         * defense_factor
+        * platoon_mult
     )
     ctx_mult = min(1.35, max(0.65, ctx_mult_raw))
 
