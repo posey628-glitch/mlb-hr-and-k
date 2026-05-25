@@ -80,9 +80,30 @@ def hr_prob_per_pa(
         # No barrel data - fall back to observed only
         h_base = h_observed
 
-    # Pitcher HR/9 adjustment - only if pitcher row has real HR/9
+    # Pitcher HR/9 adjustment - prefer handedness splits if available
     p_hr9 = pitcher_row.get("hr9") if pitcher_row else None
-    if p_hr9 is None or pd.isna(p_hr9) or p_hr9 == 0:
+
+    # NEW: Try to use vs LHB / vs RHB HR/PA splits instead of overall HR/9
+    # If a RHP gives up 4.5% HR/PA to LHB but only 2.1% to RHB,
+    # an LHB facing him should see the 4.5 number, not the average.
+    h_bats = (hitter_row.get("bats") or "").upper()
+    split_hr_per_pa = None
+    if pitcher_row is not None and h_bats in ("L", "R"):
+        # Switch hitters effectively bat opposite of the pitcher, so use the
+        # opposite-side split if available
+        col_prefix = "vs_lhb_" if h_bats == "L" else "vs_rhb_"
+        split_hr = pitcher_row.get(f"{col_prefix}hr_per_pa")
+        split_pa = pitcher_row.get(f"{col_prefix}pa")
+        # Only use the split if we have enough sample (≥40 PA)
+        if (split_hr is not None and not pd.isna(split_hr) and split_hr > 0
+                and split_pa is not None and not pd.isna(split_pa) and split_pa >= 40):
+            split_hr_per_pa = float(split_hr) / 100.0  # convert pct → rate
+
+    if split_hr_per_pa is not None:
+        league_p_hr_per_pa = 0.028  # ~2.8% league HR per PA
+        pitcher_mult = split_hr_per_pa / league_p_hr_per_pa
+        pitcher_mult = max(0.5, min(2.0, pitcher_mult))
+    elif p_hr9 is None or pd.isna(p_hr9) or p_hr9 == 0:
         pitcher_mult = 1.0  # No adjustment if we don't know
     else:
         p_hr_per_pa = (p_hr9 / 9) / 4.3  # ~4.3 PA per inning
@@ -94,16 +115,27 @@ def hr_prob_per_pa(
     # Real MLB data: opposite-handed matchups produce ~12% more HRs than same-side
     # (LHB vs RHP: 1.07x baseline; LHB vs LHP: 0.94x; RHB vs LHP: 1.06x; RHB vs RHP: 0.96x)
     # Switch hitters get the favorable side, so always neutral or slightly +
+    #
+    # NOTE: If we're already using a HANDEDNESS-SPLIT pitcher_mult above,
+    # we should dampen the platoon mult to avoid double-counting.
+    # Real splits already encode the platoon effect in the data.
     platoon_mult = 1.0
-    h_bats = (hitter_row.get("bats") or "").upper()
     p_throws = (pitcher_row.get("p_throws") or pitcher_row.get("throws") or "").upper() if pitcher_row else ""
     if h_bats and p_throws and h_bats != "S":
-        if h_bats != p_throws:
-            # Opposite handedness - HR boost
-            platoon_mult = 1.07 if h_bats == "L" else 1.06
+        # If we have real splits, the data already shows the platoon effect.
+        # Use a smaller residual platoon adjustment.
+        if split_hr_per_pa is not None:
+            # Splits used - reduce platoon impact to 1/3 to capture league avg residual
+            if h_bats != p_throws:
+                platoon_mult = 1.025 if h_bats == "L" else 1.020
+            else:
+                platoon_mult = 0.980 if h_bats == "L" else 0.985
         else:
-            # Same handedness - HR suppress
-            platoon_mult = 0.94 if h_bats == "L" else 0.96
+            # No splits available - full platoon adjustment
+            if h_bats != p_throws:
+                platoon_mult = 1.07 if h_bats == "L" else 1.06
+            else:
+                platoon_mult = 0.94 if h_bats == "L" else 0.96
     # Switch hitters (S) stay at 1.0 since they hit the favorable side
 
     # Pitch match adjustment - only if we have a real score
