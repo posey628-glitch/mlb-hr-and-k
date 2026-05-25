@@ -430,6 +430,7 @@ def build_pitcher_slate(
     pitcher_stats: pd.DataFrame,
     pitcher_recent: dict | None = None,
     slate_date=None,
+    team_hit_map: dict | None = None,
 ) -> pd.DataFrame:
     """One row per starting pitcher with composite scores + recent form."""
     thresholds = _season_thresholds(slate_date)
@@ -440,14 +441,20 @@ def build_pitcher_slate(
             if pid is None or pd.isna(pid):
                 continue
             row = pitcher_stats[pitcher_stats["player_id"] == pid]
+            opp_abbr = g[f"{'home' if side == 'away' else 'away'}_team_abbr"]
             base = {
                 "pitcher_id": pid,
                 "pitcher_name": g[f"{side}_pitcher"],
                 "team": g[f"{side}_team_abbr"],
-                "opp": g[f"{'home' if side == 'away' else 'away'}_team_abbr"],
+                "opp": opp_abbr,
                 "home_away": "@" if side == "away" else "vs",
                 "game_pk": g["gamePk"],
             }
+            # Opposing team aggregates - lets us account for whom they're facing
+            opp_agg = (team_hit_map or {}).get(opp_abbr, {})
+            base["opp_k_pct"] = opp_agg.get("k_pct")
+            base["opp_hr_per_pa"] = opp_agg.get("hr_per_pa")
+            base["opp_iso"] = opp_agg.get("iso")
             if len(row) > 0:
                 r = row.iloc[0].to_dict()
                 base.update({
@@ -758,34 +765,56 @@ def build_pitcher_slate(
         df["_hr9_pct_rank"] = _safe_pct_rank(df["hr9"])
 
     raw_hr_supp = df.apply(_hr_suppress, axis=1)
-    df["hr_suppress"] = (raw_hr_supp * df["reliability"]).clip(upper=95).round(2)
+
+    # Opponent HR factor: if facing a high-HR team, suppress score should drop
+    # (pitcher is in a tougher spot). League-avg HR/PA ~ 2.8%.
+    # Each 1pp above league avg = -5% to suppress score; capped at ±15%.
+    def _opp_hr_mult(row):
+        opp_hr = row.get("opp_hr_per_pa")
+        if opp_hr is None or pd.isna(opp_hr):
+            return 1.0
+        mult = 1 - (float(opp_hr) - 2.8) * 0.05
+        return max(0.85, min(1.15, mult))
+    df["opp_hr_mult"] = df.apply(_opp_hr_mult, axis=1)
+
+    df["hr_suppress"] = (raw_hr_supp * df["reliability"] * df["opp_hr_mult"]).clip(upper=95).round(2)
 
     # Clean up internal helper columns
     df = df.drop(columns=[c for c in ["_barrel_pct_rank", "_hr9_pct_rank"] if c in df.columns])
 
     # ------------------------------------------------------------------
     # PROJ K - reliability-adjusted, uses blended K/9 when available
+    # NOW ALSO accounts for opposing team's actual K%:
+    #   - If opp K% > league avg (22%), more strikeouts expected → boost
+    #   - If opp K% < league avg, fewer strikeouts → reduce
     # ------------------------------------------------------------------
-    # Expected IP varies by role - relievers/openers won't go deep
     if "k9" in df.columns:
         effective_k9 = df.get("blended_k9", df["k9"]).fillna(df["k9"])
         def _expected_ip(row):
             ip = row.get("ip")
             gs = row.get("games_started")
-            # Hard reliever: explicit GS=0, OR very low IP
             if gs is not None and not pd.isna(gs) and gs == 0:
-                return 1.5  # opener / bulk-relief: at most a couple innings
+                return 1.5
             if ip is None or pd.isna(ip) or ip < 10:
                 return 2.0
-            # Swing/spot starter: limited usage
             if gs is not None and not pd.isna(gs) and gs < 5:
                 return 3.5
             if ip < 25:
                 return 4.0
-            # Established starter
             return 5.5
         df["expected_ip"] = df.apply(_expected_ip, axis=1)
-        df["proj_k"] = (effective_k9 * df["expected_ip"] / 9).round(1)
+
+        # Opponent K% adjustment (capped at ±15% to prevent over-correction)
+        def _opp_k_mult(row):
+            opp_k = row.get("opp_k_pct")
+            if opp_k is None or pd.isna(opp_k):
+                return 1.0
+            # League avg K% ~ 22.5%. Every 1pp deviation → 4.5% K change.
+            mult = 1 + (float(opp_k) - 22.5) * 0.045
+            return max(0.85, min(1.15, mult))
+        df["opp_k_mult"] = df.apply(_opp_k_mult, axis=1)
+
+        df["proj_k"] = (effective_k9 * df["expected_ip"] / 9 * df["opp_k_mult"]).round(1)
 
     # Form arrow: recent ERA vs season ERA (negate so "improvement" = lower ERA = up arrow)
     if "recent_era" in df.columns and "era" in df.columns:
