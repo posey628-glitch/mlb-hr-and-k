@@ -288,9 +288,18 @@ def get_hitter_stats(season: int = CURRENT_SEASON) -> pd.DataFrame:
             if cand in df.columns:
                 df = df.rename(columns={cand: "player_id"})
                 break
-    # Compute PulledBrl% as approximation: pull_air_percent * (barrels/BBE proxy)
-    if "pull_air_percent" in df.columns and "barrel_batted_rate" in df.columns:
-        df["pulled_brl_pct"] = (df["pull_air_percent"] * df["barrel_batted_rate"] / 100).round(2)
+    # Compute PulledBrl% as approximation. Savant may return pull data under
+    # several names depending on endpoint version.
+    pull_col = None
+    for cand in ["pull_air_percent", "pull_percent", "pull_pct", "pulled_percent"]:
+        if cand in df.columns and df[cand].notna().any():
+            pull_col = cand
+            break
+    if pull_col and "barrel_batted_rate" in df.columns:
+        df["pulled_brl_pct"] = (
+            pd.to_numeric(df[pull_col], errors="coerce") *
+            pd.to_numeric(df["barrel_batted_rate"], errors="coerce") / 100
+        ).round(2)
 
     # CRITICAL: Always derive ISO at source if missing/null.
     # Savant's leaderboard sometimes returns 'iso' as an empty column even
@@ -1324,49 +1333,66 @@ def get_team_pitching_proxy(team_id: int, season: int = CURRENT_SEASON,
 def get_team_hitting_aggregates(season: int = CURRENT_SEASON) -> pd.DataFrame:
     """
     Returns one row per team with aggregate hitting tendencies:
-      - team_id, team_abbr, k_pct, hr_per_pa, iso, woba
+      - team_id, team_abbr, k_pct, bb_pct, hr_per_pa, iso
 
-    This lets pitcher K and HR projections account for the actual lineup
-    they're facing instead of treating every opponent as league-average.
+    Iterates all 30 teams, fetching team-level hitting from MLB Stats API.
+    Cached 1 hour.
     """
-    url = (
-        f"https://statsapi.mlb.com/api/v1/teams/stats"
-        f"?season={season}&group=hitting&stats=season&sportIds=1"
-    )
+    # First, fetch the list of all MLB teams
     try:
-        r = requests.get(url, headers=HEADERS, timeout=15)
+        teams_url = f"https://statsapi.mlb.com/api/v1/teams?sportId=1&season={season}"
+        r = requests.get(teams_url, headers=HEADERS, timeout=15)
         r.raise_for_status()
-        data = r.json()
+        teams_data = r.json()
     except Exception:
         return pd.DataFrame()
 
     rows = []
-    for split in data.get("stats", []):
-        for sp in split.get("splits", []):
-            team = sp.get("team") or {}
-            stat = sp.get("stat") or {}
-            try:
-                pa = int(stat.get("plateAppearances") or 0)
-                k = int(stat.get("strikeOuts") or 0)
-                hr = int(stat.get("homeRuns") or 0)
-                ab = int(stat.get("atBats") or 0)
-                hits = int(stat.get("hits") or 0)
-                doubles = int(stat.get("doubles") or 0)
-                triples = int(stat.get("triples") or 0)
-                walks = int(stat.get("baseOnBalls") or 0)
-            except (ValueError, TypeError):
-                continue
-            if pa == 0 or ab == 0:
-                continue
-            iso = ((doubles + 2*triples + 3*hr) / ab) if ab > 0 else None
-            rows.append({
-                "team_id": team.get("id"),
-                "team_abbr": team.get("abbreviation") or team.get("teamCode"),
-                "team_name": team.get("name"),
-                "pa": pa,
-                "k_pct": round(k / pa * 100, 1),
-                "bb_pct": round(walks / pa * 100, 1),
-                "hr_per_pa": round(hr / pa * 100, 2),
-                "iso": round(iso, 3) if iso is not None else None,
-            })
+    for team in teams_data.get("teams", []):
+        team_id = team.get("id")
+        team_abbr = team.get("abbreviation") or team.get("teamCode")
+        team_name = team.get("name")
+        if not team_id:
+            continue
+        # Fetch this team's hitting stats
+        try:
+            url = (
+                f"https://statsapi.mlb.com/api/v1/teams/{team_id}/stats"
+                f"?stats=season&group=hitting&season={season}&sportIds=1"
+            )
+            tr = requests.get(url, headers=HEADERS, timeout=15)
+            tr.raise_for_status()
+            data = tr.json()
+        except Exception:
+            continue
+        for split_block in data.get("stats", []):
+            for sp in split_block.get("splits", []):
+                stat = sp.get("stat") or {}
+                try:
+                    pa = int(stat.get("plateAppearances") or 0)
+                    k = int(stat.get("strikeOuts") or 0)
+                    hr = int(stat.get("homeRuns") or 0)
+                    ab = int(stat.get("atBats") or 0)
+                    hits = int(stat.get("hits") or 0)
+                    doubles = int(stat.get("doubles") or 0)
+                    triples = int(stat.get("triples") or 0)
+                    walks = int(stat.get("baseOnBalls") or 0)
+                except (ValueError, TypeError):
+                    continue
+                if pa == 0 or ab == 0:
+                    continue
+                iso = ((doubles + 2*triples + 3*hr) / ab) if ab > 0 else None
+                rows.append({
+                    "team_id": team_id,
+                    "team_abbr": team_abbr,
+                    "team_name": team_name,
+                    "pa": pa,
+                    "k_pct": round(k / pa * 100, 1),
+                    "bb_pct": round(walks / pa * 100, 1),
+                    "hr_per_pa": round(hr / pa * 100, 2),
+                    "iso": round(iso, 3) if iso is not None else None,
+                })
+                break  # Just take the first split (regular season)
+            if rows and rows[-1].get("team_id") == team_id:
+                break
     return pd.DataFrame(rows)
