@@ -71,27 +71,50 @@ def pitch_match_score(
     hitter_arsenal: pd.DataFrame,     # rows for one batter
 ) -> dict:
     """
-    Cross today's pitcher's usage against this hitter's per-pitch xwOBA.
-    Returns dict with overall score + best/worst pitch matchup.
+    Cross today's pitcher's usage against this hitter's per-pitch metrics.
+    Returns:
+      - pitch_match_score: overall score (xwOBA-based, 0-100, higher = better hitter matchup)
+      - pitch_hr_score: HR-specific score (SLG/barrel-based, 0-100)
+      - best/worst pitch breakdown
     """
     if pitcher_arsenal.empty or hitter_arsenal.empty:
-        return {"pitch_match_score": None}
+        return {"pitch_match_score": None, "pitch_hr_score": None}
 
     # Normalize pitch name column
     p_name_col = "pitch_name" if "pitch_name" in pitcher_arsenal.columns else "pitch_type"
     h_name_col = "pitch_name" if "pitch_name" in hitter_arsenal.columns else "pitch_type"
     usage_col = "pitch_usage" if "pitch_usage" in pitcher_arsenal.columns else "usage"
 
-    # Hitter xwOBA by pitch type
+    # Hitter metrics by pitch type
+    # xwoba: overall production
+    # slg: HR-relevant slugging power
+    # hard_hit: barrel proxy when barrel not available
     h_xwoba = {}
+    h_slg = {}
+    h_hard_hit = {}
+    h_barrel = {}
     for _, r in hitter_arsenal.iterrows():
+        pitch = r[h_name_col]
         xw = r.get("est_woba", r.get("xwoba", None))
         if xw is not None and not pd.isna(xw):
-            h_xwoba[r[h_name_col]] = float(xw)
+            h_xwoba[pitch] = float(xw)
+        slg = r.get("slg", None)
+        if slg is not None and not pd.isna(slg):
+            h_slg[pitch] = float(slg)
+        hh = r.get("hard_hit_percent", r.get("hard_hit", None))
+        if hh is not None and not pd.isna(hh):
+            h_hard_hit[pitch] = float(hh)
+        brl = r.get("barrel_percent", r.get("barrel_batted_rate", None))
+        if brl is not None and not pd.isna(brl):
+            h_barrel[pitch] = float(brl)
 
-    # Weight by pitcher usage
+    # Weight by pitcher usage - compute both xwOBA-based and HR-based scores
     total_weight = 0.0
     weighted_xwoba = 0.0
+    weighted_slg = 0.0
+    weighted_barrel = 0.0
+    has_slg = 0.0  # weight covered by SLG data
+    has_barrel = 0.0
     breakdown = []
     missing_usage = 0.0
     for _, r in pitcher_arsenal.iterrows():
@@ -101,38 +124,66 @@ def pitch_match_score(
         pitch = r[p_name_col]
         h_val = h_xwoba.get(pitch)
         if h_val is None:
-            # No real data for this pitch - skip rather than insert fake league avg
             missing_usage += usage
             continue
         weighted_xwoba += usage * h_val
         total_weight += usage
+
+        # SLG-by-pitch (for HR matching)
+        slg_val = h_slg.get(pitch)
+        if slg_val is not None:
+            weighted_slg += usage * slg_val
+            has_slg += usage
+
+        # Barrel by pitch (best HR signal)
+        brl_val = h_barrel.get(pitch)
+        if brl_val is not None:
+            weighted_barrel += usage * brl_val
+            has_barrel += usage
+
         breakdown.append({
             "pitch": pitch,
             "pitcher_usage": float(usage),
             "hitter_xwoba_vs": float(h_val),
+            "hitter_slg_vs": slg_val,
+            "hitter_barrel_vs": brl_val,
             "contribution": float(usage * h_val),
         })
 
-    # If we have no real data for ANY pitch, return None - don't fake a score
     if total_weight == 0:
-        return {"pitch_match_score": None}
+        return {"pitch_match_score": None, "pitch_hr_score": None}
 
-    # If most of the pitcher's usage is on pitches we have no hitter data for,
-    # the score is unreliable - return None
     if missing_usage > total_weight:
-        return {"pitch_match_score": None}
+        return {"pitch_match_score": None, "pitch_hr_score": None}
 
     avg_xwoba = weighted_xwoba / total_weight
     # Convert to 0-100 score (xwOBA range ~0.250 - 0.450)
     score = max(0, min(100, (avg_xwoba - 0.250) / 0.200 * 100))
 
-    # Best and worst pitch for this hitter in this matchup
+    # HR-specific score: prefer barrel, fall back to SLG, else None
+    pitch_hr_score = None
+    pitch_hr_basis = None
+    if has_barrel > total_weight * 0.5:
+        # >50% of pitcher usage has barrel data for this hitter
+        avg_barrel = weighted_barrel / has_barrel
+        # Convert to 0-100 (barrel% range ~2-18%)
+        pitch_hr_score = round(max(0, min(100, (avg_barrel - 2.0) / 16.0 * 100)), 1)
+        pitch_hr_basis = "barrel"
+    elif has_slg > total_weight * 0.5:
+        avg_slg = weighted_slg / has_slg
+        # Convert to 0-100 (SLG range ~.300 - .600)
+        pitch_hr_score = round(max(0, min(100, (avg_slg - 0.300) / 0.300 * 100)), 1)
+        pitch_hr_basis = "slg"
+
+    # Best and worst pitch for this hitter in this matchup (by xwOBA)
     breakdown_sorted = sorted(breakdown, key=lambda x: x["hitter_xwoba_vs"], reverse=True)
     best = breakdown_sorted[0] if breakdown_sorted else None
     worst = breakdown_sorted[-1] if breakdown_sorted else None
 
     return {
         "pitch_match_score": round(score, 1),
+        "pitch_hr_score": pitch_hr_score,
+        "pitch_hr_basis": pitch_hr_basis,
         "weighted_xwoba": round(avg_xwoba, 3),
         "best_pitch": best["pitch"] if best else None,
         "best_pitch_xwoba": best["hitter_xwoba_vs"] if best else None,
