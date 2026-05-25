@@ -1318,3 +1318,55 @@ def get_team_pitching_proxy(team_id: int, season: int = CURRENT_SEASON,
         proxy["hr9_tbd_adjusted"] = round(proxy["hr9"] * hr_penalty, 2)
     proxy["tbd_proxy"] = True
     return proxy
+
+
+@st.cache_data(ttl=3600)
+def get_team_hitting_aggregates(season: int = CURRENT_SEASON) -> pd.DataFrame:
+    """
+    Returns one row per team with aggregate hitting tendencies:
+      - team_id, team_abbr, k_pct, hr_per_pa, iso, woba
+
+    This lets pitcher K and HR projections account for the actual lineup
+    they're facing instead of treating every opponent as league-average.
+    """
+    url = (
+        f"https://statsapi.mlb.com/api/v1/teams/stats"
+        f"?season={season}&group=hitting&stats=season&sportIds=1"
+    )
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=15)
+        r.raise_for_status()
+        data = r.json()
+    except Exception:
+        return pd.DataFrame()
+
+    rows = []
+    for split in data.get("stats", []):
+        for sp in split.get("splits", []):
+            team = sp.get("team") or {}
+            stat = sp.get("stat") or {}
+            try:
+                pa = int(stat.get("plateAppearances") or 0)
+                k = int(stat.get("strikeOuts") or 0)
+                hr = int(stat.get("homeRuns") or 0)
+                ab = int(stat.get("atBats") or 0)
+                hits = int(stat.get("hits") or 0)
+                doubles = int(stat.get("doubles") or 0)
+                triples = int(stat.get("triples") or 0)
+                walks = int(stat.get("baseOnBalls") or 0)
+            except (ValueError, TypeError):
+                continue
+            if pa == 0 or ab == 0:
+                continue
+            iso = ((doubles + 2*triples + 3*hr) / ab) if ab > 0 else None
+            rows.append({
+                "team_id": team.get("id"),
+                "team_abbr": team.get("abbreviation") or team.get("teamCode"),
+                "team_name": team.get("name"),
+                "pa": pa,
+                "k_pct": round(k / pa * 100, 1),
+                "bb_pct": round(walks / pa * 100, 1),
+                "hr_per_pa": round(hr / pa * 100, 2),
+                "iso": round(iso, 3) if iso is not None else None,
+            })
+    return pd.DataFrame(rows)
