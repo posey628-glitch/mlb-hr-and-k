@@ -450,8 +450,14 @@ def build_pitcher_slate(
                 "home_away": "@" if side == "away" else "vs",
                 "game_pk": g["gamePk"],
             }
-            # Opposing team aggregates - lets us account for whom they're facing
-            opp_agg = (team_hit_map or {}).get(opp_abbr, {})
+            # Opposing team aggregates - lookup by abbr first, then by team_id
+            opp_team_id = g.get(f"{'home' if side == 'away' else 'away'}_team_id")
+            opp_agg = (team_hit_map or {}).get(opp_abbr) or {}
+            if not opp_agg and opp_team_id is not None and not pd.isna(opp_team_id):
+                try:
+                    opp_agg = (team_hit_map or {}).get(int(opp_team_id)) or {}
+                except (ValueError, TypeError):
+                    opp_agg = {}
             base["opp_k_pct"] = opp_agg.get("k_pct")
             base["opp_hr_per_pa"] = opp_agg.get("hr_per_pa")
             base["opp_iso"] = opp_agg.get("iso")
