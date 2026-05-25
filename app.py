@@ -1625,6 +1625,8 @@ st.divider()
 # LINEUP CONFIRMATION BANNER - tells user upfront if many games are unconfirmed
 # ============================================================================
 unconfirmed_games = []
+unconfirmed_with_time = []  # tuples of (label, hours_until_first_pitch)
+now_et = pd.Timestamp.now(tz="US/Eastern")
 for gpk, ctx in game_context_map.items():
     g_rows = slate[slate["gamePk"] == gpk]
     if g_rows.empty:
@@ -1638,19 +1640,52 @@ for gpk, ctx in game_context_map.items():
             sides.append(g.get("away_team_abbr", "AWAY"))
         if not home_conf:
             sides.append(g.get("home_team_abbr", "HOME"))
-        unconfirmed_games.append(f"{'/'.join(sides)} ({g.get('away_team_abbr')}@{g.get('home_team_abbr')})")
+        label = f"{'/'.join(sides)} ({g.get('away_team_abbr')}@{g.get('home_team_abbr')})"
+        unconfirmed_games.append(label)
+        # Compute time-until-first-pitch
+        game_time = g.get("gameTime")
+        time_label = ""
+        hours_until = None
+        if isinstance(game_time, pd.Timestamp):
+            try:
+                if game_time.tzinfo:
+                    local_dt = game_time.tz_convert("US/Eastern")
+                else:
+                    local_dt = game_time.tz_localize("UTC").tz_convert("US/Eastern")
+                time_label = local_dt.strftime("%I:%M %p ET").lstrip("0")
+                hours_until = (local_dt - now_et).total_seconds() / 3600
+            except Exception:
+                pass
+        unconfirmed_with_time.append((label, time_label, hours_until))
 
 if unconfirmed_games:
     n_total = len(game_context_map)
     n_unconf = len(unconfirmed_games)
-    st.warning(
-        f"⚠️ **{n_unconf}/{n_total} games have unconfirmed lineups** — MLB hasn't "
-        f"posted the actual batting order yet for: {', '.join(unconfirmed_games[:5])}"
-        f"{'...' if len(unconfirmed_games) > 5 else ''}. "
-        f"For those teams, hitters are sorted by season PA (likely starters first), "
-        f"and **lineup-position PA scaling is DISABLED** (all use 4.2 PA). "
-        f"**For best accuracy, refresh after 4-5 PM ET for evening games.**"
-    )
+    # Categorize: imminent (< 2hr), upcoming (2-6hr), later (6hr+)
+    imminent = [u for u in unconfirmed_with_time if u[2] is not None and u[2] < 2]
+    soon = [u for u in unconfirmed_with_time if u[2] is not None and 2 <= u[2] < 6]
+    later = [u for u in unconfirmed_with_time if u[2] is not None and u[2] >= 6]
+    no_time = [u for u in unconfirmed_with_time if u[2] is None]
+
+    msg_parts = [
+        f"⚠️ **{n_unconf}/{n_total} games have unconfirmed lineups.** "
+        f"For these teams: hitters sorted by season PA (likely starters first), "
+        f"the # column shows '—', and lineup-position PA scaling is DISABLED "
+        f"(everyone uses 4.2 PA = league avg)."
+    ]
+    if imminent:
+        labels = ", ".join([f"{u[0]} @ {u[1]}" for u in imminent[:5]])
+        msg_parts.append(f"\n\n🚨 **Imminent (<2hr to first pitch):** {labels} — refresh NOW if available")
+    if soon:
+        labels = ", ".join([f"{u[0]} @ {u[1]}" for u in soon[:5]])
+        msg_parts.append(f"\n\n⏰ **Upcoming (2-6hr away):** {labels} — refresh ~1hr before each game")
+    if later:
+        labels = ", ".join([f"{u[0]} @ {u[1]}" for u in later[:5]])
+        msg_parts.append(f"\n\n🕐 **Later tonight:** {labels} — refresh after 4 PM ET")
+    if no_time:
+        labels = ", ".join([u[0] for u in no_time[:5]])
+        msg_parts.append(f"\n\n❓ **Unknown time:** {labels}")
+    st.warning("".join(msg_parts))
 
 
 # ============================================================================
@@ -2248,6 +2283,20 @@ def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
     if matchup_df is None or matchup_df.empty:
         st.caption(f"{team_label}: no lineup data available yet.")
         return
+
+    # Detect if this is a roster-fill (unconfirmed) lineup
+    is_unconfirmed = (
+        "is_roster_fill" in matchup_df.columns
+        and matchup_df["is_roster_fill"].any()
+    )
+    if is_unconfirmed:
+        st.caption(
+            f"📋 **{team_label}** — lineup not posted. "
+            f"Hitters below are sorted by season PA (likely starters first). "
+            f"The **#** column shows '—' because real lineup positions are unknown. "
+            f"DON'T read row order as batting order — Murakami showing first just "
+            f"means he's the highest-PA hitter, not that he's leading off."
+        )
 
     if "pa" in matchup_df.columns:
         qualified = matchup_df[matchup_df["pa"].notna() & (matchup_df["pa"] >= INSUFFICIENT_PA_THRESHOLD)]
