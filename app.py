@@ -270,6 +270,40 @@ def hr_signal_emoji(hr_game_pct, sample_size=None, pa_threshold=80):
     return "🔴"
 
 
+def hr_grade(hr_game_pct, sample_size=None, pa_threshold=80):
+    """Letter grade (A+/A/B+/B/C/D/F) for HR Game% - more intuitive than %.
+
+    Calibrated to real-world MLB rates:
+      A+ : ≥22%  (elite matchup - top 5% of plays)
+      A  : 19-22% (very strong - top 15%)
+      B+ : 16-19% (strong matchup - top 25%)
+      B  : 12-16% (solid)
+      C+ : 9-12%  (modest)
+      C  : 6-9%   (below average)
+      D  : 3-6%   (poor)
+      F  : <3%    (avoid)
+    """
+    if hr_game_pct is None or pd.isna(hr_game_pct):
+        return "—"
+    if sample_size is not None and not pd.isna(sample_size) and sample_size < pa_threshold:
+        return "—"
+    if hr_game_pct >= 22:
+        return "A+"
+    if hr_game_pct >= 19:
+        return "A"
+    if hr_game_pct >= 16:
+        return "B+"
+    if hr_game_pct >= 12:
+        return "B"
+    if hr_game_pct >= 9:
+        return "C+"
+    if hr_game_pct >= 6:
+        return "C"
+    if hr_game_pct >= 3:
+        return "D"
+    return "F"
+
+
 def pitcher_signal_emoji(test_score, sample_size=None, pa_threshold=80):
     """Single emoji for the Signal column - pitchers."""
     if test_score is None or pd.isna(test_score):
@@ -413,6 +447,30 @@ if slate.empty:
 hitter_stats = get_hitter_stats() if not slate.empty else pd.DataFrame()
 pitcher_stats = get_pitcher_stats() if not slate.empty else pd.DataFrame()
 pitcher_arsenal_all = get_pitcher_arsenal() if not slate.empty else pd.DataFrame()
+
+# Pitcher handedness splits (vs LHB / vs RHB)
+# Merge into pitcher_stats so the slate includes them.
+try:
+    from data_fetcher import get_pitcher_handedness_splits
+    pitcher_splits = get_pitcher_handedness_splits() if not slate.empty else pd.DataFrame()
+    if (pitcher_splits is not None and not pitcher_splits.empty
+            and "player_id" in pitcher_stats.columns):
+        pitcher_stats["player_id"] = pd.to_numeric(
+            pitcher_stats["player_id"], errors="coerce").astype("Int64")
+        pitcher_splits["player_id"] = pd.to_numeric(
+            pitcher_splits["player_id"], errors="coerce").astype("Int64")
+        # Drop any conflicting columns then merge
+        merge_cols = [c for c in pitcher_splits.columns if c != "player_id"]
+        existing = set(pitcher_stats.columns)
+        merge_cols = [c for c in merge_cols if c not in existing]
+        if merge_cols:
+            pitcher_stats = pitcher_stats.merge(
+                pitcher_splits[["player_id"] + merge_cols],
+                on="player_id", how="left"
+            )
+except Exception as _e:
+    # Don't block app if Savant splits fetch fails
+    pass
 
 # Traditional stats
 hitter_trad = get_hitter_traditional() if not slate.empty else pd.DataFrame()
@@ -1003,6 +1061,9 @@ if not p_slate.empty:
         "ip", "games_started", "games_played", "ip_per_outing",
         "k_pct", "whiff_pct",
         "xwoba_allowed", "barrel_allowed",
+        # NEW: handedness splits
+        "vs_lhb_xwoba", "vs_lhb_hr_per_pa", "vs_lhb_k_percent",
+        "vs_rhb_xwoba", "vs_rhb_hr_per_pa", "vs_rhb_k_percent",
         "opp_k_pct", "opp_hr_per_pa",
         "recent_era", "recent_k9", "days_rest", "avg_recent_pitches",
         "reliability",
@@ -1071,6 +1132,42 @@ if not p_slate.empty:
         "whiff_pct": st.column_config.NumberColumn("Whiff%", format="%.1f"),
         "xwoba_allowed": st.column_config.NumberColumn("xwOBA", format="%.3f"),
         "barrel_allowed": st.column_config.NumberColumn("Brl%", format="%.1f"),
+        # Handedness splits
+        "vs_lhb_xwoba": st.column_config.NumberColumn(
+            "vs LHB xwOBA", format="%.3f",
+            help=(
+                "xwOBA allowed to left-handed batters this season.\n"
+                "<.280 = elite vs LHB, .280-.320 = avg, >.350 = exploitable.\n"
+                "Critical for predicting HRs when an LHB is in the box."
+            ),
+        ),
+        "vs_lhb_hr_per_pa": st.column_config.NumberColumn(
+            "vs LHB HR%", format="%.2f%%",
+            help=(
+                "HR rate per PA allowed to LHB. League avg ~2.8%.\n"
+                "<2% = strong, >4% = LHB crush this pitcher.\n"
+                "When LHB faces this pitcher, the model uses THIS rate not overall."
+            ),
+        ),
+        "vs_lhb_k_percent": st.column_config.NumberColumn(
+            "vs LHB K%", format="%.1f%%",
+            help="Strikeout rate vs LHB. >25% = strong, <18% = pitcher struggles vs LHB.",
+        ),
+        "vs_rhb_xwoba": st.column_config.NumberColumn(
+            "vs RHB xwOBA", format="%.3f",
+            help=(
+                "xwOBA allowed to right-handed batters this season.\n"
+                "Same scale as vs LHB. Used in HR projection when RHB at plate."
+            ),
+        ),
+        "vs_rhb_hr_per_pa": st.column_config.NumberColumn(
+            "vs RHB HR%", format="%.2f%%",
+            help="HR rate per PA allowed to RHB. League avg ~2.8%.",
+        ),
+        "vs_rhb_k_percent": st.column_config.NumberColumn(
+            "vs RHB K%", format="%.1f%%",
+            help="Strikeout rate vs RHB.",
+        ),
         "opp_k_pct": st.column_config.NumberColumn(
             "Opp K%", format="%.1f%%",
             help=(
@@ -1485,7 +1582,7 @@ for _, game in slate.iterrows():
     for matchup_df, opp_p_row in [(away_matchup, home_p_row), (home_matchup, away_p_row)]:
         if matchup_df is None or matchup_df.empty:
             continue
-        hr_pa, hr_game, verdicts, signals = [], [], [], []
+        hr_pa, hr_game, verdicts, signals, grades = [], [], [], [], []
         pull_mults_col = []
         for _, hr in matchup_df.iterrows():
             row_dict = hr.to_dict()
@@ -1579,18 +1676,21 @@ for _, game in slate.iterrows():
             p_game = hr_prob_full_game(p_pa, expected_pa=expected_pa) if p_pa is not None else None
             hr_pa.append(round(p_pa * 100, 2) if p_pa is not None else None)
             hr_game.append(round(p_game * 100, 2) if p_game is not None else None)
+            game_pct_val = round(p_game * 100, 2) if p_game is not None else None
             verdicts.append(hr_verdict(
-                round(p_game * 100, 2) if p_game is not None else None,
-                sample, INSUFFICIENT_PA_THRESHOLD,
+                game_pct_val, sample, INSUFFICIENT_PA_THRESHOLD,
             ))
             signals.append(hr_signal_emoji(
-                round(p_game * 100, 2) if p_game is not None else None,
-                sample, INSUFFICIENT_PA_THRESHOLD,
+                game_pct_val, sample, INSUFFICIENT_PA_THRESHOLD,
+            ))
+            grades.append(hr_grade(
+                game_pct_val, sample, INSUFFICIENT_PA_THRESHOLD,
             ))
         matchup_df["hr_pa_pct"] = hr_pa
         matchup_df["hr_game_pct"] = hr_game
         matchup_df["verdict"] = verdicts
         matchup_df["alert"] = signals
+        matchup_df["grade"] = grades
         matchup_df["pull_wind_mult"] = pull_mults_col
 
     # Sleeper score - uses sleepers.py functions correctly
@@ -2333,6 +2433,21 @@ def build_col_config():
                 "Formula: 1 - (1 - HR per PA)^expected_PA. Our cap is ~26% game-max."
             ),
         ),
+        "grade": st.column_config.TextColumn(
+            "Grade", width="small",
+            help=(
+                "Letter grade equivalent of HR Game%:\n"
+                "A+ : ≥22% (elite - top tier)\n"
+                "A  : 19-22% (very strong)\n"
+                "B+ : 16-19% (strong)\n"
+                "B  : 12-16% (solid)\n"
+                "C+ : 9-12% (modest)\n"
+                "C  : 6-9% (below avg)\n"
+                "D  : 3-6% (poor)\n"
+                "F  : <3% (avoid)\n"
+                "—  : insufficient sample"
+            ),
+        ),
         "hr_pa_pct": st.column_config.NumberColumn(
             "HR PA%", format="%.2f%%",
             help=(
@@ -2535,7 +2650,7 @@ def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
         insufficient = pd.DataFrame()
 
     cols_to_show = [c for c in [
-        "alert", "player_name", "lineup_pos", "bats", "position",
+        "alert", "grade", "player_name", "lineup_pos", "bats", "position",
         "power_score", "matchup_opp", "hr_game_pct", "hr_pa_pct", "matchup", "test_score",
         "streak_label",
         "pa", "barrel_pct", "iso", "xwoba", "xwobacon",
