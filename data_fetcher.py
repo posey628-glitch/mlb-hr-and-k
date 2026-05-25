@@ -390,6 +390,28 @@ def get_hitter_stats(season: int = CURRENT_SEASON) -> pd.DataFrame:
     # Normalize player_id type for merges + derive missing columns
     df = _normalize_player_df(df)
     df = _derive_hitter_missing(df)
+
+    # Clean up float precision artifacts at source so downstream code doesn't
+    # need to repeat rounding. Different metrics get different precision.
+    round_specs = {
+        # Ratios stored as 0-1 → 3 decimals
+        3: ["iso", "xwoba", "xwobacon", "xslg", "xobp", "xba", "slg", "obp",
+            "ops", "batting_avg", "babip", "avg", "woba"],
+        # Percentages 0-100 → 1 decimal
+        1: ["k_percent", "bb_percent", "whiff_percent", "swing_percent",
+            "barrel_batted_rate", "hard_hit_percent", "sweet_spot_percent",
+            "flyballs_percent", "groundballs_percent", "linedrives_percent",
+            "popups_percent", "pull_percent", "pull_air_percent",
+            "straightaway_percent", "opposite_percent", "z_swing_percent",
+            "oz_swing_percent", "f_strike_percent", "zone_percent",
+            "csw_percent"],
+        # Velocities / angles → 1 decimal
+        1: ["launch_speed", "launch_angle", "avg_best_speed", "avg_hit_angle"],
+    }
+    for digits, cols in round_specs.items():
+        for c in cols:
+            if c in df.columns:
+                df[c] = pd.to_numeric(df[c], errors="coerce").round(digits)
     return df
 
 
