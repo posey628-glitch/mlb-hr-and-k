@@ -93,6 +93,7 @@ def pitch_match_score(
     h_slg = {}
     h_hard_hit = {}
     h_barrel = {}
+    h_pa = {}  # NEW: per-pitch PA counts for sample-size shrinkage
     for _, r in hitter_arsenal.iterrows():
         pitch = r[h_name_col]
         xw = r.get("est_woba", r.get("xwoba", None))
@@ -107,6 +108,13 @@ def pitch_match_score(
         brl = r.get("barrel_percent", r.get("barrel_batted_rate", None))
         if brl is not None and not pd.isna(brl):
             h_barrel[pitch] = float(brl)
+        # Track PA so we can shrink small-sample per-pitch barrel rates
+        pa = r.get("pa", r.get("plate_appearances", r.get("total_pitches", None)))
+        if pa is not None and not pd.isna(pa):
+            try:
+                h_pa[pitch] = float(pa)
+            except (TypeError, ValueError):
+                pass
 
     # Weight by pitcher usage - BUT apply real-world adaptation:
     # MLB pitchers and analytics teams DO adjust pitch mix vs specific hitters.
@@ -151,17 +159,29 @@ def pitch_match_score(
             adapt_factor = 1.35
         usage = usage_raw * adapt_factor
 
-        weighted_xwoba += usage * h_val
+        # Apply same Bayesian shrinkage to xwoba (default prior 0.320 = league avg)
+        pitch_pa = h_pa.get(pitch, 20)
+        shrink_weight = pitch_pa / (pitch_pa + 30)
+        h_val_shrunk = h_val * shrink_weight + 0.320 * (1 - shrink_weight)
+
+        weighted_xwoba += usage * h_val_shrunk
         total_weight += usage
 
         slg_val = h_slg.get(pitch)
         if slg_val is not None:
-            weighted_slg += usage * slg_val
+            # Same shrinkage applied to SLG (default prior .400 = league avg)
+            slg_shrunk = slg_val * shrink_weight + 0.400 * (1 - shrink_weight)
+            weighted_slg += usage * slg_shrunk
             has_slg += usage
 
         brl_val = h_barrel.get(pitch)
         if brl_val is not None:
-            weighted_barrel += usage * brl_val
+            # SAMPLE-SIZE SHRINKAGE: per-pitch barrel rates with tiny samples
+            # are noisy (Ben Rice 199 total PA might have 15 PA vs sliders;
+            # 3 barrels = 20% which is misleading). Shrink toward league avg.
+            # League avg barrel% ≈ 7.5%. Bayesian shrinkage with prior weight 30 PA.
+            brl_shrunk = brl_val * shrink_weight + 7.5 * (1 - shrink_weight)
+            weighted_barrel += usage * brl_shrunk
             has_barrel += usage
 
         breakdown.append({
