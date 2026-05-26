@@ -591,6 +591,7 @@ except Exception as _e:
 
 # NEW: Pitcher day/night splits + IL status
 # Only fetch for slate pitchers (~26-30 calls each)
+_pitcher_dn_il_err = None
 try:
     from data_fetcher import get_pitcher_day_night_splits, get_pitchers_il_status
     if slate_pitcher_ids:
@@ -619,8 +620,16 @@ try:
                     pitcher_il[["player_id"] + merge_cols],
                     on="player_id", how="left"
                 )
-except Exception:
-    pass
+except NameError as _e:
+    # slate_pitcher_ids not defined - handedness fetch failed earlier
+    _pitcher_dn_il_err = f"NameError: {_e}"
+except Exception as _e:
+    _pitcher_dn_il_err = f"{type(_e).__name__}: {_e}"
+
+# Surface the error in a small caption so we can debug
+if _pitcher_dn_il_err:
+    with st.sidebar:
+        st.caption(f"⚠️ Day/Night+IL fetch issue: {_pitcher_dn_il_err}")
 
 # Traditional stats
 hitter_trad = get_hitter_traditional() if not slate.empty else pd.DataFrame()
