@@ -2020,12 +2020,12 @@ for _, game in slate.iterrows():
         pull_mults_col = []
         for _, hr in matchup_df.iterrows():
             row_dict = hr.to_dict()
-            # Inject game_type for day/night split adjustment in props.py
-            row_dict["game_type"] = ctx.get("game_type", "night")
-            # opp_p_row gets game_type too (works on the same dict via reference,
-            # but only the first time — defensive: set explicitly)
+            # Inject game_type for day/night split adjustment in props.py.
+            # game_type is the local variable set at the top of this game loop.
+            row_dict["game_type"] = game_type
+            # opp_p_row gets game_type too (defensive)
             if isinstance(opp_p_row, dict) and "game_type" not in opp_p_row:
-                opp_p_row["game_type"] = ctx.get("game_type", "night")
+                opp_p_row["game_type"] = game_type
             pa = safe_float(row_dict.get("pa"))
             sample = int(pa) if pa is not None else None
             bats = row_dict.get("bats", "R") or "R"
