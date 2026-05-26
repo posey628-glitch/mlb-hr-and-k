@@ -1377,14 +1377,21 @@ if not p_slate.empty:
             flags = []
             if r.get("sample_noise"):
                 flags.append("📉")
-            # NEW: Fresh-from-IL flag
-            # Pitchers within 7 days of return from IL typically throw fewer
-            # pitches, may be rusty. Flag them.
+            # Fresh-from-IL flag
+            # CRITICAL: NaN is truthy in Python (bool(float('nan')) == True),
+            # so we must explicitly check for NaN and treat it as "not on IL."
+            # Without this guard, every pitcher with no IL data (most of them)
+            # was being flagged as 🚑 ON IL.
             days_since = r.get("days_since_return")
             on_il = r.get("on_il")
-            if on_il:
+            on_il_is_true = (
+                on_il is True
+                or (isinstance(on_il, (int, float)) and not pd.isna(on_il) and on_il == 1)
+            )
+            if on_il_is_true:
                 flags.append("🚑 ON IL")
-            elif days_since is not None and not pd.isna(days_since) and days_since <= 7:
+            elif (days_since is not None and not pd.isna(days_since)
+                    and 0 <= days_since <= 7):
                 flags.append(f"🏥 FRESH IL ({int(days_since)}d)")
             return " ".join(flags) if flags else ""
         p_slate["warn"] = p_slate.apply(_warn_flag, axis=1)
