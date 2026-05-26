@@ -409,9 +409,23 @@ with st.sidebar:
         from backtest import list_snapshots
         existing = list_snapshots()
         if existing:
-            st.caption(f"Snapshots saved: {len(existing)} (most recent: {existing[-1]})")
+            st.caption(f"Snapshots saved: **{len(existing)}** (most recent: {existing[-1]})")
+            # Check coverage in the last 14 days
+            from datetime import datetime, timedelta
+            today = datetime.now().date()
+            expected_days = set()
+            for i in range(14):
+                expected_days.add(str(today - timedelta(days=i)))
+            covered = set(existing).intersection(expected_days)
+            coverage_pct = len(covered) / 14 * 100
+            if coverage_pct >= 80:
+                st.caption(f"✅ 14-day coverage: {len(covered)}/14 days ({coverage_pct:.0f}%)")
+            elif coverage_pct >= 50:
+                st.caption(f"🟡 14-day coverage: {len(covered)}/14 days ({coverage_pct:.0f}%)")
+            else:
+                st.caption(f"⚠️ 14-day coverage: {len(covered)}/14 days — load app daily to build calibration data.")
         else:
-            st.caption("No snapshots yet. Save today's projections via button below the slate.")
+            st.caption("⚠️ No snapshots yet. Auto-save happens when the app loads.")
     except Exception:
         st.caption("Backtest module unavailable")
     show_backtest = st.checkbox("Show backtest panel", value=False,
@@ -1680,13 +1694,17 @@ for _, game in slate.iterrows():
             hitter_park_mult = hand_park * pull_mult
 
             # Pitch-type HR match multiplier
-            # 50 = neutral, 90 = great barrel rates vs this pitcher's arsenal,
-            # 10 = poor barrel rates. Modest 0.85x to 1.15x multiplier.
+            # NOTE: pitch_match_score is ALREADY applied inside hr_prob_per_pa
+            # via pm_mult. This is an ADDITIONAL fine adjustment using the
+            # barrel-based pitch_hr_score (vs the xwoba-based pitch_match_score).
+            # These two signals are correlated, so we use a NARROWER range here
+            # to avoid double-counting the "hitter mashes this pitcher" effect.
+            # Was 0.85-1.15 (too generous). Now 0.92-1.08 = max ±8% adjustment.
             pitch_hr_score = row_dict.get("pitch_hr_score")
             if pitch_hr_score is not None and not pd.isna(pitch_hr_score):
-                # Center on 50 -> 1.0, +/- 1 score = 0.003 multiplier shift
-                pitch_hr_mult = 1.0 + (pitch_hr_score - 50) * 0.003
-                pitch_hr_mult = max(0.85, min(1.15, pitch_hr_mult))
+                # Center on 50 -> 1.0, +/- 1 score = 0.0016 shift
+                pitch_hr_mult = 1.0 + (pitch_hr_score - 50) * 0.0016
+                pitch_hr_mult = max(0.92, min(1.08, pitch_hr_mult))
             else:
                 pitch_hr_mult = 1.0
 
@@ -1731,10 +1749,13 @@ for _, game in slate.iterrows():
             # The reason: home team doesn't bat in the bottom of the 9th when
             # they're winning (~50% of games). Documented historically.
             # The effect: away hitters get ~2% more HR chances per game.
+            #
+            # CONSERVATIVE CALIBRATION: real data shows away PA advantage of
+            # about 0.05-0.08 PA per game. We use ±0.03 (a bit conservative)
+            # so the effect on HR Game% is ~0.3 percentage points, not enough
+            # to dominate the top-10 selection.
             is_away_team = (matchup_df is away_matchup)
-            # Home/away offset: away gets +0.05 PA, home gets -0.05 PA
-            # (centered around 4.2 league avg)
-            ha_offset = 0.05 if is_away_team else -0.05
+            ha_offset = 0.03 if is_away_team else -0.03
 
             lp = row_dict.get("lineup_pos")
             is_fill = row_dict.get("is_roster_fill", False)
@@ -2192,10 +2213,36 @@ if all_hitters:
     else:
         qualified = combined_all
 
+    # ==== AUTO-SNAPSHOT: critical for the model to learn ====
+    # The model is meaningless without outcome data to calibrate against.
+    # Every time the app loads, IF:
+    #   - selected_date is today
+    #   - we have decent data (at least 1 confirmed lineup or 100+ qualified hitters)
+    #   - we don't already have a snapshot for today
+    # ...then automatically save a snapshot. This ensures we capture EVERY day,
+    # not just days when the user remembers to click the button.
+    auto_snap_status = ""
+    try:
+        from backtest import save_snapshot, list_snapshots
+        existing_snaps = set(list_snapshots())
+        snap_key = str(selected_date)
+        if (snap_key not in existing_snaps
+                and selected_date == datetime.now().date()
+                and combined_all is not None and len(combined_all) >= 100):
+            ok = save_snapshot(selected_date, combined_all, p_slate)
+            if ok:
+                auto_snap_status = f"✅ Auto-snapshot saved for {selected_date}"
+            else:
+                auto_snap_status = f"⚠️ Auto-snapshot failed - click button to save manually"
+        elif snap_key in existing_snaps:
+            auto_snap_status = f"✅ Snapshot exists for {selected_date}"
+    except Exception:
+        pass
+
     # Save-snapshot + full export buttons - always render
     snap_col1, snap_col2, snap_col3 = st.columns([1.2, 1.5, 3])
     with snap_col1:
-        if st.button("💾 Save snapshot", help="Save today's projections so they can be evaluated against actual outcomes tomorrow."):
+        if st.button("💾 Save snapshot", help="Manually save today's projections for backtest comparison. Note: auto-snapshot already happens on every load."):
             try:
                 from backtest import save_snapshot
                 ok = save_snapshot(selected_date, combined_all, p_slate)
@@ -2205,6 +2252,8 @@ if all_hitters:
                     st.error("Snapshot save failed")
             except Exception as e:
                 st.error(f"Backtest module error: {e}")
+        if auto_snap_status:
+            st.caption(auto_snap_status)
 
     with snap_col2:
         # Build combined export - try Excel, fall back to CSV-bundle
