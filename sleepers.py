@@ -94,12 +94,18 @@ def hr_probability(
     return df
 
 
-def find_sleepers(hr_df: pd.DataFrame, season_hr_col: str = "home_run") -> pd.DataFrame:
+def find_sleepers(hr_df: pd.DataFrame, season_hr_col: str = "home_run",
+                    min_pa: int = 100) -> pd.DataFrame:
     """
     Flag hitters whose today HR_SCORE greatly exceeds their season HR pace.
 
     Sleeper score = today's HR_SCORE percentile MINUS season HR percentile.
     Real data only - NaN if either input missing.
+
+    min_pa: hitters below this threshold get NaN sleeper_score. Below ~100 PA
+    the season HR count is too noisy — a player with 80 PA and 5 HR may look
+    like a sleeper just because their season percentile is artificially low
+    (since the percentile is based on raw HR count without accounting for PA).
     """
     df = hr_df.copy()
     if df.empty:
@@ -114,6 +120,11 @@ def find_sleepers(hr_df: pd.DataFrame, season_hr_col: str = "home_run") -> pd.Da
         season_pct = pd.Series([np.nan] * len(df), index=df.index)
 
     df["sleeper_score"] = (hr_pct - season_pct).round(1)
+    # Suppress sleeper_score for players below the PA threshold - their
+    # season HR percentile is unreliable because raw HR count is noisy at
+    # small samples (a 5-HR player in 80 PA vs 600 PA looks the same here).
+    if "pa" in df.columns:
+        df.loc[df["pa"].isna() | (df["pa"] < min_pa), "sleeper_score"] = np.nan
     df["is_sleeper"] = df["sleeper_score"] >= 25  # arbitrary cutoff - tune
     return df
 
