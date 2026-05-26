@@ -663,12 +663,17 @@ def build_pitcher_slate(
         # Very low IP when we DO have IP data
         if ip is not None and not pd.isna(ip) and ip < min_ip:
             return rookie_prefix + "🚨 RELIEVER"
-        # Bulk reliever between starts - require BOTH high GP/GS ratio AND low IP/GS
+        # Bulk reliever between starts - require BOTH high GP/GS ratio AND low IP/outing.
+        # FIX (May 2026): was computing ip/gs which inflates because IP includes
+        # relief outings too. Use ip/gp (per-outing) which is the true average.
+        # Griffin Jax example: 5 GS / 16 GP / 27.2 IP. ip/gs = 5.4 (looks like starter).
+        # ip/gp = 1.7 (clearly a reliever/swing-man).
         if (gp is not None and gs is not None
                 and not pd.isna(gp) and not pd.isna(gs)
                 and gs > 0 and gp > gs * 1.5):
-            ip_per_start = ip / gs if (ip is not None and not pd.isna(ip) and gs > 0) else 5.0
-            if ip_per_start < 4.5:
+            ip_per_outing = (ip / gp) if (ip is not None and not pd.isna(ip)
+                                            and gp > 0) else 5.0
+            if ip_per_outing < 3.0:
                 return rookie_prefix + "🔄 SWING"
         # Low IP but not crazy low
         if ip is not None and not pd.isna(ip) and ip < full_ip * 0.6:
@@ -867,26 +872,42 @@ def build_pitcher_slate(
         def _expected_ip(row):
             ip = row.get("ip")
             gs = row.get("games_started")
-            base_ip = 5.5
-            if gs is not None and not pd.isna(gs) and gs == 0:
+            gp = row.get("games_played")
+            role = row.get("role", "")
+
+            # Role-based defaults take PRIORITY over IP-based ones.
+            # Jax case: 5 GS / 16 GP / 27.2 IP → if we just check ip/gs we miss
+            # that he's a swing-man pitching ~1.7 IP per outing.
+            if "🚨 RELIEVER" in str(role):
+                base_ip = 1.5
+            elif "🔄 BULK" in str(role):
+                base_ip = 3.0
+            elif "🔄 SWING" in str(role):
+                # For swing-man, base on actual ip_per_outing capped at 3.5
+                if (ip is not None and not pd.isna(ip) and gp is not None
+                        and not pd.isna(gp) and gp > 0):
+                    ip_per_outing = ip / gp
+                    base_ip = min(3.5, max(1.5, ip_per_outing))
+                else:
+                    base_ip = 2.5
+            elif gs is not None and not pd.isna(gs) and gs == 0:
                 base_ip = 1.5
             elif ip is None or pd.isna(ip) or ip < 10:
                 base_ip = 2.0
             elif gs is not None and not pd.isna(gs) and gs < 5:
                 base_ip = 3.5
-            elif ip < 25:
+            elif ip is not None and not pd.isna(ip) and ip < 25:
                 base_ip = 4.0
             else:
                 base_ip = 5.5
-            # NEW: IL fatigue adjustment - fresh from IL = fewer innings expected.
-            # First start back: typically 3-4 innings or ~70 pitches.
-            # Days 2-7 since return: typically scaled back slightly.
+            # IL fatigue adjustment - fresh from IL = fewer innings expected.
             days_since = row.get("days_since_return")
-            if days_since is not None and not pd.isna(days_since) and days_since <= 7:
+            if (days_since is not None and not pd.isna(days_since)
+                    and 0 <= days_since <= 7):
                 if days_since <= 3:
-                    base_ip = min(base_ip, 3.5)  # First couple starts back
+                    base_ip = min(base_ip, 3.5)
                 else:
-                    base_ip = base_ip * 0.85  # Days 4-7: 15% reduction
+                    base_ip = base_ip * 0.85
             return base_ip
         df["expected_ip"] = df.apply(_expected_ip, axis=1)
 
