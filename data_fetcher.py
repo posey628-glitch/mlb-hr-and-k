@@ -693,16 +693,27 @@ def _parse_stat_split_response(data: dict, group: str = "hitting") -> dict:
     Parse MLB Stats API statSplits response into vs_day_*/vs_night_* fields.
     Handles missing fields gracefully (returns whatever's available).
     Used for both hitters and pitchers.
+
+    Recognizes splits by code (d/n) OR by description ("Day"/"Night") since
+    MLB API responses vary.
     """
     out = {}
     for stat_group in data.get("stats", []):
         for split in stat_group.get("splits", []):
-            code = split.get("split", {}).get("code", "")
-            # sitCodes 'd' = day games, 'n' = night games
-            if code == "d":
+            split_meta = split.get("split", {})
+            code = (split_meta.get("code") or "").lower()
+            desc = (split_meta.get("description") or "").lower()
+            # Identify day vs night by code OR description
+            label = None
+            if code == "d" or "day" in desc:
                 label = "day"
-            elif code == "n":
+            elif code == "n" or "night" in desc:
                 label = "night"
+            # vs LHB / vs RHB
+            elif code == "vl" or "vs. lhb" in desc or "left" in desc:
+                label = "lhb"
+            elif code == "vr" or "vs. rhb" in desc or "right" in desc:
+                label = "rhb"
             else:
                 continue
             stat = split.get("stat", {})
@@ -779,7 +790,7 @@ def _fetch_day_night_splits_single(player_id: int, season: int, group: str = "hi
 @st.cache_data(ttl=3600)
 def get_hitter_day_night_splits(season: int = CURRENT_SEASON,
                                   hitter_ids: tuple = (),
-                                  _cache_version: str = "v1") -> pd.DataFrame:
+                                  _cache_version: str = "v2") -> pd.DataFrame:
     """
     Fetch day/night splits for the given hitter IDs.
     Only fetches for confirmed lineup spots to avoid 200+ API calls.
@@ -806,7 +817,7 @@ def get_hitter_day_night_splits(season: int = CURRENT_SEASON,
 @st.cache_data(ttl=3600)
 def get_pitcher_day_night_splits(season: int = CURRENT_SEASON,
                                    pitcher_ids: tuple = (),
-                                   _cache_version: str = "v1") -> pd.DataFrame:
+                                   _cache_version: str = "v2") -> pd.DataFrame:
     """
     Fetch day/night splits for the given pitcher IDs.
 
@@ -944,7 +955,15 @@ def get_pitchers_il_status(pitcher_ids: tuple, season: int = CURRENT_SEASON,
         except (TypeError, ValueError):
             continue
         status = get_player_il_status(pid_int, season)
-        if any(status.values()):
+        # Include if pitcher has ANY IL history this season (on IL, recent return,
+        # or any past stints). Healthy pitchers with no IL data are excluded since
+        # they don't need columns populated.
+        has_data = (
+            status.get("on_il")
+            or status.get("days_since_return") is not None
+            or (status.get("il_count_this_season") or 0) > 0
+        )
+        if has_data:
             status["player_id"] = pid_int
             rows.append(status)
     if not rows:
