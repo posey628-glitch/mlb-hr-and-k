@@ -851,6 +851,28 @@ def get_hitter_recent_form_trad(player_id: int, season: int = CURRENT_SEASON,
         # Multi-HR games in window
         multi_hr_games = sum(1 for ghr in per_game_hr if ghr >= 2)
 
+        # NEW: RECENCY-WEIGHTED recent_hr metric
+        # Last 3 games weighted 3x; games 4-7 weighted 2x; games 8-15 weighted 1x.
+        # Captures hot streaks more accurately than equal-weight rolling sum.
+        # Returns a "weighted HR rate" — equivalent HRs assuming the recent
+        # weighting pattern continues. Useful for picking up real momentum.
+        weighted_hr = 0.0
+        weighted_pa = 0.0
+        for i, ghr in enumerate(per_game_hr_rev):
+            # Per-game PA estimate from AB+BB (close enough for weighting)
+            this_ab = int(recent[len(recent) - 1 - i].get("stat", {}).get("atBats", 0) or 0)
+            this_bb = int(recent[len(recent) - 1 - i].get("stat", {}).get("baseOnBalls", 0) or 0)
+            game_pa = this_ab + this_bb
+            if i < 3:    weight = 3.0   # last 3 games
+            elif i < 7:  weight = 2.0   # games 4-7
+            else:        weight = 1.0   # games 8-15
+            weighted_hr += ghr * weight
+            weighted_pa += game_pa * weight
+        recent_hr_weighted_rate = (
+            round(weighted_hr / weighted_pa * 100, 3)
+            if weighted_pa > 0 else 0.0
+        )
+
         # Streak label for the table
         if consec_hr_games >= 2:
             streak_label = f"🔥 {consec_hr_games}g HR streak"
@@ -874,6 +896,7 @@ def get_hitter_recent_form_trad(player_id: int, season: int = CURRENT_SEASON,
             "recent_k_pct": round(k / (ab + bb) * 100, 1) if (ab + bb) else 0.0,
             "recent_ops_proxy": round((h + bb) / (ab + bb), 3) if (ab + bb) else 0.0,
             "hr_streak_games": consec_hr_games,
+            "recent_hr_weighted_rate": recent_hr_weighted_rate,
             "games_since_hr": games_since_hr,
             "hr_last_5": hr_last_5,
             "hr_last_10": hr_last_10,
