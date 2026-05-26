@@ -68,7 +68,15 @@ def hr_prob_per_pa(
     #
     # Blend weight grows with sample size: 100 PA → 30% observed / 70% xHR;
     # 300 PA → 60% observed / 40% xHR; 600 PA → 80% observed / 20% xHR.
-    h_observed = hr / pa
+
+    # NEW: sample-size shrinkage on raw observed HR/PA to combat early-season noise.
+    # A hitter with 5 HR in 30 PA has 16.7% observed rate — that's not predictive.
+    # Shrink toward league avg (2.8%) using prior weight of 50 PA.
+    # Below 50 PA: observed barely matters. Above 300 PA: observed is most trusted.
+    h_observed_raw = hr / pa
+    obs_shrink_w = pa / (pa + 50)  # 50 PA prior
+    h_observed = h_observed_raw * obs_shrink_w + 0.028 * (1 - obs_shrink_w)
+
     barrel_pct = hitter_row.get("barrel_pct")
     if barrel_pct is not None and not pd.isna(barrel_pct) and barrel_pct > 0:
         h_xhr = float(barrel_pct) / 100 * 0.385
@@ -79,6 +87,24 @@ def hr_prob_per_pa(
     else:
         # No barrel data - fall back to observed only
         h_base = h_observed
+
+    # NEW: RECENCY ADJUSTMENT - blend in recent-form hot/cold signal.
+    # recent_hr_weighted_rate gives last-3 games triple-weight, weighted across
+    # last 15 games. If this rate is significantly above/below season h_base,
+    # nudge h_base toward it (but bounded so we don't over-react to small samples).
+    #
+    # CAP: ±25% deviation from h_base. A hitter on a hot streak can boost their
+    # projection by at most 25%; a cold hitter can be reduced by at most 25%.
+    recent_weighted = hitter_row.get("recent_hr_weighted_rate")
+    if (recent_weighted is not None and not pd.isna(recent_weighted)
+            and recent_weighted > 0 and h_base > 0):
+        recent_rate_decimal = float(recent_weighted) / 100  # pct → rate
+        # Compute hot/cold ratio capped at [0.75, 1.25]
+        hot_cold_ratio = recent_rate_decimal / h_base
+        hot_cold_ratio = max(0.75, min(1.25, hot_cold_ratio))
+        # Apply only 30% of the deviation (conservative — recent games are noisy)
+        adjustment = 1.0 + (hot_cold_ratio - 1.0) * 0.30
+        h_base = h_base * adjustment
 
     # Pitcher HR/9 adjustment - prefer handedness splits if available
     p_hr9 = pitcher_row.get("hr9") if pitcher_row else None
