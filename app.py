@@ -1071,15 +1071,24 @@ if show_legend:
             "multiple advantages stacking together. Look for these FIRST when building your slate:\n\n"
             "| Tier | Conditions Required |\n"
             "|---|---|\n"
-            "| 🔥🔥🔥 **ELITE SMASH** | EXPLOIT+ pitcher + HR-friendly weather + favorable park + HR Game% ≥19% |\n"
-            "| 🔥🔥 **STRONG SMASH** | EXPLOIT or EXPLOIT+ pitcher + favorable env + favorable park + HR Game% ≥15% |\n"
-            "| 🔥 **SMASH** | 3 of 4 conditions met (one factor not perfect but still strong) |\n\n"
+            "| 🔥🔥🔥 **ELITE SMASH** | EXPLOIT+ pitcher + favorable env (≥1.05) + favorable park (≥1.04) + HR Game% ≥19% |\n"
+            "| 🔥🔥 **STRONG SMASH** | EXPLOIT/EXPLOIT+ pitcher + favorable env + favorable park + HR Game% ≥15% |\n"
+            "| 🔥 **SMASH** | EXPLOIT/EXPLOIT+ pitcher + (favorable env OR park) + HR Game% ≥15% |\n\n"
+            "Where:\n"
+            "- **Favorable env** = hand-aware park × weather × pull-wind ≥ 1.05\n"
+            "- **Favorable park** = hand-aware park × pull-wind ≥ 1.04\n"
+            "- **Pitcher grade** must NOT be TBD (we need real pitcher stats)\n\n"
             "Why this matters: when a hitter faces a bad pitcher (EXPLOIT) in a hitter-friendly "
             "ballpark with wind blowing out and good handedness platoon — that's where the model "
-            "becomes most confident. Each factor alone is moderate; together they compound. "
-            "These are the days when betting HR props pays off most.\n\n"
-            "**Filter:** roster-fill players (lineup unknown) are excluded — we need confirmed "
-            "lineup spots before flagging a Smash Spot, since lineup position affects HR Game%."
+            "becomes most confident. Each factor alone is moderate; together they compound.\n\n"
+            "**Critical filters:**\n"
+            "- LINEUP MUST BE CONFIRMED — we need real batting order to project HR Game% accurately\n"
+            "- PITCHER MUST NOT BE TBD — no grade = no smash flag\n"
+            "- **Max 2 per team in the leaderboard** — avoids stacking the same lineup\n\n"
+            "**Why some games have 0 Smash Spots:** if the pitcher is TOUGH/ELITE/MIXED, or "
+            "the weather/park is HR-hostile, no batter on that team can qualify regardless of "
+            "their personal stats. This is correct behavior — the model is honest about when "
+            "all the dominoes don't line up."
         )
 
         st.markdown("---")
@@ -1931,45 +1940,61 @@ for _, game in slate.iterrows():
 
             # SMASH SPOT calculation - the "all stars align" flag.
             # User's request: highlight when a batter has:
-            #   1. EXPLOIT or EXPLOIT+ pitcher matchup
-            #   2. Favorable park dimensions for their handedness (hand_park ≥ 1.05)
-            #   3. Favorable weather/wind (env_boost ≥ 1.05)
-            #   4. PLUS reasonable HR Game% (≥ 15% so we don't flag bad hitters
-            #      in great spots — they're still bad hitters)
+            #   1. EXPLOIT or EXPLOIT+ pitcher matchup (NOT TBD)
+            #   2. Favorable park dimensions for their handedness
+            #   3. Favorable combined environment (park × weather × wind)
+            #   4. PLUS reasonable HR Game% so we don't flag bad hitters in great spots
             #
-            # The tiers:
-            #   🔥🔥🔥 ELITE SMASH — all 4 + EXPLOIT+ pitcher + HR Game% ≥ 19%
-            #   🔥🔥 STRONG SMASH — all 4 + EXPLOIT/EXPLOIT+ pitcher
-            #   🔥 SMASH — 3 of 4 (one condition not perfect)
+            # Tiers (stricter than before):
+            #   🔥🔥🔥 ELITE SMASH = EXPLOIT+ pitcher + favorable park + favorable env + HR%≥19%
+            #   🔥🔥 STRONG SMASH = EXPLOIT/EXPLOIT+ + favorable park + favorable env + HR%≥15%
+            #   🔥 SMASH = EXPLOIT/EXPLOIT+ + (favorable park OR env) + HR%≥15%
             #
-            # Excludes: cases where hitter is roster-fill (unknown lineup) since
-            # we can't confidently project these.
+            # NEW REQUIREMENTS (fixing bugs from May 26 export):
+            # - LINEUP MUST BE CONFIRMED (otherwise we can't trust HR Game% projection)
+            # - PITCHER MUST NOT BE TBD (no grade = no confidence in matchup)
+            # - park_favorable now uses hand_park × pull_wind combined (not just either)
             smash_label = ""
             try:
                 # Combined env factor (park × weather × pull-wind for this hitter)
                 full_env = hand_park * wx_mult * pull_mult
-                pitcher_exploitable = opp_pitcher_grade in ("EXPLOIT", "EXPLOIT+")
-                pitcher_super_exploitable = opp_pitcher_grade == "EXPLOIT+"
+                # Combined park-side factor (hand-aware × pull-wind)
+                full_park = hand_park * pull_mult
+
+                pitcher_name = (row_dict.get("opp_pitcher") or "").upper()
+                pitcher_is_tbd = pitcher_name in ("TBD", "TBA", "")
+
+                pitcher_exploitable = (
+                    opp_pitcher_grade in ("EXPLOIT", "EXPLOIT+")
+                    and not pitcher_is_tbd
+                )
+                pitcher_super_exploitable = (
+                    opp_pitcher_grade == "EXPLOIT+"
+                    and not pitcher_is_tbd
+                )
                 game_pct_ok = game_pct_val is not None and game_pct_val >= 15
                 env_favorable = full_env >= 1.05
-                park_favorable = hand_park >= 1.02 or (pull_mult >= 1.04)
-                is_real_lineup = not bool(row_dict.get("is_roster_fill", False))
+                # Park favorable: hand-aware park × pull-wind combined ≥1.04
+                # (was OR of two individual checks — too generous)
+                park_favorable = full_park >= 1.04
 
-                conditions_met = sum([
-                    pitcher_exploitable,
-                    env_favorable,
-                    park_favorable,
-                    game_pct_ok,
-                ])
+                # CRITICAL: Smash spots only apply to CONFIRMED LINEUPS.
+                # When lineup is unknown, lineup_pos defaults to 4.2 PA which
+                # inflates HR Game% for non-starters and makes the flag misleading.
+                lineup_truly_confirmed = (
+                    game_confirmed and not bool(row_dict.get("is_roster_fill", False))
+                    and lp is not None and not pd.isna(lp)
+                )
 
-                if (is_real_lineup and game_pct_ok and pitcher_super_exploitable
+                if (lineup_truly_confirmed and game_pct_ok and pitcher_super_exploitable
                         and env_favorable and park_favorable
-                        and game_pct_val is not None and game_pct_val >= 19):
+                        and game_pct_val >= 19):
                     smash_label = "🔥🔥🔥 ELITE SMASH"
-                elif (is_real_lineup and game_pct_ok and pitcher_exploitable
+                elif (lineup_truly_confirmed and game_pct_ok and pitcher_exploitable
                         and env_favorable and park_favorable):
                     smash_label = "🔥🔥 STRONG SMASH"
-                elif (is_real_lineup and game_pct_ok and conditions_met >= 3):
+                elif (lineup_truly_confirmed and game_pct_ok and pitcher_exploitable
+                        and (env_favorable or park_favorable)):
                     smash_label = "🔥 SMASH"
             except Exception:
                 smash_label = ""
@@ -2491,12 +2516,21 @@ if all_hitters:
                             top_picks_export.to_excel(writer, sheet_name="Top 10 Picks", index=False)
                     except Exception:
                         pass
-                    # NEW: Smash Spots — triple-threat HR opportunities
+                    # NEW: Smash Spots — triple-threat HR opportunities (max 2 per team)
                     if combined_all is not None and "smash_spot" in combined_all.columns:
                         smash_export = combined_all[combined_all["smash_spot"] != ""].copy()
                         if not smash_export.empty:
                             tier_order = {"🔥🔥🔥 ELITE SMASH": 3, "🔥🔥 STRONG SMASH": 2, "🔥 SMASH": 1}
                             smash_export["_tier"] = smash_export["smash_spot"].map(tier_order).fillna(0)
+                            # Sort: tier desc, then HR Game% desc
+                            smash_export = smash_export.sort_values(
+                                ["_tier", "hr_game_pct"], ascending=[False, False]
+                            )
+                            # Limit to top 2 per team
+                            smash_export = smash_export.groupby(
+                                "team", group_keys=False
+                            ).head(2)
+                            # Re-sort final result
                             smash_export = smash_export.sort_values(
                                 ["_tier", "hr_game_pct"], ascending=[False, False]
                             ).drop(columns=["_tier"])
@@ -2651,17 +2685,27 @@ if all_hitters:
         st.markdown("---")
         st.markdown("**🔥 Today's Smash Spots — Triple-Threat HR Opportunities**")
         st.caption(
-            "Hitters where MULTIPLE factors align: facing an exploitable pitcher "
-            "(EXPLOIT/EXPLOIT+ grade), in HR-friendly weather, in a favorable park "
-            "(or with pull-wind advantage), AND with strong HR Game%. "
-            "**ELITE SMASH** = all 4 conditions + EXPLOIT+ pitcher + HR Game% ≥19%. "
-            "**STRONG SMASH** = all 4 conditions met. "
-            "**SMASH** = 3 of 4 conditions. These are your highest-confidence multi-factor plays."
+            "Hitters where multiple factors align: facing an EXPLOIT/EXPLOIT+ pitcher, "
+            "favorable env (park × weather × pull-wind), AND strong HR Game%. "
+            "**ELITE SMASH** = EXPLOIT+ + favorable env + favorable park + HR%≥19%. "
+            "**STRONG SMASH** = EXPLOIT/+ + favorable env + favorable park + HR%≥15%. "
+            "**SMASH** = EXPLOIT/+ + (favorable env OR park) + HR%≥15%. "
+            "**Max 2 hitters per team** (the top 2 by HR Game% on any team facing an "
+            "exploit pitcher — avoids stacking the same lineup)."
         )
         smash_df = qualified[qualified["smash_spot"] != ""].copy()
         # Sort by: ELITE first, then STRONG, then SMASH; within each tier by HR Game%
         tier_order = {"🔥🔥🔥 ELITE SMASH": 3, "🔥🔥 STRONG SMASH": 2, "🔥 SMASH": 1}
         smash_df["_tier"] = smash_df["smash_spot"].map(tier_order).fillna(0)
+        smash_df = smash_df.sort_values(
+            ["_tier", "hr_game_pct"], ascending=[False, False]
+        )
+        # CRITICAL: Limit to top 2 per team to avoid stacking same lineup.
+        # User asked: "limit the smashes to 1 or 2 per team just the top 2"
+        # We use groupby + head(2) which keeps the top 2 hitters per team
+        # (already pre-sorted by tier then HR%).
+        smash_df = smash_df.groupby("team", group_keys=False).head(2)
+        # Re-sort the final result so tiers display in order
         smash_df = smash_df.sort_values(
             ["_tier", "hr_game_pct"], ascending=[False, False]
         ).head(15)
@@ -2820,13 +2864,13 @@ def build_col_config():
             "Smash", width="small",
             help=(
                 "THE 'all stars align' flag — triple-threat HR opportunity.\n\n"
-                "🔥🔥🔥 ELITE SMASH = facing EXPLOIT+ pitcher AND HR-friendly weather "
-                "AND favorable park AND HR Game% ≥19%. The rarest, best HR plays of the day.\n\n"
-                "🔥🔥 STRONG SMASH = facing EXPLOIT or EXPLOIT+ pitcher AND favorable env "
-                "AND favorable park AND HR Game% ≥15%.\n\n"
-                "🔥 SMASH = 3 of 4 conditions met (one factor not perfect but very strong).\n\n"
-                "Blank = no special alignment. Look for these flags first when building "
-                "your slate — they're plays where multiple advantages compound."
+                "🔥🔥🔥 ELITE SMASH = facing EXPLOIT+ pitcher AND favorable env "
+                "(park × wx × wind ≥1.05) AND favorable park (≥1.04) AND HR Game% ≥19%.\n\n"
+                "🔥🔥 STRONG SMASH = EXPLOIT/+ pitcher + favorable env + favorable park + "
+                "HR Game% ≥15%.\n\n"
+                "🔥 SMASH = EXPLOIT/+ pitcher + (favorable env OR park) + HR Game% ≥15%.\n\n"
+                "Requires: confirmed lineup, real pitcher (not TBD).\n"
+                "Limited to 2 per team in the leaderboard."
             ),
         ),
         "hr_pa_pct": st.column_config.NumberColumn(
