@@ -793,10 +793,15 @@ def get_pitcher_recent_form(pitcher_id: int, season: int = CURRENT_SEASON,
 
 @st.cache_data(ttl=1800)
 def get_hitter_recent_form_trad(player_id: int, season: int = CURRENT_SEASON,
-                                  n_games: int = 15) -> dict:
+                                  n_games: int = 15,
+                                  _cache_version: str = "v2") -> dict:
     """Last 15 games hitter form via game log - lightweight.
 
     Now also tracks HR streaks and hot/cold pattern indicators.
+
+    _cache_version: bumped to v2 when recent_hr_weighted_rate field was added.
+    Forces Streamlit cache to invalidate so old cached results (missing the
+    new field) don't override fresh fetches.
     """
     url = (
         f"https://statsapi.mlb.com/api/v1/people/{player_id}/stats"
