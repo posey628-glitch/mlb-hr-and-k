@@ -424,6 +424,20 @@ with st.sidebar:
                 st.caption(f"🟡 14-day coverage: {len(covered)}/14 days ({coverage_pct:.0f}%)")
             else:
                 st.caption(f"⚠️ 14-day coverage: {len(covered)}/14 days — load app daily to build calibration data.")
+            # NEW: Show staleness of most recent snapshot
+            try:
+                latest_date = datetime.strptime(existing[-1], "%Y-%m-%d").date()
+                days_old = (today - latest_date).days
+                if days_old == 0:
+                    st.caption("✅ Today's snapshot exists — backtest data is current.")
+                elif days_old == 1:
+                    st.caption("✅ Last snapshot: yesterday.")
+                elif days_old <= 3:
+                    st.caption(f"🟡 Last snapshot: {days_old} days ago. Load the app today to capture it.")
+                else:
+                    st.caption(f"⚠️ Last snapshot: {days_old} days ago. Backtest data is stale.")
+            except Exception:
+                pass
         else:
             st.caption("⚠️ No snapshots yet. Auto-save happens when the app loads.")
     except Exception:
@@ -2964,6 +2978,16 @@ def build_col_config():
         "whiff_pct": st.column_config.NumberColumn("Whiff%", format="%.1f%%"),
         "home_run": st.column_config.NumberColumn("HR", format="%d"),
         "recent_hr": st.column_config.NumberColumn("L15 HR", format="%d"),
+        "recent_hr_weighted_rate": st.column_config.NumberColumn(
+            "L15 wHR%", format="%.2f%%",
+            help=(
+                "Recency-WEIGHTED HR/PA rate over last 15 games. "
+                "Last 3 games weighted 3×, games 4-7 weighted 2×, games 8-15 weighted 1×. "
+                "Captures hot streaks better than simple last-N average.\n\n"
+                "Used as a modest adjuster (capped at ±25%) on the model's HR base rate "
+                "so true hot streaks slightly boost projections, slumps slightly suppress."
+            ),
+        ),
         "sleeper_score": st.column_config.NumberColumn("Sleeper", format="%.1f"),
         "verdict": st.column_config.TextColumn("Verdict"),
     }
@@ -3095,7 +3119,7 @@ def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
         "pitch_match_score", "pitch_hr_score", "best_pitch", "best_pitch_xwoba", "worst_pitch",
         "fb_pct", "la", "avg_ev", "hard_hit",
         "k_pct", "bb_pct", "whiff_pct",
-        "home_run", "recent_hr", "sleeper_score",
+        "home_run", "recent_hr", "recent_hr_weighted_rate", "sleeper_score",
     ] if c in matchup_df.columns]
 
     # Auto-hide columns that are completely empty (no point showing them)
