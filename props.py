@@ -106,6 +106,31 @@ def hr_prob_per_pa(
         adjustment = 1.0 + (hot_cold_ratio - 1.0) * 0.30
         h_base = h_base * adjustment
 
+    # NEW: DAY/NIGHT adjustment - hitters perform differently in day vs night.
+    # Documented effect: most batters slightly worse in day games due to
+    # shadow / sun glare / visibility. Some hitters' splits are EXTREME.
+    # E.g. some batters hit 2x more HRs at night than day.
+    # game_type comes from app.py based on game start time.
+    game_type = hitter_row.get("game_type")  # "day" or "night"
+    if game_type in ("day", "night") and h_base > 0:
+        dn_pa_col = f"vs_{game_type}_pa"
+        dn_hr_col = f"vs_{game_type}_hr_per_pa"
+        dn_pa = hitter_row.get(dn_pa_col)
+        dn_hr = hitter_row.get(dn_hr_col)
+        # Need ≥40 PA in the split for reliability
+        if (dn_pa is not None and not pd.isna(dn_pa) and dn_pa >= 40
+                and dn_hr is not None and not pd.isna(dn_hr) and dn_hr > 0):
+            dn_rate_decimal = float(dn_hr) / 100
+            # Shrink toward h_base (don't fully trust split over base):
+            # shrink_w = pa / (pa + 100). 100 PA prior weight.
+            shrink_w = float(dn_pa) / (float(dn_pa) + 100)
+            dn_shrunk = dn_rate_decimal * shrink_w + h_base * (1 - shrink_w)
+            # Cap adjustment to ±15% of h_base (day/night is real but bounded)
+            dn_ratio = dn_shrunk / h_base
+            dn_ratio = max(0.85, min(1.15, dn_ratio))
+            # Apply 50% of the adjustment (conservative)
+            h_base = h_base * (1.0 + (dn_ratio - 1.0) * 0.50)
+
     # Pitcher HR/9 adjustment - prefer handedness splits if available
     p_hr9 = pitcher_row.get("hr9") if pitcher_row else None
 
@@ -170,6 +195,30 @@ def hr_prob_per_pa(
         league_p_hr_per_pa = (1.20 / 9) / 4.3  # league HR/9 ~1.20
         pitcher_mult = p_hr_per_pa / league_p_hr_per_pa
         pitcher_mult = max(0.5, min(2.0, pitcher_mult))
+
+    # NEW: PITCHER DAY/NIGHT adjustment.
+    # Some pitchers are dramatically better at night (or day). Apply a modest
+    # multiplier on pitcher_mult based on their day/night HR rate split.
+    # Capped at ±10% so it doesn't dominate.
+    if game_type in ("day", "night") and pitcher_row is not None:
+        p_dn_pa = pitcher_row.get(f"vs_{game_type}_pa")
+        p_dn_hr = pitcher_row.get(f"vs_{game_type}_hr_per_pa")
+        if (p_dn_pa is not None and not pd.isna(p_dn_pa) and p_dn_pa >= 50
+                and p_dn_hr is not None and not pd.isna(p_dn_hr) and p_dn_hr > 0):
+            # Compare pitcher's day/night HR rate to league average
+            p_dn_rate = float(p_dn_hr) / 100  # pct → decimal
+            # Shrinkage: 60 PA prior toward 2.8%
+            shrink_w = float(p_dn_pa) / (float(p_dn_pa) + 60)
+            p_dn_shrunk = p_dn_rate * shrink_w + 0.028 * (1 - shrink_w)
+            # Ratio of pitcher's split to overall expected (using current pitcher_mult)
+            # If pitcher_mult is 0.7 (good suppressor) and day/night rate is 1.8%
+            # vs his expected 0.7 × 2.8 = 1.96%, he's slightly worse at this time.
+            expected_pitcher_rate = 0.028 * pitcher_mult
+            if expected_pitcher_rate > 0:
+                dn_ratio = p_dn_shrunk / expected_pitcher_rate
+                dn_ratio = max(0.90, min(1.10, dn_ratio))
+                pitcher_mult = pitcher_mult * (1.0 + (dn_ratio - 1.0) * 0.50)
+                pitcher_mult = max(0.5, min(2.0, pitcher_mult))
 
     # PLATOON ADVANTAGE multiplier
     # Real MLB data: opposite-handed matchups produce ~12% more HRs than same-side
