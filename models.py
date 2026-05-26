@@ -280,6 +280,11 @@ def build_matchup_table(
         "pa", "home_run", "recent_hr", "recent_iso", "recent_avg",
         "recent_hr_weighted_rate",
         "streak_label", "hr_streak_games", "hr_last_5", "games_since_hr",
+        # Day/night splits (vs day games, vs night games)
+        "vs_day_pa", "vs_day_avg", "vs_day_obp", "vs_day_slg", "vs_day_ops",
+        "vs_day_hr_per_pa", "vs_day_k_percent",
+        "vs_night_pa", "vs_night_avg", "vs_night_obp", "vs_night_slg", "vs_night_ops",
+        "vs_night_hr_per_pa", "vs_night_k_percent",
         # Today's HR projection
         "likely_hr_pct",
     ]
@@ -515,10 +520,15 @@ def build_pitcher_slate(
                     "is_rookie": bool(r.get("is_rookie", False)),
                     "debut_year": r.get("debut_year"),
                 })
-                # Copy ALL vs_lhb_* and vs_rhb_* handedness split columns
-                # (they were being dropped previously, breaking the platoon mult)
+                # Copy ALL vs_lhb_* / vs_rhb_* handedness split columns + day/night
+                # splits + IL status. These get dropped if not explicitly copied
+                # (build_pitcher_slate only copies known fields by default).
                 for k, v in r.items():
-                    if isinstance(k, str) and (k.startswith("vs_lhb_") or k.startswith("vs_rhb_")):
+                    if isinstance(k, str) and (
+                        k.startswith("vs_lhb_") or k.startswith("vs_rhb_")
+                        or k.startswith("vs_day_") or k.startswith("vs_night_")
+                        or k in ("on_il", "days_since_return", "il_count_this_season")
+                    ):
                         base[k] = v
             if pitcher_recent and pid in pitcher_recent:
                 base.update(pitcher_recent[pid])
@@ -857,15 +867,27 @@ def build_pitcher_slate(
         def _expected_ip(row):
             ip = row.get("ip")
             gs = row.get("games_started")
+            base_ip = 5.5
             if gs is not None and not pd.isna(gs) and gs == 0:
-                return 1.5
-            if ip is None or pd.isna(ip) or ip < 10:
-                return 2.0
-            if gs is not None and not pd.isna(gs) and gs < 5:
-                return 3.5
-            if ip < 25:
-                return 4.0
-            return 5.5
+                base_ip = 1.5
+            elif ip is None or pd.isna(ip) or ip < 10:
+                base_ip = 2.0
+            elif gs is not None and not pd.isna(gs) and gs < 5:
+                base_ip = 3.5
+            elif ip < 25:
+                base_ip = 4.0
+            else:
+                base_ip = 5.5
+            # NEW: IL fatigue adjustment - fresh from IL = fewer innings expected.
+            # First start back: typically 3-4 innings or ~70 pitches.
+            # Days 2-7 since return: typically scaled back slightly.
+            days_since = row.get("days_since_return")
+            if days_since is not None and not pd.isna(days_since) and days_since <= 7:
+                if days_since <= 3:
+                    base_ip = min(base_ip, 3.5)  # First couple starts back
+                else:
+                    base_ip = base_ip * 0.85  # Days 4-7: 15% reduction
+            return base_ip
         df["expected_ip"] = df.apply(_expected_ip, axis=1)
 
         # Opponent K% adjustment (capped at ±15% to prevent over-correction)
