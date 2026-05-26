@@ -286,7 +286,8 @@ def hr_grade(hr_game_pct, sample_size=None, pa_threshold=80):
     """
     if hr_game_pct is None or pd.isna(hr_game_pct):
         return "—"
-    if sample_size is not None and not pd.isna(sample_size) and sample_size < pa_threshold:
+    # NaN PA = insufficient sample
+    if sample_size is None or pd.isna(sample_size) or sample_size < pa_threshold:
         return "—"
     if hr_game_pct >= 22:
         return "A+"
@@ -334,7 +335,10 @@ def pitcher_grade(test_score, hr_suppress=None, sample_size=None, pa_threshold=8
     """
     if test_score is None or pd.isna(test_score):
         return "—"
-    if sample_size is not None and not pd.isna(sample_size) and sample_size < pa_threshold:
+    # NO sample (NaN/None) = insufficient. A pitcher with no PA faced shouldn't
+    # get a grade. Was previously skipping the check for NaN which let pitchers
+    # like Jordan Wicks (no data) get EXPLOIT+ grades.
+    if sample_size is None or pd.isna(sample_size) or sample_size < pa_threshold:
         return "—"
     hr_s = hr_suppress if (hr_suppress is not None and not pd.isna(hr_suppress)) else test_score
     # Combined indicator - higher = harder to score against
@@ -351,6 +355,24 @@ def pitcher_grade(test_score, hr_suppress=None, sample_size=None, pa_threshold=8
     if combined_max <= 45 or combined_min <= 35:
         return "EXPLOIT"
     return "MIXED"
+
+
+def pitcher_grade_sort_key(grade):
+    """Return numeric sort key for pitcher grade. Lower = more exploitable.
+    Used so users can sort the grade column and get a sensible order.
+
+    From batter perspective: EXPLOIT+ is BEST (target), ELITE is WORST (avoid).
+    Sort ascending → most exploitable first (best for HR betting).
+    """
+    order = {
+        "EXPLOIT+": 1,
+        "EXPLOIT": 2,
+        "MIXED": 3,
+        "TOUGH": 4,
+        "ELITE": 5,
+        "—": 99,  # insufficient data goes last
+    }
+    return order.get(grade, 99)
 
 
 
@@ -1370,6 +1392,10 @@ if not p_slate.empty:
         ),
         axis=1,
     )
+    # Add hidden numeric rank for sortable Grade column.
+    # When users click the Grade header, they want EXPLOIT+ first (best HR targets),
+    # not alphabetical order. We sort the dataframe by this BEFORE display.
+    p_slate["_grade_rank"] = p_slate["grade"].apply(pitcher_grade_sort_key)
 
     # Add a visible warning flag column combining role + sample_noise + IL
     if not p_slate.empty:
@@ -1653,8 +1679,20 @@ if not p_slate.empty:
             styled = styled.format(valid_fmt, na_rep="—")
         return styled
 
+    # Sort by grade rank (EXPLOIT+ first → ELITE last → — at the bottom),
+    # then by test_score descending within same grade. Gives users a
+    # meaningful default order when they don't manually sort.
+    p_slate_display = p_slate.copy()
+    if "_grade_rank" in p_slate_display.columns:
+        sort_cols = ["_grade_rank"]
+        sort_asc = [True]
+        if "test_score" in p_slate_display.columns:
+            sort_cols.append("test_score")
+            sort_asc.append(True)  # within EXPLOIT+, lower test = MORE exploitable
+        p_slate_display = p_slate_display.sort_values(sort_cols, ascending=sort_asc)
+
     st.dataframe(
-        _style_pitcher_df(p_slate[show_cols]),
+        _style_pitcher_df(p_slate_display[show_cols]),
         hide_index=True, use_container_width=True,
         column_config=col_config,
     )
