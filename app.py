@@ -1065,6 +1065,24 @@ if show_legend:
         )
 
         st.markdown("---")
+        st.markdown("### 🔥 Smash Spots — Triple-Threat Alignment Flag")
+        st.markdown(
+            "**The 'all stars align' flag** — appears in the hitter table when a batter has "
+            "multiple advantages stacking together. Look for these FIRST when building your slate:\n\n"
+            "| Tier | Conditions Required |\n"
+            "|---|---|\n"
+            "| 🔥🔥🔥 **ELITE SMASH** | EXPLOIT+ pitcher + HR-friendly weather + favorable park + HR Game% ≥19% |\n"
+            "| 🔥🔥 **STRONG SMASH** | EXPLOIT or EXPLOIT+ pitcher + favorable env + favorable park + HR Game% ≥15% |\n"
+            "| 🔥 **SMASH** | 3 of 4 conditions met (one factor not perfect but still strong) |\n\n"
+            "Why this matters: when a hitter faces a bad pitcher (EXPLOIT) in a hitter-friendly "
+            "ballpark with wind blowing out and good handedness platoon — that's where the model "
+            "becomes most confident. Each factor alone is moderate; together they compound. "
+            "These are the days when betting HR props pays off most.\n\n"
+            "**Filter:** roster-fill players (lineup unknown) are excluded — we need confirmed "
+            "lineup spots before flagging a Smash Spot, since lineup position affects HR Game%."
+        )
+
+        st.markdown("---")
         st.markdown("### 🔬 Why hitters with low barrel% can still rank high")
         st.markdown(
             "Sometimes you'll see a hitter with mediocre barrel% rank near elites. Possible reasons:\n\n"
@@ -1772,7 +1790,22 @@ for _, game in slate.iterrows():
     for matchup_df, opp_p_row in [(away_matchup, home_p_row), (home_matchup, away_p_row)]:
         if matchup_df is None or matchup_df.empty:
             continue
+
+        # Look up opposing pitcher's grade for SMASH SPOT detection
+        # Smash Spot = batter facing EXPLOIT/EXPLOIT+ pitcher AND favorable env+park.
+        # This is the "all stars align" flag the user requested.
+        opp_pitcher_grade = None
+        opp_pitcher_id = opp_p_row.get("player_id") if opp_p_row else None
+        if opp_pitcher_id is not None and not p_slate.empty and "grade" in p_slate.columns:
+            try:
+                _match = p_slate[p_slate["pitcher_id"] == opp_pitcher_id]
+                if not _match.empty:
+                    opp_pitcher_grade = _match.iloc[0].get("grade")
+            except Exception:
+                pass
+
         hr_pa, hr_game, verdicts, signals, grades = [], [], [], [], []
+        smash_spots = []  # NEW: triple-threat HR opportunity flags
         pull_mults_col = []
         for _, hr in matchup_df.iterrows():
             row_dict = hr.to_dict()
@@ -1895,11 +1928,58 @@ for _, game in slate.iterrows():
             grades.append(hr_grade(
                 game_pct_val, sample, INSUFFICIENT_PA_THRESHOLD,
             ))
+
+            # SMASH SPOT calculation - the "all stars align" flag.
+            # User's request: highlight when a batter has:
+            #   1. EXPLOIT or EXPLOIT+ pitcher matchup
+            #   2. Favorable park dimensions for their handedness (hand_park ≥ 1.05)
+            #   3. Favorable weather/wind (env_boost ≥ 1.05)
+            #   4. PLUS reasonable HR Game% (≥ 15% so we don't flag bad hitters
+            #      in great spots — they're still bad hitters)
+            #
+            # The tiers:
+            #   🔥🔥🔥 ELITE SMASH — all 4 + EXPLOIT+ pitcher + HR Game% ≥ 19%
+            #   🔥🔥 STRONG SMASH — all 4 + EXPLOIT/EXPLOIT+ pitcher
+            #   🔥 SMASH — 3 of 4 (one condition not perfect)
+            #
+            # Excludes: cases where hitter is roster-fill (unknown lineup) since
+            # we can't confidently project these.
+            smash_label = ""
+            try:
+                # Combined env factor (park × weather × pull-wind for this hitter)
+                full_env = hand_park * wx_mult * pull_mult
+                pitcher_exploitable = opp_pitcher_grade in ("EXPLOIT", "EXPLOIT+")
+                pitcher_super_exploitable = opp_pitcher_grade == "EXPLOIT+"
+                game_pct_ok = game_pct_val is not None and game_pct_val >= 15
+                env_favorable = full_env >= 1.05
+                park_favorable = hand_park >= 1.02 or (pull_mult >= 1.04)
+                is_real_lineup = not bool(row_dict.get("is_roster_fill", False))
+
+                conditions_met = sum([
+                    pitcher_exploitable,
+                    env_favorable,
+                    park_favorable,
+                    game_pct_ok,
+                ])
+
+                if (is_real_lineup and game_pct_ok and pitcher_super_exploitable
+                        and env_favorable and park_favorable
+                        and game_pct_val is not None and game_pct_val >= 19):
+                    smash_label = "🔥🔥🔥 ELITE SMASH"
+                elif (is_real_lineup and game_pct_ok and pitcher_exploitable
+                        and env_favorable and park_favorable):
+                    smash_label = "🔥🔥 STRONG SMASH"
+                elif (is_real_lineup and game_pct_ok and conditions_met >= 3):
+                    smash_label = "🔥 SMASH"
+            except Exception:
+                smash_label = ""
+            smash_spots.append(smash_label)
         matchup_df["hr_pa_pct"] = hr_pa
         matchup_df["hr_game_pct"] = hr_game
         matchup_df["verdict"] = verdicts
         matchup_df["alert"] = signals
         matchup_df["grade"] = grades
+        matchup_df["smash_spot"] = smash_spots
         matchup_df["pull_wind_mult"] = pull_mults_col
 
     # Sleeper score - uses sleepers.py functions correctly
@@ -2411,6 +2491,16 @@ if all_hitters:
                             top_picks_export.to_excel(writer, sheet_name="Top 10 Picks", index=False)
                     except Exception:
                         pass
+                    # NEW: Smash Spots — triple-threat HR opportunities
+                    if combined_all is not None and "smash_spot" in combined_all.columns:
+                        smash_export = combined_all[combined_all["smash_spot"] != ""].copy()
+                        if not smash_export.empty:
+                            tier_order = {"🔥🔥🔥 ELITE SMASH": 3, "🔥🔥 STRONG SMASH": 2, "🔥 SMASH": 1}
+                            smash_export["_tier"] = smash_export["smash_spot"].map(tier_order).fillna(0)
+                            smash_export = smash_export.sort_values(
+                                ["_tier", "hr_game_pct"], ascending=[False, False]
+                            ).drop(columns=["_tier"])
+                            smash_export.to_excel(writer, sheet_name="Smash Spots", index=False)
                     # NEW: Green Signal sheets - hitters & pitchers with 🟢 alert
                     if combined_all is not None and "alert" in combined_all.columns:
                         green_hitters = combined_all[combined_all["alert"] == "🟢"].sort_values(
@@ -2555,6 +2645,47 @@ if all_hitters:
                 st.caption("No sleeper scores computed yet.")
 
     # ====================================================================
+    # SMASH SPOTS — the new "triple-threat alignment" leaderboard
+    # ====================================================================
+    if "smash_spot" in qualified.columns and (qualified["smash_spot"] != "").any():
+        st.markdown("---")
+        st.markdown("**🔥 Today's Smash Spots — Triple-Threat HR Opportunities**")
+        st.caption(
+            "Hitters where MULTIPLE factors align: facing an exploitable pitcher "
+            "(EXPLOIT/EXPLOIT+ grade), in HR-friendly weather, in a favorable park "
+            "(or with pull-wind advantage), AND with strong HR Game%. "
+            "**ELITE SMASH** = all 4 conditions + EXPLOIT+ pitcher + HR Game% ≥19%. "
+            "**STRONG SMASH** = all 4 conditions met. "
+            "**SMASH** = 3 of 4 conditions. These are your highest-confidence multi-factor plays."
+        )
+        smash_df = qualified[qualified["smash_spot"] != ""].copy()
+        # Sort by: ELITE first, then STRONG, then SMASH; within each tier by HR Game%
+        tier_order = {"🔥🔥🔥 ELITE SMASH": 3, "🔥🔥 STRONG SMASH": 2, "🔥 SMASH": 1}
+        smash_df["_tier"] = smash_df["smash_spot"].map(tier_order).fillna(0)
+        smash_df = smash_df.sort_values(
+            ["_tier", "hr_game_pct"], ascending=[False, False]
+        ).head(15)
+        smash_cols = [c for c in [
+            "smash_spot", "player_name", "team", "game", "opp_pitcher",
+            "hr_game_pct", "grade", "barrel_pct", "env_mult", "matchup_opp",
+        ] if c in smash_df.columns]
+        st.dataframe(
+            smash_df[smash_cols], hide_index=True, use_container_width=True,
+            column_config={
+                "smash_spot": st.column_config.TextColumn("Flag", width="medium"),
+                "player_name": st.column_config.TextColumn("Hitter"),
+                "team": st.column_config.TextColumn("Tm", width="small"),
+                "game": st.column_config.TextColumn("Game"),
+                "opp_pitcher": st.column_config.TextColumn("vs Pitcher"),
+                "hr_game_pct": st.column_config.NumberColumn("HR%", format="%.1f%%"),
+                "grade": st.column_config.TextColumn("Grd", width="small"),
+                "barrel_pct": st.column_config.NumberColumn("Brl%", format="%.1f%%"),
+                "env_mult": st.column_config.NumberColumn("Env×", format="%.2f"),
+                "matchup_opp": st.column_config.NumberColumn("Opp", format="%.1f"),
+            },
+        )
+
+    # ====================================================================
     # Top 10 Grand Slam — new leaderboard
     # ====================================================================
     if "gs_score" in qualified.columns and qualified["gs_score"].notna().any():
@@ -2683,6 +2814,19 @@ def build_col_config():
                 "D  : 3-6% (poor)\n"
                 "F  : <3% (avoid)\n"
                 "—  : insufficient sample"
+            ),
+        ),
+        "smash_spot": st.column_config.TextColumn(
+            "Smash", width="small",
+            help=(
+                "THE 'all stars align' flag — triple-threat HR opportunity.\n\n"
+                "🔥🔥🔥 ELITE SMASH = facing EXPLOIT+ pitcher AND HR-friendly weather "
+                "AND favorable park AND HR Game% ≥19%. The rarest, best HR plays of the day.\n\n"
+                "🔥🔥 STRONG SMASH = facing EXPLOIT or EXPLOIT+ pitcher AND favorable env "
+                "AND favorable park AND HR Game% ≥15%.\n\n"
+                "🔥 SMASH = 3 of 4 conditions met (one factor not perfect but very strong).\n\n"
+                "Blank = no special alignment. Look for these flags first when building "
+                "your slate — they're plays where multiple advantages compound."
             ),
         ),
         "hr_pa_pct": st.column_config.NumberColumn(
@@ -2899,7 +3043,7 @@ def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
         insufficient = pd.DataFrame()
 
     cols_to_show = [c for c in [
-        "alert", "grade", "player_name", "lineup_pos", "bats", "position",
+        "alert", "grade", "smash_spot", "player_name", "lineup_pos", "bats", "position",
         "power_score", "matchup_opp", "hr_game_pct", "hr_pa_pct", "matchup", "test_score",
         "streak_label",
         "pa", "barrel_pct", "iso", "xwoba", "xwobacon",
