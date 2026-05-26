@@ -649,7 +649,9 @@ def _fetch_pitcher_splits_single(pitcher_id: int, season: int) -> dict:
 
 
 @st.cache_data(ttl=3600)
-def get_pitcher_handedness_splits(season: int = CURRENT_SEASON, pitcher_ids: tuple = ()) -> pd.DataFrame:
+def get_pitcher_handedness_splits(season: int = CURRENT_SEASON,
+                                    pitcher_ids: tuple = (),
+                                    _cache_version: str = "v1") -> pd.DataFrame:
     """
     Fetch vs-LHB and vs-RHB splits from MLB Stats API for the given pitcher IDs.
 
@@ -659,6 +661,8 @@ def get_pitcher_handedness_splits(season: int = CURRENT_SEASON, pitcher_ids: tup
 
     Pass the list of pitcher_ids from today's slate to avoid fetching
     splits for every pitcher in the league (~700 calls).
+
+    _cache_version: bump when adding new fields to invalidate cache.
     """
     if not pitcher_ids:
         return pd.DataFrame()
@@ -774,10 +778,13 @@ def _fetch_day_night_splits_single(player_id: int, season: int, group: str = "hi
 
 @st.cache_data(ttl=3600)
 def get_hitter_day_night_splits(season: int = CURRENT_SEASON,
-                                  hitter_ids: tuple = ()) -> pd.DataFrame:
+                                  hitter_ids: tuple = (),
+                                  _cache_version: str = "v1") -> pd.DataFrame:
     """
     Fetch day/night splits for the given hitter IDs.
     Only fetches for confirmed lineup spots to avoid 200+ API calls.
+
+    _cache_version: bump when adding new fields to invalidate Streamlit cache.
     """
     if not hitter_ids:
         return pd.DataFrame()
@@ -798,9 +805,12 @@ def get_hitter_day_night_splits(season: int = CURRENT_SEASON,
 
 @st.cache_data(ttl=3600)
 def get_pitcher_day_night_splits(season: int = CURRENT_SEASON,
-                                   pitcher_ids: tuple = ()) -> pd.DataFrame:
+                                   pitcher_ids: tuple = (),
+                                   _cache_version: str = "v1") -> pd.DataFrame:
     """
     Fetch day/night splits for the given pitcher IDs.
+
+    _cache_version: bump when adding new fields to invalidate Streamlit cache.
     """
     if not pitcher_ids:
         return pd.DataFrame()
@@ -919,8 +929,12 @@ def get_player_il_status(player_id: int, season: int = CURRENT_SEASON) -> dict:
 
 
 @st.cache_data(ttl=3600)
-def get_pitchers_il_status(pitcher_ids: tuple, season: int = CURRENT_SEASON) -> pd.DataFrame:
-    """Bulk-fetch IL status for slate pitchers."""
+def get_pitchers_il_status(pitcher_ids: tuple, season: int = CURRENT_SEASON,
+                             _cache_version: str = "v1") -> pd.DataFrame:
+    """Bulk-fetch IL status for slate pitchers.
+
+    _cache_version: bump when adding new fields to invalidate cache.
+    """
     if not pitcher_ids:
         return pd.DataFrame()
     rows = []
