@@ -145,9 +145,33 @@ def get_slate(game_date: Optional[str] = None) -> pd.DataFrame:
         f"?sportId=1&date={game_date}"
         "&hydrate=probablePitcher,linescore,team"
     )
-    r = requests.get(url, headers=HEADERS, timeout=15)
-    r.raise_for_status()
-    data = r.json()
+    # Retry with exponential backoff. MLB Stats API occasionally times out
+    # under load — three quick retries instead of one long timeout reduces
+    # the chance of a hard app failure.
+    data = None
+    last_err = None
+    for attempt in range(3):
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=20)
+            r.raise_for_status()
+            data = r.json()
+            break
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            last_err = e
+            if attempt < 2:
+                import time as _time
+                _time.sleep(0.5 * (2 ** attempt))  # 0.5s, then 1s
+            continue
+        except Exception as e:
+            last_err = e
+            break
+    if data is None:
+        # Raise so Streamlit DOESN'T cache an empty result. The app.py
+        # caller catches this and shows a friendly error.
+        raise ConnectionError(
+            f"Unable to fetch MLB schedule for {game_date} after 3 attempts. "
+            f"Last error: {type(last_err).__name__}"
+        )
 
     rows = []
     for d in data.get("dates", []):
@@ -275,9 +299,24 @@ def get_hitter_stats(season: int = CURRENT_SEASON) -> pd.DataFrame:
         f"?year={season}&type=batter&filter=&min=1&selections={selections}"
         "&chart=false&x=pa&y=pa&r=no&chartType=beeswarm&csv=true"
     )
-    r = requests.get(url, headers=HEADERS, timeout=30)
-    r.raise_for_status()
-    df = pd.read_csv(io.StringIO(r.text))
+    # Savant occasionally times out under load. Retry with backoff.
+    df = None
+    for attempt in range(3):
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=30)
+            r.raise_for_status()
+            df = pd.read_csv(io.StringIO(r.text))
+            break
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
+            if attempt < 2:
+                import time as _time
+                _time.sleep(1.0 * (2 ** attempt))
+            continue
+        except Exception:
+            break
+    if df is None or df.empty:
+        # Raise so Streamlit doesn't cache empty. Caller in app.py shows warning.
+        raise ConnectionError("Baseball Savant unreachable for hitter stats after 3 attempts")
     if "last_name, first_name" in df.columns:
         df["player_name"] = df["last_name, first_name"].apply(
             lambda s: " ".join(reversed([p.strip() for p in str(s).split(",")]))
@@ -447,9 +486,23 @@ def get_pitcher_stats(season: int = CURRENT_SEASON) -> pd.DataFrame:
         f"?year={season}&type=pitcher&filter=&min=1&selections={selections}"
         "&chart=false&x=pa&y=pa&r=no&chartType=beeswarm&csv=true"
     )
-    r = requests.get(url, headers=HEADERS, timeout=30)
-    r.raise_for_status()
-    df = pd.read_csv(io.StringIO(r.text))
+    # Retry with backoff for transient Savant timeouts
+    df = None
+    for attempt in range(3):
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=30)
+            r.raise_for_status()
+            df = pd.read_csv(io.StringIO(r.text))
+            break
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
+            if attempt < 2:
+                import time as _time
+                _time.sleep(1.0 * (2 ** attempt))
+            continue
+        except Exception:
+            break
+    if df is None or df.empty:
+        raise ConnectionError("Baseball Savant unreachable for pitcher stats after 3 attempts")
     if "last_name, first_name" in df.columns:
         df["player_name"] = df["last_name, first_name"].apply(
             lambda s: " ".join(reversed([p.strip() for p in str(s).split(",")]))
