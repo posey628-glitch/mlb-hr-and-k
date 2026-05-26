@@ -679,6 +679,266 @@ def get_pitcher_handedness_splits(season: int = CURRENT_SEASON, pitcher_ids: tup
 
 
 # ----------------------------------------------------------------------------
+# Day/Night splits — hitters AND pitchers perform differently in day vs night.
+# Documented effect: most batters slightly worse in day games (~1-3% lower OPS).
+# Some pitchers significantly better at night under lights.
+# ----------------------------------------------------------------------------
+
+def _parse_stat_split_response(data: dict, group: str = "hitting") -> dict:
+    """
+    Parse MLB Stats API statSplits response into vs_day_*/vs_night_* fields.
+    Handles missing fields gracefully (returns whatever's available).
+    Used for both hitters and pitchers.
+    """
+    out = {}
+    for stat_group in data.get("stats", []):
+        for split in stat_group.get("splits", []):
+            code = split.get("split", {}).get("code", "")
+            # sitCodes 'd' = day games, 'n' = night games
+            if code == "d":
+                label = "day"
+            elif code == "n":
+                label = "night"
+            else:
+                continue
+            stat = split.get("stat", {})
+
+            def _to_int(v):
+                if v is None: return None
+                try: return int(v)
+                except (TypeError, ValueError):
+                    try: return int(float(v))
+                    except (TypeError, ValueError): return None
+
+            pa = (stat.get("plateAppearances") or stat.get("battersFaced")
+                  or stat.get("pa"))
+            ab = stat.get("atBats")
+            hr = stat.get("homeRuns")
+            k = stat.get("strikeOuts") or stat.get("strikeouts")
+            bb = stat.get("baseOnBalls") or stat.get("walks")
+            avg = stat.get("avg")
+            obp = stat.get("obp")
+            slg = stat.get("slg")
+            ops = stat.get("ops")
+
+            pa = _to_int(pa); ab = _to_int(ab); hr = _to_int(hr)
+            k = _to_int(k); bb = _to_int(bb)
+
+            # Derive PA from AB+BB if missing
+            if (pa is None or pa == 0) and ab and bb is not None:
+                pa = ab + bb
+            denom = pa if (pa and pa > 0) else ab
+
+            if pa and pa > 0:
+                out[f"vs_{label}_pa"] = pa
+            if denom and denom > 0:
+                if hr is not None:
+                    out[f"vs_{label}_hr_per_pa"] = round(hr / denom * 100, 3)
+                elif pa and pa >= 20 and slg:
+                    try:
+                        if float(slg) < 0.400:
+                            out[f"vs_{label}_hr_per_pa"] = 0.0
+                    except (TypeError, ValueError):
+                        pass
+                if k is not None:
+                    out[f"vs_{label}_k_percent"] = round(k / denom * 100, 2)
+            if avg:
+                try: out[f"vs_{label}_avg"] = float(avg)
+                except (TypeError, ValueError): pass
+            if obp:
+                try: out[f"vs_{label}_obp"] = float(obp)
+                except (TypeError, ValueError): pass
+            if slg:
+                try: out[f"vs_{label}_slg"] = float(slg)
+                except (TypeError, ValueError): pass
+            if ops:
+                try: out[f"vs_{label}_ops"] = float(ops)
+                except (TypeError, ValueError): pass
+    return out
+
+
+def _fetch_day_night_splits_single(player_id: int, season: int, group: str = "hitting") -> dict:
+    """Fetch day/night splits for one player (hitter or pitcher)."""
+    url = (
+        f"https://statsapi.mlb.com/api/v1/people/{player_id}/stats"
+        f"?stats=statSplits&sitCodes=d,n&group={group}&season={season}"
+    )
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=15)
+        if r.status_code != 200:
+            return {}
+        return _parse_stat_split_response(r.json(), group)
+    except Exception:
+        return {}
+
+
+@st.cache_data(ttl=3600)
+def get_hitter_day_night_splits(season: int = CURRENT_SEASON,
+                                  hitter_ids: tuple = ()) -> pd.DataFrame:
+    """
+    Fetch day/night splits for the given hitter IDs.
+    Only fetches for confirmed lineup spots to avoid 200+ API calls.
+    """
+    if not hitter_ids:
+        return pd.DataFrame()
+    rows = []
+    for pid in hitter_ids:
+        try:
+            pid_int = int(pid)
+        except (TypeError, ValueError):
+            continue
+        splits = _fetch_day_night_splits_single(pid_int, season, "hitting")
+        if splits:
+            splits["player_id"] = pid_int
+            rows.append(splits)
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows)
+
+
+@st.cache_data(ttl=3600)
+def get_pitcher_day_night_splits(season: int = CURRENT_SEASON,
+                                   pitcher_ids: tuple = ()) -> pd.DataFrame:
+    """
+    Fetch day/night splits for the given pitcher IDs.
+    """
+    if not pitcher_ids:
+        return pd.DataFrame()
+    rows = []
+    for pid in pitcher_ids:
+        try:
+            pid_int = int(pid)
+        except (TypeError, ValueError):
+            continue
+        splits = _fetch_day_night_splits_single(pid_int, season, "pitching")
+        if splits:
+            splits["player_id"] = pid_int
+            rows.append(splits)
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows)
+
+
+def classify_game_day_night(game_time_iso: str, timezone: str = "America/New_York") -> str:
+    """
+    Classify a game as 'day' or 'night' based on its start time.
+    MLB convention: games starting BEFORE 5 PM local are day games.
+
+    Returns 'day' or 'night'. Defaults to 'night' if classification fails.
+    """
+    try:
+        from datetime import datetime
+        try:
+            from zoneinfo import ZoneInfo
+        except ImportError:
+            ZoneInfo = None
+        # Parse ISO time (e.g., "2026-05-26T19:05:00Z")
+        if game_time_iso.endswith("Z"):
+            dt_utc = datetime.fromisoformat(game_time_iso[:-1] + "+00:00")
+        else:
+            dt_utc = datetime.fromisoformat(game_time_iso)
+        if ZoneInfo is not None:
+            try:
+                dt_local = dt_utc.astimezone(ZoneInfo(timezone))
+            except Exception:
+                dt_local = dt_utc.astimezone(ZoneInfo("America/New_York"))
+        else:
+            # Fallback: assume Eastern (UTC-4 in summer, UTC-5 in winter)
+            from datetime import timedelta
+            dt_local = dt_utc - timedelta(hours=4)
+        # 5 PM cutoff is standard for "day game" classification
+        return "day" if dt_local.hour < 17 else "night"
+    except Exception:
+        return "night"
+
+
+# ----------------------------------------------------------------------------
+# Injury / IL list — return-from-IL fatigue flag for pitchers
+# Pitchers fresh off IL typically throw 30-50 fewer pitches their first start.
+# ----------------------------------------------------------------------------
+
+@st.cache_data(ttl=3600)
+def get_player_il_status(player_id: int, season: int = CURRENT_SEASON) -> dict:
+    """
+    Check if a player has recent IL transactions.
+    Returns {"on_il": bool, "days_since_return": int|None, "il_count_this_season": int}.
+    Uses MLB Stats API transactions endpoint.
+    """
+    out = {"on_il": False, "days_since_return": None, "il_count_this_season": 0}
+    try:
+        from datetime import datetime, timedelta
+        # Get player's transactions for the season
+        url = (
+            f"https://statsapi.mlb.com/api/v1/transactions"
+            f"?playerId={player_id}&startDate={season}-01-01&endDate={season}-12-31"
+        )
+        r = requests.get(url, headers=HEADERS, timeout=10)
+        if r.status_code != 200:
+            return out
+        data = r.json()
+        transactions = data.get("transactions", [])
+        if not transactions:
+            return out
+
+        # Find most recent IL-related transaction
+        today = datetime.now().date()
+        il_count = 0
+        latest_return = None
+        latest_il_placement = None
+        for txn in transactions:
+            type_code = (txn.get("typeCode") or "").upper()
+            description = (txn.get("description") or "").lower()
+            txn_date_str = txn.get("date") or txn.get("effectiveDate")
+            if not txn_date_str:
+                continue
+            try:
+                txn_date = datetime.strptime(txn_date_str[:10], "%Y-%m-%d").date()
+            except Exception:
+                continue
+
+            # IL placements: typeCode like "SCL" (status change to IL) or descriptions
+            if ("injured list" in description or "il" in type_code.lower()
+                    or type_code in ("SCL", "DFA")):
+                if "placed" in description or "transferred to" in description:
+                    il_count += 1
+                    if latest_il_placement is None or txn_date > latest_il_placement:
+                        latest_il_placement = txn_date
+                elif "activated" in description or "reinstated" in description:
+                    if latest_return is None or txn_date > latest_return:
+                        latest_return = txn_date
+
+        # On IL = latest placement is more recent than latest return
+        if latest_il_placement and (latest_return is None or latest_il_placement > latest_return):
+            out["on_il"] = True
+        if latest_return:
+            out["days_since_return"] = (today - latest_return).days
+        out["il_count_this_season"] = il_count
+        return out
+    except Exception:
+        return out
+
+
+@st.cache_data(ttl=3600)
+def get_pitchers_il_status(pitcher_ids: tuple, season: int = CURRENT_SEASON) -> pd.DataFrame:
+    """Bulk-fetch IL status for slate pitchers."""
+    if not pitcher_ids:
+        return pd.DataFrame()
+    rows = []
+    for pid in pitcher_ids:
+        try:
+            pid_int = int(pid)
+        except (TypeError, ValueError):
+            continue
+        status = get_player_il_status(pid_int, season)
+        if any(status.values()):
+            status["player_id"] = pid_int
+            rows.append(status)
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows)
+
+
+# ----------------------------------------------------------------------------
 # Pitcher arsenal (pitch-mix, velo, spin, swing/miss per pitch type)
 # ----------------------------------------------------------------------------
 
