@@ -16,6 +16,7 @@ from typing import Optional, Any
 
 import numpy as np
 import pandas as pd
+import requests
 import streamlit as st
 
 # Core imports - make each one defensive so a single missing function
@@ -451,7 +452,28 @@ with st.sidebar:
 # ============================================================================
 
 with st.spinner("Loading slate and stats..."):
-    slate = get_slate(selected_date.isoformat())
+    try:
+        slate = get_slate(selected_date.isoformat())
+    except (ConnectionError, requests.exceptions.RequestException) as _e:
+        # MLB Stats API is temporarily unavailable. Show a friendly message
+        # and stop instead of letting the raw traceback through.
+        st.error(
+            f"⚠️ **MLB Stats API is currently unreachable.**\n\n"
+            f"This is usually temporary (MLB's servers occasionally overload). "
+            f"Try one of:\n"
+            f"- Wait 30-60 seconds and refresh the page\n"
+            f"- Click '🔄 Force refresh all data' in the sidebar\n"
+            f"- Check https://statsapi.mlb.com/api/v1/schedule?sportId=1 in your browser to confirm MLB is back up\n\n"
+            f"_Technical detail: {type(_e).__name__}_"
+        )
+        st.stop()
+    except Exception as _e:
+        st.error(
+            f"⚠️ **Unexpected error loading slate.**\n\n"
+            f"Error: {type(_e).__name__}: {_e}\n\n"
+            f"Try clicking '🔄 Force refresh all data' in the sidebar."
+        )
+        st.stop()
 
 if slate.empty:
     st.warning(f"No MLB games found on {selected_date}. Try another date.")
@@ -504,10 +526,33 @@ if slate.empty:
     )
     st.stop()
 
-# Statcast pulls
-hitter_stats = get_hitter_stats() if not slate.empty else pd.DataFrame()
-pitcher_stats = get_pitcher_stats() if not slate.empty else pd.DataFrame()
-pitcher_arsenal_all = get_pitcher_arsenal() if not slate.empty else pd.DataFrame()
+# Statcast pulls — wrap with try/except so transient timeouts don't crash app
+try:
+    hitter_stats = get_hitter_stats() if not slate.empty else pd.DataFrame()
+except (ConnectionError, requests.exceptions.RequestException) as _e:
+    st.error(
+        f"⚠️ **Baseball Savant (hitter data) is currently unreachable.**\n\n"
+        f"This is usually temporary. Try:\n"
+        f"- Wait 30-60 seconds and refresh\n"
+        f"- Click '🔄 Force refresh all data' in the sidebar\n\n"
+        f"_Error: {type(_e).__name__}_"
+    )
+    st.stop()
+
+try:
+    pitcher_stats = get_pitcher_stats() if not slate.empty else pd.DataFrame()
+except (ConnectionError, requests.exceptions.RequestException) as _e:
+    st.error(
+        f"⚠️ **Baseball Savant (pitcher data) is currently unreachable.**\n\n"
+        f"_Error: {type(_e).__name__}_"
+    )
+    st.stop()
+
+try:
+    pitcher_arsenal_all = get_pitcher_arsenal() if not slate.empty else pd.DataFrame()
+except Exception:
+    # Arsenal is non-critical; fall back to empty
+    pitcher_arsenal_all = pd.DataFrame()
 
 # Pitcher handedness splits (vs LHB / vs RHB)
 # Use MLB Stats API statSplits which IS documented and works on Streamlit Cloud.
