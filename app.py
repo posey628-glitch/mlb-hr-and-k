@@ -922,7 +922,42 @@ if show_diagnostic:
                 st.markdown("---")
 
 if show_legend:
-    with st.expander("📖 Legend & glossary"):
+    with st.expander("📖 Legend & glossary — what every column means", expanded=False):
+        # ROW 1: Letter grades (the NEW addition the user asked for)
+        st.markdown("### 🎯 Letter Grades — quick at-a-glance interpretation")
+        gcol1, gcol2 = st.columns(2)
+        with gcol1:
+            st.markdown(
+                "**HITTER Grade (HR Game% based)** — applies to the **batter facing this pitcher**.\n\n"
+                "| Grade | HR Game% | Meaning |\n"
+                "|---|---|---|\n"
+                "| **A+** | ≥22% | Elite — top-tier HR play |\n"
+                "| **A** | 19-22% | Very strong matchup |\n"
+                "| **B+** | 16-19% | Strong, above-average |\n"
+                "| **B** | 12-16% | Solid, league-good |\n"
+                "| **C+** | 9-12% | Modest, slight edge |\n"
+                "| **C** | 6-9% | Below average |\n"
+                "| **D** | 3-6% | Poor matchup |\n"
+                "| **F** | <3% | Avoid |\n"
+                "| **—** | n/a | Insufficient sample |\n"
+            )
+        with gcol2:
+            st.markdown(
+                "**PITCHER Grade — from the BATTER's perspective**. "
+                "(Tells you: is this pitcher an HR target or someone to avoid?)\n\n"
+                "| Grade | What it means |\n"
+                "|---|---|\n"
+                "| **EXPLOIT+** | 🔥 Target! Worst test/suppress scores (<30). HRs likely. |\n"
+                "| **EXPLOIT** | Solid HR target. Below-average pitcher (test/suppress ≤45). |\n"
+                "| **MIXED** | Neutral. No clear edge either way. |\n"
+                "| **TOUGH** | Avoid HR plays. Pitcher has the edge (test+suppress avg ≥65). |\n"
+                "| **ELITE** | 🚫 Strong avoid. Top-tier K stuff AND top suppress (avg ≥80). |\n"
+                "| **—** | Insufficient sample (<80 PA faced) |\n\n"
+                "**Why no 'EXPLOIT' on hitters?** Hitter grade rates THIS hitter's HR chance "
+                "today; pitcher grade rates THIS pitcher as a target. Different perspectives."
+            )
+
+        st.markdown("---")
         leg1, leg2, leg3 = st.columns(3)
         with leg1:
             st.markdown("**Signal column (hitters)**")
@@ -939,7 +974,8 @@ if show_legend:
                 "🔄 SWING — swing-man / spot starter / bulk relief between starts\n\n"
                 "⚠️ LOW IP — under 25 IP this season\n\n"
                 "🚨 RELIEVER — pure reliever / opener day\n\n"
-                "📉 SAMPLE NOISE — stat inconsistency (low IP)"
+                "📉 SAMPLE NOISE — stat inconsistency (low IP)\n\n"
+                "🌱 ROOKIE — debut in current season"
             )
         with leg2:
             st.markdown("**Signal column (pitchers)**")
@@ -950,30 +986,100 @@ if show_legend:
                 "🔴 Avoid (< 30)\n\n"
                 "⚪ Insufficient data"
             )
-            st.markdown("**Pitcher Test Score formula**")
+            st.markdown("**Verdict labels (hitters)**")
             st.markdown(
-                "Blended K/9 (30%) + Whiff% (20%) + xwOBA suppression (25%) "
-                "+ ERA (15%) + base K% (10%), then × **reliability factor**. "
-                "Relievers get 0.4 cap, low-IP/swing get scaled multiplier."
+                "🟢 **STRONG** — A+/A grade play\n\n"
+                "🟢 **SOLID** — B+/B grade play\n\n"
+                "🟡 **WATCH** — C+ borderline play\n\n"
+                "🟠 **AVOID** — C/D grade\n\n"
+                "🔴 **WEAK** — F grade or terrible matchup"
+            )
+            st.markdown("**HR Form Arrow**")
+            st.markdown(
+                "↑ Recent ISO is 10%+ above season — hot\n\n"
+                "→ Within ±10% of season pace — steady\n\n"
+                "↓ Recent ISO is 10%+ below — cold"
             )
         with leg3:
-            st.markdown("**Key metrics**")
+            st.markdown("**Streak labels**")
             st.markdown(
-                "**HR Game%** = Probability of ≥1 HR this game (calibrated from barrel rate, pitcher, park, weather)\n\n"
-                "**HR PA%** = Per-PA HR probability\n\n"
-                "**Matchup** = 0-100 composite (xwoba, barrel, ISO, opp pitcher quality)\n\n"
-                "**Test (hitter)** = Matchup × PA sample weight\n\n"
-                "**Test (pitcher)** = K/Whiff/xwOBA/ERA composite × reliability\n\n"
-                "**Conf** = Pitcher reliability multiplier (0.3 = unreliable, 1.0 = full)\n\n"
-                "**Proj K** = Blended K/9 × expected IP (scaled by role)\n\n"
-                "**Pitch Match** = Hitter pitch-specific xwOBA vs pitcher arsenal\n\n"
-                "**Sleeper** = HR-prob percentile MINUS season-HR percentile\n\n"
-                "**Pick Score** = Daily top-pick composite (all factors)"
+                "🔥 **3+ HR L5** — 3+ HR in last 5 games (very hot)\n\n"
+                "🔥 **HR L3** — homered in last 3 games\n\n"
+                "⚡ **HR L5** — homered in last 5 games\n\n"
+                "🌡️ **HR L10** — homered in last 10\n\n"
+                "❄️ **no HR L10** — 0 HR in last 10 games (cold)"
             )
+            st.markdown("**HR Environment flag (per game)**")
+            st.markdown(
+                "🔥 **HR-FRIENDLY** (env ≥1.15× boost): favor hitters\n\n"
+                "⬆️ Slightly HR-friendly (1.08-1.15×)\n\n"
+                "⬇️ Slightly HR-hostile (0.85-0.92×)\n\n"
+                "❄️ **HR-HOSTILE** (env ≤0.85×): favor pitchers\n\n"
+                "🌧️ Rain ≥50%: HR potential suppressed"
+            )
+
+        st.markdown("---")
+        st.markdown("### 📊 Column Definitions")
+        col_def1, col_def2 = st.columns(2)
+        with col_def1:
+            st.markdown(
+                "**Hitter projection columns:**\n\n"
+                "**HR Game%** — Probability of ≥1 HR this game. Top metric.\n\n"
+                "**HR PA%** — Per-PA HR probability. Use for prop pricing.\n\n"
+                "**Power Score** — 0-99 composite: barrel%, ISO, hard-hit, EV, FB%, pull-air%.\n\n"
+                "**Matchup Opp** — Opportunity score: weights env factors more heavily (catches contact hitters in great spots).\n\n"
+                "**Matchup** — Overall matchup quality (xwoba, barrel, opp pitcher).\n\n"
+                "**Test Score** — Matchup × PA reliability + recent form blend.\n\n"
+                "**Pitch Match** — Hitter's xwOBA vs THIS pitcher's specific arsenal (weighted by usage).\n\n"
+                "**Pitch HR** — Same as above but barrel-based (HR-specific).\n\n"
+                "**Pick Score** — Daily ranking composite (see formula below).\n\n"
+                "**Sleeper Score** — HR%-percentile MINUS season-HR-percentile. Positive = today is better than season pace.\n\n"
+                "**GS Score** — Grand Slam composite (HR% × lineup traffic)."
+            )
+        with col_def2:
+            st.markdown(
+                "**Pitcher projection columns:**\n\n"
+                "**Test Score** — K-focused 0-95 composite (blended K/9 30%, Whiff% 20%, xwOBA suppress 25%, ERA 15%, K% 10%) × reliability.\n\n"
+                "**kHR** — K-rating composite (50% blended K/9, 20% K%, 30% Whiff%).\n\n"
+                "**HR Suppress** — HR-suppression score (32% barrel allowed, 28% xwOBA, 20% HR/9, 20% batted-ball mix) × opp HR% × park.\n\n"
+                "**Proj K** — Blended K/9 × expected IP × opponent K% multiplier.\n\n"
+                "**Reliability** — 0.3-1.0. Captures sample size reliability. Relievers ~0.4-0.65; full starters 1.0.\n\n"
+                "**vs LHB/RHB splits** — pitcher's actual data vs each handedness. Used to OVERRIDE overall HR/9 in projections (when sample ≥40 PA).\n\n"
+                "**Opp K%** — Opposing team's season K rate. Adjusts proj_k.\n\n"
+                "**Opp HR%** — Opposing team's HR/PA. Adjusts hr_suppress."
+            )
+
+        st.markdown("---")
+        st.markdown("### 🎯 Top Picks Formula (how the daily Top 10 is ranked)")
+        st.markdown(
+            "**Pick Score** = 0-100 weighted blend of:\n\n"
+            "- **HR Game%** (25%) — today's HR probability (most important)\n"
+            "- **Matchup vs Opponent** (15%) — pitcher quality × park\n"
+            "- **Power Score** (15%) — underlying season power skills\n"
+            "- **Pitch HR Match** (10%) — barrel rate vs this pitcher's specific arsenal\n"
+            "- **HR Form** (12%) — recent ISO trend\n"
+            "- **Sleeper Lift** (8%) — today vs season pace\n"
+            "- **Env Boost** (15%) — park × weather × pull-wind\n\n"
+            "**Lineup bonuses:** +3 if confirmed lineup, -2 if roster-fill (lineup unknown)\n\n"
+            "Diversity rule: max 2 hitters per game (3 if slate is small)."
+        )
+
+        st.markdown("---")
+        st.markdown("### 🔬 Why hitters with low barrel% can still rank high")
+        st.markdown(
+            "Sometimes you'll see a hitter with mediocre barrel% rank near elites. Possible reasons:\n\n"
+            "1. **Pitch-specific edge** — they happen to crush THIS pitcher's arsenal (high Pitch HR score)\n"
+            "2. **Great park/weather** — HR-friendly venue + wind blowing out (env_mult >1.15)\n"
+            "3. **Platoon advantage** — opposite-handed matchup with reverse-split pitcher\n"
+            "4. **Lineup spot** — leadoff/#2 hitters get 4.6 PAs vs #9's 3.6 (more chances)\n"
+            "5. **Sample noise** — recent power surge can inflate rolling stats\n\n"
+            "When this happens, check `Pitch HR`, `Env`, and `Lineup_pos` columns. "
+            "If all three favor them, the model is correctly elevating them."
+        )
 
         # Concrete scale guide - what's "good" vs "bad" for each metric
         st.markdown("---")
-        st.markdown("**📏 What's Good vs Bad — Real MLB Scales**")
+        st.markdown("### 📏 What's Good vs Bad — Real MLB Scales")
         scale_col1, scale_col2 = st.columns(2)
         with scale_col1:
             st.markdown(
@@ -1024,7 +1130,9 @@ st.subheader("🥎 Pitcher Slate Overview")
 st.caption(
     "Role-aware scoring: relievers and short-sample pitchers get reliability-adjusted "
     "Test/kHR/Proj K so opener days don't dominate the rankings. "
-    "Look for **🚨 RELIEVER** and **⚠️ LOW IP** flags — those scores are intentionally scaled down."
+    "Look for **🚨 RELIEVER** and **⚠️ LOW IP** flags — those scores are intentionally scaled down. "
+    "**New to the columns?** See the **📖 Legend & glossary** section above the pitcher table "
+    "for grade definitions (A+, EXPLOIT, MIXED, TOUGH, ELITE), column meanings, and scoring formulas."
 )
 
 pitcher_recent_map = {}
