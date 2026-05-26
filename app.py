@@ -2435,6 +2435,11 @@ for gpk, ctx in game_context_map.items():
 
 if all_hitters:
     combined_all = pd.concat(all_hitters, ignore_index=True)
+    # Drop hr_prob (it's a duplicate of hr_score, just confusingly named).
+    # Both are 0-100 composite scores — keeping both confused users who
+    # thought hr_prob was a 0-1 probability.
+    if "hr_prob" in combined_all.columns:
+        combined_all = combined_all.drop(columns=["hr_prob"])
     if "pa" in combined_all.columns:
         qualified = combined_all[combined_all["pa"].notna() & (combined_all["pa"] >= INSUFFICIENT_PA_THRESHOLD)]
     else:
