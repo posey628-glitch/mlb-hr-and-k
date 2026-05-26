@@ -278,6 +278,7 @@ def build_matchup_table(
         "obp", "slg", "ops", "babip",
         # Counts
         "pa", "home_run", "recent_hr", "recent_iso", "recent_avg",
+        "recent_hr_weighted_rate",
         "streak_label", "hr_streak_games", "hr_last_5", "games_since_hr",
         # Today's HR projection
         "likely_hr_pct",
