@@ -589,6 +589,39 @@ except Exception as _e:
     # Don't block app if MLB Stats API splits fetch fails
     pass
 
+# NEW: Pitcher day/night splits + IL status
+# Only fetch for slate pitchers (~26-30 calls each)
+try:
+    from data_fetcher import get_pitcher_day_night_splits, get_pitchers_il_status
+    if slate_pitcher_ids:
+        pitcher_dn = get_pitcher_day_night_splits(pitcher_ids=slate_pitcher_ids)
+        if pitcher_dn is not None and not pitcher_dn.empty and "player_id" in pitcher_stats.columns:
+            pitcher_dn["player_id"] = pd.to_numeric(
+                pitcher_dn["player_id"], errors="coerce").astype("Int64")
+            merge_cols = [c for c in pitcher_dn.columns if c != "player_id"]
+            existing = set(pitcher_stats.columns)
+            merge_cols = [c for c in merge_cols if c not in existing]
+            if merge_cols:
+                pitcher_stats = pitcher_stats.merge(
+                    pitcher_dn[["player_id"] + merge_cols],
+                    on="player_id", how="left"
+                )
+        # IL status
+        pitcher_il = get_pitchers_il_status(slate_pitcher_ids)
+        if pitcher_il is not None and not pitcher_il.empty and "player_id" in pitcher_stats.columns:
+            pitcher_il["player_id"] = pd.to_numeric(
+                pitcher_il["player_id"], errors="coerce").astype("Int64")
+            merge_cols = [c for c in pitcher_il.columns if c != "player_id"]
+            existing = set(pitcher_stats.columns)
+            merge_cols = [c for c in merge_cols if c not in existing]
+            if merge_cols:
+                pitcher_stats = pitcher_stats.merge(
+                    pitcher_il[["player_id"] + merge_cols],
+                    on="player_id", how="left"
+                )
+except Exception:
+    pass
+
 # Traditional stats
 hitter_trad = get_hitter_traditional() if not slate.empty else pd.DataFrame()
 pitcher_trad = get_pitcher_traditional() if not slate.empty else pd.DataFrame()
@@ -1124,6 +1157,30 @@ if show_legend:
         )
 
         st.markdown("---")
+        st.markdown("### ☀️🌙 Day vs Night Splits + IL Status")
+        st.markdown(
+            "**Day/Night splits** — some hitters/pitchers perform very differently in "
+            "day vs night games (visibility, sleep cycles, lighting). The model now "
+            "uses these as a modest adjustment:\n\n"
+            "**Hitters:** ±15% bound on h_base adjustment (caps so it can't overpower other factors). "
+            "Sample shrinkage with 100 PA prior. Only triggers with ≥40 PA in the split.\n\n"
+            "**Pitchers:** ±10% on pitcher_mult. Sample shrinkage with 60 PA prior. "
+            "Only triggers with ≥50 PA in the split.\n\n"
+            "**Why bounded:** day/night effects are real but smaller than handedness or park. "
+            "If a hitter has .250 AVG in day games and .280 at night, that's a 12% difference — "
+            "applying 50% of it (the model's choice) gives us a 6% nudge in the right direction.\n\n"
+            "**Game header now shows:** ☀️ DAY GAME or 🌙 NIGHT GAME next to the HR env flag.\n\n"
+            "---\n\n"
+            "**🚑 ON IL / 🏥 FRESH IL flags (pitchers)**\n\n"
+            "Pitchers fresh off the IL throw fewer pitches and may be rusty. The model:\n"
+            "- Caps expected_ip at 3.5 for first 3 days back (was 5.5 for full starters)\n"
+            "- Reduces expected_ip by 15% for days 4-7 since return\n"
+            "- This affects proj_k (fewer innings = fewer Ks projected)\n"
+            "- Shows a 🏥 FRESH IL ({days}d) warning in the pitcher table\n\n"
+            "Data source: MLB Stats API transactions endpoint."
+        )
+
+        st.markdown("---")
         st.markdown("### 🔥 Smash Spots — Triple-Threat Alignment Flag")
         st.markdown(
             "**The 'all stars align' flag** — appears in the hitter table when a batter has "
@@ -1305,12 +1362,21 @@ if not p_slate.empty:
         axis=1,
     )
 
-    # Add a visible warning flag column combining role + sample_noise
+    # Add a visible warning flag column combining role + sample_noise + IL
     if not p_slate.empty:
         def _warn_flag(r):
             flags = []
             if r.get("sample_noise"):
                 flags.append("📉")
+            # NEW: Fresh-from-IL flag
+            # Pitchers within 7 days of return from IL typically throw fewer
+            # pitches, may be rusty. Flag them.
+            days_since = r.get("days_since_return")
+            on_il = r.get("on_il")
+            if on_il:
+                flags.append("🚑 ON IL")
+            elif days_since is not None and not pd.isna(days_since) and days_since <= 7:
+                flags.append(f"🏥 FRESH IL ({int(days_since)}d)")
             return " ".join(flags) if flags else ""
         p_slate["warn"] = p_slate.apply(_warn_flag, axis=1)
 
@@ -1326,8 +1392,13 @@ if not p_slate.empty:
         "vs_lhb_hr_per_pa", "vs_lhb_k_percent",
         "vs_rhb_pa", "vs_rhb_avg", "vs_rhb_obp", "vs_rhb_slg",
         "vs_rhb_hr_per_pa", "vs_rhb_k_percent",
+        # NEW: day/night splits
+        "vs_day_pa", "vs_day_avg", "vs_day_slg", "vs_day_hr_per_pa",
+        "vs_night_pa", "vs_night_avg", "vs_night_slg", "vs_night_hr_per_pa",
         "opp_k_pct", "opp_hr_per_pa",
         "recent_era", "recent_k9", "days_rest", "avg_recent_pitches",
+        # NEW: IL info
+        "days_since_return", "il_count_this_season",
         "reliability",
     ] if c in p_slate.columns]
 
@@ -1444,6 +1515,40 @@ if not p_slate.empty:
             "vs R K%", format="%.1f%%",
             help="K rate vs RHB.",
         ),
+        # Day/night pitcher splits
+        "vs_day_pa": st.column_config.NumberColumn(
+            "Day PA", format="%d",
+            help="Plate appearances in day games. Larger = more reliable split.",
+        ),
+        "vs_day_avg": st.column_config.NumberColumn("Day AVG", format="%.3f"),
+        "vs_day_slg": st.column_config.NumberColumn("Day SLG", format="%.3f"),
+        "vs_day_hr_per_pa": st.column_config.NumberColumn(
+            "Day HR%", format="%.2f%%",
+            help=(
+                "HR rate per PA in day games. League avg ~2.8%.\n"
+                "Some pitchers are dramatically worse at day games (visibility, sleep cycles)."
+            ),
+        ),
+        "vs_night_pa": st.column_config.NumberColumn("Night PA", format="%d"),
+        "vs_night_avg": st.column_config.NumberColumn("Night AVG", format="%.3f"),
+        "vs_night_slg": st.column_config.NumberColumn("Night SLG", format="%.3f"),
+        "vs_night_hr_per_pa": st.column_config.NumberColumn(
+            "Night HR%", format="%.2f%%",
+            help="HR rate per PA in night games. League avg ~2.8%.",
+        ),
+        "days_since_return": st.column_config.NumberColumn(
+            "Days Off IL", format="%d",
+            help=(
+                "Days since this pitcher was reinstated from the IL.\n"
+                "≤3 days = first start back, expect fewer innings.\n"
+                "4-7 days = still ramping back up.\n"
+                "Blank = healthy / no recent IL stint."
+            ),
+        ),
+        "il_count_this_season": st.column_config.NumberColumn(
+            "IL Stints", format="%d",
+            help="Number of times this pitcher has been placed on IL this season.",
+        ),
         "opp_k_pct": st.column_config.NumberColumn(
             "Opp K%", format="%.1f%%",
             help=(
@@ -1548,6 +1653,14 @@ matchup_tables = {}
 
 for _, game in slate.iterrows():
     gpk = int(game["gamePk"])
+
+    # NEW: Classify game as day/night for split adjustments
+    try:
+        from data_fetcher import classify_game_day_night
+        game_time_iso = game.get("gameTime") or ""
+        game_type = classify_game_day_night(game_time_iso) if game_time_iso else "night"
+    except Exception:
+        game_type = "night"
 
     # Park factor
     venue = game.get("venue") or ""
@@ -1761,7 +1874,10 @@ for _, game in slate.iterrows():
         except Exception:
             pass
 
-    # Hitter recent form
+    # Hitter recent form + day/night splits
+    # Day/night splits are fetched ONLY for confirmed-lineup hitters to limit
+    # API calls (typically 18 hitters per game = ~270 calls if every team is
+    # confirmed). When lineups aren't posted yet, we skip the day/night fetch.
     recent_hitter_map = {}
     if use_recent_form:
         try:
@@ -1772,6 +1888,33 @@ for _, game in slate.iterrows():
                 recent_hitter_map[pid] = get_hitter_recent_form_trad(pid) or {}
         except Exception:
             pass
+
+    # Day/night splits — only if at least one side has confirmed lineup
+    try:
+        from data_fetcher import get_hitter_day_night_splits
+        if away_confirmed or home_confirmed:
+            hitter_ids_for_dn = []
+            for p in (away_lineup + home_lineup):
+                pid = safe_int(p.get("id"))
+                if pid is not None:
+                    hitter_ids_for_dn.append(pid)
+            hitter_ids_for_dn = tuple(set(hitter_ids_for_dn))
+            if hitter_ids_for_dn:
+                hitter_dn_df = get_hitter_day_night_splits(hitter_ids=hitter_ids_for_dn)
+                if hitter_dn_df is not None and not hitter_dn_df.empty:
+                    for _, dn_row in hitter_dn_df.iterrows():
+                        pid = safe_int(dn_row.get("player_id"))
+                        if pid is None:
+                            continue
+                        # Add day/night fields to the recent_hitter_map entry so
+                        # they flow through build_matchup_table -> row_dict -> props
+                        if pid not in recent_hitter_map:
+                            recent_hitter_map[pid] = {}
+                        for k, v in dn_row.items():
+                            if k != "player_id" and pd.notna(v):
+                                recent_hitter_map[pid][k] = v
+    except Exception:
+        pass
 
     # Build matchup tables for each side
     away_matchup = build_matchup_table(
@@ -1877,6 +2020,12 @@ for _, game in slate.iterrows():
         pull_mults_col = []
         for _, hr in matchup_df.iterrows():
             row_dict = hr.to_dict()
+            # Inject game_type for day/night split adjustment in props.py
+            row_dict["game_type"] = ctx.get("game_type", "night")
+            # opp_p_row gets game_type too (works on the same dict via reference,
+            # but only the first time — defensive: set explicitly)
+            if isinstance(opp_p_row, dict) and "game_type" not in opp_p_row:
+                opp_p_row["game_type"] = ctx.get("game_type", "night")
             pa = safe_float(row_dict.get("pa"))
             sample = int(pa) if pa is not None else None
             bats = row_dict.get("bats", "R") or "R"
@@ -2155,6 +2304,7 @@ for _, game in slate.iterrows():
         "home_lineup_confirmed": home_confirmed,
         "hr_env_flag": hr_env_flag,
         "hr_env_color": hr_env_color,
+        "game_type": game_type,  # "day" or "night" for splits
     }
     matchup_tables[game["gamePk"]] = (away_matchup, home_matchup)
 
@@ -3276,17 +3426,30 @@ for _, game in slate.iterrows():
     # HR environment flag - prominent color-coded summary
     hr_env_flag = ctx.get("hr_env_flag", "")
     hr_env_color = ctx.get("hr_env_color", "")
+    # NEW: append day/night indicator to env flag
+    game_type_str = ctx.get("game_type", "")
+    if game_type_str == "day":
+        day_night_label = "☀️ DAY GAME"
+    elif game_type_str == "night":
+        day_night_label = "🌙 NIGHT GAME"
+    else:
+        day_night_label = ""
     if hr_env_flag:
+        combined_msg = hr_env_flag
+        if day_night_label:
+            combined_msg += f" · {day_night_label}"
         if hr_env_color == "success":
-            st.success(hr_env_flag)
+            st.success(combined_msg)
         elif hr_env_color == "info":
-            st.info(hr_env_flag)
+            st.info(combined_msg)
         elif hr_env_color == "warning":
-            st.warning(hr_env_flag)
+            st.warning(combined_msg)
         elif hr_env_color == "error":
-            st.error(hr_env_flag)
+            st.error(combined_msg)
         else:
-            st.caption(hr_env_flag)
+            st.caption(combined_msg)
+    elif day_night_label:
+        st.caption(day_night_label)
 
     # Pull-wind interaction summary, if applicable
     pull_summaries = ctx.get("pull_wind_summary", [])
