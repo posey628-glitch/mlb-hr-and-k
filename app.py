@@ -2649,6 +2649,165 @@ if all_hitters_for_picks:
             for _, r in top10.head(5).iterrows()
         )
         st.markdown(f"**Top 5 at a glance:** {glance}")
+
+        # ====================================================================
+        # PARLAY SUGGESTIONS — combine top picks into 2-leg and 3-leg HR parlays
+        # ====================================================================
+        st.markdown("---")
+        st.markdown("### 🎯 Parlay Suggestions — HR-to-hit combinations")
+        st.caption(
+            "Suggested HR parlays combining today's top plays. **Parlay HR%** = "
+            "joint probability that ALL legs homer (computed by multiplying "
+            "individual game HR%). Higher = more likely to cash but lower payout. "
+            "We diversify across games when possible to avoid correlated outcomes "
+            "(same lineup → same opposing pitcher = correlated)."
+        )
+
+        # Build parlay candidates from top picks
+        parlay_pool = top10[top10["hr_game_pct"].notna()].head(15).copy()
+        if len(parlay_pool) >= 2:
+            from itertools import combinations
+            game_col = "game" if "game" in parlay_pool.columns else None
+
+            # 2-LEG parlays
+            two_leg_parlays = []
+            for combo in combinations(parlay_pool.index, 2):
+                rows = [parlay_pool.loc[i] for i in combo]
+                # Skip if both legs from same game (correlated)
+                if game_col and rows[0].get(game_col) == rows[1].get(game_col):
+                    continue
+                # Joint probability (independent assumption since cross-game)
+                p1 = rows[0].get("hr_game_pct", 0) / 100
+                p2 = rows[1].get("hr_game_pct", 0) / 100
+                joint = p1 * p2
+                two_leg_parlays.append({
+                    "Leg 1": f"{rows[0]['player_name']} ({rows[0].get('team','')})",
+                    "Leg 2": f"{rows[1]['player_name']} ({rows[1].get('team','')})",
+                    "L1 HR%": p1 * 100,
+                    "L2 HR%": p2 * 100,
+                    "Parlay HR%": joint * 100,
+                    "Approx Odds": f"+{int(round(1 / joint * 100 - 100))}" if joint > 0 else "N/A",
+                })
+            two_leg_df = pd.DataFrame(two_leg_parlays).sort_values(
+                "Parlay HR%", ascending=False
+            ).head(10).reset_index(drop=True)
+
+            # 3-LEG parlays - more conservative (lower hit rate, higher payout)
+            three_leg_parlays = []
+            for combo in combinations(parlay_pool.index[:12], 3):
+                rows = [parlay_pool.loc[i] for i in combo]
+                # Skip if any two legs share a game (correlated)
+                if game_col:
+                    games = {r.get(game_col) for r in rows}
+                    if len(games) < 3:
+                        continue
+                p1 = rows[0].get("hr_game_pct", 0) / 100
+                p2 = rows[1].get("hr_game_pct", 0) / 100
+                p3 = rows[2].get("hr_game_pct", 0) / 100
+                joint = p1 * p2 * p3
+                three_leg_parlays.append({
+                    "Leg 1": f"{rows[0]['player_name']}",
+                    "Leg 2": f"{rows[1]['player_name']}",
+                    "Leg 3": f"{rows[2]['player_name']}",
+                    "Avg HR%": (p1 + p2 + p3) / 3 * 100,
+                    "Parlay HR%": joint * 100,
+                    "Approx Odds": f"+{int(round(1 / joint * 100 - 100))}" if joint > 0 else "N/A",
+                })
+            three_leg_df = pd.DataFrame(three_leg_parlays).sort_values(
+                "Parlay HR%", ascending=False
+            ).head(8).reset_index(drop=True)
+
+            tab1, tab2 = st.tabs(["🎯 2-Leg Parlays (safer)", "💎 3-Leg Parlays (better odds)"])
+            with tab1:
+                st.caption(
+                    "Top 10 two-leg HR parlays from different games. "
+                    "Real-world fair odds shown next to projected hit rate."
+                )
+                st.dataframe(
+                    two_leg_df, hide_index=True, use_container_width=True,
+                    column_config={
+                        "L1 HR%": st.column_config.NumberColumn(format="%.1f%%"),
+                        "L2 HR%": st.column_config.NumberColumn(format="%.1f%%"),
+                        "Parlay HR%": st.column_config.NumberColumn(
+                            format="%.2f%%",
+                            help="Probability BOTH legs hit. ~3-5% = strong play.",
+                        ),
+                        "Approx Odds": st.column_config.TextColumn(
+                            help="Fair-odds American format if the parlay HR% is correct.",
+                        ),
+                    },
+                )
+                # Store for export
+                two_leg_parlay_export = two_leg_df.copy()
+            with tab2:
+                st.caption(
+                    "Top 8 three-leg HR parlays from different games. "
+                    "Lower hit rate but bigger payout. Use sparingly."
+                )
+                st.dataframe(
+                    three_leg_df, hide_index=True, use_container_width=True,
+                    column_config={
+                        "Avg HR%": st.column_config.NumberColumn(format="%.1f%%"),
+                        "Parlay HR%": st.column_config.NumberColumn(
+                            format="%.3f%%",
+                            help="Probability ALL THREE legs hit. ~0.5-1% = strong 3-leg.",
+                        ),
+                    },
+                )
+                three_leg_parlay_export = three_leg_df.copy()
+
+            st.caption(
+                "⚠️ **Honest disclaimer:** parlay odds compound risk. Each leg's "
+                "miss-rate is real. Even a 4% 2-leg parlay misses 96% of the time. "
+                "Use these as one signal among many, not a betting guarantee."
+            )
+
+            # ====================================================================
+            # TWITTER / SOCIAL SHARE — generate copyable post using top picks + parlay
+            # ====================================================================
+            with st.expander("🐦 Twitter-ready daily post — copy + paste"):
+                date_str = selected_date.strftime("%b %-d")
+                top3 = top10.head(3)
+                top3_lines = [
+                    f"{i+1}. {r['player_name']} ({r['team']}) {r.get('hr_game_pct', 0):.1f}%"
+                    for i, (_, r) in enumerate(top3.iterrows())
+                ]
+                best_parlay = ""
+                if not two_leg_df.empty:
+                    bp = two_leg_df.iloc[0]
+                    best_parlay = (
+                        f"\n\nTop Parlay: {bp['Leg 1']} + {bp['Leg 2']} "
+                        f"({bp['Parlay HR%']:.1f}% / {bp['Approx Odds']})"
+                    )
+
+                twitter_text = (
+                    f"⚾ MLB HR Picks — {date_str}\n\n"
+                    f"Top 3 HR Plays:\n"
+                    + "\n".join(top3_lines)
+                    + best_parlay
+                    + "\n\n#MLB #DFS #HRprops"
+                )
+                st.text_area(
+                    "Copy this for Twitter (280 chars limit):",
+                    value=twitter_text, height=200,
+                    help=(
+                        "Paste this directly into Twitter. "
+                        "Tips for growing followers: post daily at consistent times "
+                        "(4-5 PM ET after lineups confirm), tag #MLB and #HRprops, "
+                        "follow back accounts that engage. Show your work — when "
+                        "picks hit, post the result the next morning to build credibility."
+                    ),
+                )
+                chars = len(twitter_text)
+                if chars > 280:
+                    st.warning(
+                        f"⚠️ Post is {chars} characters — Twitter limit is 280. "
+                        f"Trim the parlay or hashtags before posting."
+                    )
+                else:
+                    st.caption(f"✅ {chars}/280 characters — fits in one tweet.")
+        else:
+            st.caption("Need at least 2 picks with HR projections to suggest parlays.")
     else:
         st.caption("Not enough qualified hitters with HR projections yet.")
 else:
@@ -2782,6 +2941,11 @@ if all_hitters:
                     try:
                         if 'top_picks_export' in dir() and top_picks_export is not None and not top_picks_export.empty:
                             top_picks_export.to_excel(writer, sheet_name="Top 10 Picks", index=False)
+                        # NEW: Parlay suggestion sheets
+                        if 'two_leg_parlay_export' in dir() and two_leg_parlay_export is not None and not two_leg_parlay_export.empty:
+                            two_leg_parlay_export.to_excel(writer, sheet_name="2-Leg Parlays", index=False)
+                        if 'three_leg_parlay_export' in dir() and three_leg_parlay_export is not None and not three_leg_parlay_export.empty:
+                            three_leg_parlay_export.to_excel(writer, sheet_name="3-Leg Parlays", index=False)
                     except Exception:
                         pass
                     # NEW: Smash Spots — triple-threat HR opportunities (max 2 per team)
