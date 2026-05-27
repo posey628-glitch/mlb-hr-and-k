@@ -860,6 +860,14 @@ if use_sprint_speed:
 
 st.title(f"⚾ Posey MLB HR & K Data — {selected_date.strftime('%A, %B %d, %Y')}")
 
+# Display current ET time so user knows context
+try:
+    _now_et = pd.Timestamp.now(tz="US/Eastern")
+    st.caption(f"🕐 Current time: **{_now_et.strftime('%-I:%M %p ET')}** · "
+               f"All game times below shown in ET")
+except Exception:
+    pass
+
 n_games = len(slate)
 n_pitchers = pitcher_stats["k9"].notna().sum() if "k9" in pitcher_stats.columns else 0
 n_hitters = hitter_stats["xwoba"].notna().sum() if "xwoba" in hitter_stats.columns else 0
@@ -2175,10 +2183,11 @@ for _, game in slate.iterrows():
             except Exception:
                 hand_park = park_mult
 
-            # Pull-side wind multiplier
+            # Pull-side wind multiplier (passes temp for retractable-roof awareness)
             try:
+                _temp_f_for_wind = (weather or {}).get("temp_f")
                 pull_mult, pull_summary = wind_pull_side_multiplier(
-                    venue_name, bats, wind_mph, wind_dir
+                    venue_name, bats, wind_mph, wind_dir, temp_f=_temp_f_for_wind,
                 )
                 if pull_summary:
                     pull_summaries[pull_summary] = pull_summaries.get(pull_summary, 0) + 1
@@ -2590,6 +2599,21 @@ for gpk, ctx in game_context_map.items():
 
 if all_hitters_for_picks:
     combined_picks = pd.concat(all_hitters_for_picks, ignore_index=True)
+    # Enrich with opp pitcher grade for downstream sleeper-parlay filtering.
+    # (combined_all gets the same enrichment later; we duplicate it here so
+    # the parlay code that uses `q` has access too.)
+    if (not p_slate.empty and "pitcher_name" in p_slate.columns
+            and "grade" in p_slate.columns
+            and "opp_pitcher" in combined_picks.columns):
+        try:
+            _grade_map = p_slate.set_index("pitcher_name")["grade"].to_dict()
+            _hr9_map = p_slate.set_index("pitcher_name")["hr9"].to_dict() if "hr9" in p_slate.columns else {}
+            _barrel_a_map = p_slate.set_index("pitcher_name")["barrel_allowed"].to_dict() if "barrel_allowed" in p_slate.columns else {}
+            combined_picks["opp_pitcher_grade"] = combined_picks["opp_pitcher"].map(_grade_map)
+            combined_picks["opp_pitcher_hr9"] = combined_picks["opp_pitcher"].map(_hr9_map)
+            combined_picks["opp_pitcher_barrel_allowed"] = combined_picks["opp_pitcher"].map(_barrel_a_map)
+        except Exception:
+            pass
     if "pa" in combined_picks.columns and "hr_game_pct" in combined_picks.columns:
         q = combined_picks[
             combined_picks["pa"].notna()
@@ -2809,18 +2833,23 @@ if all_hitters_for_picks:
                 "Parlay HR%", ascending=False
             ).reset_index(drop=True)
 
-            # GREEDY DIVERSITY: pick top parlays where each player appears only once.
-            # User feedback: don't show the same player in 5 different parlay rows.
-            # Each parlay uses 2 NEW players not previously seen.
+            # GREEDY DIVERSITY: cap each player at appearing in at most MAX_USES
+            # parlay rows. User feedback was Wood appearing in 5+ rows was too
+            # repetitive, but capping at 1 use dropped the parlay count to ~3.
+            # Cap of 2 strikes the balance: shows variety but uses real top plays.
+            MAX_USES = 2
             two_leg_selected = []
-            used_players = set()
+            player_use_count = {}
             for _, prow in two_leg_all.iterrows():
-                if prow["_p1_name"] in used_players or prow["_p2_name"] in used_players:
+                p1 = prow["_p1_name"]
+                p2 = prow["_p2_name"]
+                if (player_use_count.get(p1, 0) >= MAX_USES
+                        or player_use_count.get(p2, 0) >= MAX_USES):
                     continue
                 two_leg_selected.append(prow)
-                used_players.add(prow["_p1_name"])
-                used_players.add(prow["_p2_name"])
-                if len(two_leg_selected) >= 8:
+                player_use_count[p1] = player_use_count.get(p1, 0) + 1
+                player_use_count[p2] = player_use_count.get(p2, 0) + 1
+                if len(two_leg_selected) >= 10:
                     break
             two_leg_df = (pd.DataFrame(two_leg_selected)
                           .drop(columns=["_p1_name", "_p2_name"])
@@ -2855,16 +2884,17 @@ if all_hitters_for_picks:
             three_leg_all = pd.DataFrame(three_leg_parlays).sort_values(
                 "Parlay HR%", ascending=False
             ).reset_index(drop=True)
-            # Same greedy diversity for 3-leg
+            # Same MAX_USES rule for 3-leg
             three_leg_selected = []
-            used_players_3 = set()
+            player_use_count_3 = {}
             for _, prow in three_leg_all.iterrows():
-                names = {prow["_p1_name"], prow["_p2_name"], prow["_p3_name"]}
-                if names & used_players_3:
+                names = [prow["_p1_name"], prow["_p2_name"], prow["_p3_name"]]
+                if any(player_use_count_3.get(n, 0) >= MAX_USES for n in names):
                     continue
                 three_leg_selected.append(prow)
-                used_players_3 |= names
-                if len(three_leg_selected) >= 5:
+                for n in names:
+                    player_use_count_3[n] = player_use_count_3.get(n, 0) + 1
+                if len(three_leg_selected) >= 8:
                     break
             three_leg_df = (pd.DataFrame(three_leg_selected)
                             .drop(columns=["_p1_name", "_p2_name", "_p3_name"])
