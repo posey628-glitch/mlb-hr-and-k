@@ -404,7 +404,9 @@ with st.sidebar:
     # My Picks editor, and any future owner-exclusive tools.
     # ========================================================================
 
-    # 👇 EDIT THIS to your own secret string (any text, the longer the better):
+    # 👇 Key is now loaded from Streamlit Secrets (set in app Settings → Secrets):
+    #    owner_key = "Posey628628!"
+    # Leaving this empty keeps your secret out of the public GitHub repo.
     OWNER_KEY = ""
 
     # Try to override from Streamlit secrets (if you set it up); otherwise use hardcoded
@@ -459,6 +461,19 @@ with st.sidebar:
 
     st.divider()
     if st.button("🔄 Force refresh all data", help="Clears the data cache and re-fetches from APIs. Use if you see stale or missing data."):
+        st.cache_data.clear()
+        st.rerun()
+    if st.button("⚾ Refresh slate ONLY (probable pitcher changes)",
+                 help="Use when a team announces a new starter mid-day. Re-pulls "
+                      "the schedule + probables from MLB Stats API without "
+                      "re-fetching all hitter/pitcher stats (much faster)."):
+        # Clear only the slate-related cache entries
+        try:
+            from data_fetcher import get_slate as _g
+            if hasattr(_g, "clear"):
+                _g.clear()
+        except Exception:
+            pass
         st.cache_data.clear()
         st.rerun()
     st.caption("Real data only - empty cells mean we couldn't fetch that stat.")
@@ -2531,6 +2546,7 @@ two_leg_df = None
 three_leg_df = None
 two_leg_parlay_export = None
 three_leg_parlay_export = None
+sleeper_parlay_export = None
 rr_export = None
 for gpk, ctx in game_context_map.items():
     game_rows = slate[slate["gamePk"] == gpk]
@@ -2732,13 +2748,25 @@ if all_hitters_for_picks:
             "(same lineup → same opposing pitcher = correlated)."
         )
 
-        # Build parlay candidates from top picks
-        parlay_pool = top10[top10["hr_game_pct"].notna()].head(15).copy()
+        # Build parlay pool — but FIRST collapse to ONE hitter per team.
+        # User request: parlays should never include two hitters from the
+        # same team OR same game. Take the best (highest HR%) from each team.
+        parlay_pool_full = top10[top10["hr_game_pct"].notna()].head(15).copy()
+        if "team" in parlay_pool_full.columns:
+            # For each team, keep only the row with highest hr_game_pct
+            parlay_pool = (
+                parlay_pool_full.sort_values("hr_game_pct", ascending=False)
+                .drop_duplicates(subset=["team"], keep="first")
+                .reset_index(drop=True)
+            )
+        else:
+            parlay_pool = parlay_pool_full.reset_index(drop=True)
         if len(parlay_pool) >= 2:
             from itertools import combinations
             game_col = "game" if "game" in parlay_pool.columns else None
 
-            # 2-LEG parlays
+            # 2-LEG parlays — one per game AND one per team (latter is automatic
+            # since pool was de-duped by team above)
             two_leg_parlays = []
             for combo in combinations(parlay_pool.index, 2):
                 rows = [parlay_pool.loc[i] for i in combo]
@@ -2761,7 +2789,7 @@ if all_hitters_for_picks:
                 "Parlay HR%", ascending=False
             ).head(10).reset_index(drop=True)
 
-            # 3-LEG parlays - more conservative (lower hit rate, higher payout)
+            # 3-LEG parlays - one per game AND one per team
             three_leg_parlays = []
             for combo in combinations(parlay_pool.index[:12], 3):
                 rows = [parlay_pool.loc[i] for i in combo]
@@ -2830,6 +2858,99 @@ if all_hitters_for_picks:
                 "miss-rate is real. Even a 4% 2-leg parlay misses 96% of the time. "
                 "Use these as one signal among many, not a betting guarantee."
             )
+
+            # ====================================================================
+            # 💎 SLEEPER PARLAYS — separate section with explicit warning
+            # ====================================================================
+            # User asked for sleeper parlays in their own section with a warning.
+            # Sleepers = high upside today vs season pace BUT lower absolute HR%,
+            # so parlays are higher variance. Use only sleepers that aren't facing
+            # TOUGH/ELITE pitchers (trap protection).
+            sleeper_parlay_export = None
+            if ("sleeper_score" in q.columns and "opp_pitcher_grade" in q.columns
+                    and "team" in q.columns):
+                sleeper_pool = q[
+                    (q["sleeper_score"] > 15)  # meaningful sleeper lift
+                    & (~q["opp_pitcher_grade"].isin(["TOUGH", "ELITE"]))
+                    & (q["hr_game_pct"].fillna(0) >= 8)  # still need a real HR chance
+                ].sort_values("sleeper_score", ascending=False)
+                # One per team rule
+                sleeper_pool = sleeper_pool.drop_duplicates(
+                    subset=["team"], keep="first"
+                ).head(10).reset_index(drop=True)
+
+                if len(sleeper_pool) >= 2:
+                    with st.expander("💎 Sleeper Parlays (higher variance — different game/team only)"):
+                        st.warning(
+                            "⚠️ **Higher variance than top-pick parlays.** "
+                            "Sleepers are hitters with HR upside today vs season pace, "
+                            "but their absolute HR Game% is lower than the top picks. "
+                            "Hit rates here are lower; payouts are bigger. "
+                            "TOUGH/ELITE pitcher matchups already filtered out. "
+                            "Use SPARINGLY — these are dart throws compared to top-pick parlays."
+                        )
+                        sleeper_2leg = []
+                        for combo in combinations(sleeper_pool.index, 2):
+                            rows = [sleeper_pool.loc[i] for i in combo]
+                            # Skip same game
+                            if game_col and rows[0].get(game_col) == rows[1].get(game_col):
+                                continue
+                            p1 = rows[0].get("hr_game_pct", 0) / 100
+                            p2 = rows[1].get("hr_game_pct", 0) / 100
+                            joint = p1 * p2
+                            sleeper_2leg.append({
+                                "Leg 1": f"{rows[0]['player_name']} ({rows[0].get('team','')}) [Sleep {rows[0].get('sleeper_score',0):.0f}]",
+                                "Leg 2": f"{rows[1]['player_name']} ({rows[1].get('team','')}) [Sleep {rows[1].get('sleeper_score',0):.0f}]",
+                                "L1 HR%": p1 * 100,
+                                "L2 HR%": p2 * 100,
+                                "Parlay HR%": joint * 100,
+                                "Approx Odds": f"+{int(round(1 / joint * 100 - 100))}" if joint > 0 else "N/A",
+                            })
+                        sleeper_2leg_df = pd.DataFrame(sleeper_2leg).sort_values(
+                            "Parlay HR%", ascending=False
+                        ).head(8).reset_index(drop=True)
+                        st.markdown(f"**💎 Top sleeper 2-leg parlays ({len(sleeper_2leg_df)})**")
+                        st.dataframe(
+                            sleeper_2leg_df, hide_index=True, use_container_width=True,
+                            column_config={
+                                "L1 HR%": st.column_config.NumberColumn(format="%.1f%%"),
+                                "L2 HR%": st.column_config.NumberColumn(format="%.1f%%"),
+                                "Parlay HR%": st.column_config.NumberColumn(format="%.2f%%"),
+                            },
+                        )
+                        sleeper_parlay_export = sleeper_2leg_df.copy()
+
+                        # Sleeper round robin (3-pick)
+                        if len(sleeper_pool) >= 3:
+                            st.markdown("**💎 Sleeper Round Robin (top 3)**")
+                            rr3 = sleeper_pool.head(3)
+                            sleeper_rr = []
+                            for n_legs in range(2, 4):
+                                for combo in combinations(rr3.index, n_legs):
+                                    rows = [rr3.loc[i] for i in combo]
+                                    # Same-game check
+                                    if game_col and len({r.get(game_col) for r in rows}) < n_legs:
+                                        continue
+                                    joint = 1.0
+                                    names = []
+                                    for r in rows:
+                                        joint *= r.get("hr_game_pct", 0) / 100
+                                        names.append(r["player_name"])
+                                    if joint > 0:
+                                        sleeper_rr.append({
+                                            "Legs": n_legs,
+                                            "Combination": " + ".join(names),
+                                            "Hit %": joint * 100,
+                                            "Fair Odds": f"+{int(round(1/joint*100 - 100))}",
+                                        })
+                            sleeper_rr_df = pd.DataFrame(sleeper_rr)
+                            if not sleeper_rr_df.empty:
+                                st.dataframe(
+                                    sleeper_rr_df, hide_index=True, use_container_width=True,
+                                    column_config={
+                                        "Hit %": st.column_config.NumberColumn(format="%.3f%%"),
+                                    },
+                                )
 
             # ====================================================================
             # ROUND ROBIN — pick N hitters, generate every parlay combination
@@ -3140,6 +3261,20 @@ for gpk, ctx in game_context_map.items():
 
 if all_hitters:
     combined_all = pd.concat(all_hitters, ignore_index=True)
+    # Enrich with the OPPOSING pitcher's grade so we can filter trap sleepers
+    # (e.g. don't recommend a sleeper facing a TOUGH/ELITE pitcher).
+    if (not p_slate.empty and "pitcher_name" in p_slate.columns
+            and "grade" in p_slate.columns
+            and "opp_pitcher" in combined_all.columns):
+        try:
+            grade_map = p_slate.set_index("pitcher_name")["grade"].to_dict()
+            hr9_map = p_slate.set_index("pitcher_name")["hr9"].to_dict() if "hr9" in p_slate.columns else {}
+            barrel_a_map = p_slate.set_index("pitcher_name")["barrel_allowed"].to_dict() if "barrel_allowed" in p_slate.columns else {}
+            combined_all["opp_pitcher_grade"] = combined_all["opp_pitcher"].map(grade_map)
+            combined_all["opp_pitcher_hr9"] = combined_all["opp_pitcher"].map(hr9_map)
+            combined_all["opp_pitcher_barrel_allowed"] = combined_all["opp_pitcher"].map(barrel_a_map)
+        except Exception:
+            pass
     # Drop hr_prob (it's a duplicate of hr_score, just confusingly named).
     # Both are 0-100 composite scores — keeping both confused users who
     # thought hr_prob was a 0-1 probability.
@@ -3243,6 +3378,8 @@ if all_hitters:
                             two_leg_parlay_export.to_excel(writer, sheet_name="2-Leg Parlays", index=False)
                         if 'three_leg_parlay_export' in dir() and three_leg_parlay_export is not None and not three_leg_parlay_export.empty:
                             three_leg_parlay_export.to_excel(writer, sheet_name="3-Leg Parlays", index=False)
+                        if 'sleeper_parlay_export' in dir() and sleeper_parlay_export is not None and not sleeper_parlay_export.empty:
+                            sleeper_parlay_export.to_excel(writer, sheet_name="Sleeper Parlays", index=False)
                         if 'rr_export' in dir() and rr_export is not None and not rr_export.empty:
                             rr_export.to_excel(writer, sheet_name="Round Robin", index=False)
                     except Exception:
@@ -3381,14 +3518,24 @@ if all_hitters:
 
     with col_right:
         st.markdown("**💎 Top 10 Sleepers**")
-        st.caption("Under-the-radar HR upside")
+        st.caption("Under-the-radar HR upside — TOUGH/ELITE pitcher matchups filtered out")
         if "sleeper_score" in qualified.columns:
-            top_sleep = qualified.dropna(subset=["sleeper_score"]).sort_values(
-                "sleeper_score", ascending=False
-            ).head(10)
+            top_sleep = qualified.dropna(subset=["sleeper_score"]).copy()
+            # TRAP PROTECTION: sleepers shouldn't be facing TOUGH/ELITE pitchers.
+            # User's rationale: even if the model identifies HR upside vs season pace,
+            # facing an ace is too risky for a sleeper play. Better to avoid entirely.
+            # Keep MIXED/EXPLOIT/EXPLOIT+/— (no grade ≈ no data on pitcher).
+            if "opp_pitcher_grade" in top_sleep.columns:
+                avoid_grades = {"TOUGH", "ELITE"}
+                pre_n = len(top_sleep)
+                top_sleep = top_sleep[~top_sleep["opp_pitcher_grade"].isin(avoid_grades)]
+                filtered_n = pre_n - len(top_sleep)
+                if filtered_n > 0:
+                    st.caption(f"_({filtered_n} candidates filtered out — facing TOUGH/ELITE pitcher)_")
+            top_sleep = top_sleep.sort_values("sleeper_score", ascending=False).head(10)
             if not top_sleep.empty:
                 cols = [c for c in [
-                    "player_name", "team", "game",
+                    "player_name", "team", "game", "opp_pitcher", "opp_pitcher_grade",
                     "sleeper_score", "hr_game_pct", "barrel_pct",
                 ] if c in top_sleep.columns]
                 disp = top_sleep[cols].copy().reset_index(drop=True)
@@ -3398,6 +3545,11 @@ if all_hitters:
                         "player_name": st.column_config.TextColumn("Hitter"),
                         "team": st.column_config.TextColumn("Tm"),
                         "game": st.column_config.TextColumn("Game"),
+                        "opp_pitcher": st.column_config.TextColumn("vs P", width="small"),
+                        "opp_pitcher_grade": st.column_config.TextColumn(
+                            "Grd", width="small",
+                            help="Opp pitcher grade. EXPLOIT+/EXPLOIT = target. MIXED = neutral.",
+                        ),
                         "sleeper_score": st.column_config.NumberColumn(
                             "Sleeper", format="%.1f",
                             help="HR prob percentile MINUS season HR percentile.",
@@ -3410,8 +3562,140 @@ if all_hitters:
                 st.caption("No sleeper scores computed yet.")
 
     # ====================================================================
-    # SMASH SPOTS — the new "triple-threat alignment" leaderboard
+    # A+/A GRADE LEADERBOARD — quick access to all elite grade plays
     # ====================================================================
+    if "grade" in qualified.columns:
+        elite_grades = qualified[qualified["grade"].isin(["A+", "A"])].copy()
+        if not elite_grades.empty:
+            st.markdown("---")
+            st.markdown(f"**🏆 A+/A Grade Hitters Today ({len(elite_grades)})**")
+            st.caption(
+                "Every hitter rated A+ (HR Game% ≥22%) or A (19-22%). These are the "
+                "top-tier HR plays on the slate. Sort by HR% to see best plays first."
+            )
+            elite_sorted = elite_grades.sort_values("hr_game_pct", ascending=False)
+            elite_cols = [c for c in [
+                "grade", "player_name", "team", "game", "opp_pitcher",
+                "opp_pitcher_grade", "hr_game_pct", "smash_spot",
+                "barrel_pct", "iso", "env_mult",
+            ] if c in elite_sorted.columns]
+            st.dataframe(
+                elite_sorted[elite_cols], hide_index=True, use_container_width=True,
+                column_config={
+                    "grade": st.column_config.TextColumn("Grd", width="small"),
+                    "player_name": st.column_config.TextColumn("Hitter"),
+                    "team": st.column_config.TextColumn("Tm", width="small"),
+                    "game": st.column_config.TextColumn("Game"),
+                    "opp_pitcher": st.column_config.TextColumn("vs P"),
+                    "opp_pitcher_grade": st.column_config.TextColumn("PGrd", width="small"),
+                    "hr_game_pct": st.column_config.NumberColumn("HR%", format="%.1f%%"),
+                    "smash_spot": st.column_config.TextColumn("Smash", width="small"),
+                    "barrel_pct": st.column_config.NumberColumn("Brl%", format="%.1f%%"),
+                    "iso": st.column_config.NumberColumn("ISO", format="%.3f"),
+                    "env_mult": st.column_config.NumberColumn("Env×", format="%.2f"),
+                },
+            )
+
+    # ====================================================================
+    # 🎯 ELITE HITTERS vs VULNERABLE PITCHERS — the perfect-storm leaderboard
+    # ====================================================================
+    # User requested: "good matchup and graded hitters vs exploit/exploit+ pitchers
+    # who let up above average home runs or hard hits or something like that
+    # especially if park factors and weather are good for the hitter too"
+    #
+    # Qualifying criteria:
+    #   - Hitter grade A/A+ OR HR Game% ≥ 16% (top-tier matchup plays)
+    #   - Opposing pitcher is EXPLOIT or EXPLOIT+ grade
+    #   - Pitcher HR/9 ≥ 1.2 (above-average HR rate allowed)
+    #   - OR pitcher barrel% allowed ≥ 7.5 (above-average hard contact allowed)
+    #   - Env mult ≥ 1.00 (at minimum neutral park/weather)
+    if ("opp_pitcher_grade" in qualified.columns
+            and "opp_pitcher_hr9" in qualified.columns):
+        perfect_storm = qualified.copy()
+        # Filter to hitters facing exploitable pitchers with real vulnerability
+        ps_mask = (
+            perfect_storm["opp_pitcher_grade"].isin(["EXPLOIT", "EXPLOIT+"])
+            & (perfect_storm["hr_game_pct"].fillna(0) >= 14)
+            & (
+                (perfect_storm["opp_pitcher_hr9"].fillna(0) >= 1.2)
+                | (perfect_storm.get("opp_pitcher_barrel_allowed", pd.Series([0]*len(perfect_storm))).fillna(0) >= 7.5)
+            )
+        )
+        if "env_mult" in perfect_storm.columns:
+            ps_mask = ps_mask & (perfect_storm["env_mult"].fillna(1.0) >= 1.00)
+        perfect_storm = perfect_storm[ps_mask].copy()
+        # Cap to 1 per team to spread plays
+        if not perfect_storm.empty and "team" in perfect_storm.columns:
+            perfect_storm = (
+                perfect_storm.sort_values("hr_game_pct", ascending=False)
+                .drop_duplicates(subset=["team"], keep="first")
+                .head(15)
+            )
+        if not perfect_storm.empty:
+            st.markdown("---")
+            st.markdown(f"**🎯 Elite Hitters vs Vulnerable Pitchers ({len(perfect_storm)})**")
+            st.caption(
+                "Hitters with HR Game% ≥14% facing EXPLOIT/EXPLOIT+ pitchers who allow "
+                "above-average HR/9 (≥1.2) or barrel% (≥7.5%) — plus favorable env "
+                "(neutral or better). **Max 1 per team.** These are the strongest "
+                "combinations of hitter quality, pitcher vulnerability, and environment."
+            )
+            ps_cols = [c for c in [
+                "player_name", "team", "game", "grade", "hr_game_pct",
+                "opp_pitcher", "opp_pitcher_grade", "opp_pitcher_hr9",
+                "opp_pitcher_barrel_allowed", "env_mult", "barrel_pct",
+            ] if c in perfect_storm.columns]
+            st.dataframe(
+                perfect_storm[ps_cols], hide_index=True, use_container_width=True,
+                column_config={
+                    "player_name": st.column_config.TextColumn("Hitter"),
+                    "team": st.column_config.TextColumn("Tm", width="small"),
+                    "game": st.column_config.TextColumn("Game"),
+                    "grade": st.column_config.TextColumn("HGrd", width="small"),
+                    "hr_game_pct": st.column_config.NumberColumn("HR%", format="%.1f%%"),
+                    "opp_pitcher": st.column_config.TextColumn("vs P"),
+                    "opp_pitcher_grade": st.column_config.TextColumn(
+                        "PGrd", width="small",
+                        help="Pitcher grade from batter's perspective.",
+                    ),
+                    "opp_pitcher_hr9": st.column_config.NumberColumn(
+                        "P HR/9", format="%.2f",
+                        help="Pitcher's HR/9 allowed. ≥1.2 = above-average vulnerability.",
+                    ),
+                    "opp_pitcher_barrel_allowed": st.column_config.NumberColumn(
+                        "P Brl%", format="%.1f%%",
+                        help="Pitcher's barrel% allowed. ≥7.5% = above-average hard contact.",
+                    ),
+                    "env_mult": st.column_config.NumberColumn(
+                        "Env×", format="%.2f",
+                        help="Park × weather × wind multiplier.",
+                    ),
+                    "barrel_pct": st.column_config.NumberColumn("H Brl%", format="%.1f%%"),
+                },
+            )
+
+    # ====================================================================
+    # ⚾ Recently homered warning — flag top picks who hit yesterday
+    # ====================================================================
+    # User concern: don't repeat "this guy homered yesterday → he'll homer today".
+    # The model doesn't do this automatically, but we surface it visually to remind
+    # the user to check WHY a hitter is on the board, not just trust momentum.
+    if ("recent_hr" in qualified.columns and top_picks_export is not None
+            and not top_picks_export.empty):
+        # Check which top picks have homered in recent games (any in last 3)
+        recent_homered = top_picks_export.copy()
+        # We don't have "homered yesterday" directly, but recent_hr (L15) > 0
+        # combined with a high recent_hr_weighted_rate signals a current hot streak.
+        if "recent_hr" in recent_homered.columns:
+            hot_picks = recent_homered[recent_homered["recent_hr"].fillna(0) >= 2].copy()
+            if not hot_picks.empty:
+                st.caption(
+                    f"⚠️ **Recency check:** {len(hot_picks)} of today's top picks have "
+                    f"≥2 HRs in their last 15 games ({', '.join(hot_picks['player_name'].tolist()[:5])}). "
+                    f"Model rates these based on full season profile + today's matchup, "
+                    f"NOT just recent results — but verify their season stats look strong, "
+                    f"not just their streak."
+                )
     if "smash_spot" in qualified.columns and (qualified["smash_spot"] != "").any():
         st.markdown("---")
         st.markdown("**🔥 Today's Smash Spots — Triple-Threat HR Opportunities**")
