@@ -2821,6 +2821,120 @@ if all_hitters_for_picks:
             )
 
             # ====================================================================
+            # ROUND ROBIN — pick N hitters, generate every parlay combination
+            # ====================================================================
+            with st.expander("🎰 Round Robin — pick 3-5 hitters, see every combination"):
+                st.caption(
+                    "**What's a round robin?** Pick N hitters. The model generates "
+                    "EVERY possible parlay combination at every leg count. Trade-off: "
+                    "you wager on more parlays (more cost) but only need SOME to cash. "
+                    "If 1 of your 5 misses, you still hit ~6 of the smaller parlays.\n\n"
+                    "Default uses the top picks already shown above. Toggle Owner-mode "
+                    "and use the My Picks editor below to round-robin YOUR personal list."
+                )
+
+                # Pool: top N from the parlay candidates
+                rr_size = st.slider(
+                    "Round Robin size (number of hitters):",
+                    min_value=3, max_value=5, value=4,
+                    help="More hitters = more parlay combinations but more cost.",
+                    key="rr_size_slider",
+                )
+
+                # Take top N picks already built (parlay_pool from above)
+                rr_picks = parlay_pool.head(rr_size).copy()
+                if len(rr_picks) < rr_size:
+                    st.warning(f"Only {len(rr_picks)} qualified picks available — using all.")
+
+                if len(rr_picks) >= 3:
+                    # Show the pool first
+                    pool_display = rr_picks[["player_name", "team", "game", "hr_game_pct"]].copy()
+                    pool_display["#"] = range(1, len(pool_display) + 1)
+                    st.markdown("**Your Round Robin pool:**")
+                    st.dataframe(
+                        pool_display[["#", "player_name", "team", "game", "hr_game_pct"]],
+                        hide_index=True, use_container_width=True,
+                        column_config={
+                            "hr_game_pct": st.column_config.NumberColumn("HR%", format="%.1f%%"),
+                        },
+                    )
+
+                    # Generate every combination at each leg count
+                    rr_results = []
+                    for leg_count in range(2, len(rr_picks) + 1):
+                        combos = list(combinations(rr_picks.index, leg_count))
+                        for combo in combos:
+                            rows = [rr_picks.loc[i] for i in combo]
+                            # Independence assumption — typical for unrelated hitter HR props
+                            joint = 1.0
+                            names = []
+                            for r in rows:
+                                pct = r.get("hr_game_pct", 0) / 100
+                                joint *= pct
+                                names.append(r["player_name"])
+                            if joint > 0:
+                                odds = int(round(1 / joint * 100 - 100))
+                                rr_results.append({
+                                    "Legs": leg_count,
+                                    "Combination": " + ".join(names),
+                                    "Hit %": joint * 100,
+                                    "Fair Odds": f"+{odds}",
+                                })
+
+                    rr_df = pd.DataFrame(rr_results)
+                    if not rr_df.empty:
+                        # Summary stats by leg count
+                        n_legs = sorted(rr_df["Legs"].unique())
+                        summary_lines = []
+                        for lc in n_legs:
+                            sub = rr_df[rr_df["Legs"] == lc]
+                            avg_hit = sub["Hit %"].mean()
+                            summary_lines.append(
+                                f"**{lc}-leg:** {len(sub)} parlays · avg {avg_hit:.2f}% hit rate"
+                            )
+                        st.markdown(" · ".join(summary_lines))
+
+                        # Display by leg count tabs
+                        leg_tabs = st.tabs([f"{lc}-leg ({len(rr_df[rr_df['Legs']==lc])})" for lc in n_legs])
+                        for tab_idx, lc in enumerate(n_legs):
+                            with leg_tabs[tab_idx]:
+                                sub = rr_df[rr_df["Legs"] == lc].sort_values(
+                                    "Hit %", ascending=False
+                                ).reset_index(drop=True)
+                                st.dataframe(
+                                    sub[["Combination", "Hit %", "Fair Odds"]],
+                                    hide_index=True, use_container_width=True,
+                                    column_config={
+                                        "Hit %": st.column_config.NumberColumn(
+                                            format="%.3f%%",
+                                            help="Joint probability all legs hit.",
+                                        ),
+                                        "Fair Odds": st.column_config.TextColumn(
+                                            help="What odds would be fair if our hit% is right.",
+                                        ),
+                                    },
+                                )
+
+                        # Round robin export
+                        rr_export = rr_df.copy()
+
+                        # Sportsbook-style summary
+                        total_parlays = len(rr_df)
+                        # If user wagers $1 on each combo, expected return:
+                        # E[$] = sum( hit_prob * (odds_decimal - 1) ) - (1 - hit_prob) ...
+                        # but odds vary so we'll just show the cost summary
+                        st.caption(
+                            f"💰 **Cost summary:** A full round robin = {total_parlays} parlays. "
+                            f"At $1 each = ${total_parlays} total wager. "
+                            f"On most sportsbooks you can select 'Round Robin' as a single ticket "
+                            f"with a fixed cost = total parlays × wager-per-parlay."
+                        )
+                    else:
+                        st.caption("No valid combinations generated.")
+                else:
+                    st.caption("Need at least 3 picks with HR projections.")
+
+            # ====================================================================
             # MY PICKS — OWNER-ONLY editable personal pick list
             # ====================================================================
             if owner_mode:
@@ -3118,6 +3232,8 @@ if all_hitters:
                             two_leg_parlay_export.to_excel(writer, sheet_name="2-Leg Parlays", index=False)
                         if 'three_leg_parlay_export' in dir() and three_leg_parlay_export is not None and not three_leg_parlay_export.empty:
                             three_leg_parlay_export.to_excel(writer, sheet_name="3-Leg Parlays", index=False)
+                        if 'rr_export' in dir() and rr_export is not None and not rr_export.empty:
+                            rr_export.to_excel(writer, sheet_name="Round Robin", index=False)
                     except Exception:
                         pass
                     # NEW: Smash Spots — triple-threat HR opportunities (max 2 per team)
