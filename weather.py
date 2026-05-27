@@ -141,7 +141,22 @@ def hr_multiplier(weather: dict, park: dict) -> tuple[float, str]:
 
     summary = []
     mult = 1.0
-    roof_factor = 0.5 if roof == "retractable" else 1.0
+
+    # Determine roof_factor: 0 if retractable likely closed (cold/hot), else 1
+    # CHANGED (May 2026): replaced flat 50% with temperature-aware heuristic.
+    # MLB roofs are typically closed below 60°F or above 88°F → no weather effect.
+    # In comfortable range (60-88°F) → roof likely open → full weather effect.
+    _temp_check = weather.get("temp_f")
+    if roof == "retractable":
+        if _temp_check is None:
+            roof_factor = 0.7  # unknown temp, modest dampener
+        elif _temp_check < 60 or _temp_check > 88:
+            # Roof likely CLOSED — return neutral immediately
+            return 1.0, f"🏟️ Retractable roof likely CLOSED ({_temp_check:.0f}°F) — indoor conditions"
+        else:
+            roof_factor = 1.0  # roof likely open
+    else:
+        roof_factor = 1.0
 
     # Temperature - asymmetric (cold suppresses more than warm boosts)
     temp = weather.get("temp_f")
@@ -219,8 +234,10 @@ def hr_multiplier(weather: dict, park: dict) -> tuple[float, str]:
             mult *= (1 - 0.03 * roof_factor)
             summary.append(f"💧 {pp:.0f}% drizzle risk")
 
-    if roof == "retractable":
-        summary.append("(retractable roof: 50% weather effect)")
+    if roof == "retractable" and _temp_check is not None and 60 <= _temp_check <= 88:
+        summary.append(f"(retractable, likely open at {_temp_check:.0f}°F)")
+    elif roof == "retractable":
+        summary.append("(retractable, status uncertain)")
 
     # Sanity bounds
     mult = max(0.55, min(1.45, mult))
