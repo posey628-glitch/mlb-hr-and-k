@@ -384,6 +384,48 @@ with st.sidebar:
     st.title("⚾ Posey MLB Props")
     selected_date = st.date_input("Slate date", value=date.today())
 
+    # ========================================================================
+    # OWNER MODE — toggle to expose owner-only features
+    # Owner mode is gated by either:
+    #   1. URL param ?owner=<secret> matching st.secrets["owner_key"], OR
+    #   2. Direct sidebar password entry matching st.secrets["owner_key"]
+    # Public users see no owner-only sections. Owner sees: Twitter post,
+    # My Picks editor, and any future owner-exclusive tools.
+    #
+    # Setup: in Streamlit Cloud → Settings → Secrets → add:
+    #   owner_key = "your-secret-passphrase"
+    # Then bookmark https://your-app-url/?owner=your-secret-passphrase
+    # for instant owner access.
+    # ========================================================================
+    owner_mode = False
+    try:
+        configured_key = st.secrets.get("owner_key", "")
+    except Exception:
+        configured_key = ""
+    if configured_key:
+        # Check URL param first (silent activation via bookmarked URL)
+        try:
+            qp = st.query_params
+            url_key = qp.get("owner", "")
+            if isinstance(url_key, list):
+                url_key = url_key[0] if url_key else ""
+            if url_key and url_key == configured_key:
+                owner_mode = True
+        except Exception:
+            pass
+        # Fallback: password entry
+        if not owner_mode:
+            with st.expander("🔐 Owner login", expanded=False):
+                pwd = st.text_input(
+                    "Password", type="password", key="owner_pwd",
+                    help="Hidden by default; only the app owner needs this.",
+                )
+                if pwd and pwd == configured_key:
+                    owner_mode = True
+                    st.success("✓ Owner mode active")
+    if owner_mode:
+        st.caption("👑 **Owner mode** — extra tools enabled below.")
+
     st.subheader("Data sources")
     use_recent_form = st.checkbox("Recent form (L15)", value=True)
     use_pitch_match = st.checkbox("Pitch match score", value=HAVE_PITCH_MATCH)
@@ -2763,49 +2805,160 @@ if all_hitters_for_picks:
             )
 
             # ====================================================================
-            # TWITTER / SOCIAL SHARE — generate copyable post using top picks + parlay
+            # MY PICKS — OWNER-ONLY editable personal pick list
             # ====================================================================
-            with st.expander("🐦 Twitter-ready daily post — copy + paste"):
-                date_str = selected_date.strftime("%b %-d")
-                top3 = top10.head(3)
-                top3_lines = [
-                    f"{i+1}. {r['player_name']} ({r['team']}) {r.get('hr_game_pct', 0):.1f}%"
-                    for i, (_, r) in enumerate(top3.iterrows())
-                ]
-                best_parlay = ""
-                if not two_leg_df.empty:
-                    bp = two_leg_df.iloc[0]
-                    best_parlay = (
-                        f"\n\nTop Parlay: {bp['Leg 1']} + {bp['Leg 2']} "
-                        f"({bp['Parlay HR%']:.1f}% / {bp['Approx Odds']})"
+            if owner_mode:
+                with st.expander("📝 My Picks — your personal HR picks for today (owner only)"):
+                    st.caption(
+                        "Build your own daily pick list by selecting hitters from "
+                        "the slate. Picks save during your session and can be exported. "
+                        "Use this to track YOUR plays separately from the model's suggestions."
                     )
 
-                twitter_text = (
-                    f"⚾ MLB HR Picks — {date_str}\n\n"
-                    f"Top 3 HR Plays:\n"
-                    + "\n".join(top3_lines)
-                    + best_parlay
-                    + "\n\n#MLB #DFS #HRprops"
-                )
-                st.text_area(
-                    "Copy this for Twitter (280 chars limit):",
-                    value=twitter_text, height=200,
-                    help=(
-                        "Paste this directly into Twitter. "
-                        "Tips for growing followers: post daily at consistent times "
-                        "(4-5 PM ET after lineups confirm), tag #MLB and #HRprops, "
-                        "follow back accounts that engage. Show your work — when "
-                        "picks hit, post the result the next morning to build credibility."
-                    ),
-                )
-                chars = len(twitter_text)
-                if chars > 280:
-                    st.warning(
-                        f"⚠️ Post is {chars} characters — Twitter limit is 280. "
-                        f"Trim the parlay or hashtags before posting."
+                    # Initialize session state for picks
+                    picks_key = f"my_picks_{selected_date.isoformat()}"
+                    if picks_key not in st.session_state:
+                        st.session_state[picks_key] = []
+
+                    # Build hitter selection from current slate
+                    if combined_all is not None and not combined_all.empty:
+                        # Sort by HR Game% so best plays appear first in selector
+                        selector_df = combined_all[
+                            combined_all["hr_game_pct"].notna()
+                        ].sort_values("hr_game_pct", ascending=False).copy()
+                        # Build label "Name (TEAM) — HR% / grade"
+                        selector_df["_label"] = selector_df.apply(
+                            lambda r: f"{r['player_name']} ({r.get('team','')}) — {r.get('hr_game_pct', 0):.1f}% / {r.get('grade','—')}",
+                            axis=1,
+                        )
+                        all_labels = selector_df["_label"].tolist()
+
+                        chosen = st.multiselect(
+                            "Add hitters to your pick list:",
+                            options=all_labels,
+                            default=st.session_state[picks_key],
+                            help="Type to filter. Select as many as you want.",
+                            key=f"picks_selector_{selected_date.isoformat()}",
+                        )
+                        st.session_state[picks_key] = chosen
+
+                        if chosen:
+                            # Filter selector_df to chosen picks
+                            my_picks_df = selector_df[selector_df["_label"].isin(chosen)].copy()
+                            display_cols = [c for c in [
+                                "player_name", "team", "game", "opp_pitcher",
+                                "bats", "hr_game_pct", "grade", "smash_spot",
+                                "barrel_pct", "iso", "matchup_opp", "env_mult",
+                            ] if c in my_picks_df.columns]
+                            st.dataframe(
+                                my_picks_df[display_cols],
+                                hide_index=True, use_container_width=True,
+                                column_config={
+                                    "hr_game_pct": st.column_config.NumberColumn(
+                                        "HR Game%", format="%.2f%%"),
+                                    "barrel_pct": st.column_config.NumberColumn(
+                                        "Brl%", format="%.1f%%"),
+                                    "iso": st.column_config.NumberColumn("ISO", format="%.3f"),
+                                    "env_mult": st.column_config.NumberColumn(
+                                        "Env×", format="%.3f"),
+                                },
+                            )
+
+                            # Stats summary
+                            avg_pct = my_picks_df["hr_game_pct"].mean()
+                            n_picks = len(my_picks_df)
+                            # If treating as a parlay
+                            if n_picks >= 2 and n_picks <= 10:
+                                # Joint probability if all are independent
+                                joint_prob = 1.0
+                                for p in my_picks_df["hr_game_pct"].dropna():
+                                    joint_prob *= (p / 100)
+                                summary_cols = st.columns(3)
+                                with summary_cols[0]:
+                                    st.metric("My picks", f"{n_picks}")
+                                with summary_cols[1]:
+                                    st.metric("Avg HR%", f"{avg_pct:.1f}%")
+                                with summary_cols[2]:
+                                    if joint_prob > 0:
+                                        odds = int(round(1 / joint_prob * 100 - 100))
+                                        st.metric(
+                                            "As a parlay",
+                                            f"{joint_prob*100:.3f}%",
+                                            help=f"Fair odds: +{odds}",
+                                        )
+
+                            # Tweet-ready My Picks post
+                            st.markdown("**My Picks tweet:**")
+                            picks_lines = "\n".join(
+                                f"{i+1}. {r['player_name']} ({r['team']})"
+                                for i, (_, r) in enumerate(my_picks_df.iterrows())
+                            )
+                            mypicks_tweet = (
+                                f"⚾ My HR Picks — {selected_date.strftime('%b %-d')}\n\n"
+                                f"{picks_lines}\n\n"
+                                f"#MLB #DFS #HRprops"
+                            )
+                            st.text_area(
+                                "Copy My Picks for Twitter:",
+                                value=mypicks_tweet, height=160,
+                                key=f"mypicks_tweet_{selected_date.isoformat()}",
+                            )
+                            chars = len(mypicks_tweet)
+                            if chars > 280:
+                                st.warning(f"⚠️ {chars}/280 — too long, trim picks")
+                            else:
+                                st.caption(f"✅ {chars}/280 characters")
+
+                            # Clear button
+                            if st.button("🗑️ Clear my picks", key=f"clear_picks_{selected_date.isoformat()}"):
+                                st.session_state[picks_key] = []
+                                st.rerun()
+                        else:
+                            st.caption("No picks selected yet. Use the dropdown above.")
+                    else:
+                        st.caption("Slate data not loaded yet.")
+            if owner_mode:
+                with st.expander("🐦 Twitter-ready daily post — copy + paste (owner only)"):
+                    date_str = selected_date.strftime("%b %-d")
+                    top3 = top10.head(3)
+                    top3_lines = [
+                        f"{i+1}. {r['player_name']} ({r['team']}) {r.get('hr_game_pct', 0):.1f}%"
+                        for i, (_, r) in enumerate(top3.iterrows())
+                    ]
+                    best_parlay = ""
+                    if not two_leg_df.empty:
+                        bp = two_leg_df.iloc[0]
+                        best_parlay = (
+                            f"\n\nTop Parlay: {bp['Leg 1']} + {bp['Leg 2']} "
+                            f"({bp['Parlay HR%']:.1f}% / {bp['Approx Odds']})"
+                        )
+
+                    twitter_text = (
+                        f"⚾ MLB HR Picks — {date_str}\n\n"
+                        f"Top 3 HR Plays:\n"
+                        + "\n".join(top3_lines)
+                        + best_parlay
+                        + "\n\n#MLB #DFS #HRprops"
                     )
-                else:
-                    st.caption(f"✅ {chars}/280 characters — fits in one tweet.")
+                    st.text_area(
+                        "Copy this for Twitter (280 chars limit):",
+                        value=twitter_text, height=200,
+                        help=(
+                            "Paste this directly into Twitter. "
+                            "Tips for growing followers: post daily at consistent times "
+                            "(4-5 PM ET after lineups confirm), tag #MLB and #HRprops, "
+                            "follow back accounts that engage. Show your work — when "
+                            "picks hit, post the result the next morning to build credibility."
+                        ),
+                    )
+                    chars = len(twitter_text)
+                    if chars > 280:
+                        st.warning(
+                            f"⚠️ Post is {chars} characters — Twitter limit is 280. "
+                            f"Trim the parlay or hashtags before posting."
+                        )
+                    else:
+                        st.caption(f"✅ {chars}/280 characters — fits in one tweet.")
         else:
             st.caption("Need at least 2 picks with HR projections to suggest parlays.")
     else:
