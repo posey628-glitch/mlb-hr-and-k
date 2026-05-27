@@ -651,6 +651,15 @@ def build_pitcher_slate(
         gs = row.get("games_started")
         gp = row.get("games_played")
         is_rookie = row.get("is_rookie", False)
+        # IL info - if pitcher is JUST returning from IL, their low IP doesn't
+        # mean they're a reliever. Gerrit Cole returning from Tommy John has
+        # low season IP but is clearly a STARTER.
+        days_since_return = row.get("days_since_return")
+        il_count = row.get("il_count_this_season", 0) or 0
+        is_returning_starter = (
+            days_since_return is not None and not pd.isna(days_since_return)
+            and 0 <= days_since_return <= 30
+        ) or (il_count is not None and not pd.isna(il_count) and il_count >= 1)
         # If we have no IP and no GS data at all, say so honestly
         if (ip is None or pd.isna(ip)) and (gs is None or pd.isna(gs)):
             return "❔ NO DATA"
@@ -664,7 +673,13 @@ def build_pitcher_slate(
                 return rookie_prefix + "🔄 BULK"
             return rookie_prefix + "🚨 RELIEVER"
         # Very low IP when we DO have IP data
+        # EXCEPTION: if pitcher has gs >= 1 AND is_returning_starter, they're
+        # not a reliever — they're a starter coming back from IL with limited
+        # season IP. Mark them as RETURNING STARTER instead.
         if ip is not None and not pd.isna(ip) and ip < min_ip:
+            if (gs is not None and not pd.isna(gs) and gs >= 1
+                    and is_returning_starter):
+                return rookie_prefix + "🏥 RETURNING"
             return rookie_prefix + "🚨 RELIEVER"
         # Bulk reliever between starts - require BOTH high GP/GS ratio AND low IP/outing.
         # FIX (May 2026): was computing ip/gs which inflates because IP includes
@@ -680,9 +695,16 @@ def build_pitcher_slate(
                 return rookie_prefix + "🔄 SWING"
         # Low IP but not crazy low
         if ip is not None and not pd.isna(ip) and ip < full_ip * 0.6:
+            # Same IL exception
+            if (gs is not None and not pd.isna(gs) and gs >= 1
+                    and is_returning_starter):
+                return rookie_prefix + "🏥 RETURNING"
             return rookie_prefix + "⚠️ LOW IP"
         # Few starts
         if gs is not None and not pd.isna(gs) and gs < min_gs:
+            # IL exception again
+            if is_returning_starter:
+                return rookie_prefix + "🏥 RETURNING"
             return rookie_prefix + "🔄 SWING"
         return rookie_prefix + "✓" if rookie_prefix else "✓"
 
