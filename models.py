@@ -263,6 +263,7 @@ def build_matchup_table(
     # Final column order matching the screenshots
     display_cols = [
         "player_id", "player_name", "lineup_pos", "position", "bats",
+        "is_roster_fill",  # CRITICAL: flag for whether lineup_pos is real or fill
         # Composites (matching screenshot order)
         "matchup", "test_score", "ceiling", "zone_fit",
         "hr_form", "hr_form_label", "hr_form_arrow", "kHR",
@@ -619,16 +620,18 @@ def build_pitcher_slate(
         # Explicit zero starts = reliever
         if gs is not None and not pd.isna(gs) and gs == 0:
             return 0.4
-        # Bulk reliever: games_played >> games_started AND low IP per start
+        # Bulk reliever: games_played >> games_started AND low IP per OUTING
         # (a real starter with 8 GS and 12 GP because of an IL stint shouldn't
-        # be downgraded - check IP/GS too)
+        # be downgraded — but a swing-man with 6 GS and 17 GP and 1.6 IP/outing
+        # is clearly relief-heavy. Use ip/gp not ip/gs, since IP includes
+        # relief outings too.)
         bulk_relief = False
         if (gp is not None and gs is not None
                 and not pd.isna(gp) and not pd.isna(gs)
                 and gs > 0 and gp > gs * 1.5):
-            ip_per_start = ip / gs if gs > 0 else 0
-            # True bulk reliever role: <4.5 IP per game-started (he's not really starting)
-            if ip_per_start < 4.5:
+            ip_per_outing = ip / gp if gp > 0 else 0
+            # True bulk reliever role: <3.0 IP per outing
+            if ip_per_outing < 3.0:
                 bulk_relief = True
         base = 0.65 if bulk_relief else 1.0
         ip_factor = min(1.0, ip / full_ip)
