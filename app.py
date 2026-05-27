@@ -405,7 +405,7 @@ with st.sidebar:
     # ========================================================================
 
     # 👇 EDIT THIS to your own secret string (any text, the longer the better):
-    OWNER_KEY = "posey-mlb-owner-2026"
+    OWNER_KEY = ""
 
     # Try to override from Streamlit secrets (if you set it up); otherwise use hardcoded
     try:
