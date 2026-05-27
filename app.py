@@ -1782,10 +1782,18 @@ for _, game in slate.iterrows():
     gpk = int(game["gamePk"])
 
     # NEW: Classify game as day/night for split adjustments
+    # CRITICAL: Use the VENUE's local timezone, not ET. A 3:45 PM Arizona
+    # game is a day game even though it's 6:45 PM ET.
     try:
-        from data_fetcher import classify_game_day_night
+        from data_fetcher import classify_game_day_night, get_venue_timezone
         game_time_iso = game.get("gameTime") or ""
-        game_type = classify_game_day_night(game_time_iso) if game_time_iso else "night"
+        venue_tz = get_venue_timezone(game.get("venue") or "")
+        # Handle pd.Timestamp gametime
+        if hasattr(game_time_iso, "isoformat"):
+            game_time_iso = game_time_iso.isoformat()
+            if not game_time_iso.endswith("Z") and "+" not in game_time_iso:
+                game_time_iso = game_time_iso + "+00:00"
+        game_type = classify_game_day_night(game_time_iso, venue_tz) if game_time_iso else "night"
     except Exception:
         game_type = "night"
 
@@ -2136,7 +2144,11 @@ for _, game in slate.iterrows():
         opp_pitcher_id = opp_p_row.get("player_id") if opp_p_row else None
         if opp_pitcher_id is not None and not p_slate.empty and "grade" in p_slate.columns:
             try:
-                _match = p_slate[p_slate["pitcher_id"] == opp_pitcher_id]
+                # Coerce both sides to int for reliable matching (pitcher_id can
+                # end up as Int64/float/object across different pandas operations)
+                opp_pid_int = int(opp_pitcher_id)
+                _ids = pd.to_numeric(p_slate["pitcher_id"], errors="coerce")
+                _match = p_slate[_ids == opp_pid_int]
                 if not _match.empty:
                     opp_pitcher_grade = _match.iloc[0].get("grade")
             except Exception:
@@ -2292,6 +2304,9 @@ for _, game in slate.iterrows():
             smash_label = ""
             try:
                 # Combined env factor (park × weather × pull-wind for this hitter)
+                # NOTE: full_env uses hand_park (handedness-aware) and pull-wind
+                # which can DIFFER from the game-level env_mult shown in the table.
+                # That's intentional — smash detection wants per-hitter precision.
                 full_env = hand_park * wx_mult * pull_mult
                 # Combined park-side factor (hand-aware × pull-wind)
                 full_park = hand_park * pull_mult
@@ -2308,9 +2323,12 @@ for _, game in slate.iterrows():
                     and not pitcher_is_tbd
                 )
                 game_pct_ok = game_pct_val is not None and game_pct_val >= 15
-                env_favorable = full_env >= 1.05
-                # Park favorable: hand-aware park × pull-wind combined ≥1.04
-                park_favorable = full_park >= 1.04
+                # Slightly looser thresholds: env ≥1.03 (was 1.05), park ≥1.02 (was 1.04).
+                # User was seeing 0 smash spots at 1.05/1.04 even with 100+ confirmed
+                # lineups. The stricter cutoff was excluding legitimate plays where
+                # park is roof-controlled (≈1.03) and weather is modest.
+                env_favorable = full_env >= 1.03
+                park_favorable = full_park >= 1.02
 
                 # CRITICAL: Smash spots only apply to CONFIRMED LINEUPS.
                 # is_roster_fill is the authoritative flag set in models.py when
@@ -2784,10 +2802,31 @@ if all_hitters_for_picks:
                     "L2 HR%": p2 * 100,
                     "Parlay HR%": joint * 100,
                     "Approx Odds": f"+{int(round(1 / joint * 100 - 100))}" if joint > 0 else "N/A",
+                    "_p1_name": rows[0]['player_name'],
+                    "_p2_name": rows[1]['player_name'],
                 })
-            two_leg_df = pd.DataFrame(two_leg_parlays).sort_values(
+            two_leg_all = pd.DataFrame(two_leg_parlays).sort_values(
                 "Parlay HR%", ascending=False
-            ).head(10).reset_index(drop=True)
+            ).reset_index(drop=True)
+
+            # GREEDY DIVERSITY: pick top parlays where each player appears only once.
+            # User feedback: don't show the same player in 5 different parlay rows.
+            # Each parlay uses 2 NEW players not previously seen.
+            two_leg_selected = []
+            used_players = set()
+            for _, prow in two_leg_all.iterrows():
+                if prow["_p1_name"] in used_players or prow["_p2_name"] in used_players:
+                    continue
+                two_leg_selected.append(prow)
+                used_players.add(prow["_p1_name"])
+                used_players.add(prow["_p2_name"])
+                if len(two_leg_selected) >= 8:
+                    break
+            two_leg_df = (pd.DataFrame(two_leg_selected)
+                          .drop(columns=["_p1_name", "_p2_name"])
+                          if two_leg_selected else
+                          two_leg_all.drop(columns=["_p1_name", "_p2_name"]).head(10))
+            two_leg_df = two_leg_df.reset_index(drop=True)
 
             # 3-LEG parlays - one per game AND one per team
             three_leg_parlays = []
@@ -2809,10 +2848,31 @@ if all_hitters_for_picks:
                     "Avg HR%": (p1 + p2 + p3) / 3 * 100,
                     "Parlay HR%": joint * 100,
                     "Approx Odds": f"+{int(round(1 / joint * 100 - 100))}" if joint > 0 else "N/A",
+                    "_p1_name": rows[0]['player_name'],
+                    "_p2_name": rows[1]['player_name'],
+                    "_p3_name": rows[2]['player_name'],
                 })
-            three_leg_df = pd.DataFrame(three_leg_parlays).sort_values(
+            three_leg_all = pd.DataFrame(three_leg_parlays).sort_values(
                 "Parlay HR%", ascending=False
-            ).head(8).reset_index(drop=True)
+            ).reset_index(drop=True)
+            # Same greedy diversity for 3-leg
+            three_leg_selected = []
+            used_players_3 = set()
+            for _, prow in three_leg_all.iterrows():
+                names = {prow["_p1_name"], prow["_p2_name"], prow["_p3_name"]}
+                if names & used_players_3:
+                    continue
+                three_leg_selected.append(prow)
+                used_players_3 |= names
+                if len(three_leg_selected) >= 5:
+                    break
+            three_leg_df = (pd.DataFrame(three_leg_selected)
+                            .drop(columns=["_p1_name", "_p2_name", "_p3_name"])
+                            if three_leg_selected else
+                            three_leg_all.drop(
+                                columns=["_p1_name", "_p2_name", "_p3_name"]
+                            ).head(8))
+            three_leg_df = three_leg_df.reset_index(drop=True)
 
             tab1, tab2 = st.tabs(["🎯 2-Leg Parlays (safer)", "💎 3-Leg Parlays (better odds)"])
             with tab1:
@@ -3359,7 +3419,13 @@ if all_hitters:
                         if not top_pow.empty:
                             top_pow.to_excel(writer, sheet_name="Top 20 Power", index=False)
                     if "sleeper_score" in qualified.columns:
-                        top_sl = qualified.dropna(subset=["sleeper_score"]).sort_values(
+                        # Apply same TOUGH/ELITE filter to export as to the display widget
+                        sleep_export = qualified.dropna(subset=["sleeper_score"]).copy()
+                        if "opp_pitcher_grade" in sleep_export.columns:
+                            sleep_export = sleep_export[
+                                ~sleep_export["opp_pitcher_grade"].isin(["TOUGH", "ELITE"])
+                            ]
+                        top_sl = sleep_export.sort_values(
                             "sleeper_score", ascending=False).head(20)
                         if not top_sl.empty:
                             top_sl.to_excel(writer, sheet_name="Top 20 Sleepers", index=False)
