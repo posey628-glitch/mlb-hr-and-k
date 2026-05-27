@@ -100,7 +100,8 @@ def get_park_hand_factor(venue_name: str, bats: str) -> float:
 
 def wind_pull_side_multiplier(venue_name: str, bats: str,
                                wind_mph: float | None,
-                               wind_dir_deg: float | None) -> tuple[float, str]:
+                               wind_dir_deg: float | None,
+                               temp_f: float | None = None) -> tuple[float, str]:
     """
     Compute a multiplier for HR based on wind blowing toward the hitter's pull side.
 
@@ -114,7 +115,9 @@ def wind_pull_side_multiplier(venue_name: str, bats: str,
 
     Roof handling:
     - dome: no wind effect (always closed) → returns 1.0
-    - retractable: half effect (assumes closed ~50% of the time on average)
+    - retractable: temperature-aware. Assumes roof CLOSED when temp is extreme
+      (below 60°F or above 88°F) → 0% wind effect. Open in moderate temps
+      (60-88°F) → 100% wind effect. This replaces the crude "50% always" rule.
     - open: full effect
     """
     if wind_mph is None or wind_dir_deg is None or wind_mph < 3:
@@ -128,9 +131,26 @@ def wind_pull_side_multiplier(venue_name: str, bats: str,
     if roof == "dome":
         return 1.0, ""
 
-    # Retractable roofs play closed in extreme weather. Without real-time
-    # roof-status data, we apply a 50% dampener to wind effect.
-    roof_factor = 0.5 if roof == "retractable" else 1.0
+    # Retractable roofs: closed when temp is uncomfortable for fans/players.
+    # Real-world MLB practice: roofs typically closed below 60°F or above 88°F.
+    # When closed → wind has no effect. When open → full effect.
+    # Without exact roof-status data per game, this temp heuristic is closer to
+    # reality than the flat "50%" rule it replaces.
+    if roof == "retractable":
+        if temp_f is None:
+            # No temp data — fall back to moderate dampener (was 50%, now 70%)
+            roof_factor = 0.7
+            roof_note_text = " (retractable, roof status unknown)"
+        elif temp_f < 60 or temp_f > 88:
+            # Roof very likely closed
+            return 1.0, f"🏟️ Retractable roof likely CLOSED ({temp_f:.0f}°F) — no wind effect"
+        else:
+            # Comfortable temp range — roof likely open, full effect
+            roof_factor = 1.0
+            roof_note_text = " (retractable, likely open)"
+    else:
+        roof_factor = 1.0
+        roof_note_text = ""
 
     # Pull-side bearing (where the hitter pulls the ball)
     if bats == "L":
@@ -154,22 +174,20 @@ def wind_pull_side_multiplier(venue_name: str, bats: str,
         # Strong tailwind effect, scales with mph
         boost = min(0.15, wind_mph * 0.012) * roof_factor
         mult = 1 + boost
-        roof_note = " (retractable roof: 50% effect)" if roof == "retractable" else ""
-        return mult, f"💨 Wind to {side} ({wind_mph:.0f}mph) — HR boost{roof_note}"
+        return mult, f"💨 Wind to {side} ({wind_mph:.0f}mph) — HR boost{roof_note_text}"
     elif diff < 60:
         # Partial tailwind
         boost = min(0.08, wind_mph * 0.006) * roof_factor
         mult = 1 + boost
-        return mult, f"💨 Wind partially to {side} — small HR boost"
+        return mult, f"💨 Wind partially to {side} — small HR boost{roof_note_text}"
     elif diff > 150:  # wind blowing AGAINST pull side
         suppress = min(0.12, wind_mph * 0.010) * roof_factor
         mult = 1 - suppress
-        roof_note = " (retractable roof: 50% effect)" if roof == "retractable" else ""
-        return mult, f"💨 Wind into {side} ({wind_mph:.0f}mph) — HR suppress{roof_note}"
+        return mult, f"💨 Wind into {side} ({wind_mph:.0f}mph) — HR suppress{roof_note_text}"
     elif diff > 120:
         suppress = min(0.06, wind_mph * 0.005) * roof_factor
         mult = 1 - suppress
-        return mult, f"💨 Wind partially into {side} — small HR suppress"
+        return mult, f"💨 Wind partially into {side} — small HR suppress{roof_note_text}"
 
     return 1.0, ""
 
