@@ -840,10 +840,14 @@ def get_pitcher_day_night_splits(season: int = CURRENT_SEASON,
     return pd.DataFrame(rows)
 
 
-def classify_game_day_night(game_time_iso: str, timezone: str = "America/New_York") -> str:
+def classify_game_day_night(game_time_iso: str, venue_timezone: str = None) -> str:
     """
-    Classify a game as 'day' or 'night' based on its start time.
-    MLB convention: games starting BEFORE 5 PM local are day games.
+    Classify a game as 'day' or 'night' based on its LOCAL start time.
+    MLB convention: games starting BEFORE 5 PM venue-local are day games.
+
+    venue_timezone: optional IANA timezone string (e.g. "America/Phoenix").
+        If not provided, defaults to "America/New_York" which is WRONG for
+        west-coast venues. Callers should always pass the venue timezone.
 
     Returns 'day' or 'night'. Defaults to 'night' if classification fails.
     """
@@ -858,11 +862,17 @@ def classify_game_day_night(game_time_iso: str, timezone: str = "America/New_Yor
             dt_utc = datetime.fromisoformat(game_time_iso[:-1] + "+00:00")
         else:
             dt_utc = datetime.fromisoformat(game_time_iso)
+        tz_to_use = venue_timezone or "America/New_York"
         if ZoneInfo is not None:
             try:
-                dt_local = dt_utc.astimezone(ZoneInfo(timezone))
+                dt_local = dt_utc.astimezone(ZoneInfo(tz_to_use))
             except Exception:
-                dt_local = dt_utc.astimezone(ZoneInfo("America/New_York"))
+                # Try fallback to America/New_York if requested zone fails
+                try:
+                    dt_local = dt_utc.astimezone(ZoneInfo("America/New_York"))
+                except Exception:
+                    from datetime import timedelta
+                    dt_local = dt_utc - timedelta(hours=4)
         else:
             # Fallback: assume Eastern (UTC-4 in summer, UTC-5 in winter)
             from datetime import timedelta
@@ -871,6 +881,39 @@ def classify_game_day_night(game_time_iso: str, timezone: str = "America/New_Yor
         return "day" if dt_local.hour < 17 else "night"
     except Exception:
         return "night"
+
+
+# Map of stadium → IANA timezone for accurate day/night classification
+VENUE_TIMEZONES = {
+    # Pacific
+    "Oracle Park": "America/Los_Angeles",
+    "Dodger Stadium": "America/Los_Angeles",
+    "Petco Park": "America/Los_Angeles",
+    "Angel Stadium": "America/Los_Angeles",
+    "T-Mobile Park": "America/Los_Angeles",
+    "Sutter Health Park": "America/Los_Angeles",  # Athletics 2025+ temporary
+    # Mountain (Arizona never observes DST)
+    "Chase Field": "America/Phoenix",
+    "Coors Field": "America/Denver",
+    "Salt River Fields": "America/Phoenix",  # spring training
+    # Central
+    "Globe Life Field": "America/Chicago",
+    "Daikin Park": "America/Chicago",
+    "Minute Maid Park": "America/Chicago",
+    "Wrigley Field": "America/Chicago",
+    "Guaranteed Rate Field": "America/Chicago",
+    "Rate Field": "America/Chicago",
+    "Target Field": "America/Chicago",
+    "Kauffman Stadium": "America/Chicago",
+    "Busch Stadium": "America/Chicago",
+    "American Family Field": "America/Chicago",
+    # Eastern (all others)
+}
+
+
+def get_venue_timezone(venue_name: str) -> str:
+    """Look up IANA timezone for a venue. Defaults to America/New_York."""
+    return VENUE_TIMEZONES.get(venue_name, "America/New_York")
 
 
 # ----------------------------------------------------------------------------
