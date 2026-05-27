@@ -2520,7 +2520,18 @@ st.caption(
 )
 
 # Gather all qualified hitters with game context
+# Pre-initialize variables to None so any unexpected reference order can't
+# NameError. They get their real values inside the if-block below.
 all_hitters_for_picks = []
+combined_picks = None
+combined_all = None
+top10 = None
+top_picks_export = None
+two_leg_df = None
+three_leg_df = None
+two_leg_parlay_export = None
+three_leg_parlay_export = None
+rr_export = None
 for gpk, ctx in game_context_map.items():
     game_rows = slate[slate["gamePk"] == gpk]
     if game_rows.empty:
