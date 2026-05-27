@@ -386,45 +386,61 @@ with st.sidebar:
 
     # ========================================================================
     # OWNER MODE — toggle to expose owner-only features
-    # Owner mode is gated by either:
-    #   1. URL param ?owner=<secret> matching st.secrets["owner_key"], OR
-    #   2. Direct sidebar password entry matching st.secrets["owner_key"]
+    #
+    # 🔑 EASIEST SETUP (no Streamlit secrets needed):
+    #   1. Change OWNER_KEY below from "posey-mlb-owner-2026" to your own
+    #      secret passphrase (any string — make it long and random)
+    #   2. Save and deploy
+    #   3. Bookmark: https://your-app-url/?owner=YOUR_KEY_HERE
+    #      (replace YOUR_KEY_HERE with what you set above)
+    #   4. Clicking that bookmark gives you owner mode automatically
+    #
+    # 🔒 MORE SECURE (optional - hides key from your GitHub repo):
+    #   1. In Streamlit Cloud → Settings → Secrets, add:
+    #      owner_key = "your-secret-string"
+    #   2. If set, st.secrets["owner_key"] overrides the hardcoded value
+    #
     # Public users see no owner-only sections. Owner sees: Twitter post,
     # My Picks editor, and any future owner-exclusive tools.
-    #
-    # Setup: in Streamlit Cloud → Settings → Secrets → add:
-    #   owner_key = "your-secret-passphrase"
-    # Then bookmark https://your-app-url/?owner=your-secret-passphrase
-    # for instant owner access.
     # ========================================================================
-    owner_mode = False
+
+    # 👇 EDIT THIS to your own secret string (any text, the longer the better):
+    OWNER_KEY = "posey-mlb-owner-2026"
+
+    # Try to override from Streamlit secrets (if you set it up); otherwise use hardcoded
     try:
-        configured_key = st.secrets.get("owner_key", "")
+        _secret_key = st.secrets.get("owner_key", "")
+        if _secret_key:
+            OWNER_KEY = _secret_key
     except Exception:
-        configured_key = ""
-    if configured_key:
-        # Check URL param first (silent activation via bookmarked URL)
+        pass
+
+    owner_mode = False
+    if OWNER_KEY:
+        # Method 1: URL param ?owner=...  (silent, instant via bookmark)
         try:
             qp = st.query_params
             url_key = qp.get("owner", "")
             if isinstance(url_key, list):
                 url_key = url_key[0] if url_key else ""
-            if url_key and url_key == configured_key:
+            if url_key and url_key == OWNER_KEY:
                 owner_mode = True
         except Exception:
             pass
-        # Fallback: password entry
+        # Method 2: Password entry (collapsed expander — public users won't notice)
         if not owner_mode:
             with st.expander("🔐 Owner login", expanded=False):
                 pwd = st.text_input(
-                    "Password", type="password", key="owner_pwd",
-                    help="Hidden by default; only the app owner needs this.",
+                    "Owner key", type="password", key="owner_pwd",
+                    help="Hidden field — only the app owner needs this.",
                 )
-                if pwd and pwd == configured_key:
+                if pwd and pwd == OWNER_KEY:
                     owner_mode = True
                     st.success("✓ Owner mode active")
+                elif pwd:
+                    st.error("Invalid key.")
     if owner_mode:
-        st.caption("👑 **Owner mode** — extra tools enabled below.")
+        st.caption("👑 **Owner mode active** — extra tools enabled below.")
 
     st.subheader("Data sources")
     use_recent_form = st.checkbox("Recent form (L15)", value=True)
@@ -3698,6 +3714,62 @@ def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
 
     if not qualified.empty:
         st.markdown(f"**{team_label}**")
+
+        # ====================================================================
+        # CATEGORY LEADERS — who leads what on this team?
+        # Shows the top hitter in each key category so you can see at a glance
+        # who's the best play in different dimensions.
+        # ====================================================================
+        leader_categories = [
+            ("HR Game%", "hr_game_pct", True, "%.1f%%"),
+            ("Power Score", "power_score", True, "%.0f"),
+            ("Matchup", "matchup", True, "%.0f"),
+            ("HR Form", "hr_form", True, "%.0f"),
+            ("Barrel%", "barrel_pct", True, "%.1f%%"),
+            ("ISO", "iso", True, "%.3f"),
+            ("xwOBA", "xwoba", True, "%.3f"),
+            ("Recent HRs", "recent_hr", True, "%.0f"),
+            ("L15 wHR%", "recent_hr_weighted_rate", True, "%.2f%%"),
+            ("Pitch Match", "pitch_match_score", True, "%.0f"),
+            ("Pitch HR Match", "pitch_hr_score", True, "%.0f"),
+        ]
+        # Count how many categories each player leads in
+        leader_counts = {}
+        leader_details = []
+        for cat_label, col, descending, fmt in leader_categories:
+            if col in qualified.columns and qualified[col].notna().any():
+                # Best (max) row in this category
+                best_idx = qualified[col].idxmax() if descending else qualified[col].idxmin()
+                best_row = qualified.loc[best_idx]
+                name = best_row.get("player_name", "?")
+                val = best_row[col]
+                try:
+                    val_str = fmt % val
+                except Exception:
+                    val_str = str(val)
+                leader_counts[name] = leader_counts.get(name, 0) + 1
+                leader_details.append({"Category": cat_label, "Leader": name, "Value": val_str})
+
+        if leader_details:
+            with st.expander(f"🏅 {team_label} Category Leaders ({len(leader_details)} categories)"):
+                # Display leaders table
+                ldr_df = pd.DataFrame(leader_details)
+                st.dataframe(ldr_df, hide_index=True, use_container_width=True)
+                # Summary: hitters leading multiple categories
+                multi_leaders = {n: c for n, c in leader_counts.items() if c >= 2}
+                if multi_leaders:
+                    sorted_leaders = sorted(multi_leaders.items(), key=lambda x: -x[1])
+                    summary = " · ".join(
+                        f"**{name}** ({count} categories)"
+                        for name, count in sorted_leaders[:5]
+                    )
+                    st.markdown(f"**Top multi-category leaders:** {summary}")
+                    st.caption(
+                        "Hitters who lead in multiple categories are your strongest "
+                        "all-around plays on this team. If someone leads 3+ categories, "
+                        "they're likely the best HR pick from this lineup."
+                    )
+
         st.dataframe(
             _style_matchup_df(qualified[cols_to_show]),
             hide_index=True, use_container_width=True,
