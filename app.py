@@ -2237,14 +2237,14 @@ for _, game in slate.iterrows():
                 game_pct_ok = game_pct_val is not None and game_pct_val >= 15
                 env_favorable = full_env >= 1.05
                 # Park favorable: hand-aware park × pull-wind combined ≥1.04
-                # (was OR of two individual checks — too generous)
                 park_favorable = full_park >= 1.04
 
                 # CRITICAL: Smash spots only apply to CONFIRMED LINEUPS.
-                # When lineup is unknown, lineup_pos defaults to 4.2 PA which
-                # inflates HR Game% for non-starters and makes the flag misleading.
+                # is_roster_fill is the authoritative flag set in models.py when
+                # the player came from roster-padding (not actual lineup).
+                is_fill_player = bool(row_dict.get("is_roster_fill", False))
                 lineup_truly_confirmed = (
-                    game_confirmed and not bool(row_dict.get("is_roster_fill", False))
+                    game_confirmed and not is_fill_player
                     and lp is not None and not pd.isna(lp)
                 )
 
