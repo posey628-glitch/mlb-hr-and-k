@@ -405,7 +405,7 @@ with st.sidebar:
     # ========================================================================
 
     # 👇 EDIT THIS to your own secret string (any text, the longer the better):
-    OWNER_KEY = "Posey628628!"
+    OWNER_KEY = "posey-mlb-owner-2026"
 
     # Try to override from Streamlit secrets (if you set it up); otherwise use hardcoded
     try:
@@ -2836,11 +2836,14 @@ if all_hitters_for_picks:
                     if picks_key not in st.session_state:
                         st.session_state[picks_key] = []
 
-                    # Build hitter selection from current slate
-                    if combined_all is not None and not combined_all.empty:
+                    # Build hitter selection from current slate.
+                    # combined_picks is the all-hitters pool built earlier in this
+                    # section (around line 2547). combined_all isn't built until much
+                    # later, so we can't use it here.
+                    if combined_picks is not None and not combined_picks.empty:
                         # Sort by HR Game% so best plays appear first in selector
-                        selector_df = combined_all[
-                            combined_all["hr_game_pct"].notna()
+                        selector_df = combined_picks[
+                            combined_picks["hr_game_pct"].notna()
                         ].sort_values("hr_game_pct", ascending=False).copy()
                         # Build label "Name (TEAM) — HR% / grade"
                         selector_df["_label"] = selector_df.apply(
