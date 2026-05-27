@@ -111,12 +111,26 @@ def wind_pull_side_multiplier(venue_name: str, bats: str,
     If wind is blowing INTO home plate from the pull side, multiplier < 1.
 
     Returns (multiplier, summary_string).
+
+    Roof handling:
+    - dome: no wind effect (always closed) → returns 1.0
+    - retractable: half effect (assumes closed ~50% of the time on average)
+    - open: full effect
     """
     if wind_mph is None or wind_dir_deg is None or wind_mph < 3:
         return 1.0, ""
 
     park = get_park(venue_name)
     cf_bearing = park.get("cf_bearing", 0)
+    roof = park.get("roof", "open")
+
+    # Permanent dome → no wind effect ever
+    if roof == "dome":
+        return 1.0, ""
+
+    # Retractable roofs play closed in extreme weather. Without real-time
+    # roof-status data, we apply a 50% dampener to wind effect.
+    roof_factor = 0.5 if roof == "retractable" else 1.0
 
     # Pull-side bearing (where the hitter pulls the ball)
     if bats == "L":
@@ -138,17 +152,23 @@ def wind_pull_side_multiplier(venue_name: str, bats: str,
 
     if diff < 30:  # wind blowing directly to pull side
         # Strong tailwind effect, scales with mph
-        mult = 1 + min(0.15, wind_mph * 0.012)
-        return mult, f"💨 Wind to {side} ({wind_mph:.0f}mph) — HR boost"
+        boost = min(0.15, wind_mph * 0.012) * roof_factor
+        mult = 1 + boost
+        roof_note = " (retractable roof: 50% effect)" if roof == "retractable" else ""
+        return mult, f"💨 Wind to {side} ({wind_mph:.0f}mph) — HR boost{roof_note}"
     elif diff < 60:
         # Partial tailwind
-        mult = 1 + min(0.08, wind_mph * 0.006)
+        boost = min(0.08, wind_mph * 0.006) * roof_factor
+        mult = 1 + boost
         return mult, f"💨 Wind partially to {side} — small HR boost"
     elif diff > 150:  # wind blowing AGAINST pull side
-        mult = 1 - min(0.12, wind_mph * 0.010)
-        return mult, f"💨 Wind into {side} ({wind_mph:.0f}mph) — HR suppress"
+        suppress = min(0.12, wind_mph * 0.010) * roof_factor
+        mult = 1 - suppress
+        roof_note = " (retractable roof: 50% effect)" if roof == "retractable" else ""
+        return mult, f"💨 Wind into {side} ({wind_mph:.0f}mph) — HR suppress{roof_note}"
     elif diff > 120:
-        mult = 1 - min(0.06, wind_mph * 0.005)
+        suppress = min(0.06, wind_mph * 0.005) * roof_factor
+        mult = 1 - suppress
         return mult, f"💨 Wind partially into {side} — small HR suppress"
 
     return 1.0, ""
