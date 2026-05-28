@@ -1922,8 +1922,12 @@ for _, game in slate.iterrows():
     def _fill_to_nine(existing_lineup, team_id):
         """Pad lineup to 9 position players using active roster as fallback.
 
-        Returns (lineup, is_confirmed) where is_confirmed = True only if
-        MLB has actually posted the lineup (not roster-padded).
+        Returns (lineup, is_confirmed, bench) where:
+          lineup     = the 9 hitters shown as the lineup (real if posted, else padded)
+          is_confirmed = True only if MLB has actually posted the lineup
+          bench      = remaining active-roster position players (NOT in the 9)
+                       Used to surface late-swap candidates like Grichuk who
+                       just signed but might pinch-hit or fill in.
 
         IMPORTANT: When using roster fill, we sort by season PA (descending)
         so the most-used position players appear first. Alphabetical order
@@ -1932,12 +1936,12 @@ for _, game in slate.iterrows():
         """
         is_confirmed = len(existing_lineup) >= 8  # At least 8 of 9 = real lineup
         if not team_id:
-            return existing_lineup, is_confirmed
+            return existing_lineup, is_confirmed, []
         existing_ids = {p.get("id") for p in existing_lineup if p.get("id")}
         try:
             roster = get_team_roster(int(team_id))
         except Exception:
-            return existing_lineup, is_confirmed
+            return existing_lineup, is_confirmed, []
         # Filter to position players only (skip P, SP, RP, TWP)
         position_players = [
             p for p in roster
@@ -1965,7 +1969,7 @@ for _, game in slate.iterrows():
             key=lambda p: pa_lookup.get(int(p.get("id", 0)) if p.get("id") else 0, 0),
             reverse=True,
         )
-        # Pad up to 9 total
+        # Pad up to 9 total when lineup isn't fully posted
         needed = max(0, 9 - len(existing_lineup))
         for p in position_players[:needed]:
             existing_lineup.append({
@@ -1973,19 +1977,26 @@ for _, game in slate.iterrows():
                 "position": p.get("position"), "bats": p.get("bats"),
                 "is_roster_fill": True,  # mark these as not real lineup positions
             })
-        return existing_lineup, is_confirmed
+        # Bench: every other position player NOT in the 9 we display.
+        # These are the late-swap / pinch-hit candidates.
+        bench_pool = position_players[needed:] if needed > 0 else position_players
+        bench = [{
+            "id": p.get("id"), "name": p.get("name"),
+            "position": p.get("position"), "bats": p.get("bats"),
+        } for p in bench_pool]
+        return existing_lineup, is_confirmed, bench
 
     try:
         away_lineup = get_lineup(int(game["gamePk"]), "away")
     except Exception:
         away_lineup = []
-    away_lineup, away_confirmed = _fill_to_nine(away_lineup, game.get("away_team_id"))
+    away_lineup, away_confirmed, away_bench = _fill_to_nine(away_lineup, game.get("away_team_id"))
 
     try:
         home_lineup = get_lineup(int(game["gamePk"]), "home")
     except Exception:
         home_lineup = []
-    home_lineup, home_confirmed = _fill_to_nine(home_lineup, game.get("home_team_id"))
+    home_lineup, home_confirmed, home_bench = _fill_to_nine(home_lineup, game.get("home_team_id"))
 
     # Backfill batting handedness for any hitters missing it
     needs_bats_ids = set()
@@ -2099,6 +2110,31 @@ for _, game in slate.iterrows():
         recent_form_dict=recent_hitter_map,
         pitcher_arsenal_df=pitcher_arsenal_all,
     )
+
+    # Bench matchups — same calculations but for roster-active players NOT
+    # in tonight's 9-man lineup. Used to surface late-swap candidates
+    # (pinch hitters, players who could replace someone in the lineup last minute).
+    away_bench_matchup = pd.DataFrame()
+    home_bench_matchup = pd.DataFrame()
+    try:
+        if away_bench:
+            away_bench_matchup = build_matchup_table(
+                away_bench,
+                pd.Series(home_p_row) if home_p_row else None,
+                hitter_stats, pitcher_stats,
+                recent_form_dict=recent_hitter_map,
+                pitcher_arsenal_df=pitcher_arsenal_all,
+            )
+        if home_bench:
+            home_bench_matchup = build_matchup_table(
+                home_bench,
+                pd.Series(away_p_row) if away_p_row else None,
+                hitter_stats, pitcher_stats,
+                recent_form_dict=recent_hitter_map,
+                pitcher_arsenal_df=pitcher_arsenal_all,
+            )
+    except Exception:
+        pass
 
     # Power Score - composite HR-likelihood incorporating park/weather/pitcher
     try:
@@ -2488,6 +2524,8 @@ for _, game in slate.iterrows():
         "game_type": game_type,  # "day" or "night" for splits
         "real_roof_closed": real_roof_closed,  # True/False/None (from MLB feed)
         "roof_condition": roof_status.get("condition", ""),
+        "away_bench_matchup": away_bench_matchup,
+        "home_bench_matchup": home_bench_matchup,
     }
     matchup_tables[game["gamePk"]] = (away_matchup, home_matchup)
 
@@ -4432,7 +4470,40 @@ for _, game in slate.iterrows():
         header_bits.append(
             f"**{game['away_pitcher']}** vs **{game['home_pitcher']}**"
         )
+    # Status flag — surface in progress / final / postponed games prominently
+    game_status_str = (game.get("status") or "").strip()
+    if game_status_str:
+        in_progress = any(kw in game_status_str.lower() for kw in
+                          ("progress", "delayed", "warmup", "pre-game", "manager"))
+        is_final = any(kw in game_status_str.lower() for kw in
+                       ("final", "completed", "game over", "ended"))
+        is_postponed = any(kw in game_status_str.lower() for kw in
+                           ("postponed", "suspended", "cancelled", "canceled"))
+        if in_progress:
+            header_bits.append(f"🟠 **{game_status_str.upper()}** — bets locked")
+        elif is_final:
+            header_bits.append(f"🔴 **{game_status_str.upper()}** — game over")
+        elif is_postponed:
+            header_bits.append(f"⚫ **{game_status_str.upper()}**")
     st.markdown(" · ".join(header_bits))
+
+    # Loud full-width banner for games that have started or finished — user
+    # asked for an unmistakable signal so they don't pick from these.
+    if game_status_str:
+        gs_lower = game_status_str.lower()
+        if any(kw in gs_lower for kw in ("progress", "delayed", "warmup")):
+            st.error(
+                f"🟠 **GAME IN PROGRESS — picks no longer available** "
+                f"(except live betting). Status: {game_status_str}"
+            )
+        elif any(kw in gs_lower for kw in ("final", "completed", "game over", "ended")):
+            st.error(
+                f"🔴 **GAME FINAL — outcomes are set.** Status: {game_status_str}"
+            )
+        elif any(kw in gs_lower for kw in ("postponed", "suspended", "cancelled", "canceled")):
+            st.error(
+                f"⚫ **GAME {game_status_str.upper()}** — props void / refunded."
+            )
 
     # Lineup confirmation status - warn if using roster-fill
     away_conf = ctx.get("away_lineup_confirmed", True)
@@ -4618,8 +4689,59 @@ for _, game in slate.iterrows():
     tabs = st.tabs([away_tab, home_tab, "🎯 K Projections"])
     with tabs[0]:
         render_matchup_section(ctx.get("away_matchup"), game['away_team_abbr'])
+        # Late-swap candidates from active roster but not in tonight's 9
+        bench = ctx.get("away_bench_matchup")
+        if bench is not None and not bench.empty:
+            with st.expander(
+                f"🔄 {game['away_team_abbr']} bench / possible late-swap candidates "
+                f"({len(bench)} active-roster hitters not in tonight's 9)"
+            ):
+                st.caption(
+                    "These hitters are on the active roster but NOT in the posted "
+                    "starting lineup. If a player gets scratched late, one of these "
+                    "could be the replacement. Stats shown so you're prepared. "
+                    "**HR Game% NOT computed** — these aren't expected starters."
+                )
+                bench_cols = [c for c in [
+                    "player_name", "position", "bats", "pa",
+                    "barrel_pct", "iso", "xwoba", "home_run", "recent_hr",
+                ] if c in bench.columns]
+                st.dataframe(
+                    bench[bench_cols].sort_values("pa", ascending=False, na_position="last"),
+                    hide_index=True, use_container_width=True,
+                    column_config={
+                        "player_name": st.column_config.TextColumn("Hitter"),
+                        "barrel_pct": st.column_config.NumberColumn("Brl%", format="%.1f%%"),
+                        "iso": st.column_config.NumberColumn("ISO", format="%.3f"),
+                        "xwoba": st.column_config.NumberColumn("xwOBA", format="%.3f"),
+                    },
+                )
     with tabs[1]:
         render_matchup_section(ctx.get("home_matchup"), game['home_team_abbr'])
+        bench = ctx.get("home_bench_matchup")
+        if bench is not None and not bench.empty:
+            with st.expander(
+                f"🔄 {game['home_team_abbr']} bench / possible late-swap candidates "
+                f"({len(bench)} active-roster hitters not in tonight's 9)"
+            ):
+                st.caption(
+                    "Active-roster hitters NOT in the posted starting lineup. "
+                    "If someone gets scratched late, one of these is the likely replacement."
+                )
+                bench_cols = [c for c in [
+                    "player_name", "position", "bats", "pa",
+                    "barrel_pct", "iso", "xwoba", "home_run", "recent_hr",
+                ] if c in bench.columns]
+                st.dataframe(
+                    bench[bench_cols].sort_values("pa", ascending=False, na_position="last"),
+                    hide_index=True, use_container_width=True,
+                    column_config={
+                        "player_name": st.column_config.TextColumn("Hitter"),
+                        "barrel_pct": st.column_config.NumberColumn("Brl%", format="%.1f%%"),
+                        "iso": st.column_config.NumberColumn("ISO", format="%.3f"),
+                        "xwoba": st.column_config.NumberColumn("xwOBA", format="%.3f"),
+                    },
+                )
     with tabs[2]:
         kp1, kp2 = st.columns(2)
         for col, side, label in [
