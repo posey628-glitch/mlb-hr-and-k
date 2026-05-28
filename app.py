@@ -2097,8 +2097,10 @@ for _, game in slate.iterrows():
     home_lineup, home_confirmed, home_bench = _fill_to_nine(home_lineup, game.get("home_team_id"))
 
     # Backfill batting handedness for any hitters missing it
+    # IMPORTANT: include bench players too — they show "bats: None" otherwise
+    # because /roster/active doesn't always populate batSide.
     needs_bats_ids = set()
-    for p in away_lineup + home_lineup:
+    for p in away_lineup + home_lineup + away_bench + home_bench:
         if p.get("id") and not p.get("bats"):
             try:
                 needs_bats_ids.add(int(p["id"]))
@@ -2107,7 +2109,7 @@ for _, game in slate.iterrows():
     if needs_bats_ids:
         try:
             bats_map = fill_hitter_bats([], ids=needs_bats_ids)
-            for p in away_lineup + home_lineup:
+            for p in away_lineup + home_lineup + away_bench + home_bench:
                 pid = p.get("id")
                 if pid in bats_map and not p.get("bats"):
                     p["bats"] = bats_map[pid]
