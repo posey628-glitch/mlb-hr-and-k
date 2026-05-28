@@ -130,7 +130,7 @@ def _derive_hitter_missing(df: pd.DataFrame) -> pd.DataFrame:
 # Slate / probable pitchers (MLB Stats API)
 # ----------------------------------------------------------------------------
 
-@st.cache_data(ttl=1800)
+@st.cache_data(ttl=300)  # 5min — was 30min; probable pitchers change throughout the day
 def get_slate(game_date: Optional[str] = None) -> pd.DataFrame:
     """
     Return one row per game for the given date (YYYY-MM-DD, default today).
@@ -203,7 +203,7 @@ def get_slate(game_date: Optional[str] = None) -> pd.DataFrame:
     return df
 
 
-@st.cache_data(ttl=1800)
+@st.cache_data(ttl=180)  # 3min — lineups are posted/changed throughout afternoon
 def get_lineup(game_pk: int, side: str = "home") -> list[dict]:
     """
     Return the projected/actual lineup for a side ("home" or "away").
@@ -232,7 +232,7 @@ def get_lineup(game_pk: int, side: str = "home") -> list[dict]:
         return []
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=900)  # 15min — catches mid-day call-ups, IL moves, demotions
 def get_team_roster(team_id: int) -> list[dict]:
     """Active roster for a team - used as lineup fallback."""
     url = f"https://statsapi.mlb.com/api/v1/teams/{team_id}/roster/active"
@@ -1970,3 +1970,62 @@ def get_team_hitting_aggregates(season: int = CURRENT_SEASON) -> pd.DataFrame:
             if rows and rows[-1].get("team_id") == team_id:
                 break
     return pd.DataFrame(rows)
+
+
+# =============================================================================
+# REAL ROOF STATUS — pulls actual condition from MLB game feed
+# =============================================================================
+# MLB Stats API includes the literal roof status in gameData.weather.condition
+# for indoor/retractable venues. Values seen in production:
+#   - "Roof Closed"   (retractable park with roof closed for this game)
+#   - "Dome"          (permanent dome, e.g., Tropicana Field)
+#   - "Clear", "Partly Cloudy", "Cloudy", "Rain"   (outdoor or roof open)
+# This gives us the GROUND TRUTH instead of guessing from temperature.
+
+@st.cache_data(ttl=300)  # 5min — refresh often, roof decisions can change pre-game
+def get_game_roof_status(game_pk: int) -> dict:
+    """
+    Return real roof status + MLB-reported weather for a game.
+
+    Returns dict:
+        {
+            "roof_closed": bool | None,  # None = unknown
+            "condition": str,            # raw condition string from MLB
+            "temp": float | None,        # MLB-reported temp
+            "wind": str,                 # MLB-reported wind ("X mph, From CF")
+        }
+    """
+    url = f"https://statsapi.mlb.com/api/v1.1/game/{game_pk}/feed/live"
+    out = {"roof_closed": None, "condition": "", "temp": None, "wind": ""}
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=12)
+        if r.status_code != 200:
+            return out
+        data = r.json()
+        wx = data.get("gameData", {}).get("weather", {})
+        condition = wx.get("condition", "") or ""
+        out["condition"] = condition
+        out["wind"] = wx.get("wind", "") or ""
+        temp_str = wx.get("temp", "")
+        try:
+            out["temp"] = float(temp_str) if temp_str else None
+        except (ValueError, TypeError):
+            out["temp"] = None
+        # Decide roof state from condition string
+        cond_lower = condition.lower()
+        if "roof closed" in cond_lower or "dome" in cond_lower:
+            out["roof_closed"] = True
+        elif "roof open" in cond_lower:
+            out["roof_closed"] = False
+        elif condition and any(
+            outdoor_kw in cond_lower
+            for outdoor_kw in ("clear", "sunny", "cloud", "rain", "overcast",
+                                "wind", "partly", "drizzle", "mist", "fog",
+                                "snow", "shower")
+        ):
+            # Any actual weather description = open-air conditions
+            out["roof_closed"] = False
+        # else: leave as None (unknown)
+        return out
+    except Exception:
+        return out
