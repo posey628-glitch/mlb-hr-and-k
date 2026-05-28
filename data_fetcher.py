@@ -2066,3 +2066,71 @@ def get_game_roof_status(game_pk: int) -> dict:
         return out
     except Exception:
         return out
+
+
+# =============================================================================
+# SLATE-WIDE TRANSACTIONS — surface roster moves so user knows what changed
+# =============================================================================
+
+@st.cache_data(ttl=900)  # 15min — roster moves can happen mid-day
+def get_recent_transactions(days_back: int = 2, _stats_day: str = "") -> pd.DataFrame:
+    """
+    Pull all MLB roster transactions from the last N days.
+
+    Returns df with columns:
+        date, type_code, type_desc, player_name, player_id, from_team, to_team,
+        description
+
+    type_code legend (most important for hitter/pitcher impact):
+        TR  = Traded
+        SC  = Signed as free agent
+        DFA = Designated for Assignment
+        REL = Released
+        OUT = Outrighted
+        CU  = Called Up (from minors)
+        SD  = Sent Down (to minors)
+        SCL = Selected from minors (added to 40-man)
+        IL  = Placed on Injured List
+        RTN = Returned to team / activated from IL
+        STA = Status change
+
+    These directly impact:
+      - Trades/signings: stats/team data may not yet reflect new team
+      - DFA/release: player no longer available
+      - Call-ups: new player to evaluate (low PA, insufficient sample)
+      - IL moves: pitcher fresh from IL = role detection adjustment
+    """
+    from datetime import date, timedelta
+    end_d = date.today()
+    start_d = end_d - timedelta(days=days_back)
+    url = (
+        "https://statsapi.mlb.com/api/v1/transactions"
+        f"?startDate={start_d.isoformat()}&endDate={end_d.isoformat()}"
+    )
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=15)
+        if r.status_code != 200:
+            return pd.DataFrame()
+        data = r.json()
+    except Exception:
+        return pd.DataFrame()
+    rows = []
+    for txn in data.get("transactions", []):
+        person = txn.get("person", {}) or {}
+        from_team = (txn.get("fromTeam") or {}).get("name", "")
+        to_team = (txn.get("toTeam") or {}).get("name", "")
+        rows.append({
+            "date": txn.get("date", ""),
+            "type_code": txn.get("typeCode", ""),
+            "type_desc": txn.get("typeTr", "") or txn.get("typeDesc", ""),
+            "player_name": person.get("fullName", ""),
+            "player_id": person.get("id"),
+            "from_team": from_team,
+            "to_team": to_team,
+            "description": txn.get("description", ""),
+        })
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        # Sort newest first
+        df = df.sort_values("date", ascending=False).reset_index(drop=True)
+    return df
