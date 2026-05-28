@@ -266,8 +266,15 @@ def get_lineup(game_pk: int, side: str = "home") -> list[dict]:
 
 @st.cache_data(ttl=900)  # 15min — catches mid-day call-ups, IL moves, demotions
 def get_team_roster(team_id: int) -> list[dict]:
-    """Active roster for a team - used as lineup fallback."""
-    url = f"https://statsapi.mlb.com/api/v1/teams/{team_id}/roster/active"
+    """Active roster for a team - used as lineup fallback.
+
+    Hydrates with person.bats so bench players have batting handedness
+    (otherwise the bench display shows 'bats: None' for every player).
+    """
+    url = (
+        f"https://statsapi.mlb.com/api/v1/teams/{team_id}/roster/active"
+        "?hydrate=person"
+    )
     try:
         r = requests.get(url, headers=HEADERS, timeout=15)
         r.raise_for_status()
@@ -276,10 +283,15 @@ def get_team_roster(team_id: int) -> list[dict]:
             pos = p.get("position", {}).get("abbreviation", "")
             if pos in ("P",):
                 continue  # skip pitchers when looking for hitters
+            person = p.get("person", {}) or {}
+            # batSide can be nested under person (hydrated) or absent
+            bats = ((person.get("batSide") or {}).get("code")
+                    or (p.get("batSide") or {}).get("code"))
             out.append({
-                "id": p["person"]["id"],
-                "name": p["person"]["fullName"],
+                "id": person.get("id") or p["person"]["id"],
+                "name": person.get("fullName") or p["person"]["fullName"],
                 "position": pos,
+                "bats": bats,
             })
         return out
     except Exception:
