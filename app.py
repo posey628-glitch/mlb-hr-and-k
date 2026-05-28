@@ -27,6 +27,14 @@ except ImportError:
     def get_slate(*a, **k): return pd.DataFrame()
 
 try:
+    from data_fetcher import _stats_day_key
+except ImportError:
+    # Fallback so callers using this don't break if module is older
+    def _stats_day_key() -> str:
+        from datetime import date
+        return date.today().isoformat()
+
+try:
     from data_fetcher import get_lineup
 except ImportError:
     def get_lineup(*a, **k): return []
@@ -623,7 +631,7 @@ if slate.empty:
 
 # Statcast pulls — wrap with try/except so transient timeouts don't crash app
 try:
-    hitter_stats = get_hitter_stats() if not slate.empty else pd.DataFrame()
+    hitter_stats = get_hitter_stats(_stats_day=_stats_day_key()) if not slate.empty else pd.DataFrame()
 except (ConnectionError, requests.exceptions.RequestException) as _e:
     st.error(
         f"⚠️ **Baseball Savant (hitter data) is currently unreachable.**\n\n"
@@ -635,7 +643,7 @@ except (ConnectionError, requests.exceptions.RequestException) as _e:
     st.stop()
 
 try:
-    pitcher_stats = get_pitcher_stats() if not slate.empty else pd.DataFrame()
+    pitcher_stats = get_pitcher_stats(_stats_day=_stats_day_key()) if not slate.empty else pd.DataFrame()
 except (ConnectionError, requests.exceptions.RequestException) as _e:
     st.error(
         f"⚠️ **Baseball Savant (pitcher data) is currently unreachable.**\n\n"
@@ -727,8 +735,8 @@ if _pitcher_dn_il_err:
         st.caption(f"⚠️ Day/Night+IL fetch issue: {_pitcher_dn_il_err}")
 
 # Traditional stats
-hitter_trad = get_hitter_traditional() if not slate.empty else pd.DataFrame()
-pitcher_trad = get_pitcher_traditional() if not slate.empty else pd.DataFrame()
+hitter_trad = get_hitter_traditional(_stats_day=_stats_day_key()) if not slate.empty else pd.DataFrame()
+pitcher_trad = get_pitcher_traditional(_stats_day=_stats_day_key()) if not slate.empty else pd.DataFrame()
 
 # Merge traditional stats - force player_id types to match
 # CRITICAL: use combine_first style merge so we never overwrite Savant values
