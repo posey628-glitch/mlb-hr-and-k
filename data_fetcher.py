@@ -6,18 +6,50 @@ Pulls today's MLB slate and all underlying data from free public sources:
   - Baseball Savant (baseballsavant.mlb.com) - Statcast stats, arsenals
 
 No API keys required. All endpoints are publicly documented.
-Results are cached for 30 minutes via Streamlit's @st.cache_data.
+Results are cached via Streamlit's @st.cache_data with TTLs tuned per source:
+  - Slate (probable pitchers): 5 min
+  - Lineups: 3 min
+  - Active rosters: 15 min
+  - Season Statcast stats: 1 hour AND rolls over daily at 5 AM ET
 """
 
 from __future__ import annotations
 
 import io
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from typing import Optional
 
 import pandas as pd
 import requests
 import streamlit as st
+
+
+def _stats_day_key() -> str:
+    """Return a cache-buster string that changes once per day at 5 AM ET.
+
+    Statcast updates with the previous day's batted-ball data around 2-4 AM ET.
+    By rolling our cache key over at 5 AM ET, we guarantee that morning users
+    always get fresh stats from the new day's update — without waiting for the
+    1-hour TTL to expire mid-morning.
+
+    Returns a string like "2026-05-28" (the "stats day"). For times before 5 AM,
+    we return yesterday's date so we don't bust the cache prematurely while
+    Statcast itself is still updating.
+    """
+    try:
+        try:
+            from zoneinfo import ZoneInfo
+            now_et = datetime.now(ZoneInfo("America/New_York"))
+        except Exception:
+            # Fallback: assume UTC-4 (ET in summer); good enough for cache
+            now_et = datetime.utcnow() - timedelta(hours=4)
+        # If it's before 5 AM ET, Statcast may still be updating — use yesterday
+        if now_et.hour < 5:
+            return (now_et - timedelta(days=1)).strftime("%Y-%m-%d")
+        return now_et.strftime("%Y-%m-%d")
+    except Exception:
+        return date.today().isoformat()
+
 
 # Pretend to be a real browser - Savant sometimes 403s on bare requests
 HEADERS = {
@@ -275,11 +307,16 @@ def get_all_team_rosters(slate: pd.DataFrame) -> dict:
 # ----------------------------------------------------------------------------
 
 @st.cache_data(ttl=3600)
-def get_hitter_stats(season: int = CURRENT_SEASON) -> pd.DataFrame:
+def get_hitter_stats(season: int = CURRENT_SEASON, _stats_day: str = "") -> pd.DataFrame:
     """
     Pull season-level Statcast hitter stats with ALL columns needed for the
     dashboard: standard rates, expected stats, batted-ball quality, pulled
     contact, fly ball %, launch angle, swing/miss, etc.
+
+    _stats_day is a cache-buster set by the caller (defaults to today's ET stats
+    date via _stats_day_key()). Including it in the signature makes Streamlit
+    treat a new day as a cache miss — so morning users get fresh stats without
+    waiting for the 1-hour TTL.
     """
     selections = (
         "pa,abs,hits,player_age,k_percent,bb_percent,woba,xwoba,xiso,xba,xslg,xobp,"
@@ -459,7 +496,7 @@ def get_hitter_stats(season: int = CURRENT_SEASON) -> pd.DataFrame:
 # ----------------------------------------------------------------------------
 
 @st.cache_data(ttl=3600)
-def get_pitcher_stats(season: int = CURRENT_SEASON) -> pd.DataFrame:
+def get_pitcher_stats(season: int = CURRENT_SEASON, _stats_day: str = "") -> pd.DataFrame:
     """Season-level Statcast pitcher stats - expanded.
 
     Now requests stats that let us derive ERA-equivalents independently of
@@ -1362,7 +1399,7 @@ def get_pitch_run_values(season: int = CURRENT_SEASON) -> pd.DataFrame:
 # ----------------------------------------------------------------------------
 
 @st.cache_data(ttl=3600)
-def get_hitter_traditional(season: int = CURRENT_SEASON) -> pd.DataFrame:
+def get_hitter_traditional(season: int = CURRENT_SEASON, _stats_day: str = "") -> pd.DataFrame:
     """Pull season AVG, OBP, SLG, HR, RBI, R for all hitters.
 
     Uses playerPool=All to catch non-qualifying hitters (early-season,
@@ -1410,7 +1447,7 @@ def get_hitter_traditional(season: int = CURRENT_SEASON) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=900)  # Shortened from 3600 to 15min so failures recover faster
-def get_pitcher_traditional(season: int = CURRENT_SEASON) -> pd.DataFrame:
+def get_pitcher_traditional(season: int = CURRENT_SEASON, _stats_day: str = "") -> pd.DataFrame:
     """Pull season ERA, WHIP, HR/9, K/9, BB/9 for all pitchers.
 
     Uses playerPool=All so non-qualifying pitchers (early-season, callups,
@@ -1479,10 +1516,10 @@ def get_pitcher_traditional(season: int = CURRENT_SEASON) -> pd.DataFrame:
     return _normalize_player_df(df)
 
 
-def get_pitcher_traditional_safe(season: int = CURRENT_SEASON) -> pd.DataFrame:
+def get_pitcher_traditional_safe(season: int = CURRENT_SEASON, _stats_day: str = "") -> pd.DataFrame:
     """Wrapper that catches the cache-bust exception and returns empty df."""
     try:
-        return get_pitcher_traditional(season)
+        return get_pitcher_traditional(season, _stats_day=_stats_day)
     except Exception:
         return pd.DataFrame()
 
