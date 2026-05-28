@@ -466,6 +466,14 @@ with st.sidebar:
     st.subheader("Display")
     show_diagnostic = st.checkbox("Show data diagnostic", value=False)
     show_legend = st.checkbox("Show legend / glossary", value=True)
+    show_transactions = st.checkbox(
+        "Show recent transactions", value=True,
+        help=(
+            "Display trades, signings, DFAs, releases, call-ups, IL moves "
+            "from the last 2 days. Critical for catching mid-day roster changes "
+            "that might affect tonight's slate."
+        ),
+    )
 
     st.divider()
     if st.button("🔄 Force refresh all data", help="Clears the data cache and re-fetches from APIs. Use if you see stale or missing data."):
@@ -888,6 +896,88 @@ hdr_col1.metric("Games", n_games)
 hdr_col2.metric("Pitchers w/ data", int(n_pitchers))
 hdr_col3.metric("Hitters w/ data", int(n_hitters))
 hdr_col4.metric("PA threshold", INSUFFICIENT_PA_THRESHOLD)
+
+# =============================================================================
+# RECENT TRANSACTIONS — trades, signings, DFAs, IL, call-ups in last 2 days
+# =============================================================================
+if show_transactions:
+    try:
+        from data_fetcher import get_recent_transactions
+        txn_df = get_recent_transactions(days_back=2, _stats_day=_stats_day_key())
+    except Exception:
+        txn_df = pd.DataFrame()
+    if not txn_df.empty:
+        # Categorize transactions into types user cares about
+        IMPACT_CODES = {
+            # Roster moves that change WHERE a player is
+            "TR":  ("🔁", "TRADE"),
+            "SC":  ("✍️", "SIGNING"),
+            "DFA": ("⚠️", "DFA"),
+            "REL": ("❌", "RELEASE"),
+            "OUT": ("⬇️", "OUTRIGHTED"),
+            # Roster moves that change WHO is available
+            "CU":  ("⬆️", "CALL-UP"),
+            "SD":  ("⬇️", "SENT DOWN"),
+            "SCL": ("✨", "SELECTED"),
+            "STA": ("📝", "STATUS"),
+            # IL moves
+            "IL":  ("🏥", "TO IL"),
+            "RTN": ("🟢", "FROM IL"),
+        }
+        # Filter to "high-impact" moves only
+        impact_df = txn_df[txn_df["type_code"].isin(IMPACT_CODES.keys())].copy()
+        if not impact_df.empty:
+            impact_df["icon"] = impact_df["type_code"].map(lambda c: IMPACT_CODES.get(c, ("", ""))[0])
+            impact_df["category"] = impact_df["type_code"].map(lambda c: IMPACT_CODES.get(c, ("", ""))[1])
+            # Group by category for a clean summary count
+            cat_counts = impact_df["category"].value_counts()
+            count_pills = " · ".join(
+                f"{IMPACT_CODES[code][0]} {IMPACT_CODES[code][1]}: **{cat_counts.get(IMPACT_CODES[code][1], 0)}**"
+                for code in ["TR", "SC", "DFA", "REL", "CU", "SD", "SCL", "IL", "RTN"]
+                if cat_counts.get(IMPACT_CODES[code][1], 0) > 0
+            )
+            with st.expander(
+                f"🔄 Recent roster moves (last 2 days): {len(impact_df)} transactions — {count_pills}",
+                expanded=False,
+            ):
+                st.caption(
+                    "Mid-day roster moves that could affect tonight's slate. "
+                    "If a player you're targeting was DFA'd or sent down, you'll see it here. "
+                    "If a hitter was traded, the data may still show their previous team "
+                    "until our caches roll over. Click '🔄 Force refresh all data' if needed."
+                )
+                show_cols = ["date", "icon", "category", "player_name", "from_team", "to_team", "description"]
+                show_cols = [c for c in show_cols if c in impact_df.columns]
+                # Trim description for readability
+                if "description" in impact_df.columns:
+                    impact_df["description"] = impact_df["description"].astype(str).str[:140]
+                st.dataframe(
+                    impact_df[show_cols].head(50),
+                    hide_index=True, use_container_width=True,
+                    column_config={
+                        "date": st.column_config.TextColumn("Date", width="small"),
+                        "icon": st.column_config.TextColumn("", width="small"),
+                        "category": st.column_config.TextColumn("Type", width="small"),
+                        "player_name": st.column_config.TextColumn("Player"),
+                        "from_team": st.column_config.TextColumn("From"),
+                        "to_team": st.column_config.TextColumn("To"),
+                        "description": st.column_config.TextColumn("Details"),
+                    },
+                )
+            # Build a set of player IDs that recently moved teams — used below
+            # to flag affected hitters/pitchers in the slate.
+            try:
+                _recently_moved_ids = set(
+                    int(pid) for pid in impact_df["player_id"].dropna().tolist()
+                )
+            except Exception:
+                _recently_moved_ids = set()
+        else:
+            _recently_moved_ids = set()
+    else:
+        _recently_moved_ids = set()
+else:
+    _recently_moved_ids = set()
 
 if show_backtest:
     with st.expander("📈 Backtest — projection accuracy vs actual outcomes", expanded=True):
@@ -3438,6 +3528,15 @@ if all_hitters:
             combined_all["opp_pitcher_grade"] = combined_all["opp_pitcher"].map(grade_map)
             combined_all["opp_pitcher_hr9"] = combined_all["opp_pitcher"].map(hr9_map)
             combined_all["opp_pitcher_barrel_allowed"] = combined_all["opp_pitcher"].map(barrel_a_map)
+        except Exception:
+            pass
+    # Flag hitters whose player_id appears in recent transactions — their team
+    # data or stats may not yet reflect the move. User can investigate manually.
+    if _recently_moved_ids and "player_id" in combined_all.columns:
+        try:
+            combined_all["recently_moved"] = combined_all["player_id"].apply(
+                lambda pid: "🔄" if (pd.notna(pid) and int(pid) in _recently_moved_ids) else ""
+            )
         except Exception:
             pass
     # Drop hr_prob (it's a duplicate of hr_score, just confusingly named).
