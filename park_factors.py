@@ -101,7 +101,8 @@ def get_park_hand_factor(venue_name: str, bats: str) -> float:
 def wind_pull_side_multiplier(venue_name: str, bats: str,
                                wind_mph: float | None,
                                wind_dir_deg: float | None,
-                               temp_f: float | None = None) -> tuple[float, str]:
+                               temp_f: float | None = None,
+                               real_roof_closed: bool | None = None) -> tuple[float, str]:
     """
     Compute a multiplier for HR based on wind blowing toward the hitter's pull side.
 
@@ -113,12 +114,15 @@ def wind_pull_side_multiplier(venue_name: str, bats: str,
 
     Returns (multiplier, summary_string).
 
-    Roof handling:
-    - dome: no wind effect (always closed) → returns 1.0
-    - retractable: temperature-aware. Assumes roof CLOSED when temp is extreme
-      (below 60°F or above 88°F) → 0% wind effect. Open in moderate temps
-      (60-88°F) → 100% wind effect. This replaces the crude "50% always" rule.
-    - open: full effect
+    Roof handling priority order (most reliable first):
+    1. real_roof_closed=True (from MLB game feed) → no wind effect, period
+    2. real_roof_closed=False → full wind effect (roof confirmed open)
+    3. roof type is permanent dome → no wind effect ever
+    4. roof type is retractable + no real status → temperature heuristic:
+        - <60°F or >88°F → likely closed → no wind effect
+        - 60-88°F → likely open → full effect
+        - no temp data → 70% dampener
+    5. open roof → full wind effect
     """
     if wind_mph is None or wind_dir_deg is None or wind_mph < 3:
         return 1.0, ""
@@ -127,28 +131,28 @@ def wind_pull_side_multiplier(venue_name: str, bats: str,
     cf_bearing = park.get("cf_bearing", 0)
     roof = park.get("roof", "open")
 
-    # Permanent dome → no wind effect ever
-    if roof == "dome":
+    # Priority 1+2: real status from MLB feed
+    if real_roof_closed is True:
+        return 1.0, "🏟️ Roof closed (MLB-confirmed) — no wind effect"
+    if real_roof_closed is False:
+        # Roof confirmed open → full effect regardless of roof type
+        roof_factor = 1.0
+        roof_note_text = " (roof confirmed OPEN)" if roof == "retractable" else ""
+    elif roof == "dome":
+        # Priority 3: permanent dome
         return 1.0, ""
-
-    # Retractable roofs: closed when temp is uncomfortable for fans/players.
-    # Real-world MLB practice: roofs typically closed below 60°F or above 88°F.
-    # When closed → wind has no effect. When open → full effect.
-    # Without exact roof-status data per game, this temp heuristic is closer to
-    # reality than the flat "50%" rule it replaces.
-    if roof == "retractable":
+    elif roof == "retractable":
+        # Priority 4: temperature heuristic since MLB hasn't reported status yet
         if temp_f is None:
-            # No temp data — fall back to moderate dampener (was 50%, now 70%)
             roof_factor = 0.7
             roof_note_text = " (retractable, roof status unknown)"
         elif temp_f < 60 or temp_f > 88:
-            # Roof very likely closed
             return 1.0, f"🏟️ Retractable roof likely CLOSED ({temp_f:.0f}°F) — no wind effect"
         else:
-            # Comfortable temp range — roof likely open, full effect
             roof_factor = 1.0
             roof_note_text = " (retractable, likely open)"
     else:
+        # Priority 5: regular open-air park
         roof_factor = 1.0
         roof_note_text = ""
 
