@@ -860,11 +860,15 @@ if use_sprint_speed:
 
 st.title(f"⚾ Posey MLB HR & K Data — {selected_date.strftime('%A, %B %d, %Y')}")
 
-# Display current ET time so user knows context
+# Display current ET time + when each data source was last refreshed
 try:
     _now_et = pd.Timestamp.now(tz="US/Eastern")
-    st.caption(f"🕐 Current time: **{_now_et.strftime('%-I:%M %p ET')}** · "
-               f"All game times below shown in ET")
+    _time_caption = (
+        f"🕐 **Current time: {_now_et.strftime('%-I:%M %p ET')}** · "
+        f"Slate refreshes every 5 min · Lineups every 3 min · Rosters every 15 min · "
+        f"All game times shown in ET"
+    )
+    st.caption(_time_caption)
 except Exception:
     pass
 
@@ -1820,6 +1824,17 @@ for _, game in slate.iterrows():
     weather = {}
     wx_mult = 1.0
     wx_summary = ""
+    # ---- REAL ROOF STATUS from MLB game feed (overrides our guessing) ----
+    # Only matters for venues with a roof — we pull this regardless of venue
+    # to keep code simple; it just returns roof_closed=None for outdoor parks.
+    roof_status = {"roof_closed": None, "condition": "", "temp": None, "wind": ""}
+    try:
+        from data_fetcher import get_game_roof_status
+        roof_status = get_game_roof_status(int(game["gamePk"])) or roof_status
+    except Exception:
+        pass
+    real_roof_closed = roof_status.get("roof_closed")  # True / False / None
+
     if use_weather and venue:
         try:
             park_info = get_park(venue)
@@ -1837,12 +1852,22 @@ for _, game in slate.iterrows():
             if weather.get("error"):
                 wx_summary = f"Weather API error: {weather.get('error', '')[:50]}"
             else:
-                wx_mult, _summary = hr_multiplier(weather, park_info)
-                wx_summary = _summary or "Neutral"
-                # Hard rain warning - >80% chance suggests likely delay/postponement
-                pp = weather.get("precip_prob")
-                if pp is not None and pp >= 80:
-                    wx_summary = f"⚠️ HEAVY RAIN ({pp:.0f}%) — possible delay/PPD — " + wx_summary
+                # If MLB CONFIRMS the roof is closed, ignore outside weather
+                # entirely — treat as indoor neutral.
+                if real_roof_closed is True:
+                    wx_mult = 1.0
+                    cond_label = roof_status.get("condition") or "Roof Closed"
+                    wx_summary = f"🏟️ {cond_label} (MLB-confirmed) — indoor neutral"
+                else:
+                    wx_mult, _summary = hr_multiplier(weather, park_info)
+                    wx_summary = _summary or "Neutral"
+                    # Hard rain warning - >80% chance suggests likely delay/postponement
+                    pp = weather.get("precip_prob")
+                    if pp is not None and pp >= 80:
+                        wx_summary = f"⚠️ HEAVY RAIN ({pp:.0f}%) — possible delay/PPD — " + wx_summary
+                    # If MLB CONFIRMS roof is OPEN, note that
+                    if real_roof_closed is False and park_info.get("roof") == "retractable":
+                        wx_summary += " · 🏟️ Roof confirmed OPEN"
         except Exception as e:
             weather = {"error": str(e)}
             wx_mult = 1.0
@@ -2187,7 +2212,9 @@ for _, game in slate.iterrows():
             try:
                 _temp_f_for_wind = (weather or {}).get("temp_f")
                 pull_mult, pull_summary = wind_pull_side_multiplier(
-                    venue_name, bats, wind_mph, wind_dir, temp_f=_temp_f_for_wind,
+                    venue_name, bats, wind_mph, wind_dir,
+                    temp_f=_temp_f_for_wind,
+                    real_roof_closed=real_roof_closed,  # ground truth if available
                 )
                 if pull_summary:
                     pull_summaries[pull_summary] = pull_summaries.get(pull_summary, 0) + 1
@@ -2459,6 +2486,8 @@ for _, game in slate.iterrows():
         "hr_env_flag": hr_env_flag,
         "hr_env_color": hr_env_color,
         "game_type": game_type,  # "day" or "night" for splits
+        "real_roof_closed": real_roof_closed,  # True/False/None (from MLB feed)
+        "roof_condition": roof_status.get("condition", ""),
     }
     matchup_tables[game["gamePk"]] = (away_matchup, home_matchup)
 
@@ -3792,6 +3821,67 @@ if all_hitters:
                     f"NOT just recent results — but verify their season stats look strong, "
                     f"not just their streak."
                 )
+    # ====================================================================
+    # ⏳ DUE TO HOMER — hitters with strong stats but no recent HR (regression)
+    # ====================================================================
+    # User asked: "if a player hasnt homered in a while but has all the stats
+    # indicating that they have just had bad luck or will go soon..."
+    # Criteria:
+    #   - Has strong underlying power profile (barrel% ≥ 8, xwOBA ≥ 0.330, ISO ≥ 0.180)
+    #   - Has 0 HR in last 15 games (cold streak)
+    #   - Season HR rate suggests they should have hit by now
+    #   - Today's matchup is at least neutral (not facing TOUGH/ELITE pitcher)
+    if all(c in qualified.columns for c in ["recent_hr", "barrel_pct", "xwoba", "iso"]):
+        due_pool = qualified.copy()
+        due_pool = due_pool[
+            (due_pool["recent_hr"].fillna(99) == 0)  # 0 HR in last 15
+            & (due_pool["barrel_pct"].fillna(0) >= 8)
+            & (due_pool["xwoba"].fillna(0) >= 0.330)
+            & (due_pool["iso"].fillna(0) >= 0.160)
+        ]
+        # Avoid the trap of recommending guys vs aces
+        if "opp_pitcher_grade" in due_pool.columns:
+            due_pool = due_pool[~due_pool["opp_pitcher_grade"].isin(["TOUGH", "ELITE"])]
+        if not due_pool.empty:
+            # Score by "expected vs actual gap"
+            # Higher barrel + xwOBA + iso = should have homered more
+            due_pool = due_pool.copy()
+            due_pool["due_score"] = (
+                due_pool["barrel_pct"].fillna(0) * 2
+                + due_pool["xwoba"].fillna(0) * 100
+                + due_pool["iso"].fillna(0) * 100
+            )
+            due_pool = due_pool.sort_values("due_score", ascending=False).head(10)
+            st.markdown("---")
+            st.markdown(f"**⏳ Due to Homer ({len(due_pool)}) — bad luck candidates**")
+            st.caption(
+                "Hitters with elite power metrics (barrel% ≥8, xwOBA ≥.330, ISO ≥.160) "
+                "but ZERO HRs in their last 15 games. The underlying stats say they "
+                "should have homered by now — bad luck / wrong pitches faced. Regression "
+                "candidates. **TOUGH/ELITE pitcher matchups filtered out.**"
+            )
+            due_cols = [c for c in [
+                "player_name", "team", "game", "opp_pitcher", "opp_pitcher_grade",
+                "recent_hr", "barrel_pct", "xwoba", "iso", "hr_game_pct",
+            ] if c in due_pool.columns]
+            st.dataframe(
+                due_pool[due_cols], hide_index=True, use_container_width=True,
+                column_config={
+                    "player_name": st.column_config.TextColumn("Hitter"),
+                    "team": st.column_config.TextColumn("Tm", width="small"),
+                    "game": st.column_config.TextColumn("Game"),
+                    "opp_pitcher": st.column_config.TextColumn("vs P"),
+                    "opp_pitcher_grade": st.column_config.TextColumn("PGrd", width="small"),
+                    "recent_hr": st.column_config.NumberColumn(
+                        "L15 HR", format="%d", width="small",
+                        help="HRs in last 15 games. 0 = cold streak."),
+                    "barrel_pct": st.column_config.NumberColumn("Brl%", format="%.1f%%"),
+                    "xwoba": st.column_config.NumberColumn("xwOBA", format="%.3f"),
+                    "iso": st.column_config.NumberColumn("ISO", format="%.3f"),
+                    "hr_game_pct": st.column_config.NumberColumn("HR%", format="%.1f%%"),
+                },
+            )
+
     if "smash_spot" in qualified.columns and (qualified["smash_spot"] != "").any():
         st.markdown("---")
         st.markdown("**🔥 Today's Smash Spots — Triple-Threat HR Opportunities**")
@@ -4387,10 +4477,30 @@ for _, game in slate.iterrows():
         day_night_label = "🌙 NIGHT GAME"
     else:
         day_night_label = ""
+
+    # ROOF STATUS — show what MLB reports, with manual override option
+    # for retractable parks where MLB hasn't reported status yet.
+    real_roof_closed = ctx.get("real_roof_closed")  # True / False / None
+    roof_condition = ctx.get("roof_condition", "")
+    venue_park = get_park(game.get("venue", "")) or {}
+    venue_roof_type = venue_park.get("roof", "open")
+
+    roof_label = ""
+    if real_roof_closed is True:
+        roof_label = f"🏟️ ROOF CLOSED ({roof_condition})" if roof_condition else "🏟️ ROOF CLOSED (MLB-confirmed)"
+    elif real_roof_closed is False and venue_roof_type == "retractable":
+        roof_label = "🏟️ ROOF OPEN (MLB-confirmed)"
+    elif venue_roof_type == "dome":
+        roof_label = "🏟️ DOME (always closed)"
+    elif venue_roof_type == "retractable":
+        roof_label = "🏟️ Retractable roof — status unknown, using temp guess"
+
     if hr_env_flag:
         combined_msg = hr_env_flag
         if day_night_label:
             combined_msg += f" · {day_night_label}"
+        if roof_label:
+            combined_msg += f" · {roof_label}"
         if hr_env_color == "success":
             st.success(combined_msg)
         elif hr_env_color == "info":
@@ -4401,14 +4511,33 @@ for _, game in slate.iterrows():
             st.error(combined_msg)
         else:
             st.caption(combined_msg)
-    elif day_night_label:
-        st.caption(day_night_label)
+    elif day_night_label or roof_label:
+        st.caption(" · ".join(s for s in [day_night_label, roof_label] if s))
 
-    # Pull-wind interaction summary, if applicable
+    # Pull-wind interaction summary — show prominently when wind significantly
+    # helps or hurts a handedness side. User asked for easy-to-see flag.
     pull_summaries = ctx.get("pull_wind_summary", [])
     if pull_summaries:
-        pull_msg = " · ".join(pull_summaries)
-        st.caption(f"🎯 **Pull-side wind:** {pull_msg}")
+        # Determine which sides are affected
+        all_msgs = " · ".join(pull_summaries)
+        lhb_helped = "RF" in all_msgs and "boost" in all_msgs.lower()
+        rhb_helped = "LF" in all_msgs and "boost" in all_msgs.lower()
+        lhb_hurt = "RF" in all_msgs and "suppress" in all_msgs.lower()
+        rhb_hurt = "LF" in all_msgs and "suppress" in all_msgs.lower()
+        if lhb_helped and rhb_helped:
+            st.info(f"🌬️ **STRONG WIND — boosts BOTH LHB & RHB:** {all_msgs}")
+        elif lhb_helped:
+            st.info(f"🌬️ **Wind FAVORS LHB:** {all_msgs}")
+        elif rhb_helped:
+            st.info(f"🌬️ **Wind FAVORS RHB:** {all_msgs}")
+        elif lhb_hurt and rhb_hurt:
+            st.warning(f"🌬️ **WIND SUPPRESSES HRs both sides:** {all_msgs}")
+        elif lhb_hurt:
+            st.warning(f"🌬️ **Wind hurts LHB:** {all_msgs}")
+        elif rhb_hurt:
+            st.warning(f"🌬️ **Wind hurts RHB:** {all_msgs}")
+        else:
+            st.caption(f"🎯 **Pull-side wind:** {all_msgs}")
 
     info_cols = st.columns(4)
     with info_cols[0]:
