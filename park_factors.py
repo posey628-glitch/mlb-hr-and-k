@@ -65,6 +65,10 @@ PARKS = {
     "George M. Steinbrenner Field": {"hr_factor": 100, "hr_factor_L": 100, "hr_factor_R": 100, "runs_factor": 100, "cf_bearing": 0, "lat": 27.980, "lon": -82.507, "roof": "open"},
     "Camden Yards":          {"hr_factor": 99,  "hr_factor_L": 102, "hr_factor_R": 97,  "runs_factor": 99,  "cf_bearing": 18,  "lat": 39.284, "lon": -76.622,  "roof": "open"},
     "Oriole Park at Camden Yards": {"hr_factor": 99, "hr_factor_L": 102, "hr_factor_R": 97, "runs_factor": 99, "cf_bearing": 18, "lat": 39.284, "lon": -76.622, "roof": "open"},
+    # White Sox park — was "Guaranteed Rate Field", renamed "Rate Field" Jan 2025.
+    # MLB Stats API venue.name returns "Rate Field" now. Include both for safety.
+    "Rate Field":            {"hr_factor": 105, "hr_factor_L": 103, "hr_factor_R": 107, "runs_factor": 102, "cf_bearing": 35, "lat": 41.830, "lon": -87.634, "roof": "open"},
+    "Guaranteed Rate Field": {"hr_factor": 105, "hr_factor_L": 103, "hr_factor_R": 107, "runs_factor": 102, "cf_bearing": 35, "lat": 41.830, "lon": -87.634, "roof": "open"},
 }
 
 
