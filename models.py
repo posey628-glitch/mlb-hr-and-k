@@ -650,7 +650,11 @@ def build_pitcher_slate(
         ip = row.get("ip")
         gs = row.get("games_started")
         gp = row.get("games_played")
-        is_rookie = row.get("is_rookie", False)
+        _rookie_raw = row.get("is_rookie", False)
+        try:
+            is_rookie = bool(_rookie_raw) if (_rookie_raw is not None and not pd.isna(_rookie_raw)) else False
+        except (TypeError, ValueError):
+            is_rookie = False
         # MLB's official primaryPosition: "SP" / "RP" / "P" / "TWP" / ""
         # When MLB says SP, trust it as a starter regardless of low season IP.
         mlb_position = (row.get("primary_position") or "").upper()
@@ -673,7 +677,7 @@ def build_pitcher_slate(
         if (ip is None or pd.isna(ip)) and (gs is None or pd.isna(gs)):
             return "❔ NO DATA"
 
-        rookie_prefix = "🌱 " if (is_rookie is True) else ""
+        rookie_prefix = "🌱 " if is_rookie else ""
 
         # Safe numeric values
         gs_n = float(gs) if (gs is not None and not pd.isna(gs)) else 0
@@ -1029,7 +1033,11 @@ def recompute_pitcher_roles(p_slate: pd.DataFrame, slate_date=None) -> pd.DataFr
         ip = row.get("ip")
         gs = row.get("games_started")
         gp = row.get("games_played")
-        is_rookie = row.get("is_rookie", False)
+        _rookie_raw = row.get("is_rookie", False)
+        try:
+            is_rookie = bool(_rookie_raw) if (_rookie_raw is not None and not pd.isna(_rookie_raw)) else False
+        except (TypeError, ValueError):
+            is_rookie = False
         mlb_position = (row.get("primary_position") or "").upper()
         # NA-safe IL info handling. `or 0` raises NAType.__bool__ on pd.NA.
         days_since_return = row.get("days_since_return")
@@ -1046,7 +1054,7 @@ def recompute_pitcher_roles(p_slate: pd.DataFrame, slate_date=None) -> pd.DataFr
         ) or (il_count >= 1)
         if (ip is None or pd.isna(ip)) and (gs is None or pd.isna(gs)):
             return "❔ NO DATA"
-        rookie_prefix = "🌱 " if (is_rookie is True) else ""
+        rookie_prefix = "🌱 " if is_rookie else ""
         gs_n = float(gs) if (gs is not None and not pd.isna(gs)) else 0
         gp_n = float(gp) if (gp is not None and not pd.isna(gp)) else 0
         ip_n = float(ip) if (ip is not None and not pd.isna(ip)) else 0
