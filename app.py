@@ -24,7 +24,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.05.28-il-fix-v5"
+APP_VERSION = "2026.05.28-il-fix-v6-NUCLEAR"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -221,17 +221,15 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# AUTO CACHE INVALIDATION ON DEPLOY
-# Streamlit's @st.cache_data hashes function arguments, NOT function code.
-# So when we ship a bugfix (e.g. IL detection logic change), the cached old
-# output stays in memory until TTL expires (up to 1 hour). User sees old bugs
-# until they hit "Force refresh" or wait.
-# Fix: on every page load, check session-state version. If it doesn't match
-# the current APP_VERSION constant, clear all caches and reload.
-# This means every new code deploy auto-clears caches on next page view.
-if "_app_version" not in st.session_state:
-    st.session_state["_app_version"] = APP_VERSION
-elif st.session_state["_app_version"] != APP_VERSION:
+# AUTO CACHE INVALIDATION ON DEPLOY + FRESH SESSION
+# Streamlit's @st.cache_data persists across user sessions. When we ship a
+# bugfix, cached function output stays for up to 1 hour (TTL).
+# My previous "only clear on version mismatch" check was broken because
+# session_state is per-user-session — on a fresh load, the value is never
+# present, so we set it without clearing. The clear NEVER fired.
+# Fix: clear cache once per session, unconditionally. Aggressive but correct.
+if "_cache_cleared_this_session" not in st.session_state:
+    st.session_state["_cache_cleared_this_session"] = True
     st.session_state["_app_version"] = APP_VERSION
     try:
         st.cache_data.clear()
@@ -900,10 +898,15 @@ if use_sprint_speed:
 
 st.title(f"⚾ Posey MLB HR & K Data — {selected_date.strftime('%A, %B %d, %Y')}")
 
-# Visible deploy version so user can confirm new code is live.
-# If this string doesn't match what I just told them in chat, the deploy
-# didn't take effect — they're still seeing old code regardless of GitHub.
-st.caption(f"🔧 App version: `{APP_VERSION}` · If this doesn't match latest fix → Streamlit deploy didn't update yet")
+# BIG visible deploy version. If this doesn't say v6-NUCLEAR, deploy hasn't taken effect.
+st.markdown(
+    f"### 🔧 DEPLOY VERSION: `{APP_VERSION}`"
+)
+st.caption(
+    "👆 **This version string must match the latest fix from chat.** "
+    "If it says an older version (v4, v5, etc.), the Streamlit deploy didn't "
+    "complete — wait 60 seconds and refresh, or check Streamlit Cloud status."
+)
 
 # Display current ET time + when each data source was last refreshed
 try:
@@ -1589,12 +1592,18 @@ if not p_slate.empty and "pitcher_id" in p_slate.columns:
 # MLB doesn't list IL'd pitchers as probable starters. If our transactions
 # parser thinks Webb is on IL but he's the probable starter today, the slate
 # is the authority — override unconditionally.
-# This is also the most reliable defense against future IL detection bugs.
-# We previously conditioned on `== True` but that fails if on_il is stored as
-# int 1, numpy.bool_, or "True" string. Just set to False for everyone.
+# NUCLEAR v6 FIX: previous version only cleared on_il. But days_since_return
+# and il_count_this_season are SEPARATE fields the warn flag + role check
+# also read. Even with on_il=False, if days_since_return=3, you'd see
+# "🏥 FRESH IL (3d)" — and if il_count>0, role check thinks pitcher is
+# "returning from IL". Clear EVERYTHING for these pitchers.
 if not p_slate.empty:
-    if "on_il" in p_slate.columns:
-        p_slate["on_il"] = False
+    for il_col in ("on_il", "days_since_return", "il_count_this_season"):
+        if il_col in p_slate.columns:
+            if il_col == "on_il":
+                p_slate[il_col] = False
+            else:
+                p_slate[il_col] = pd.NA
     # Also re-run role classification with the cleaned data
     try:
         from models import recompute_pitcher_roles
@@ -1602,18 +1611,23 @@ if not p_slate.empty:
     except (ImportError, AttributeError):
         pass
 
-    # FINAL ROLE NORMALIZATION: if anything still says "RELIEVER" or "BULK",
-    # those labels are deprecated — replace with the modern equivalent.
-    # By definition every pitcher here is starting tonight; "🚨 OPENER" is the
-    # right label for someone MLB lists as RP. Pure RELIEVER label should
-    # never appear in p_slate at all.
+    # FINAL ROLE NORMALIZATION: catch any deprecated labels that leak through.
+    # "🚨 RELIEVER" and "🔄 BULK" are dead labels — replace with "🚨 OPENER".
+    # Also catches case mismatches and partial matches defensively.
     if "role" in p_slate.columns:
         def _normalize_role(r):
             s = str(r) if r is not None else ""
-            if "🚨 RELIEVER" in s:
-                return s.replace("🚨 RELIEVER", "🚨 OPENER")
-            if "🔄 BULK" in s:
-                return s.replace("🔄 BULK", "🚨 OPENER")
+            # Case-insensitive substring matching to catch any variant
+            s_lower = s.lower()
+            if "reliever" in s_lower:
+                # Preserve any emoji/prefix but replace the word
+                s = s.replace("🚨 RELIEVER", "🚨 OPENER")
+                s = s.replace("RELIEVER", "OPENER")
+                s = s.replace("Reliever", "OPENER")
+                s = s.replace("reliever", "OPENER")
+            if "bulk" in s_lower:
+                s = s.replace("🔄 BULK", "🚨 OPENER")
+                s = s.replace("BULK", "OPENER")
             return s
         p_slate["role"] = p_slate["role"].apply(_normalize_role)
 
@@ -2049,6 +2063,38 @@ if not p_slate.empty:
         hide_index=True, use_container_width=True,
         column_config=col_config,
     )
+
+    # DIAGNOSTIC: show LITERAL column values so user can verify what's actually
+    # in the data when they're confused about what they see. Especially useful
+    # for emoji-based flags that might be misread (🏥 ≠ "on IL", 🚨 ≠ "reliever").
+    with st.expander("🔍 Diagnostic: show literal flag/role values for any pitcher"):
+        st.caption(
+            "If you think a pitcher is flagged incorrectly, find them here. "
+            "Shows the EXACT text in each flag column (with emojis spelled out). "
+            "💡 Note: 🏥 RETURNING means 'starter just back from IL' — NOT 'on IL'. "
+            "🚨 OPENER means 'MLB lists as RP, ~1-2 IP expected' — NOT 'reliever'."
+        )
+        if not p_slate.empty and "pitcher_name" in p_slate.columns:
+            search = st.text_input(
+                "Filter pitchers (partial name match):",
+                key="diag_pitcher_search",
+                placeholder="webb, giolito, crow...",
+            )
+            diag_df = p_slate.copy()
+            if search:
+                diag_df = diag_df[
+                    diag_df["pitcher_name"].str.contains(search, case=False, na=False)
+                ]
+            diag_cols = [c for c in [
+                "pitcher_name", "team", "role", "warn", "primary_position",
+                "on_il", "days_since_return", "il_count_this_season",
+                "ip", "games_started", "games_played", "is_rookie",
+            ] if c in diag_df.columns]
+            if not diag_df.empty:
+                st.dataframe(
+                    diag_df[diag_cols].head(30),
+                    hide_index=True, use_container_width=True,
+                )
 
 st.divider()
 # ============================================================================
