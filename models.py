@@ -654,13 +654,20 @@ def build_pitcher_slate(
         # MLB's official primaryPosition: "SP" / "RP" / "P" / "TWP" / ""
         # When MLB says SP, trust it as a starter regardless of low season IP.
         mlb_position = (row.get("primary_position") or "").upper()
-        # IL info
+        # IL info — be defensive about pandas NA. `or 0` raises NAType.__bool__
+        # error when the field is pd.NA, so we explicitly check for NA first.
         days_since_return = row.get("days_since_return")
-        il_count = row.get("il_count_this_season", 0) or 0
+        if pd.isna(days_since_return):
+            days_since_return = None
+        _il_raw = row.get("il_count_this_season", 0)
+        try:
+            il_count = 0 if pd.isna(_il_raw) else (int(_il_raw) if _il_raw else 0)
+        except (TypeError, ValueError):
+            il_count = 0
         is_returning_starter = (
-            days_since_return is not None and not pd.isna(days_since_return)
+            days_since_return is not None
             and 0 <= days_since_return <= 30
-        ) or (il_count is not None and not pd.isna(il_count) and il_count >= 1)
+        ) or (il_count >= 1)
 
         # NO DATA case
         if (ip is None or pd.isna(ip)) and (gs is None or pd.isna(gs)):
@@ -1024,12 +1031,19 @@ def recompute_pitcher_roles(p_slate: pd.DataFrame, slate_date=None) -> pd.DataFr
         gp = row.get("games_played")
         is_rookie = row.get("is_rookie", False)
         mlb_position = (row.get("primary_position") or "").upper()
+        # NA-safe IL info handling. `or 0` raises NAType.__bool__ on pd.NA.
         days_since_return = row.get("days_since_return")
-        il_count = row.get("il_count_this_season", 0) or 0
+        if pd.isna(days_since_return):
+            days_since_return = None
+        _il_raw = row.get("il_count_this_season", 0)
+        try:
+            il_count = 0 if pd.isna(_il_raw) else (int(_il_raw) if _il_raw else 0)
+        except (TypeError, ValueError):
+            il_count = 0
         is_returning_starter = (
-            days_since_return is not None and not pd.isna(days_since_return)
+            days_since_return is not None
             and 0 <= days_since_return <= 30
-        ) or (il_count is not None and not pd.isna(il_count) and il_count >= 1)
+        ) or (il_count >= 1)
         if (ip is None or pd.isna(ip)) and (gs is None or pd.isna(gs)):
             return "❔ NO DATA"
         rookie_prefix = "🌱 " if (is_rookie is True) else ""
