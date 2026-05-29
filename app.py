@@ -24,7 +24,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.05.28-il-fix-v3"
+APP_VERSION = "2026.05.28-il-fix-v5"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -900,6 +900,11 @@ if use_sprint_speed:
 
 st.title(f"⚾ Posey MLB HR & K Data — {selected_date.strftime('%A, %B %d, %Y')}")
 
+# Visible deploy version so user can confirm new code is live.
+# If this string doesn't match what I just told them in chat, the deploy
+# didn't take effect — they're still seeing old code regardless of GitHub.
+st.caption(f"🔧 App version: `{APP_VERSION}` · If this doesn't match latest fix → Streamlit deploy didn't update yet")
+
 # Display current ET time + when each data source was last refreshed
 try:
     _now_et = pd.Timestamp.now(tz="US/Eastern")
@@ -1583,18 +1588,34 @@ if not p_slate.empty and "pitcher_id" in p_slate.columns:
 # HARD OVERRIDE: probable starters cannot be on IL.
 # MLB doesn't list IL'd pitchers as probable starters. If our transactions
 # parser thinks Webb is on IL but he's the probable starter today, the slate
-# is the authority — override on_il to False.
+# is the authority — override unconditionally.
 # This is also the most reliable defense against future IL detection bugs.
-if not p_slate.empty and "on_il" in p_slate.columns:
-    n_was_il = int((p_slate["on_il"] == True).sum())
-    if n_was_il > 0:
-        p_slate.loc[p_slate["on_il"] == True, "on_il"] = False
-        # Also re-run role check since IL status fed into it
-        try:
-            from models import recompute_pitcher_roles
-            p_slate = recompute_pitcher_roles(p_slate, slate_date=selected_date)
-        except (ImportError, AttributeError):
-            pass
+# We previously conditioned on `== True` but that fails if on_il is stored as
+# int 1, numpy.bool_, or "True" string. Just set to False for everyone.
+if not p_slate.empty:
+    if "on_il" in p_slate.columns:
+        p_slate["on_il"] = False
+    # Also re-run role classification with the cleaned data
+    try:
+        from models import recompute_pitcher_roles
+        p_slate = recompute_pitcher_roles(p_slate, slate_date=selected_date)
+    except (ImportError, AttributeError):
+        pass
+
+    # FINAL ROLE NORMALIZATION: if anything still says "RELIEVER" or "BULK",
+    # those labels are deprecated — replace with the modern equivalent.
+    # By definition every pitcher here is starting tonight; "🚨 OPENER" is the
+    # right label for someone MLB lists as RP. Pure RELIEVER label should
+    # never appear in p_slate at all.
+    if "role" in p_slate.columns:
+        def _normalize_role(r):
+            s = str(r) if r is not None else ""
+            if "🚨 RELIEVER" in s:
+                return s.replace("🚨 RELIEVER", "🚨 OPENER")
+            if "🔄 BULK" in s:
+                return s.replace("🔄 BULK", "🚨 OPENER")
+            return s
+        p_slate["role"] = p_slate["role"].apply(_normalize_role)
 
 # ----- DATA AVAILABILITY WARNING -----
 # If MLB Stats API data is mostly missing, warn the user explicitly so they
@@ -1648,20 +1669,16 @@ if not p_slate.empty:
             flags = []
             if r.get("sample_noise"):
                 flags.append("📉")
-            # Fresh-from-IL flag
-            # CRITICAL: NaN is truthy in Python (bool(float('nan')) == True),
-            # so we must explicitly check for NaN and treat it as "not on IL."
-            # Without this guard, every pitcher with no IL data (most of them)
-            # was being flagged as 🚑 ON IL.
+            # NOTE: Removed 🚑 ON IL flag entirely. By definition, every pitcher
+            # in p_slate is a probable starter for today's game — they CANNOT
+            # be on IL. Logan Webb showed ON IL repeatedly because of transaction-
+            # parsing edge cases (paternity, restricted list, etc.) that no
+            # amount of pattern matching can fully prevent. The slate itself is
+            # the authority: if MLB lists you as the probable starter, you're
+            # not on IL. Period.
+            # 🏥 FRESH IL (just back) is still meaningful for workload context.
             days_since = r.get("days_since_return")
-            on_il = r.get("on_il")
-            on_il_is_true = (
-                on_il is True
-                or (isinstance(on_il, (int, float)) and not pd.isna(on_il) and on_il == 1)
-            )
-            if on_il_is_true:
-                flags.append("🚑 ON IL")
-            elif (days_since is not None and not pd.isna(days_since)
+            if (days_since is not None and not pd.isna(days_since)
                     and 0 <= days_since <= 7):
                 flags.append(f"🏥 FRESH IL ({int(days_since)}d)")
             return " ".join(flags) if flags else ""
@@ -4181,43 +4198,72 @@ if all_hitters:
     # ====================================================================
     # User asked: "if a player hasnt homered in a while but has all the stats
     # indicating that they have just had bad luck or will go soon..."
-    # Criteria:
-    #   - Has strong underlying power profile (barrel% ≥ 8, xwOBA ≥ 0.330, ISO ≥ 0.180)
-    #   - Has 0 HR in last 15 games (cold streak)
-    #   - Season HR rate suggests they should have hit by now
-    #   - Today's matchup is at least neutral (not facing TOUGH/ELITE pitcher)
+    # Modernized criteria (May 28, 2026): uses richer Statcast signals to
+    # match competitor "He's Due List" methodology:
+    #   - barrel% (quality of contact)
+    #   - hard-hit% (consistent loud contact)
+    #   - xwOBA / xSLG (expected production from underlying contact)
+    #   - ISO (real power output)
+    #   - pull% (HRs come from pulled contact for most hitters)
+    #   - avg exit velocity
+    # A hitter who's elite in MULTIPLE of these but has zero recent HRs is
+    # the strongest regression candidate.
     if all(c in qualified.columns for c in ["recent_hr", "barrel_pct", "xwoba", "iso"]):
         due_pool = qualified.copy()
+        # Looser threshold than before — let more candidates in, score harder
         due_pool = due_pool[
             (due_pool["recent_hr"].fillna(99) == 0)  # 0 HR in last 15
-            & (due_pool["barrel_pct"].fillna(0) >= 8)
-            & (due_pool["xwoba"].fillna(0) >= 0.330)
-            & (due_pool["iso"].fillna(0) >= 0.160)
+            & (due_pool["barrel_pct"].fillna(0) >= 7)
+            & (due_pool["xwoba"].fillna(0) >= 0.320)
+            & (due_pool["iso"].fillna(0) >= 0.140)
         ]
         # Avoid the trap of recommending guys vs aces
         if "opp_pitcher_grade" in due_pool.columns:
             due_pool = due_pool[~due_pool["opp_pitcher_grade"].isin(["TOUGH", "ELITE"])]
         if not due_pool.empty:
-            # Score by "expected vs actual gap"
-            # Higher barrel + xwOBA + iso = should have homered more
             due_pool = due_pool.copy()
-            due_pool["due_score"] = (
-                due_pool["barrel_pct"].fillna(0) * 2
-                + due_pool["xwoba"].fillna(0) * 100
-                + due_pool["iso"].fillna(0) * 100
-            )
+            # Composite "due score" — higher weight on quality-of-contact metrics
+            # because that's what predicts future HRs better than past HR count.
+            score_components = []
+            # Barrel% is THE strongest single HR predictor
+            if "barrel_pct" in due_pool.columns:
+                score_components.append(due_pool["barrel_pct"].fillna(0) * 3.0)
+            # Hard-hit% (95+ mph) reinforces barrel signal
+            if "hard_hit" in due_pool.columns:
+                score_components.append(due_pool["hard_hit"].fillna(0) * 0.8)
+            # xwOBA — expected production from full plate appearance profile
+            if "xwoba" in due_pool.columns:
+                score_components.append(due_pool["xwoba"].fillna(0) * 100)
+            # xSLG — expected slugging based on quality of contact
+            if "xslg" in due_pool.columns:
+                score_components.append(pd.to_numeric(due_pool["xslg"], errors="coerce").fillna(0) * 50)
+            # ISO — real isolated power
+            if "iso" in due_pool.columns:
+                score_components.append(due_pool["iso"].fillna(0) * 80)
+            # Pull rate boost — pulled contact produces ~70% of MLB HRs
+            if "pull_pct" in due_pool.columns:
+                score_components.append(due_pool["pull_pct"].fillna(0) * 0.3)
+            # Exit velocity — raw power
+            if "avg_ev" in due_pool.columns:
+                score_components.append(due_pool["avg_ev"].fillna(0) * 0.5)
+            if score_components:
+                due_pool["due_score"] = sum(score_components)
+            else:
+                due_pool["due_score"] = due_pool["barrel_pct"].fillna(0) * 2
             due_pool = due_pool.sort_values("due_score", ascending=False).head(10)
             st.markdown("---")
             st.markdown(f"**⏳ Due to Homer ({len(due_pool)}) — bad luck candidates**")
             st.caption(
-                "Hitters with elite power metrics (barrel% ≥8, xwOBA ≥.330, ISO ≥.160) "
-                "but ZERO HRs in their last 15 games. The underlying stats say they "
-                "should have homered by now — bad luck / wrong pitches faced. Regression "
-                "candidates. **TOUGH/ELITE pitcher matchups filtered out.**"
+                "Hitters with elite power metrics (barrel% ≥7, xwOBA ≥.320, ISO ≥.140) "
+                "but ZERO HRs in their last 15 games. Ranked by composite score combining "
+                "barrel%, hard-hit%, xwOBA, xSLG, ISO, pull%, and exit velo. "
+                "These underlying signals predict future HRs better than recent HR count. "
+                "**TOUGH/ELITE pitcher matchups filtered out.**"
             )
             due_cols = [c for c in [
                 "player_name", "team", "game", "opp_pitcher", "opp_pitcher_grade",
-                "recent_hr", "barrel_pct", "xwoba", "iso", "hr_game_pct",
+                "recent_hr", "barrel_pct", "hard_hit", "xwoba", "xslg", "iso",
+                "pull_pct", "avg_ev", "hr_game_pct",
             ] if c in due_pool.columns]
             st.dataframe(
                 due_pool[due_cols], hide_index=True, use_container_width=True,
@@ -4231,8 +4277,12 @@ if all_hitters:
                         "L15 HR", format="%d", width="small",
                         help="HRs in last 15 games. 0 = cold streak."),
                     "barrel_pct": st.column_config.NumberColumn("Brl%", format="%.1f%%"),
+                    "hard_hit": st.column_config.NumberColumn("HH%", format="%.1f%%"),
                     "xwoba": st.column_config.NumberColumn("xwOBA", format="%.3f"),
+                    "xslg": st.column_config.NumberColumn("xSLG", format="%.3f"),
                     "iso": st.column_config.NumberColumn("ISO", format="%.3f"),
+                    "pull_pct": st.column_config.NumberColumn("Pull%", format="%.1f%%"),
+                    "avg_ev": st.column_config.NumberColumn("EV", format="%.1f"),
                     "hr_game_pct": st.column_config.NumberColumn("HR%", format="%.1f%%"),
                 },
             )
