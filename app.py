@@ -24,7 +24,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.05.28-il-fix-v7-NA-SAFE"
+APP_VERSION = "2026.05.29-audit-v8"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -1710,8 +1710,17 @@ if not p_slate.empty:
         def _platoon_hr_flag(r):
             l_hr_pa = r.get("vs_lhb_hr_per_pa")
             r_hr_pa = r.get("vs_rhb_hr_per_pa")
-            l_pa = r.get("vs_lhb_pa", 0) or 0
-            r_pa = r.get("vs_rhb_pa", 0) or 0
+            # NA-safe PA extraction — `or 0` raises NAType.__bool__ on pd.NA
+            _l_raw = r.get("vs_lhb_pa", 0)
+            _r_raw = r.get("vs_rhb_pa", 0)
+            try:
+                l_pa = 0 if pd.isna(_l_raw) else float(_l_raw or 0)
+            except (TypeError, ValueError):
+                l_pa = 0
+            try:
+                r_pa = 0 if pd.isna(_r_raw) else float(_r_raw or 0)
+            except (TypeError, ValueError):
+                r_pa = 0
             # Need meaningful samples to make a call (min 40 PA each side)
             if (l_hr_pa is None or pd.isna(l_hr_pa)
                 or r_hr_pa is None or pd.isna(r_hr_pa)
@@ -2813,17 +2822,39 @@ for _, game in slate.iterrows():
     try:
         # Park K factor (small effect, but worth including)
         pkf = park_k_factor(venue) if venue else 1.0
+        # Look up role-aware expected_ip from p_slate (models.py computed it)
+        # Was a real bug: k_total_projection defaults to expected_ip=5.5 for
+        # every pitcher, so openers and rookie starters had inflated K projections.
+        def _exp_ip_for_pitcher(p_row):
+            if not p_row:
+                return 5.5
+            pid = p_row.get("player_id")
+            if pid is not None and not p_slate.empty and "pitcher_id" in p_slate.columns:
+                try:
+                    _ids = pd.to_numeric(p_slate["pitcher_id"], errors="coerce")
+                    _match = p_slate[_ids == int(pid)]
+                    if not _match.empty and "expected_ip" in _match.columns:
+                        v = _match.iloc[0].get("expected_ip")
+                        if v is not None and not pd.isna(v):
+                            return float(v)
+                except Exception:
+                    pass
+            return 5.5  # fallback to legacy default
         if away_p_row:
+            away_exp_ip = _exp_ip_for_pitcher(away_p_row)
             away_k_proj = k_total_projection(
                 away_p_row, home_lineup_k_pct,
                 ump_k_factor=ump.get("k_factor", 1.0),
                 park_k_factor=pkf,
+                expected_ip=away_exp_ip,
             )
         if home_p_row:
+            home_exp_ip = _exp_ip_for_pitcher(home_p_row)
             home_k_proj = k_total_projection(
                 home_p_row, away_lineup_k_pct,
                 ump_k_factor=ump.get("k_factor", 1.0),
                 park_k_factor=pkf,
+                expected_ip=home_exp_ip,
             )
     except Exception:
         pass
