@@ -2178,3 +2178,45 @@ def get_recent_transactions(days_back: int = 2, _stats_day: str = "") -> pd.Data
         # Sort newest first
         df = df.sort_values("date", ascending=False).reset_index(drop=True)
     return df
+
+
+# =============================================================================
+# PITCHER PRIMARY POSITION (SP / RP / P) — MLB's official role label
+# =============================================================================
+# MLB Stats API returns each player's primaryPosition. For pitchers this is
+# usually one of:
+#   - "SP"  (Starting Pitcher)
+#   - "RP"  (Relief Pitcher)
+#   - "P"   (generic Pitcher - ambiguous)
+#   - "TWP" (Two-Way Player, e.g., Ohtani)
+# When MLB says SP, trust it. When they say RP but we have them as a probable
+# starter today, that's a real signal they're being used as an opener.
+
+@st.cache_data(ttl=3600)
+def get_pitcher_primary_positions(pitcher_ids: tuple) -> dict:
+    """
+    Bulk-fetch primary position designations for a tuple of pitcher IDs.
+    Returns {player_id: "SP" | "RP" | "P" | "TWP" | ""}.
+    """
+    if not pitcher_ids:
+        return {}
+    # MLB Stats API people endpoint supports comma-separated IDs (up to ~100)
+    ids_str = ",".join(str(int(pid)) for pid in pitcher_ids if pid)
+    url = f"https://statsapi.mlb.com/api/v1/people?personIds={ids_str}"
+    out = {}
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=15)
+        if r.status_code != 200:
+            return {}
+        data = r.json()
+        for person in data.get("people", []):
+            pid = person.get("id")
+            pos = (person.get("primaryPosition") or {}).get("abbreviation", "")
+            if pid:
+                try:
+                    out[int(pid)] = pos
+                except (ValueError, TypeError):
+                    continue
+        return out
+    except Exception:
+        return {}
