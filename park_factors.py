@@ -78,13 +78,50 @@ PARKS = {
 
 
 def get_park(venue_name: str) -> dict:
-    """Return park dict, falling back to neutral defaults if unknown."""
+    """Return park dict, falling back to neutral defaults if unknown.
+
+    Match strategy (in order):
+    1. Exact name match (most reliable)
+    2. Case-insensitive exact match
+    3. Substring match — either direction. Catches "Uniqlo Field at Dodger
+       Stadium" matching our "Uniqlo Field" key, or vice versa.
+    4. First-word fallback (last resort).
+
+    Returns dict with `unknown: True` if no match — caller should warn.
+    """
+    if not venue_name:
+        return _unknown_park()
+    # 1. Exact
     if venue_name in PARKS:
         return PARKS[venue_name]
-    # Try fuzzy match on the first word
+    # 2. Case-insensitive exact
+    venue_lower = venue_name.strip().lower()
     for k, v in PARKS.items():
-        if venue_name and venue_name.split()[0].lower() in k.lower():
+        if k.lower() == venue_lower:
             return v
+    # 3. Substring match in either direction. Use lowercase for safety.
+    # We do this even with very short keys because "Uniqlo Field" should
+    # match "Uniqlo Field at Dodger Stadium" and vice versa.
+    for k, v in PARKS.items():
+        k_lower = k.lower()
+        if k_lower in venue_lower or venue_lower in k_lower:
+            # Require at least 5 characters to match to avoid false hits
+            # (e.g., "field" alone matching every venue with "field" in name)
+            if len(k_lower) >= 8 or len(venue_lower) >= 8:
+                return v
+    # 4. First-word fallback
+    try:
+        first_word = venue_name.split()[0].lower()
+        if len(first_word) >= 4:
+            for k, v in PARKS.items():
+                if first_word in k.lower():
+                    return v
+    except Exception:
+        pass
+    return _unknown_park()
+
+
+def _unknown_park() -> dict:
     return {
         "hr_factor": 100, "hr_factor_L": 100, "hr_factor_R": 100,
         "runs_factor": 100, "cf_bearing": 0,
