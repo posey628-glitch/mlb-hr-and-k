@@ -1534,6 +1534,28 @@ except TypeError:
     except TypeError:
         p_slate = build_pitcher_slate(slate, pitcher_stats, pitcher_recent=pitcher_recent_map)
 
+# Enrich p_slate with MLB's primaryPosition designation (SP/RP/P).
+# This gives us MLB's actual role label rather than inferring from games-started.
+# Coleman Crow example: rookie with 2 starts looks like a "RELIEVER" by our
+# games-started inference, but MLB lists him as SP. Trust MLB's label.
+if not p_slate.empty and "pitcher_id" in p_slate.columns:
+    try:
+        from data_fetcher import get_pitcher_primary_positions
+        _pid_tuple = tuple(int(x) for x in p_slate["pitcher_id"].dropna().tolist())
+        _pos_map = get_pitcher_primary_positions(_pid_tuple)
+        p_slate["primary_position"] = p_slate["pitcher_id"].apply(
+            lambda pid: _pos_map.get(int(pid), "") if pd.notna(pid) else ""
+        )
+        # Now re-run role classification using the new position signal.
+        # The first pass inside build_pitcher_slate ran without primary_position.
+        try:
+            from models import recompute_pitcher_roles
+            p_slate = recompute_pitcher_roles(p_slate, slate_date=selected_date)
+        except (ImportError, AttributeError):
+            pass  # older models.py without recompute function
+    except Exception:
+        p_slate["primary_position"] = ""
+
 # ----- DATA AVAILABILITY WARNING -----
 # If MLB Stats API data is mostly missing, warn the user explicitly so they
 # don't think the model is broken when it's actually a data fetch issue.
@@ -1711,7 +1733,14 @@ if not p_slate.empty:
         ),
         "role": st.column_config.TextColumn(
             "Role", width="small",
-            help="✓ established starter · ⚠️ LOW IP · 🔄 SWING · 🚨 RELIEVER (test score scaled down)",
+            help=(
+                "✓ Established starter (full IP expected) · "
+                "🌱 NEW STARTER (rookie/recent recall, short leash) · "
+                "🏥 RETURNING (just back from IL) · "
+                "⚠️ LOW IP (below-expected workload) · "
+                "🔄 SWING (used in starts + relief alternately) · "
+                "🚨 OPENER (MLB lists as RP, ~1-2 IP expected)"
+            ),
         ),
         "warn": st.column_config.TextColumn(
             "Flag", width="small",
