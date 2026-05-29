@@ -19,6 +19,13 @@ import pandas as pd
 import requests
 import streamlit as st
 
+# APP VERSION - bump this any time we ship a bugfix that needs to invalidate
+# the data cache (e.g. IL detection logic changed, park database updated, etc.)
+# On startup we compare this against the cached version and clear @st.cache_data
+# if they differ. This avoids the "user uploads new code but Streamlit serves
+# the old cached function output until 1-hour TTL expires" problem.
+APP_VERSION = "2026.05.28-il-fix-v3"
+
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
 try:
@@ -213,6 +220,23 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# AUTO CACHE INVALIDATION ON DEPLOY
+# Streamlit's @st.cache_data hashes function arguments, NOT function code.
+# So when we ship a bugfix (e.g. IL detection logic change), the cached old
+# output stays in memory until TTL expires (up to 1 hour). User sees old bugs
+# until they hit "Force refresh" or wait.
+# Fix: on every page load, check session-state version. If it doesn't match
+# the current APP_VERSION constant, clear all caches and reload.
+# This means every new code deploy auto-clears caches on next page view.
+if "_app_version" not in st.session_state:
+    st.session_state["_app_version"] = APP_VERSION
+elif st.session_state["_app_version"] != APP_VERSION:
+    st.session_state["_app_version"] = APP_VERSION
+    try:
+        st.cache_data.clear()
+    except Exception:
+        pass
 
 
 def safe_int(val) -> Optional[int]:
@@ -1555,6 +1579,22 @@ if not p_slate.empty and "pitcher_id" in p_slate.columns:
             pass  # older models.py without recompute function
     except Exception:
         p_slate["primary_position"] = ""
+
+# HARD OVERRIDE: probable starters cannot be on IL.
+# MLB doesn't list IL'd pitchers as probable starters. If our transactions
+# parser thinks Webb is on IL but he's the probable starter today, the slate
+# is the authority — override on_il to False.
+# This is also the most reliable defense against future IL detection bugs.
+if not p_slate.empty and "on_il" in p_slate.columns:
+    n_was_il = int((p_slate["on_il"] == True).sum())
+    if n_was_il > 0:
+        p_slate.loc[p_slate["on_il"] == True, "on_il"] = False
+        # Also re-run role check since IL status fed into it
+        try:
+            from models import recompute_pitcher_roles
+            p_slate = recompute_pitcher_roles(p_slate, slate_date=selected_date)
+        except (ImportError, AttributeError):
+            pass
 
 # ----- DATA AVAILABILITY WARNING -----
 # If MLB Stats API data is mostly missing, warn the user explicitly so they
