@@ -665,6 +665,18 @@ def build_pitcher_slate(
             return "❔ NO DATA"
         # Rookie indicator added to any role they fall into
         rookie_prefix = "🌱 " if (is_rookie is True) else ""
+
+        # CRITICAL: starts are the primary signal. If a pitcher has meaningful
+        # GS this season, they ARE a starter — even if total IP is low (could
+        # be returning from injury, short outings, or just early in a recall).
+        # This check runs FIRST so we don't accidentally downgrade a starter.
+        # min_gs scales with season: April=1, May=3, June=4, etc.
+        # Lucas Giolito example: returning from 2024-2025 elbow surgery, 5 GS
+        # but only 22 IP. Previously flagged RELIEVER because IP < 25. WRONG.
+        has_real_starts = (
+            gs is not None and not pd.isna(gs) and gs >= max(min_gs, 3)
+        )
+
         # Explicit zero starts:
         #   - low IP → pure RELIEVER
         #   - meaningful IP (25+) → BULK relief role (long reliever, sometimes opens)
@@ -672,20 +684,9 @@ def build_pitcher_slate(
             if ip is not None and not pd.isna(ip) and ip >= 25:
                 return rookie_prefix + "🔄 BULK"
             return rookie_prefix + "🚨 RELIEVER"
-        # Very low IP when we DO have IP data
-        # EXCEPTION: if pitcher has gs >= 1 AND is_returning_starter, they're
-        # not a reliever — they're a starter coming back from IL with limited
-        # season IP. Mark them as RETURNING STARTER instead.
-        if ip is not None and not pd.isna(ip) and ip < min_ip:
-            if (gs is not None and not pd.isna(gs) and gs >= 1
-                    and is_returning_starter):
-                return rookie_prefix + "🏥 RETURNING"
-            return rookie_prefix + "🚨 RELIEVER"
-        # Bulk reliever between starts - require BOTH high GP/GS ratio AND low IP/outing.
-        # FIX (May 2026): was computing ip/gs which inflates because IP includes
-        # relief outings too. Use ip/gp (per-outing) which is the true average.
-        # Griffin Jax example: 5 GS / 16 GP / 27.2 IP. ip/gs = 5.4 (looks like starter).
-        # ip/gp = 1.7 (clearly a reliever/swing-man).
+
+        # If pitcher has real starts, they're a starter — but check first if
+        # they're a swing/bulk role based on GP >> GS ratio.
         if (gp is not None and gs is not None
                 and not pd.isna(gp) and not pd.isna(gs)
                 and gs > 0 and gp > gs * 1.5):
@@ -693,6 +694,20 @@ def build_pitcher_slate(
                                             and gp > 0) else 5.0
             if ip_per_outing < 3.0:
                 return rookie_prefix + "🔄 SWING"
+
+        # Very low IP when we DO have IP data
+        # EXCEPTION 1: pitcher has real starts → starter, just hasn't pitched deep
+        # EXCEPTION 2: pitcher has gs >= 1 AND is_returning_starter → 🏥 RETURNING
+        if ip is not None and not pd.isna(ip) and ip < min_ip:
+            if has_real_starts:
+                # Has 3+ starts → starter despite low total IP. Flag if returning.
+                if is_returning_starter:
+                    return rookie_prefix + "🏥 RETURNING"
+                return rookie_prefix + "✓"
+            if (gs is not None and not pd.isna(gs) and gs >= 1
+                    and is_returning_starter):
+                return rookie_prefix + "🏥 RETURNING"
+            return rookie_prefix + "🚨 RELIEVER"
         # Low IP but not crazy low
         if ip is not None and not pd.isna(ip) and ip < full_ip * 0.6:
             # Same IL exception
