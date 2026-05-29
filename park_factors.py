@@ -53,6 +53,11 @@ PARKS = {
     "PNC Park":              {"hr_factor": 98,  "hr_factor_L": 92,  "hr_factor_R": 102, "runs_factor": 99,  "cf_bearing": 117, "lat": 40.447, "lon": -80.006,  "roof": "open"},  # Deep RF suppresses LHB
     "Angel Stadium":         {"hr_factor": 97,  "hr_factor_L": 97,  "hr_factor_R": 97,  "runs_factor": 96,  "cf_bearing": 50,  "lat": 33.800, "lon": -117.883, "roof": "open"},
     "Dodger Stadium":        {"hr_factor": 97,  "hr_factor_L": 97,  "hr_factor_R": 97,  "runs_factor": 97,  "cf_bearing": 22,  "lat": 34.073, "lon": -118.240, "roof": "open"},
+    # NEW MARCH 2026: Dodgers sold field naming rights to Uniqlo. MLB Stats API
+    # may now return either "Dodger Stadium" or "Uniqlo Field at Dodger Stadium".
+    # Same physical stadium, same dimensions, same coordinates — just a new name.
+    "Uniqlo Field":          {"hr_factor": 97,  "hr_factor_L": 97,  "hr_factor_R": 97,  "runs_factor": 97,  "cf_bearing": 22,  "lat": 34.073, "lon": -118.240, "roof": "open"},
+    "Uniqlo Field at Dodger Stadium": {"hr_factor": 97, "hr_factor_L": 97, "hr_factor_R": 97, "runs_factor": 97, "cf_bearing": 22, "lat": 34.073, "lon": -118.240, "roof": "open"},
     "Kauffman Stadium":      {"hr_factor": 96,  "hr_factor_L": 96,  "hr_factor_R": 96,  "runs_factor": 99,  "cf_bearing": 5,   "lat": 39.051, "lon": -94.480,  "roof": "open"},
     "Comerica Park":         {"hr_factor": 95,  "hr_factor_L": 96,  "hr_factor_R": 94,  "runs_factor": 97,  "cf_bearing": 39,  "lat": 42.339, "lon": -83.048,  "roof": "open"},
     "loanDepot park":        {"hr_factor": 95,  "hr_factor_L": 95,  "hr_factor_R": 95,  "runs_factor": 96,  "cf_bearing": 36,  "lat": 25.778, "lon": -80.220,  "roof": "retractable"},
