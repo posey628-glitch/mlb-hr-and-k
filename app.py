@@ -1605,8 +1605,73 @@ if not p_slate.empty:
             return " ".join(flags) if flags else ""
         p_slate["warn"] = p_slate.apply(_warn_flag, axis=1)
 
+        # =====================================================================
+        # PLATOON HR VULNERABILITY FLAG
+        # =====================================================================
+        # User example: "Fedde has allowed 10 of last 12 HRs to RHB" — even
+        # if his overall HR rate looks fine, the side-split matters a lot.
+        # Use season vs_lhb_hr_per_pa and vs_rhb_hr_per_pa (which we already
+        # pull) to compute a platoon ratio. If a pitcher's HR rate to one
+        # handedness is significantly higher than the other, flag the
+        # vulnerable side so the user can target that side's hitters.
+        def _platoon_hr_flag(r):
+            l_hr_pa = r.get("vs_lhb_hr_per_pa")
+            r_hr_pa = r.get("vs_rhb_hr_per_pa")
+            l_pa = r.get("vs_lhb_pa", 0) or 0
+            r_pa = r.get("vs_rhb_pa", 0) or 0
+            # Need meaningful samples to make a call (min 40 PA each side)
+            if (l_hr_pa is None or pd.isna(l_hr_pa)
+                or r_hr_pa is None or pd.isna(r_hr_pa)
+                or l_pa < 40 or r_pa < 40):
+                return ""
+            l_hr_pa = float(l_hr_pa)
+            r_hr_pa = float(r_hr_pa)
+            # Avoid div-by-zero — if a side is 0% HR allowed, use minimum 0.001
+            l_safe = max(l_hr_pa, 0.001)
+            r_safe = max(r_hr_pa, 0.001)
+            ratio_r_to_l = r_safe / l_safe  # >1 = more HR to RHB
+            # Require: large ratio AND vulnerable side has high absolute HR rate
+            if ratio_r_to_l >= 2.0 and r_hr_pa >= 0.035:
+                return "💥 RHB"  # Very vulnerable to RHB
+            if ratio_r_to_l >= 1.5 and r_hr_pa >= 0.030:
+                return "💢 RHB"  # Vulnerable to RHB
+            if ratio_r_to_l <= 0.5 and l_hr_pa >= 0.035:
+                return "💥 LHB"
+            if ratio_r_to_l <= 0.67 and l_hr_pa >= 0.030:
+                return "💢 LHB"
+            return ""
+        p_slate["platoon_hr_flag"] = p_slate.apply(_platoon_hr_flag, axis=1)
+
+        # =====================================================================
+        # RECENT HR ALLOWED FLAG
+        # =====================================================================
+        # User: "Severino 3 HRs over last 3 starts" — surface this directly.
+        # We already have recent_hr9 (HR/9 in last 5 starts). Translate that
+        # into an absolute count using recent_ip and recent_starts so user
+        # sees "🔥 5 HR L5" rather than just "HR/9 = 1.94".
+        def _recent_hr_flag(r):
+            recent_ip = r.get("recent_ip")
+            recent_hr9 = r.get("recent_hr9")
+            recent_starts = r.get("recent_starts")
+            if (recent_ip is None or pd.isna(recent_ip) or recent_ip <= 0
+                or recent_hr9 is None or pd.isna(recent_hr9)
+                or recent_starts is None or pd.isna(recent_starts)):
+                return ""
+            # Approximate total recent HRs allowed
+            hr_count = round(float(recent_hr9) * float(recent_ip) / 9.0)
+            n = int(recent_starts)
+            if hr_count >= 6:
+                return f"🔥 {hr_count}HR L{n}"
+            if hr_count >= 4:
+                return f"⚠️ {hr_count}HR L{n}"
+            if hr_count >= 3 and n <= 3:
+                return f"⚠️ {hr_count}HR L{n}"  # 3 HRs in 3 starts is meaningful
+            return ""
+        p_slate["recent_hr_flag"] = p_slate.apply(_recent_hr_flag, axis=1)
+
     show_cols = [c for c in [
-        "alert", "grade", "role", "warn", "pitcher_name", "team", "home_away", "opp", "throws",
+        "alert", "grade", "role", "warn", "platoon_hr_flag", "recent_hr_flag",
+        "pitcher_name", "team", "home_away", "opp", "throws",
         "test_score", "kHR", "hr_suppress", "proj_k", "form_arrow",
         "era", "whip", "k9", "bb9", "hr9",
         "ip", "games_started", "games_played", "ip_per_outing",
@@ -1651,6 +1716,25 @@ if not p_slate.empty:
         "warn": st.column_config.TextColumn(
             "Flag", width="small",
             help="📉 = sample noise (ERA-WHIP mismatch or zero Statcast values at low IP)",
+        ),
+        "platoon_hr_flag": st.column_config.TextColumn(
+            "Vuln", width="small",
+            help=(
+                "Platoon HR vulnerability based on season-long splits:\n"
+                "💥 RHB / 💥 LHB = SEVERE — pitcher's HR/PA to that side is 2x+ "
+                "the other AND ≥3.5%. Target that side's hitters hard.\n"
+                "💢 RHB / 💢 LHB = NOTABLE — 1.5x+ ratio and ≥3.0%. Target that side.\n"
+                "Blank = balanced or sample too small (need 40+ PA each side)."
+            ),
+        ),
+        "recent_hr_flag": st.column_config.TextColumn(
+            "L5 HR",
+            help=(
+                "Recent HRs allowed in last 5 starts:\n"
+                "🔥 = 6+ HRs (extremely vulnerable lately)\n"
+                "⚠️ 4-5 HRs (vulnerable) or 3 HRs in 3 starts (concerning trend)\n"
+                "Blank = normal recent HR rate."
+            ),
         ),
         "pitcher_name": st.column_config.TextColumn("Pitcher"),
         "team": st.column_config.TextColumn("Tm", width="small"),
@@ -1939,8 +2023,13 @@ for _, game in slate.iterrows():
             lat = park_info.get("lat")
             lon = park_info.get("lon")
             cf_bearing = park_info.get("cf_bearing", 0)
+            if park_info.get("unknown"):
+                # Venue not in our park database — likely a renamed park or
+                # spring-training site. Surface this so user knows what's going
+                # on instead of silently producing neutral data.
+                raise ValueError(f"venue '{venue}' not in park database — neutral park/weather used")
             if lat is None or lon is None:
-                raise ValueError("missing coords")
+                raise ValueError(f"venue '{venue}' missing coordinates")
             game_dt = game.get("gameTime")
             if isinstance(game_dt, pd.Timestamp):
                 wx_iso = game_dt.isoformat()
@@ -2779,6 +2868,12 @@ if all_hitters_for_picks:
             combined_picks["opp_pitcher_grade"] = combined_picks["opp_pitcher"].map(_grade_map)
             combined_picks["opp_pitcher_hr9"] = combined_picks["opp_pitcher"].map(_hr9_map)
             combined_picks["opp_pitcher_barrel_allowed"] = combined_picks["opp_pitcher"].map(_barrel_a_map)
+            if "platoon_hr_flag" in p_slate.columns:
+                _platoon_map = p_slate.set_index("pitcher_name")["platoon_hr_flag"].to_dict()
+                combined_picks["opp_platoon_hr"] = combined_picks["opp_pitcher"].map(_platoon_map)
+            if "recent_hr_flag" in p_slate.columns:
+                _recent_hr_map = p_slate.set_index("pitcher_name")["recent_hr_flag"].to_dict()
+                combined_picks["opp_recent_hr"] = combined_picks["opp_pitcher"].map(_recent_hr_map)
         except Exception:
             pass
     if "pa" in combined_picks.columns and "hr_game_pct" in combined_picks.columns:
@@ -2859,6 +2954,42 @@ if all_hitters_for_picks:
                 q["pick_score"] = q["pick_score"] - q["is_roster_fill"].fillna(False).astype(float) * 2.0
                 # Confirmed (non-fill) gets +3
                 q.loc[~q["is_roster_fill"].fillna(False).astype(bool), "pick_score"] += 3.0
+
+            # PLATOON HR BONUS — if hitter's handedness matches the side the
+            # opposing pitcher gives up the most HRs to, bump their score.
+            # 💥 = +4 (severe), 💢 = +2 (notable). Switch hitters (S) get the
+            # bonus regardless since they can pick the side.
+            if "opp_platoon_hr" in q.columns and "bats" in q.columns:
+                def _platoon_bonus(row):
+                    flag = row.get("opp_platoon_hr") or ""
+                    bats = (row.get("bats") or "").upper()
+                    if not flag or not bats:
+                        return 0
+                    is_severe = "💥" in str(flag)
+                    is_notable = "💢" in str(flag)
+                    target_side = "RHB" if "RHB" in str(flag) else ("LHB" if "LHB" in str(flag) else "")
+                    if not target_side:
+                        return 0
+                    hitter_matches = (
+                        bats == "S"
+                        or (bats == "R" and target_side == "RHB")
+                        or (bats == "L" and target_side == "LHB")
+                    )
+                    if hitter_matches:
+                        return 4.0 if is_severe else (2.0 if is_notable else 0)
+                    return 0
+                q["pick_score"] = q["pick_score"] + q.apply(_platoon_bonus, axis=1)
+
+            # RECENT HR ALLOWED BONUS — pitcher giving up HRs lately = ride the wave
+            if "opp_recent_hr" in q.columns:
+                def _recent_hr_bonus(row):
+                    flag = str(row.get("opp_recent_hr") or "")
+                    if "🔥" in flag:
+                        return 3.0
+                    if "⚠️" in flag:
+                        return 1.5
+                    return 0
+                q["pick_score"] = q["pick_score"] + q.apply(_recent_hr_bonus, axis=1)
 
             q["pick_score"] = q["pick_score"].round(1)
         else:
@@ -3530,6 +3661,14 @@ if all_hitters:
             combined_all["opp_pitcher_grade"] = combined_all["opp_pitcher"].map(grade_map)
             combined_all["opp_pitcher_hr9"] = combined_all["opp_pitcher"].map(hr9_map)
             combined_all["opp_pitcher_barrel_allowed"] = combined_all["opp_pitcher"].map(barrel_a_map)
+            # NEW: surface pitcher platoon HR vulnerability and recent HR streak
+            # on each hitter row so it's visible in the matchup table.
+            if "platoon_hr_flag" in p_slate.columns:
+                platoon_map = p_slate.set_index("pitcher_name")["platoon_hr_flag"].to_dict()
+                combined_all["opp_platoon_hr"] = combined_all["opp_pitcher"].map(platoon_map)
+            if "recent_hr_flag" in p_slate.columns:
+                recent_hr_map = p_slate.set_index("pitcher_name")["recent_hr_flag"].to_dict()
+                combined_all["opp_recent_hr"] = combined_all["opp_pitcher"].map(recent_hr_map)
         except Exception:
             pass
     # Flag hitters whose player_id appears in recent transactions — their team
