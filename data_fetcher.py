@@ -994,12 +994,18 @@ def get_player_il_status(player_id: int, season: int = CURRENT_SEASON) -> dict:
             return out
 
         # Find most recent IL-related transaction
+        # IMPORTANT: be STRICT here. Earlier versions matched things like:
+        #   - "Selected from minors" (SCL) → flagged as IL
+        #   - "Placed on paternity list" → flagged as IL
+        #   - "Placed on bereavement list" → flagged as IL
+        #   - "Placed on restricted list" → flagged as IL
+        # All false positives. We now ONLY count transactions whose description
+        # explicitly mentions an injured list.
         today = datetime.now().date()
         il_count = 0
         latest_return = None
         latest_il_placement = None
         for txn in transactions:
-            type_code = (txn.get("typeCode") or "").upper()
             description = (txn.get("description") or "").lower()
             txn_date_str = txn.get("date") or txn.get("effectiveDate")
             if not txn_date_str:
@@ -1009,16 +1015,42 @@ def get_player_il_status(player_id: int, season: int = CURRENT_SEASON) -> dict:
             except Exception:
                 continue
 
-            # IL placements: typeCode like "SCL" (status change to IL) or descriptions
-            if ("injured list" in description or "il" in type_code.lower()
-                    or type_code in ("SCL", "DFA")):
-                if "placed" in description or "transferred to" in description:
-                    il_count += 1
-                    if latest_il_placement is None or txn_date > latest_il_placement:
-                        latest_il_placement = txn_date
-                elif "activated" in description or "reinstated" in description:
-                    if latest_return is None or txn_date > latest_return:
-                        latest_return = txn_date
+            # STRICT IL test: description must mention an injured list
+            # (10-day IL, 15-day IL, 60-day IL, 7-day concussion IL, etc.)
+            is_il_txn = (
+                "injured list" in description
+                or "the il" in description
+                or "10-day il" in description
+                or "15-day il" in description
+                or "60-day il" in description
+                or "7-day il" in description
+            )
+            # Exclude paternity, bereavement, restricted, suspended, military lists
+            is_other_list = any(kw in description for kw in (
+                "paternity list", "bereavement list", "restricted list",
+                "suspended list", "military list", "family medical",
+            ))
+            if is_other_list:
+                continue  # NOT an IL transaction
+            if not is_il_txn:
+                continue  # not IL related at all
+
+            # Now classify: placement vs. activation
+            is_placement = (
+                "placed" in description
+                or "transferred to" in description
+            )
+            is_activation = (
+                "activated" in description
+                or "reinstated" in description
+            )
+            if is_placement:
+                il_count += 1
+                if latest_il_placement is None or txn_date > latest_il_placement:
+                    latest_il_placement = txn_date
+            elif is_activation:
+                if latest_return is None or txn_date > latest_return:
+                    latest_return = txn_date
 
         # On IL = latest placement is more recent than latest return
         if latest_il_placement and (latest_return is None or latest_il_placement > latest_return):
