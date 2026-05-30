@@ -24,7 +24,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.05.29-audit-v8"
+APP_VERSION = "2026.05.29-ohtani-wind-v10"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -479,8 +479,19 @@ with st.sidebar:
     use_pitch_match = st.checkbox("Pitch match score", value=HAVE_PITCH_MATCH)
     use_bvp = st.checkbox("Batter vs Pitcher history", value=HAVE_SPLITS)
     use_weather = st.checkbox("Weather + park factors", value=True)
-    use_ump = st.checkbox("Umpire + catcher framing", value=HAVE_GAME_CONTEXT)
-    use_vegas = st.checkbox("Vegas totals", value=HAVE_GAME_CONTEXT)
+    use_ump = st.checkbox(
+        "Catcher framing",
+        value=HAVE_GAME_CONTEXT,
+        help="Catcher framing affects called-strike rate, which boosts K projections.",
+    )
+    # Vegas totals removed (May 2026). We pull them from ESPN but never
+    # actually USED them in any HR or K calculation — only displayed as a
+    # metric. For HR/K props, the underlying signals (park × weather,
+    # opp team K%/HR%, pitcher quality) already cover what Vegas total
+    # represents in market-derived form. Keeping a stale "Vegas total"
+    # display added load time and an extra API dependency for no analytical
+    # value. The variable is kept = False so downstream code paths still work.
+    use_vegas = False
     # Sprint speed has no impact on HR or K projections - removed from UI.
     # If you want speed-based metrics (steals, infield hits) in the future, re-enable.
     use_sprint_speed = False
@@ -2146,6 +2157,7 @@ for _, game in slate.iterrows():
     # Weather
     weather = {}
     wx_mult = 1.0
+    wx_mult_nowind = 1.0  # wind-stripped wx_mult for per-hitter HR calc
     wx_summary = ""
     # ---- REAL ROOF STATUS from MLB game feed (overrides our guessing) ----
     # Only matters for venues with a roof — we pull this regardless of venue
@@ -2184,10 +2196,15 @@ for _, game in slate.iterrows():
                 # entirely — treat as indoor neutral.
                 if real_roof_closed is True:
                     wx_mult = 1.0
+                    wx_mult_nowind = 1.0
                     cond_label = roof_status.get("condition") or "Roof Closed"
                     wx_summary = f"🏟️ {cond_label} (MLB-confirmed) — indoor neutral"
                 else:
                     wx_mult, _summary = hr_multiplier(weather, park_info)
+                    # ALSO compute a wind-stripped multiplier for per-hitter
+                    # HR calc, since wind is applied per-handedness via
+                    # wind_pull_side_multiplier (avoids double-counting).
+                    wx_mult_nowind, _ = hr_multiplier(weather, park_info, skip_wind=True)
                     wx_summary = _summary or "Neutral"
                     # Hard rain warning - >80% chance suggests likely delay/postponement
                     pp = weather.get("precip_prob")
@@ -2199,6 +2216,7 @@ for _, game in slate.iterrows():
         except Exception as e:
             weather = {"error": str(e)}
             wx_mult = 1.0
+            wx_mult_nowind = 1.0
             wx_summary = f"Weather failed: {str(e)[:60]}"
     elif not use_weather:
         wx_summary = "Weather disabled"
@@ -2227,14 +2245,15 @@ for _, game in slate.iterrows():
     # else: neutral, no flag
 
     # Umpire + catcher framing
+    # Umpire factor disabled — we fetch HP umpire name but have no lookup
+    # table for individual umpire K-rate tendencies, so it was always returning
+    # neutral 1.0. Removed to keep only signals that actually add value.
     ump = {}
     framing = {}
     if use_ump and HAVE_GAME_CONTEXT:
         try:
-            ump = get_umpire_for_game(gpk) or {}
             framing = get_catcher_framing_for_game(gpk) or {}
         except Exception:
-            ump = {}
             framing = {}
 
     # Vegas
@@ -2270,11 +2289,15 @@ for _, game in slate.iterrows():
             roster = get_team_roster(int(team_id))
         except Exception:
             return existing_lineup, is_confirmed, []
-        # Filter to position players only (skip P, SP, RP, TWP)
+        # Filter to position players only (skip P, SP, RP).
+        # IMPORTANT: TWP (two-way players like Ohtani) ARE included — they
+        # bat in the lineup even on days they pitch. Excluding them was a bug
+        # that hid Ohtani when the Dodgers' lineup wasn't yet posted.
+        # We also INCLUDE them when they pitch — because Ohtani still hits.
         position_players = [
             p for p in roster
             if p.get("position") and str(p.get("position")).upper() not in
-                ("P", "SP", "RP", "TWP")
+                ("P", "SP", "RP")
             and p.get("id") not in existing_ids
         ]
         # SORT by season PA so likely starters come first.
@@ -2610,7 +2633,7 @@ for _, game in slate.iterrows():
             try:
                 p_pa = hr_prob_per_pa(
                     row_dict, opp_p_row,
-                    park_factor=hitter_park_mult, weather_mult=wx_mult,
+                    park_factor=hitter_park_mult, weather_mult=wx_mult_nowind,
                     pitch_match_score=row_dict.get("pitch_match_score"),
                 )
                 # Apply pitch_hr_score as an additional fine adjustment
@@ -2706,10 +2729,9 @@ for _, game in slate.iterrows():
             smash_label = ""
             try:
                 # Combined env factor (park × weather × pull-wind for this hitter)
-                # NOTE: full_env uses hand_park (handedness-aware) and pull-wind
-                # which can DIFFER from the game-level env_mult shown in the table.
-                # That's intentional — smash detection wants per-hitter precision.
-                full_env = hand_park * wx_mult * pull_mult
+                # NOTE: uses wx_mult_nowind to avoid double-counting wind
+                # (pull_mult already encodes the pull-side wind effect).
+                full_env = hand_park * wx_mult_nowind * pull_mult
                 # Combined park-side factor (hand-aware × pull-wind)
                 full_park = hand_park * pull_mult
 
@@ -2844,7 +2866,6 @@ for _, game in slate.iterrows():
             away_exp_ip = _exp_ip_for_pitcher(away_p_row)
             away_k_proj = k_total_projection(
                 away_p_row, home_lineup_k_pct,
-                ump_k_factor=ump.get("k_factor", 1.0),
                 park_k_factor=pkf,
                 expected_ip=away_exp_ip,
             )
@@ -2852,7 +2873,6 @@ for _, game in slate.iterrows():
             home_exp_ip = _exp_ip_for_pitcher(home_p_row)
             home_k_proj = k_total_projection(
                 home_p_row, away_lineup_k_pct,
-                ump_k_factor=ump.get("k_factor", 1.0),
                 park_k_factor=pkf,
                 expected_ip=home_exp_ip,
             )
@@ -3124,13 +3144,17 @@ if all_hitters_for_picks:
             # bonus regardless since they can pick the side.
             if "opp_platoon_hr" in q.columns and "bats" in q.columns:
                 def _platoon_bonus(row):
-                    flag = row.get("opp_platoon_hr") or ""
-                    bats = (row.get("bats") or "").upper()
+                    # NA-safe: pd.NA in `or` expression crashes. Extract first,
+                    # then check NA, then coerce.
+                    _flag_raw = row.get("opp_platoon_hr")
+                    _bats_raw = row.get("bats")
+                    flag = "" if (_flag_raw is None or pd.isna(_flag_raw)) else str(_flag_raw)
+                    bats = "" if (_bats_raw is None or pd.isna(_bats_raw)) else str(_bats_raw).upper()
                     if not flag or not bats:
                         return 0
-                    is_severe = "💥" in str(flag)
-                    is_notable = "💢" in str(flag)
-                    target_side = "RHB" if "RHB" in str(flag) else ("LHB" if "LHB" in str(flag) else "")
+                    is_severe = "💥" in flag
+                    is_notable = "💢" in flag
+                    target_side = "RHB" if "RHB" in flag else ("LHB" if "LHB" in flag else "")
                     if not target_side:
                         return 0
                     hitter_matches = (
@@ -3146,7 +3170,8 @@ if all_hitters_for_picks:
             # RECENT HR ALLOWED BONUS — pitcher giving up HRs lately = ride the wave
             if "opp_recent_hr" in q.columns:
                 def _recent_hr_bonus(row):
-                    flag = str(row.get("opp_recent_hr") or "")
+                    _raw = row.get("opp_recent_hr")
+                    flag = "" if (_raw is None or pd.isna(_raw)) else str(_raw)
                     if "🔥" in flag:
                         return 3.0
                     if "⚠️" in flag:
@@ -5054,7 +5079,7 @@ for _, game in slate.iterrows():
         else:
             st.caption(f"🎯 **Pull-side wind:** {all_msgs}")
 
-    info_cols = st.columns(4)
+    info_cols = st.columns(3)
     with info_cols[0]:
         st.metric("Venue", game.get("venue", "—"))
     with info_cols[1]:
@@ -5081,13 +5106,10 @@ for _, game in slate.iterrows():
             wx_help = ctx.get("summary", "Weather not loaded")
             st.metric("Weather", "—", help=wx_help)
     with info_cols[2]:
-        st.metric("Park × Wx", f"{ctx.get('hr_mult', 1.0):.2f}×")
-    with info_cols[3]:
-        vg = ctx.get("vegas") or {}
-        if vg.get("total"):
-            st.metric("Vegas total", f"{vg['total']:.1f}")
-        else:
-            st.metric("Vegas total", "—")
+        st.metric(
+            "Park × Wx", f"{ctx.get('hr_mult', 1.0):.2f}×",
+            help="Park HR factor × weather multiplier. >1.0 = HR-friendly.",
+        )
 
     # Per-game Top HR Hitter + Top Sleeper, combining both lineups
     am = ctx.get("away_matchup")
@@ -5124,7 +5146,16 @@ for _, game in slate.iterrows():
                     if not sleepers_only.empty:
                         sl = sleepers_only.sort_values("sleeper_score", ascending=False).iloc[0]
                         sc = sl.get("sleeper_score", 0)
-                        hr_pct = sl.get("hr_game_pct", 0) or 0
+                        # NA-safe: pandas Series .get(...) can return pd.NA
+                        _hr_raw = sl.get("hr_game_pct", 0)
+                        try:
+                            hr_pct = 0 if pd.isna(_hr_raw) else float(_hr_raw)
+                        except (TypeError, ValueError):
+                            hr_pct = 0
+                        try:
+                            sc = 0 if pd.isna(sc) else float(sc)
+                        except (TypeError, ValueError):
+                            sc = 0
                         st.markdown(
                             f"**💎 Best Sleeper**: **{sl['player_name']}** "
                             f"({sl['_team']}) — sleeper {sc:.1f}, HR {hr_pct:.1f}%"
