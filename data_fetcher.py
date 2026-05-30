@@ -281,8 +281,10 @@ def get_team_roster(team_id: int) -> list[dict]:
         out = []
         for p in r.json().get("roster", []):
             pos = p.get("position", {}).get("abbreviation", "")
-            if pos in ("P",):
-                continue  # skip pitchers when looking for hitters
+            # Skip pure pitchers (P/SP/RP). TWP (two-way players) ARE kept
+            # because they bat — Ohtani being the canonical example.
+            if pos in ("P", "SP", "RP"):
+                continue
             person = p.get("person", {}) or {}
             # batSide can be nested under person (hydrated) or absent
             bats = ((person.get("batSide") or {}).get("code")
