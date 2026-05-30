@@ -24,7 +24,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.05.29-correctness-v11"
+APP_VERSION = "2026.05.29-deadcode-v13"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -127,16 +127,10 @@ except ImportError:
     def park_k_factor(venue_name): return 1.0
 from weather import fetch_weather, hr_multiplier
 
-try:
-    from splits import bvp_for_lineup, hitter_vs_similar
-    # Aliased for older app code that used the wrong names
-    get_career_bvp_aggregate = bvp_for_lineup
-    get_similar_arsenal_aggregate = hitter_vs_similar
-    HAVE_SPLITS = True
-except Exception:
-    HAVE_SPLITS = False
-    def get_career_bvp_aggregate(*a, **k): return None
-    def get_similar_arsenal_aggregate(*a, **k): return None
+# splits.py was deleted — never used in main data flow.
+# Per-pitch matchup data is captured by pitch_match_score (pitch_match.py),
+# and pitcher handedness splits come via data_fetcher.get_pitcher_handedness_splits.
+HAVE_SPLITS = False
 
 try:
     from pitch_match import pitch_match_score, get_hitter_pitch_arsenal
@@ -486,13 +480,18 @@ with st.sidebar:
     st.subheader("Data sources")
     use_recent_form = st.checkbox("Recent form (L15)", value=True)
     use_pitch_match = st.checkbox("Pitch match score", value=HAVE_PITCH_MATCH)
-    use_bvp = st.checkbox("Batter vs Pitcher history", value=HAVE_SPLITS)
+    # BvP checkbox removed (was dead UI — the get_career_bvp_aggregate
+    # function was never actually called in the data flow, only the arsenal
+    # block ran). Per-pitch matchup is captured by pitch_match_score.
+    use_bvp = False
     use_weather = st.checkbox("Weather + park factors", value=True)
-    use_ump = st.checkbox(
-        "Catcher framing",
-        value=HAVE_GAME_CONTEXT,
-        help="Catcher framing affects called-strike rate, which boosts K projections.",
-    )
+    # Catcher framing checkbox removed — same dead UI pattern as umpire
+    # and Vegas. We fetched framing data but the catcher_framing_factor was
+    # never actually passed to k_total_projection (default 1.0 always won).
+    # Wiring it would require: lookup tonight's starting catcher from the
+    # lineup, then his framing_k_factor from season leaderboard. Real work,
+    # not done. Removed to keep UI honest about what affects calculations.
+    use_ump = False
     # Vegas totals removed (May 2026). We pull them from ESPN but never
     # actually USED them in any HR or K calculation — only displayed as a
     # metric. For HR/K props, the underlying signals (park × weather,
@@ -818,12 +817,16 @@ if not pitcher_trad.empty and "player_id" in pitcher_stats.columns:
         pitcher_trad.drop(columns=drop, errors="ignore"),
         on="player_id", how="left", suffixes=("", "_trad"),
     )
-    # Coalesce era, whip, ip, hr9, k9 from trad if Savant didn't provide
+    # Coalesce era, whip, ip, hr9, k9, bb9 — PREFER trad (real MLB Stats API)
+    # over Savant-derived estimates. This was a real bug: Savant unconditionally
+    # set k9 = k_percent * 4.3 * 9 / 100, so the trad fillna() never fired.
+    # Now trad wins where it exists, Savant-derived fills NaN.
     for col in ["era", "whip", "ip", "hr9", "k9", "bb9"]:
         trad_col = f"{col}_trad"
         if trad_col in pitcher_stats.columns:
             if col in pitcher_stats.columns:
-                pitcher_stats[col] = pitcher_stats[col].fillna(pitcher_stats[trad_col])
+                # Trad first, Savant-derived as fallback for NaN positions
+                pitcher_stats[col] = pitcher_stats[trad_col].fillna(pitcher_stats[col])
             else:
                 pitcher_stats[col] = pitcher_stats[trad_col]
             pitcher_stats = pitcher_stats.drop(columns=[trad_col])
@@ -1076,6 +1079,34 @@ if show_backtest:
                                             f"{h_metrics.get('actual_hr_rate_pct', 0)}%")
                                 t10_hr = h_metrics.get("top10_hr_hit_rate", 0)
                                 m4.metric("Top-10 HR pick hit rate", f"{t10_hr}%")
+
+                                # Brier score — the single best calibration metric.
+                                # Lower = better. For HRs, ~0.04-0.06 is good,
+                                # <0.03 is excellent, >0.08 = systematic miscalibration.
+                                brier = h_metrics.get("brier_score")
+                                if brier is not None:
+                                    b_col, _ = st.columns([1, 3])
+                                    if brier < 0.04:
+                                        b_label = "Excellent"
+                                    elif brier < 0.06:
+                                        b_label = "Good"
+                                    elif brier < 0.08:
+                                        b_label = "OK"
+                                    else:
+                                        b_label = "Needs tuning"
+                                    b_col.metric(
+                                        "Brier score",
+                                        f"{brier:.4f}",
+                                        delta=b_label,
+                                        delta_color="off",
+                                        help=(
+                                            "Mean squared error between predicted "
+                                            "HR probability and actual outcome (0/1). "
+                                            "Lower = better. Rare-event reference: "
+                                            "<0.03 excellent · 0.04-0.06 good · "
+                                            ">0.08 systematic over-prediction."
+                                        ),
+                                    )
 
                                 # Show calibration table
                                 bands = h_metrics.get("hr_pct_bands", [])
@@ -2498,7 +2529,13 @@ for _, game in slate.iterrows():
     except Exception:
         pass
 
-    # Power Score - composite HR-likelihood incorporating park/weather/pitcher
+    # Power Score - composite HR-likelihood incorporating park/weather/pitcher.
+    # NOTE: Power Score intentionally uses the GAME-LEVEL wx_mult (with wind),
+    # while per-hitter HR Game% below uses wx_mult_nowind + per-hand pull-wind.
+    # Reason: Power Score is a hitter-quality ranking that gets one game-wide
+    # environment adjustment. The per-hitter HR Game% needs handedness-precise
+    # wind (LHB pull side ≠ RHB pull side ≠ CF direction), which the game-level
+    # wind can't represent. Different scopes, intentionally different wind models.
     try:
         from models import add_power_score
         away_matchup = add_power_score(
@@ -3850,6 +3887,30 @@ for gpk, ctx in game_context_map.items():
 
 if all_hitters:
     combined_all = pd.concat(all_hitters, ignore_index=True)
+    # SLATE-WIDE SLEEPER RECOMPUTE
+    # find_sleepers() is called per-lineup (9 hitters at a time), so
+    # sleeper_score percentiles are computed within 9-row frames. A hitter
+    # ranking #1 in a weak lineup would get ~95 sleeper score even if he'd
+    # rank #50 slate-wide. Recompute on the full combined frame so percentiles
+    # reflect the whole slate (200-300 hitters).
+    try:
+        score_col = "hr_score" if "hr_score" in combined_all.columns else (
+            "hr_prob" if "hr_prob" in combined_all.columns else None
+        )
+        if (score_col and "home_run" in combined_all.columns
+                and combined_all[score_col].notna().any()):
+            hr_pct_slate = combined_all[score_col].rank(pct=True) * 100
+            season_pct_slate = combined_all["home_run"].rank(pct=True) * 100
+            combined_all["sleeper_score"] = (hr_pct_slate - season_pct_slate).round(1)
+            # Suppress when PA below 100 (same threshold as find_sleepers)
+            if "pa" in combined_all.columns:
+                combined_all.loc[
+                    combined_all["pa"].isna() | (combined_all["pa"] < 100),
+                    "sleeper_score"
+                ] = np.nan
+    except Exception:
+        pass
+
     # Enrich with the OPPOSING pitcher's grade so we can filter trap sleepers
     # (e.g. don't recommend a sleeper facing a TOUGH/ELITE pitcher).
     if (not p_slate.empty and "pitcher_name" in p_slate.columns
@@ -5270,41 +5331,29 @@ for _, game in slate.iterrows():
                     },
                 )
 
-    if use_bvp or not pitcher_arsenal_all.empty:
-        with st.expander("🔬 Deep dive: Pitcher arsenal + historical BvP"):
+    if not pitcher_arsenal_all.empty:
+        with st.expander("🔬 Deep dive: Pitcher arsenal"):
             st.caption(
-                "**What this shows:** the actual pitches each pitcher throws (usage %, "
-                "velocity, xwOBA allowed) and any career-history batter-vs-pitcher "
-                "stats. Use this to spot if a hitter has seen this pitcher 10+ times "
-                "and crushed them, or to see what pitches the pitcher leans on."
+                "**What this shows:** the actual pitches each pitcher throws — "
+                "usage %, velocity, xwOBA allowed per pitch type. "
+                "Use this to see what pitches the pitcher leans on and which "
+                "ones give up the most damage."
             )
             sub1, sub2 = st.columns(2)
             with sub1:
-                if use_bvp:
-                    h_pid = safe_int(game.get("home_pitcher_id"))
-                    if h_pid:
-                        st.markdown(f"**{game['away_team_abbr']} BvP history**")
-                        st.caption(f"vs {game.get('home_pitcher', 'TBD')}")
-                if not pitcher_arsenal_all.empty:
-                    h_pid = safe_int(game.get("home_pitcher_id"))
-                    if h_pid:
-                        ars = pitcher_arsenal_all[pitcher_arsenal_all["player_id"] == h_pid]
-                        if not ars.empty:
-                            st.markdown(f"**{game.get('home_pitcher', 'TBD')} arsenal**")
-                            st.dataframe(ars, hide_index=True, use_container_width=True)
+                h_pid = safe_int(game.get("home_pitcher_id"))
+                if h_pid:
+                    ars = pitcher_arsenal_all[pitcher_arsenal_all["player_id"] == h_pid]
+                    if not ars.empty:
+                        st.markdown(f"**{game.get('home_pitcher', 'TBD')} arsenal**")
+                        st.dataframe(ars, hide_index=True, use_container_width=True)
             with sub2:
-                if use_bvp:
-                    a_pid = safe_int(game.get("away_pitcher_id"))
-                    if a_pid:
-                        st.markdown(f"**{game['home_team_abbr']} BvP history**")
-                        st.caption(f"vs {game.get('away_pitcher', 'TBD')}")
-                if not pitcher_arsenal_all.empty:
-                    a_pid = safe_int(game.get("away_pitcher_id"))
-                    if a_pid:
-                        ars = pitcher_arsenal_all[pitcher_arsenal_all["player_id"] == a_pid]
-                        if not ars.empty:
-                            st.markdown(f"**{game.get('away_pitcher', 'TBD')} arsenal**")
-                            st.dataframe(ars, hide_index=True, use_container_width=True)
+                a_pid = safe_int(game.get("away_pitcher_id"))
+                if a_pid:
+                    ars = pitcher_arsenal_all[pitcher_arsenal_all["player_id"] == a_pid]
+                    if not ars.empty:
+                        st.markdown(f"**{game.get('away_pitcher', 'TBD')} arsenal**")
+                        st.dataframe(ars, hide_index=True, use_container_width=True)
 
     st.divider()
 
