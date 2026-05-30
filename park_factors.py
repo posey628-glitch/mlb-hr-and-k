@@ -88,17 +88,27 @@ def get_park(venue_name: str) -> dict:
     4. First-word fallback (last resort).
 
     Returns dict with `unknown: True` if no match — caller should warn.
+    The returned dict ALWAYS includes a "name" field set to the canonical
+    PARKS key, so downstream code (e.g., weather.hr_multiplier's altitude
+    dampener) can identify the venue without re-matching.
     """
     if not venue_name:
-        return _unknown_park()
+        return _unknown_park(venue_name)
+
+    def _with_name(canonical_key, park_data):
+        # Inject canonical name into a COPY so we don't mutate the PARKS dict.
+        out = dict(park_data)
+        out["name"] = canonical_key
+        return out
+
     # 1. Exact
     if venue_name in PARKS:
-        return PARKS[venue_name]
+        return _with_name(venue_name, PARKS[venue_name])
     # 2. Case-insensitive exact
     venue_lower = venue_name.strip().lower()
     for k, v in PARKS.items():
         if k.lower() == venue_lower:
-            return v
+            return _with_name(k, v)
     # 3. Substring match in either direction. Use lowercase for safety.
     # We do this even with very short keys because "Uniqlo Field" should
     # match "Uniqlo Field at Dodger Stadium" and vice versa.
@@ -108,21 +118,22 @@ def get_park(venue_name: str) -> dict:
             # Require at least 5 characters to match to avoid false hits
             # (e.g., "field" alone matching every venue with "field" in name)
             if len(k_lower) >= 8 or len(venue_lower) >= 8:
-                return v
+                return _with_name(k, v)
     # 4. First-word fallback
     try:
         first_word = venue_name.split()[0].lower()
         if len(first_word) >= 4:
             for k, v in PARKS.items():
                 if first_word in k.lower():
-                    return v
+                    return _with_name(k, v)
     except Exception:
         pass
-    return _unknown_park()
+    return _unknown_park(venue_name)
 
 
-def _unknown_park() -> dict:
+def _unknown_park(venue_name: str = "") -> dict:
     return {
+        "name": venue_name or "Unknown",
         "hr_factor": 100, "hr_factor_L": 100, "hr_factor_R": 100,
         "runs_factor": 100, "cf_bearing": 0,
         "lat": None, "lon": None, "roof": "open", "unknown": True,
