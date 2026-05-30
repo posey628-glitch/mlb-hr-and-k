@@ -24,7 +24,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.05.29-ohtani-wind-v10"
+APP_VERSION = "2026.05.29-correctness-v11"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -221,20 +221,29 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# AUTO CACHE INVALIDATION ON DEPLOY + FRESH SESSION
-# Streamlit's @st.cache_data persists across user sessions. When we ship a
-# bugfix, cached function output stays for up to 1 hour (TTL).
-# My previous "only clear on version mismatch" check was broken because
-# session_state is per-user-session — on a fresh load, the value is never
-# present, so we set it without clearing. The clear NEVER fired.
-# Fix: clear cache once per session, unconditionally. Aggressive but correct.
-if "_cache_cleared_this_session" not in st.session_state:
-    st.session_state["_cache_cleared_this_session"] = True
-    st.session_state["_app_version"] = APP_VERSION
+# AUTO CACHE INVALIDATION — proper version
+# Use @st.cache_data to store the deployed version PROCESS-WIDE (survives
+# across user sessions, unlike st.session_state which is per-browser-tab).
+# When the deployed version differs from what's cached, we clear.
+# This means: clear ONCE per actual code deploy, not once per browser tab.
+@st.cache_resource
+def _deployed_version_tracker() -> dict:
+    """Process-wide singleton storing the version that's currently 'live'.
+    Returns a mutable dict so we can update it in-place when we detect a
+    new deploy without invalidating the cache_resource itself."""
+    return {"version": None}
+
+_version_state = _deployed_version_tracker()
+if _version_state["version"] != APP_VERSION:
+    # First load after a deploy — clear data caches once for everyone.
     try:
         st.cache_data.clear()
     except Exception:
         pass
+    _version_state["version"] = APP_VERSION
+# Also remember in session_state so other code paths can read it (e.g. the
+# diagnostic at the top of the page, sidebar metadata).
+st.session_state["_app_version"] = APP_VERSION
 
 
 def safe_int(val) -> Optional[int]:
@@ -2640,8 +2649,9 @@ for _, game in slate.iterrows():
                 # BUT re-apply the soft squash so we don't blow past the cap.
                 if p_pa is not None:
                     raw = float(p_pa) * pitch_hr_mult
-                    # Soft squash: same logic as in props.py (7.0% per-PA ceiling,
-                    # wider differentiation band)
+                    # Soft squash: same logic as in props.py.
+                    # Theoretical asymptote 7% per PA, practical ceiling ~6.3%
+                    # (tanh never reaches 1.0).
                     if raw <= 0.04:
                         p_pa = raw
                     else:
@@ -2888,7 +2898,7 @@ for _, game in slate.iterrows():
         "away_p_row": away_p_row, "home_p_row": home_p_row,
         "away_k_proj": away_k_proj, "home_k_proj": home_k_proj,
         "away_gs": away_gs, "home_gs": home_gs,
-        "pull_wind_summary": list(pull_summaries.keys()) if 'pull_summaries' in dir() else [],
+        "pull_wind_summary": list(pull_summaries.keys()),
         "away_lineup_confirmed": away_confirmed,
         "home_lineup_confirmed": home_confirmed,
         "hr_env_flag": hr_env_flag,
@@ -3114,11 +3124,14 @@ if all_hitters_for_picks:
             score_parts.append(_pct(q["hr_form"]))
             weights.append(0.12)
         # sleeper_score: today's HR percentile MINUS season pace
-        # High positive sleeper = today's matchup is much better than season avg
+        # High positive sleeper = today's matchup is much better than season avg.
+        # Use percentile rank (same as other components) so we never lose
+        # differentiation at the high end. The previous fixed-scale formula
+        # `((score + 70) / 1.5).clip(0, 100)` mapped all scores above ~77 to
+        # ≈98-100, blurring rankings among the strongest sleepers (Julien 56,
+        # Acuña 44 OK, but Schwarber-tier 80+ all collapsed).
         if "sleeper_score" in q.columns and q["sleeper_score"].notna().any():
-            # Normalize: range typically -67 to +77, treat 0 as neutral
-            sleeper_norm = ((q["sleeper_score"].fillna(0) + 70) / 1.5).clip(0, 100)
-            score_parts.append(sleeper_norm)
+            score_parts.append(_pct(q["sleeper_score"]))
             weights.append(0.08)
 
         # === Today's environment (15%) ===
