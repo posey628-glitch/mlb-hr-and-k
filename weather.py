@@ -158,13 +158,20 @@ def hr_multiplier(weather: dict, park: dict, skip_wind: bool = False) -> tuple[f
     else:
         roof_factor = 1.0
 
-    # Temperature - asymmetric (cold suppresses more than warm boosts)
+    # Temperature - asymmetric (cold suppresses more than warm boosts).
+    # ALTITUDE DAMPENING: park HR factors for Coors Field (1.21) and Sutter
+    # Health Park already embed thousands of historical games' worth of
+    # weather and altitude effects. Adding a full temperature multiplier on
+    # top of those park factors double-counts the temperature contribution.
+    # Solution: halve the temperature effect at high-altitude parks.
+    HIGH_ALTITUDE_PARKS = {"Coors Field", "Sutter Health Park"}
+    altitude_dampener = 0.5 if park.get("name") in HIGH_ALTITUDE_PARKS else 1.0
     temp = weather.get("temp_f")
     if temp is not None:
         if temp >= 70:
-            t_eff = (temp - 70) / 10 * 0.03
+            t_eff = (temp - 70) / 10 * 0.03 * altitude_dampener
         else:
-            t_eff = (temp - 70) / 10 * 0.04  # stronger cold penalty
+            t_eff = (temp - 70) / 10 * 0.04 * altitude_dampener  # stronger cold penalty
         mult *= (1 + t_eff * roof_factor)
         if temp >= 85:
             summary.append(f"🌡️ {temp:.0f}°F (carries well)")
