@@ -24,7 +24,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.05.29-calibration-v16"
+APP_VERSION = "2026.05.30-leaders-v17"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -358,7 +358,10 @@ def pitcher_grade(test_score, hr_suppress=None, sample_size=None, pa_threshold=8
     """Letter grade + label for pitchers — matches BetGravy style.
 
     Combines test_score (K-focused) and hr_suppress (HR-friendly avoidance)
-    to produce a pitcher matchup grade from the batter's perspective:
+    to produce a pitcher matchup grade from the batter's perspective. This
+    grade reflects the PITCHER'S SKILL ONLY — park and weather are NOT
+    factored in (use env_adj_grade for that, which adjusts for tonight's
+    environment).
 
       EXPLOITABLE+ : test ≤ 30 OR hr_suppress ≤ 30  (target this pitcher)
       EXPLOITABLE  : test ≤ 45 OR hr_suppress ≤ 45
@@ -388,6 +391,55 @@ def pitcher_grade(test_score, hr_suppress=None, sample_size=None, pa_threshold=8
     if combined_max <= 45 or combined_min <= 35:
         return "EXPLOIT"
     return "MIXED"
+
+
+def pitcher_grade_env_adj(base_grade, env_mult):
+    """Adjust the base pitcher grade for tonight's park × weather.
+
+    The intuition: an ELITE pitcher in Coors with wind out (env_mult=1.20)
+    is closer to TOUGH in HR-suppression terms tonight, and an EXPLOIT
+    pitcher in Petco with cold wind in (env_mult=0.80) is closer to MIXED.
+
+    Rules (env_mult is the game's park × weather HR multiplier):
+      env >= 1.18 (very hitter-friendly):  shift one tier toward EXPLOIT
+      env >= 1.10 (hitter-friendly):       shift half a tier (only soft tiers)
+      env <= 0.85 (pitcher-friendly):      shift one tier toward TOUGH
+      env <= 0.92 (mildly pitcher-friendly): shift half a tier (only soft tiers)
+      else: no change
+
+    Half-tier means: a borderline grade gets nudged; established tiers
+    (ELITE / EXPLOIT+) hold unless the env shift is strong.
+    """
+    if base_grade in (None, "—"):
+        return "—"
+    if env_mult is None or pd.isna(env_mult):
+        return base_grade
+
+    em = float(env_mult)
+    order = ["EXPLOIT+", "EXPLOIT", "MIXED", "TOUGH", "ELITE"]
+    if base_grade not in order:
+        return base_grade
+    idx = order.index(base_grade)
+
+    if em >= 1.18:
+        new_idx = max(0, idx - 1)
+    elif em >= 1.10:
+        # Soft shift: only nudge MIXED→EXPLOIT and TOUGH→MIXED. Don't drag
+        # ELITE down for a mild park boost.
+        if base_grade in ("MIXED", "TOUGH"):
+            new_idx = idx - 1
+        else:
+            new_idx = idx
+    elif em <= 0.85:
+        new_idx = min(len(order) - 1, idx + 1)
+    elif em <= 0.92:
+        if base_grade in ("EXPLOIT", "MIXED"):
+            new_idx = idx + 1
+        else:
+            new_idx = idx
+    else:
+        new_idx = idx
+    return order[new_idx]
 
 
 def pitcher_grade_sort_key(grade):
@@ -3043,6 +3095,44 @@ for _, game in slate.iterrows():
     matchup_tables[game["gamePk"]] = (away_matchup, home_matchup)
 
 
+# After all games processed, add env-adjusted grade to p_slate.
+# Each pitcher gets a grade that reflects today's PARK × WEATHER context,
+# in addition to the base "grade" which is pitcher-skill-only.
+# Convention: a pitcher's "opposing environment" is the environment HE faces,
+# i.e. the game's own park × weather. (Hr_mult is the same for both pitchers
+# in a game.)
+if not p_slate.empty and "grade" in p_slate.columns:
+    # Build pitcher_id → game env_mult map from game_context_map
+    env_by_pid = {}
+    for gpk, ctx in game_context_map.items():
+        env = ctx.get("hr_mult", 1.0)
+        a_row = ctx.get("away_p_row") or {}
+        h_row = ctx.get("home_p_row") or {}
+        a_pid = a_row.get("player_id") if a_row else None
+        h_pid = h_row.get("player_id") if h_row else None
+        if a_pid is not None and not pd.isna(a_pid):
+            env_by_pid[int(a_pid)] = float(env)
+        if h_pid is not None and not pd.isna(h_pid):
+            env_by_pid[int(h_pid)] = float(env)
+
+    def _env_adj(row):
+        try:
+            pid = row.get("player_id")
+            if pid is None or pd.isna(pid):
+                return row.get("grade", "—")
+            env = env_by_pid.get(int(pid))
+            if env is None:
+                return row.get("grade", "—")
+            return pitcher_grade_env_adj(row.get("grade"), env)
+        except Exception:
+            return row.get("grade", "—")
+
+    p_slate["env_adj_grade"] = p_slate.apply(_env_adj, axis=1)
+    # Store env_mult on each pitcher row too for the UI/diagnostic
+    p_slate["game_env_mult"] = p_slate["player_id"].apply(
+        lambda pid: env_by_pid.get(int(pid)) if pid is not None and not pd.isna(pid) else None
+    )
+
 st.divider()
 
 
@@ -3128,6 +3218,117 @@ else:
 
 
 # ============================================================================
+# SLATE LEADERS — who's #1 in each meaningful category across the whole slate
+# ============================================================================
+# Build a single dataframe combining all hitters across all games, then find
+# the leader in each category. Mark them with 🏆 in the main displays via a
+# slate_leader_flags column on combined_all (built below this section).
+slate_leader_cats = []  # list of (category_label, player_id, player_name, value, fmt)
+slate_leader_pid_map = {}  # pid → list of category labels (for icon display)
+
+def _track_leader(label, pid, name, value, fmt="{:.2f}"):
+    """Record a slate leader for display + emoji marking."""
+    if pid is None or pd.isna(pid) or name is None:
+        return
+    slate_leader_cats.append((label, int(pid), name, value, fmt))
+    slate_leader_pid_map.setdefault(int(pid), []).append(label)
+
+# Hitter leaders (require sufficient sample for stats-based categories)
+if all_hitters:
+    _combined_lead = pd.concat(all_hitters, ignore_index=True)
+    # Dedupe by player_id — same hitter may appear in multiple rosters
+    if "player_id" in _combined_lead.columns:
+        _combined_lead["_pid"] = pd.to_numeric(_combined_lead["player_id"], errors="coerce")
+        _combined_lead = _combined_lead.drop_duplicates(subset="_pid", keep="first")
+
+    def _leader_by(df, col, label, min_pa=100, ascending=False, fmt="{:.2f}"):
+        if col not in df.columns:
+            return
+        sub = df[df[col].notna()].copy()
+        if "pa" in sub.columns:
+            sub = sub[sub["pa"].fillna(0) >= min_pa]
+        if sub.empty:
+            return
+        sub = sub.sort_values(col, ascending=ascending)
+        top = sub.iloc[0]
+        _track_leader(label, top.get("player_id"), top.get("player_name"),
+                       top[col], fmt)
+
+    # Quality leaders (stats)
+    _leader_by(_combined_lead, "barrel_pct",  "💥 Slate-best Barrel%",       fmt="{:.1f}%")
+    _leader_by(_combined_lead, "iso",         "⚡ Slate-best ISO",            fmt="{:.3f}")
+    _leader_by(_combined_lead, "xwoba",       "🎯 Slate-best xwOBA",          fmt="{:.3f}")
+    _leader_by(_combined_lead, "hard_hit",    "💪 Slate-best Hard-Hit%",      fmt="{:.1f}%")
+    _leader_by(_combined_lead, "avg_ev",      "🚀 Slate-best Exit Velo",      fmt="{:.1f} mph")
+    _leader_by(_combined_lead, "home_run",    "🏟️ Slate-best Season HRs",     min_pa=50, fmt="{:.0f}")
+    _leader_by(_combined_lead, "recent_hr",   "🔥 Slate-best Recent HRs (L15)", min_pa=50, fmt="{:.0f}")
+
+    # Today's matchup leaders (need projection columns to be populated)
+    _leader_by(_combined_lead, "hr_game_pct", "🎲 Slate-best HR Game%",       min_pa=50, fmt="{:.1f}%")
+    _leader_by(_combined_lead, "power_score", "💎 Slate-best Power Score",    min_pa=50, fmt="{:.1f}")
+    _leader_by(_combined_lead, "sleeper_score", "💤 Slate-best Sleeper",      min_pa=100, fmt="{:.1f}")
+
+    # Environment-leader: best HR-friendly env on the slate
+    if "env_boost" in _combined_lead.columns and _combined_lead["env_boost"].notna().any():
+        env_sub = _combined_lead.dropna(subset=["env_boost"])
+        max_env = env_sub["env_boost"].max()
+        top_env = env_sub[env_sub["env_boost"] >= max_env - 0.001]
+        # Among hitters in the best env, pick the one with the highest barrel%
+        # so the leader is also a quality bat, not someone in Coors with no skill
+        if "barrel_pct" in top_env.columns and top_env["barrel_pct"].notna().any():
+            top_env = top_env.sort_values("barrel_pct", ascending=False)
+        top = top_env.iloc[0]
+        _track_leader("🌞 Slate-best Environment + bat",
+                        top.get("player_id"), top.get("player_name"),
+                        top["env_boost"], "{:.2f}×")
+
+# Pitcher leaders (from p_slate)
+if not p_slate.empty:
+    def _p_leader(df, col, label, ascending=False, fmt="{:.1f}", min_ip=20):
+        if col not in df.columns:
+            return
+        sub = df[df[col].notna()].copy()
+        if "ip" in sub.columns:
+            sub = sub[sub["ip"].fillna(0) >= min_ip]
+        if sub.empty:
+            return
+        sub = sub.sort_values(col, ascending=ascending)
+        top = sub.iloc[0]
+        _track_leader(label, top.get("player_id"), top.get("pitcher_name"),
+                       top[col], fmt)
+
+    _p_leader(p_slate, "test_score",   "🛡️ Slate-best Test Score (pitcher)", fmt="{:.1f}")
+    _p_leader(p_slate, "hr_suppress",  "🚫 Slate-best HR Suppress (pitcher)", fmt="{:.1f}")
+    _p_leader(p_slate, "k9",           "⚡ Slate-best K/9 (pitcher)",         fmt="{:.2f}")
+    _p_leader(p_slate, "whiff_pct",    "💨 Slate-best Whiff% (pitcher)",      fmt="{:.1f}%")
+    _p_leader(p_slate, "proj_k",       "📊 Slate-best Projected K (pitcher)", fmt="{:.1f}")
+
+    # Worst pitchers — these are smash targets for HITTERS
+    _p_leader(p_slate, "test_score",   "🎯 Slate-easiest Test Score (smash)",  ascending=True, fmt="{:.1f}")
+    _p_leader(p_slate, "hr9",          "🔥 Slate-worst HR/9 (smash)",         fmt="{:.2f}", min_ip=20)
+
+if slate_leader_cats:
+    st.subheader("🏆 Slate Leaders — who tops the slate in each category")
+    st.caption(
+        "These players have the slate-best value in each named category. "
+        "Players appearing here will be highlighted with 🏆 in the top picks "
+        "and matchup tables. A player can lead multiple categories."
+    )
+    lc1, lc2 = st.columns(2)
+    half = (len(slate_leader_cats) + 1) // 2
+    for col, items in [(lc1, slate_leader_cats[:half]), (lc2, slate_leader_cats[half:])]:
+        with col:
+            for label, pid, name, val, fmt in items:
+                try:
+                    val_str = fmt.format(val)
+                except Exception:
+                    val_str = str(val)
+                st.markdown(f"- {label}: **{name}** ({val_str})")
+
+st.divider()
+
+
+# ============================================================================
 # TOP 5 PICKS OF THE DAY — combined HR signal across all factors
 # ============================================================================
 st.subheader("🏆 Top 10 Picks of the Day")
@@ -3179,6 +3380,17 @@ for gpk, ctx in game_context_map.items():
 
 if all_hitters_for_picks:
     combined_picks = pd.concat(all_hitters_for_picks, ignore_index=True)
+    # Slate-leader flag — re-uses the map built in the Slate Leaders section.
+    if slate_leader_pid_map and "player_id" in combined_picks.columns:
+        def _leader_flag_pick(pid):
+            try:
+                cats = slate_leader_pid_map.get(int(pid), [])
+            except (TypeError, ValueError):
+                return ""
+            if not cats:
+                return ""
+            return f"🏆×{len(cats)}" if len(cats) >= 3 else "🏆"
+        combined_picks["slate_leader_flag"] = combined_picks["player_id"].apply(_leader_flag_pick)
     # Enrich with opp pitcher grade for downstream sleeper-parlay filtering.
     # (combined_all gets the same enrichment later; we duplicate it here so
     # the parlay code that uses `q` has access too.)
@@ -3364,7 +3576,7 @@ if all_hitters_for_picks:
         top10["rank"] = range(1, len(top10) + 1)
 
         cols_to_show = [c for c in [
-            "rank", "player_name", "team", "game", "opp_pitcher",
+            "rank", "slate_leader_flag", "player_name", "team", "game", "opp_pitcher",
             "pick_score", "hr_game_pct", "matchup", "barrel_pct",
             "hr_form", "env_boost",
         ] if c in top10.columns]
@@ -3374,6 +3586,10 @@ if all_hitters_for_picks:
             disp, hide_index=True, use_container_width=True,
             column_config={
                 "rank": st.column_config.NumberColumn("#", width="small"),
+                "slate_leader_flag": st.column_config.TextColumn(
+                    "🏆", width="small",
+                    help="🏆 = slate leader in at least one category. ×N = leader in N categories.",
+                ),
                 "player_name": st.column_config.TextColumn("Hitter"),
                 "team": st.column_config.TextColumn("Tm", width="small"),
                 "game": st.column_config.TextColumn("Game"),
@@ -3981,6 +4197,27 @@ for gpk, ctx in game_context_map.items():
 
 if all_hitters:
     combined_all = pd.concat(all_hitters, ignore_index=True)
+
+    # Tag slate leaders with 🏆 in a new column. The slate_leader_pid_map was
+    # built earlier (Slate Leaders section). Each leader gets a flag that
+    # shows in the matchup tables and export.
+    if slate_leader_pid_map:
+        def _leader_flag(pid):
+            try:
+                cats = slate_leader_pid_map.get(int(pid), [])
+            except (TypeError, ValueError):
+                return ""
+            if not cats:
+                return ""
+            # Count of categories led; 🏆 prefix with category count
+            if len(cats) >= 3:
+                return f"🏆×{len(cats)}"
+            return "🏆"
+        combined_all["slate_leader_flag"] = combined_all["player_id"].apply(_leader_flag)
+        # Also annotate p_slate the same way
+        if not p_slate.empty:
+            p_slate["slate_leader_flag"] = p_slate["player_id"].apply(_leader_flag)
+
     # SLATE-WIDE SLEEPER RECOMPUTE
     # find_sleepers() is called per-lineup (9 hitters at a time), so
     # sleeper_score percentiles are computed within 9-row frames. A hitter
@@ -5247,6 +5484,40 @@ for _, game in slate.iterrows():
         else:
             st.caption(f"🎯 **Pull-side wind:** {all_msgs}")
 
+    # PITCHER GRADE BANNER — show each starter's base grade alongside the
+    # env-adjusted grade (post park × weather). Helps user see when an ELITE
+    # pitcher in Coors becomes TOUGH, or an EXPLOIT in Petco becomes MIXED.
+    if not p_slate.empty and "grade" in p_slate.columns:
+        a_pid = (ctx.get("away_p_row") or {}).get("player_id")
+        h_pid = (ctx.get("home_p_row") or {}).get("player_id")
+        env_mult_show = ctx.get("hr_mult", 1.0)
+
+        def _pitcher_grade_str(pid, label, side_team):
+            if pid is None or pd.isna(pid):
+                return None
+            try:
+                pid_int = int(pid)
+            except (TypeError, ValueError):
+                return None
+            match = p_slate[p_slate["player_id"] == pid_int]
+            if match.empty:
+                return None
+            base = match.iloc[0].get("grade") or "—"
+            env_adj = match.iloc[0].get("env_adj_grade") or base
+            name = match.iloc[0].get("pitcher_name") or label
+            if base == env_adj or env_adj == "—":
+                return f"**{name}** ({side_team}): {base}"
+            # Different — show transition with arrow
+            return f"**{name}** ({side_team}): {base} → **{env_adj}** (env-adj)"
+
+        away_str = _pitcher_grade_str(a_pid, game.get("away_pitcher", "TBD"),
+                                        game.get("away_team_abbr", ""))
+        home_str = _pitcher_grade_str(h_pid, game.get("home_pitcher", "TBD"),
+                                        game.get("home_team_abbr", ""))
+        pitcher_strs = [s for s in (away_str, home_str) if s]
+        if pitcher_strs:
+            st.caption(" · ".join(pitcher_strs) + f" · env_mult: {env_mult_show:.2f}×")
+
     info_cols = st.columns(3)
     with info_cols[0]:
         st.metric("Venue", game.get("venue", "—"))
@@ -5314,8 +5585,18 @@ for _, game in slate.iterrows():
                     top = valid.sort_values("hr_game_pct", ascending=False).iloc[0]
                     pct = top.get("hr_game_pct", 0)
                     alert = top.get("alert", "")
+                    # Show slate-leader flag if this player tops any category
+                    leader_badge = ""
+                    try:
+                        _pid = top.get("player_id")
+                        if _pid is not None and not pd.isna(_pid):
+                            cats = slate_leader_pid_map.get(int(_pid), [])
+                            if cats:
+                                leader_badge = " 🏆"
+                    except Exception:
+                        pass
                     st.markdown(
-                        f"**🎯 Best HR Play**: {alert} **{top['player_name']}** "
+                        f"**🎯 Best HR Play**: {alert} **{top['player_name']}**{leader_badge} "
                         f"({top['_team']}) — {pct:.1f}% HR Game"
                     )
         with pick_cols[1]:
