@@ -281,22 +281,23 @@ def hr_prob_per_pa(
     # Reference: Aaron Judge's actual rate of "at-least-1-HR in a game" peaked
     # at ~25% in his 62-HR 2022 season.
     #
-    # NEW BEHAVIOR (May 2026 update): Loosened the squash so elite hitters
-    # show meaningful differentiation. Previously all 13 elites clustered
-    # at 6.0-6.2% per PA (visible as identical hr_game_pct in top picks).
-    # Now:
+    # Behavior:
     #   - Below 4% per PA: linear pass-through (no squash)
     #   - 4-5%: gentle squash (some compression)
     #   - 5-7%: stronger squash (most differentiation happens here)
-    #   - Asymptote: 7.0% per PA (max game = 1 - 0.93^4.2 = 26.4%)
-    # This gives Judge (~20% barrel + great matchup) clear separation from
-    # Schwarber (~26% barrel + great matchup).
+    #   - Theoretical asymptote: 7.0% per PA (since tanh→1.0 in the limit)
+    #   - PRACTICAL ceiling: ~6.3% per PA. tanh never actually reaches 1.0:
+    #     tanh(1)≈0.76, tanh(2)≈0.96, tanh(3)≈0.995. Realistic inputs
+    #     produce 5.5-6.3% caps. Schwarber-tier max around 5.9%.
+    #     Per-game max: 1 - (1-0.063)^4.2 ≈ 24%.
+    # This gives clear separation among elite hitters without hard-cap clipping.
     if prob <= 0.04:
         squashed = prob
     else:
         excess = prob - 0.04
-        # tanh squash: asymptotes at 0.030 (so max = 0.07 = 7.0% per PA)
-        # Scale parameter widened to 0.040 so differentiation stays wider
+        # tanh squash: theoretical asymptote at 0.030 (so theoretical max = 7%),
+        # practical max ~6.3% for realistic excess values (0.02-0.05 range).
+        # Scale parameter widened to 0.040 so differentiation stays wider.
         squashed = 0.04 + 0.030 * np.tanh(excess / 0.040)
     return float(max(0.001, squashed))
 
