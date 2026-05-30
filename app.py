@@ -24,7 +24,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.05.29-la-fix-v15"
+APP_VERSION = "2026.05.29-calibration-v16"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -871,17 +871,43 @@ if not hitter_stats.empty:
     # different source would suppress the fill for everyone else.
     if "launch_angle" not in hitter_stats.columns:
         needs_la = True
+        la_missing_pct_before = 100.0
+        la_n_total_before = len(hitter_stats)
     else:
-        n_total = len(hitter_stats)
-        n_missing = hitter_stats["launch_angle"].isna().sum()
-        needs_la = (n_total > 0) and (n_missing / n_total > 0.30)
+        la_n_total_before = len(hitter_stats)
+        la_n_missing_before = hitter_stats["launch_angle"].isna().sum()
+        la_missing_pct_before = (la_n_missing_before / la_n_total_before * 100.0
+                                    if la_n_total_before > 0 else 0.0)
+        needs_la = (la_n_total_before > 0) and (la_missing_pct_before > 30.0)
+
+    # Persist coverage state to session_state so a diagnostic expander
+    # near the bottom of the page can show it. Even when the fill is skipped
+    # because coverage is already good, we want to be able to see that.
+    st.session_state["_la_missing_pct_before"] = la_missing_pct_before
+    st.session_state["_la_n_total"] = la_n_total_before
+    st.session_state["_la_fill_ran"] = bool(needs_la)
+    st.session_state["_la_fill_error"] = None
+
     if needs_la:
         try:
             from data_fetcher import fill_hitter_la_for_slate
             with st.spinner("Fetching real launch angles from Statcast (bulk first, ~5s)..."):
                 hitter_stats = fill_hitter_la_for_slate(hitter_stats, slate)
+            # Re-measure coverage AFTER fill so we can report the delta
+            if "launch_angle" in hitter_stats.columns:
+                n_missing_after = hitter_stats["launch_angle"].isna().sum()
+                n_total_after = len(hitter_stats)
+                pct_after = (n_missing_after / n_total_after * 100.0
+                                if n_total_after > 0 else 0.0)
+                st.session_state["_la_missing_pct_after"] = pct_after
+            else:
+                st.session_state["_la_missing_pct_after"] = 100.0
         except Exception as e:
+            st.session_state["_la_fill_error"] = str(e)[:200]
             st.warning(f"LA fill skipped: {e}")
+    else:
+        # Already healthy — record current coverage as the "after" too
+        st.session_state["_la_missing_pct_after"] = la_missing_pct_before
 
 # Last-resort: if IP is still completely missing for everyone, estimate from
 # Statcast PA so the model has *something* to work with (≈4.3 PA per IP)
@@ -2172,6 +2198,53 @@ if not p_slate.empty:
                     diag_df[diag_cols].head(30),
                     hide_index=True, use_container_width=True,
                 )
+
+    # DIAGNOSTIC: Launch angle coverage. If the LA column shows 0% across the
+    # board in the export, this expander tells you whether the fill RAN, what
+    # the before/after coverage was, and what error (if any) happened.
+    with st.expander("🔍 Diagnostic: launch angle coverage"):
+        st.caption(
+            "Launch angle feeds into the Power Score (sweet-spot bonus at ~28°). "
+            "If LA shows all NaN in the export, check the state below."
+        )
+        la_total = st.session_state.get("_la_n_total", 0)
+        la_before = st.session_state.get("_la_missing_pct_before")
+        la_after = st.session_state.get("_la_missing_pct_after")
+        la_ran = st.session_state.get("_la_fill_ran", False)
+        la_err = st.session_state.get("_la_fill_error")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Hitters in stats", la_total)
+        if la_before is not None:
+            c2.metric(
+                "Missing LA before fill",
+                f"{la_before:.1f}%",
+                help="If <30%, fill is skipped (already healthy).",
+            )
+        if la_after is not None:
+            delta = None
+            if la_before is not None:
+                delta = f"{la_after - la_before:+.1f}pp"
+            c3.metric(
+                "Missing LA after fill",
+                f"{la_after:.1f}%",
+                delta=delta,
+                delta_color="inverse",
+                help="After fill ran (if it ran). Target: <10% missing.",
+            )
+        st.write(f"**LA fill ran this session:** {'✓ yes' if la_ran else '— no (already ≤30% missing)'}")
+        if la_err:
+            st.error(f"LA fill error: {la_err}")
+        if not la_ran and (la_before is not None and la_before > 30):
+            st.warning(
+                "LA fill was needed but didn't run. This usually means an "
+                "exception fired before the fill block (check above)."
+            )
+        if la_after is not None and la_after > 50:
+            st.warning(
+                "More than half of hitters still missing LA after fill. "
+                "Statcast bulk endpoint may be down or rate-limited. Power "
+                "Score will be reduced for affected players."
+            )
 
 st.divider()
 # ============================================================================
