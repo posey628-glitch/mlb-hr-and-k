@@ -24,7 +24,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.05.29-calibration-v14"
+APP_VERSION = "2026.05.29-la-fix-v15"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -866,12 +866,19 @@ with st.spinner("Filling in missing pitcher data..."):
 # hitter on today's slate missing it. Cached 24h per player so the cost is
 # only paid once per day.
 if not hitter_stats.empty:
-    needs_la = ("launch_angle" not in hitter_stats.columns
-                or hitter_stats["launch_angle"].isna().all())
+    # Trigger LA fill if >30% of hitters are missing LA. Previously we only
+    # triggered on 100% missing, which meant a single hitter with LA from a
+    # different source would suppress the fill for everyone else.
+    if "launch_angle" not in hitter_stats.columns:
+        needs_la = True
+    else:
+        n_total = len(hitter_stats)
+        n_missing = hitter_stats["launch_angle"].isna().sum()
+        needs_la = (n_total > 0) and (n_missing / n_total > 0.30)
     if needs_la:
         try:
             from data_fetcher import fill_hitter_la_for_slate
-            with st.spinner("Fetching real launch angles from Statcast (one-time, cached 24h)..."):
+            with st.spinner("Fetching real launch angles from Statcast (bulk first, ~5s)..."):
                 hitter_stats = fill_hitter_la_for_slate(hitter_stats, slate)
         except Exception as e:
             st.warning(f"LA fill skipped: {e}")
