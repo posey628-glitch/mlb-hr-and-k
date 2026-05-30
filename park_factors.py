@@ -37,7 +37,7 @@ PARKS = {
     "Yankee Stadium":        {"hr_factor": 113, "hr_factor_L": 125, "hr_factor_R": 105, "runs_factor": 104, "cf_bearing": 22,  "lat": 40.829, "lon": -73.926,  "roof": "open"},
     "Citizens Bank Park":    {"hr_factor": 110, "hr_factor_L": 113, "hr_factor_R": 108, "runs_factor": 103, "cf_bearing": 18,  "lat": 39.906, "lon": -75.166,  "roof": "open"},
     "Globe Life Field":      {"hr_factor": 108, "hr_factor_L": 109, "hr_factor_R": 107, "runs_factor": 102, "cf_bearing": 11,  "lat": 32.747, "lon": -97.083,  "roof": "retractable"},
-    "Fenway Park":           {"hr_factor": 107, "hr_factor_L": 96,  "hr_factor_R": 115, "runs_factor": 108, "cf_bearing": 50,  "lat": 42.346, "lon": -71.097,  "roof": "open"},  # Green Monster boosts RHB
+    "Fenway Park":           {"hr_factor": 107, "hr_factor_L": 115, "hr_factor_R": 96,  "runs_factor": 108, "cf_bearing": 50,  "lat": 42.346, "lon": -71.097,  "roof": "open"},  # RF short porch (302ft) boosts LHB; Green Monster in LF eats RHB HRs (become doubles)
     "Wrigley Field":         {"hr_factor": 105, "hr_factor_L": 105, "hr_factor_R": 105, "runs_factor": 104, "cf_bearing": 38,  "lat": 41.948, "lon": -87.655,  "roof": "open"},
     "Chase Field":           {"hr_factor": 104, "hr_factor_L": 105, "hr_factor_R": 103, "runs_factor": 101, "cf_bearing": 23,  "lat": 33.445, "lon": -112.067, "roof": "retractable"},
     "Rogers Centre":         {"hr_factor": 103, "hr_factor_L": 103, "hr_factor_R": 103, "runs_factor": 100, "cf_bearing": 0,   "lat": 43.641, "lon": -79.389,  "roof": "retractable"},
