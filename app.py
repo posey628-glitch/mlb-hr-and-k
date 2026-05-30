@@ -24,7 +24,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.05.30-leaders-v17"
+APP_VERSION = "2026.05.30-leaders-v17b"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -3117,7 +3117,7 @@ if not p_slate.empty and "grade" in p_slate.columns:
 
     def _env_adj(row):
         try:
-            pid = row.get("player_id")
+            pid = row.get("pitcher_id")
             if pid is None or pd.isna(pid):
                 return row.get("grade", "—")
             env = env_by_pid.get(int(pid))
@@ -3129,7 +3129,7 @@ if not p_slate.empty and "grade" in p_slate.columns:
 
     p_slate["env_adj_grade"] = p_slate.apply(_env_adj, axis=1)
     # Store env_mult on each pitcher row too for the UI/diagnostic
-    p_slate["game_env_mult"] = p_slate["player_id"].apply(
+    p_slate["game_env_mult"] = p_slate["pitcher_id"].apply(
         lambda pid: env_by_pid.get(int(pid)) if pid is not None and not pd.isna(pid) else None
     )
 
@@ -3294,7 +3294,7 @@ if not p_slate.empty:
             return
         sub = sub.sort_values(col, ascending=ascending)
         top = sub.iloc[0]
-        _track_leader(label, top.get("player_id"), top.get("pitcher_name"),
+        _track_leader(label, top.get("pitcher_id"), top.get("pitcher_name"),
                        top[col], fmt)
 
     _p_leader(p_slate, "test_score",   "🛡️ Slate-best Test Score (pitcher)", fmt="{:.1f}")
@@ -4216,7 +4216,7 @@ if all_hitters:
         combined_all["slate_leader_flag"] = combined_all["player_id"].apply(_leader_flag)
         # Also annotate p_slate the same way
         if not p_slate.empty:
-            p_slate["slate_leader_flag"] = p_slate["player_id"].apply(_leader_flag)
+            p_slate["slate_leader_flag"] = p_slate["pitcher_id"].apply(_leader_flag)
 
     # SLATE-WIDE SLEEPER RECOMPUTE
     # find_sleepers() is called per-lineup (9 hitters at a time), so
@@ -5499,7 +5499,7 @@ for _, game in slate.iterrows():
                 pid_int = int(pid)
             except (TypeError, ValueError):
                 return None
-            match = p_slate[p_slate["player_id"] == pid_int]
+            match = p_slate[p_slate["pitcher_id"] == pid_int]
             if match.empty:
                 return None
             base = match.iloc[0].get("grade") or "—"
