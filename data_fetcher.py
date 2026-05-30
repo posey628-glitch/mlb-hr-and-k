@@ -483,20 +483,22 @@ def get_hitter_stats(season: int = CURRENT_SEASON, _stats_day: str = "") -> pd.D
 
     # Clean up float precision artifacts at source so downstream code doesn't
     # need to repeat rounding. Different metrics get different precision.
+    # NOTE: previously this dict had TWO `1:` keys, which silently overwrote
+    # the first — meaning all percentage columns (k_percent, barrel_batted_rate,
+    # hard_hit_percent, etc.) weren't being rounded at all. Now merged.
     round_specs = {
         # Ratios stored as 0-1 → 3 decimals
         3: ["iso", "xwoba", "xwobacon", "xslg", "xobp", "xba", "slg", "obp",
             "ops", "batting_avg", "babip", "avg", "woba"],
-        # Percentages 0-100 → 1 decimal
+        # Percentages (0-100) and velocities/angles → 1 decimal
         1: ["k_percent", "bb_percent", "whiff_percent", "swing_percent",
             "barrel_batted_rate", "hard_hit_percent", "sweet_spot_percent",
             "flyballs_percent", "groundballs_percent", "linedrives_percent",
             "popups_percent", "pull_percent", "pull_air_percent",
             "straightaway_percent", "opposite_percent", "z_swing_percent",
             "oz_swing_percent", "f_strike_percent", "zone_percent",
-            "csw_percent"],
-        # Velocities / angles → 1 decimal
-        1: ["launch_speed", "launch_angle", "avg_best_speed", "avg_hit_angle"],
+            "csw_percent",
+            "launch_speed", "launch_angle", "avg_best_speed", "avg_hit_angle"],
     }
     for digits, cols in round_specs.items():
         for c in cols:
@@ -676,8 +678,8 @@ def _fetch_pitcher_splits_single(pitcher_id: int, season: int) -> dict:
                     elif pa and pa >= 20 and slg is not None:
                         try:
                             slg_f = float(slg)
-                            if slg_f < 0.400:
-                                # Low SLG with no HR field reported = likely 0 HRs
+                            # Tightened to .320 (was .400) — see other site.
+                            if slg_f < 0.320:
                                 out[f"vs_{label}_hr_per_pa"] = 0.0
                         except (TypeError, ValueError):
                             pass
@@ -802,7 +804,11 @@ def _parse_stat_split_response(data: dict, group: str = "hitting") -> dict:
                     out[f"vs_{label}_hr_per_pa"] = round(hr / denom * 100, 3)
                 elif pa and pa >= 20 and slg:
                     try:
-                        if float(slg) < 0.400:
+                        # Tightened from .400 to .320: a pitcher with 1 HR in 25
+                        # PA could still post .380 SLG, so the old threshold
+                        # was occasionally inferring 0 HRs incorrectly.
+                        # .320 SLG is a strong signal that no HRs were hit.
+                        if float(slg) < 0.320:
                             out[f"vs_{label}_hr_per_pa"] = 0.0
                     except (TypeError, ValueError):
                         pass
@@ -1121,39 +1127,6 @@ def get_pitcher_arsenal(season: int = CURRENT_SEASON) -> pd.DataFrame:
             if isinstance(s, str) and "," in s else s
         )
     return df
-
-
-@st.cache_data(ttl=3600)
-def get_pitcher_arsenal_by_count(season: int = CURRENT_SEASON) -> pd.DataFrame:
-    """
-    Pitch usage broken out by count: ahead, behind, even, early, all.
-    Mirrors the 'Count Usage' tab in the screenshots.
-    """
-    frames = []
-    count_filters = [
-        ("all", ""),
-        ("early", "0-0,1-0,0-1,1-1,2-0"),
-        ("ahead", "0-1,0-2,1-2,2-2"),
-        ("behind", "1-0,2-0,2-1,3-0,3-1,3-2"),
-        ("even", "0-0,1-1,2-2,3-2"),
-    ]
-    for label, _filter in count_filters:
-        # Savant doesn't have a public CSV grouped by count - use pitch-type
-        # leaderboard with the count filter set
-        url = (
-            "https://baseballsavant.mlb.com/leaderboard/pitch-arsenal-stats"
-            f"?type=pitcher&pitchType=&year={season}&team=&min=10&hand=&csv=true"
-        )
-        try:
-            r = requests.get(url, headers=HEADERS, timeout=30)
-            r.raise_for_status()
-            df = pd.read_csv(io.StringIO(r.text))
-            df["count_state"] = label
-            frames.append(df)
-            break  # Same endpoint for all - we'll filter client-side
-        except Exception:
-            continue
-    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
 @st.cache_data(ttl=1800)
@@ -1881,7 +1854,6 @@ def get_recent_form_hitter(player_id: int, season: int = CURRENT_SEASON, days: i
     aggregates a few rolling indicators.
     """
     end = date.today()
-    start = end.replace(day=max(1, end.day))  # safe default; we'll use Savant search
     from datetime import timedelta
     start = end - timedelta(days=days)
     url = (
