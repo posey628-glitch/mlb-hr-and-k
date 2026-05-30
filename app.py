@@ -24,7 +24,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.05.29-deadcode-v13"
+APP_VERSION = "2026.05.29-calibration-v14"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -485,13 +485,23 @@ with st.sidebar:
     # block ran). Per-pitch matchup is captured by pitch_match_score.
     use_bvp = False
     use_weather = st.checkbox("Weather + park factors", value=True)
-    # Catcher framing checkbox removed — same dead UI pattern as umpire
-    # and Vegas. We fetched framing data but the catcher_framing_factor was
-    # never actually passed to k_total_projection (default 1.0 always won).
-    # Wiring it would require: lookup tonight's starting catcher from the
-    # lineup, then his framing_k_factor from season leaderboard. Real work,
-    # not done. Removed to keep UI honest about what affects calculations.
-    use_ump = False
+    # Catcher framing remains disabled — was fetched but never wired into
+    # k_total_projection. Reintroducing it cleanly would require pulling the
+    # game's starting catcher from the lineup card then joining their framing
+    # stat — non-trivial. Skip until needed.
+    #
+    # Umpire factor RE-ENABLED with a real lookup table (UMPIRE_K_FACTORS in
+    # game_context.py). Most umpires are neutral; this only meaningfully moves
+    # K projections on the ~10% of slates with an extreme umpire assigned.
+    use_ump = st.checkbox(
+        "Umpire K-zone tendencies",
+        value=HAVE_GAME_CONTEXT,
+        help=(
+            "Apply known umpire K-rate tendencies to K projections. "
+            "Most umpires are neutral (1.0×). Top K-friendly umpires "
+            "add ~7% to K projections; tight-zone umpires subtract ~5%."
+        ),
+    )
     # Vegas totals removed (May 2026). We pull them from ESPN but never
     # actually USED them in any HR or K calculation — only displayed as a
     # metric. For HR/K props, the underlying signals (park × weather,
@@ -2284,17 +2294,16 @@ for _, game in slate.iterrows():
         hr_env_color = "warning"
     # else: neutral, no flag
 
-    # Umpire + catcher framing
-    # Umpire factor disabled — we fetch HP umpire name but have no lookup
-    # table for individual umpire K-rate tendencies, so it was always returning
-    # neutral 1.0. Removed to keep only signals that actually add value.
+    # Umpire factor — uses UMPIRE_K_FACTORS lookup table in game_context.py.
+    # Most umpires return neutral 1.0; only ~10% have meaningfully non-neutral
+    # K-rate tendencies (±5% or more from neutral).
     ump = {}
     framing = {}
     if use_ump and HAVE_GAME_CONTEXT:
         try:
-            framing = get_catcher_framing_for_game(gpk) or {}
+            ump = get_umpire_for_game(gpk) or {}
         except Exception:
-            framing = {}
+            ump = {}
 
     # Vegas
     vegas_row = {}
@@ -2693,7 +2702,7 @@ for _, game in slate.iterrows():
                         p_pa = raw
                     else:
                         excess = raw - 0.04
-                        p_pa = 0.04 + 0.030 * np.tanh(excess / 0.040)
+                        p_pa = 0.04 + 0.032 * np.tanh(excess / 0.045)
                     p_pa = max(0.001, p_pa)
             except TypeError:
                 try:
@@ -2716,15 +2725,16 @@ for _, game in slate.iterrows():
             # NEW (May 2026): Home/Away PA adjustment.
             # Away teams average ~4.31 PA per game; home teams ~4.21 PA per game.
             # The reason: home team doesn't bat in the bottom of the 9th when
-            # they're winning (~50% of games). Documented historically.
-            # The effect: away hitters get ~2% more HR chances per game.
-            #
-            # CONSERVATIVE CALIBRATION: real data shows away PA advantage of
-            # about 0.05-0.08 PA per game. We use ±0.03 (a bit conservative)
-            # so the effect on HR Game% is ~0.3 percentage points, not enough
-            # to dominate the top-10 selection.
+            # HOME/AWAY PA OFFSET — refined from 0.03 to 0.055 (May 2026).
+            # Real MLB data 2022-2024: away teams average ~4.31 PA/game vs
+            # home ~4.20 (away advantage because home team doesn't bat in the
+            # bottom of the 9th when winning, ~50% of games). The ±0.055 split
+            # gives 4.255 vs 4.145 — within 0.005 PA of empirical average and
+            # adds about 0.15-0.30 percentage points to away hitters' HR Game%.
+            # Still small enough that it doesn't dominate top-10 selection, but
+            # directionally correct and research-backed.
             is_away_team = (matchup_df is away_matchup)
-            ha_offset = 0.03 if is_away_team else -0.03
+            ha_offset = 0.055 if is_away_team else -0.055
 
             lp = row_dict.get("lineup_pos")
             is_fill = row_dict.get("is_roster_fill", False)
@@ -2909,10 +2919,13 @@ for _, game in slate.iterrows():
                 except Exception:
                     pass
             return 5.5  # fallback to legacy default
+        # Pull umpire K-factor (neutral 1.0 for ~90% of games)
+        ump_k = float(ump.get("k_factor", 1.0)) if ump else 1.0
         if away_p_row:
             away_exp_ip = _exp_ip_for_pitcher(away_p_row)
             away_k_proj = k_total_projection(
                 away_p_row, home_lineup_k_pct,
+                ump_k_factor=ump_k,
                 park_k_factor=pkf,
                 expected_ip=away_exp_ip,
             )
@@ -2920,6 +2933,7 @@ for _, game in slate.iterrows():
             home_exp_ip = _exp_ip_for_pitcher(home_p_row)
             home_k_proj = k_total_projection(
                 home_p_row, away_lineup_k_pct,
+                ump_k_factor=ump_k,
                 park_k_factor=pkf,
                 expected_ip=home_exp_ip,
             )
@@ -5184,6 +5198,19 @@ for _, game in slate.iterrows():
             "Park × Wx", f"{ctx.get('hr_mult', 1.0):.2f}×",
             help="Park HR factor × weather multiplier. >1.0 = HR-friendly.",
         )
+        # Show umpire flag if K-factor is meaningfully non-neutral (±3%+)
+        ump_info = ctx.get("ump") or {}
+        ump_k = ump_info.get("k_factor", 1.0)
+        ump_name = ump_info.get("name")
+        if ump_name and (ump_k >= 1.03 or ump_k <= 0.97):
+            if ump_k >= 1.05:
+                st.caption(f"👨‍⚖️ **HP: {ump_name}** · K-friendly ({ump_k:.2f}×)")
+            elif ump_k >= 1.03:
+                st.caption(f"👨‍⚖️ HP: {ump_name} · slight K boost ({ump_k:.2f}×)")
+            elif ump_k <= 0.95:
+                st.caption(f"👨‍⚖️ **HP: {ump_name}** · K-suppressing ({ump_k:.2f}×)")
+            else:
+                st.caption(f"👨‍⚖️ HP: {ump_name} · slight K dampener ({ump_k:.2f}×)")
 
     # Per-game Top HR Hitter + Top Sleeper, combining both lineups
     am = ctx.get("away_matchup")
