@@ -176,7 +176,11 @@ def grand_slam_probability(
     # 4) Per-hitter HR rate (re-use hr_score if present, else compute quickly)
     if "hr_score" not in df.columns:
         df = hr_probability(df, pitcher_row, hr_mult)
-    base_hr = df["hr_score"] / 100.0  # normalize 0-1
+    # CRITICAL: hr_score already has hr_mult applied (inside hr_probability).
+    # The formula below multiplies by hr_mult AGAIN. To avoid squaring the
+    # park/weather effect (e.g. Coors+wind = 1.20² = 1.44× instead of 1.20×),
+    # we strip it here before the formula re-applies it.
+    base_hr = (df["hr_score"] / max(hr_mult, 0.01)) / 100.0  # normalize 0-1
 
     # Compound it (cap at 100 - it's a 0-100 score, not unbounded)
     df["gs_score"] = (
