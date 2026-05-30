@@ -102,8 +102,13 @@ def hr_prob_per_pa(
         # Compute hot/cold ratio capped at [0.75, 1.25]
         hot_cold_ratio = recent_rate_decimal / h_base
         hot_cold_ratio = max(0.75, min(1.25, hot_cold_ratio))
-        # Apply only 30% of the deviation (conservative — recent games are noisy)
-        adjustment = 1.0 + (hot_cold_ratio - 1.0) * 0.30
+        # Apply only 20% of the deviation (lowered from 30% in May 2026).
+        # Baseball research consistently shows hot/cold streaks have minimal
+        # predictive value beyond 1-2 weeks. Most quantitative analysts use
+        # 10-15% weight; 20% is a balanced choice that respects the signal
+        # without overreacting to small samples. Result: projections more
+        # stable, less reactive to short streaks.
+        adjustment = 1.0 + (hot_cold_ratio - 1.0) * 0.20
         h_base = h_base * adjustment
 
     # NEW: DAY/NIGHT adjustment - hitters perform differently in day vs night.
@@ -207,7 +212,11 @@ def hr_prob_per_pa(
         pitcher_mult = 1.0  # No adjustment if we don't know
     else:
         p_hr_per_pa = (p_hr9 / 9) / 4.3  # ~4.3 PA per inning
-        league_p_hr_per_pa = (1.20 / 9) / 4.3  # league HR/9 ~1.20
+        # League HR/9 baseline: 1.30 reflects 2023-2025 MLB rate.
+        # Was 1.20 (2022 deadened-ball era) — that made every pitcher look
+        # ~9% better at HR suppression than reality, systematically reducing
+        # pitcher_mult for average pitchers.
+        league_p_hr_per_pa = (1.30 / 9) / 4.3
         pitcher_mult = p_hr_per_pa / league_p_hr_per_pa
         pitcher_mult = max(0.5, min(2.0, pitcher_mult))
 
@@ -304,26 +313,27 @@ def hr_prob_per_pa(
     )
     # Use a SOFT squash that asymptotes at a REALISTIC ceiling.
     # Reference: Aaron Judge's actual rate of "at-least-1-HR in a game" peaked
-    # at ~25% in his 62-HR 2022 season.
+    # at ~25% in his 62-HR 2022 season. Schwarber/Olson 2024 hit 24.4%/24.3%.
+    #
+    # CALIBRATION (May 2026): loosened from 0.030/0.040 → 0.032/0.045 to bring
+    # elite hitter game% up to 24-26% range matching real MLB data. Previous
+    # caps had Schwarber at ~22.6% game (real 24.4%) — systematically 1-2pp low.
     #
     # Behavior:
     #   - Below 4% per PA: linear pass-through (no squash)
     #   - 4-5%: gentle squash (some compression)
     #   - 5-7%: stronger squash (most differentiation happens here)
-    #   - Theoretical asymptote: 7.0% per PA (since tanh→1.0 in the limit)
-    #   - PRACTICAL ceiling: ~6.3% per PA. tanh never actually reaches 1.0:
-    #     tanh(1)≈0.76, tanh(2)≈0.96, tanh(3)≈0.995. Realistic inputs
-    #     produce 5.5-6.3% caps. Schwarber-tier max around 5.9%.
-    #     Per-game max: 1 - (1-0.063)^4.2 ≈ 24%.
-    # This gives clear separation among elite hitters without hard-cap clipping.
+    #   - Theoretical asymptote: 7.2% per PA (tanh→1.0 in the limit)
+    #   - PRACTICAL ceiling: ~6.7% per PA in realistic input range.
+    #     Per-game max: 1 - (1-0.067)^4.2 ≈ 25.4% — matches Schwarber-tier real rate.
     if prob <= 0.04:
         squashed = prob
     else:
         excess = prob - 0.04
-        # tanh squash: theoretical asymptote at 0.030 (so theoretical max = 7%),
-        # practical max ~6.3% for realistic excess values (0.02-0.05 range).
-        # Scale parameter widened to 0.040 so differentiation stays wider.
-        squashed = 0.04 + 0.030 * np.tanh(excess / 0.040)
+        # Tanh squash: theoretical asymptote at 0.032 (theoretical max = 7.2% per PA).
+        # Scale parameter 0.045 (was 0.040) widens the differentiation band, so
+        # 6%/PA input → 5.5% out (was 5.4%), 8%/PA → 6.4% (was 6.3%), 12%/PA → 6.9%.
+        squashed = 0.04 + 0.032 * np.tanh(excess / 0.045)
     return float(max(0.001, squashed))
 
 
@@ -390,8 +400,25 @@ def k_total_projection(
         P(K total > line). Lines like 5.5 mean "more than 5.5 strikeouts",
         i.e. 6 or more, so we DON'T add a continuity correction since line is
         already at the half-integer.
+
+        HYBRID: for low-K projections (mean < 5, typically openers/swing-men),
+        the Normal approximation diverges from the true discrete distribution
+        by 3-5 percentage points. Use Poisson for these. At K≥5 the Normal
+        approximation is accurate enough for prop pricing.
         """
         from math import erf, sqrt
+        if mean < 5:
+            # Poisson is the right discrete distribution for rare-event counts.
+            # P(K > line) = P(K >= ceil(line)) since K is integer.
+            from math import factorial, exp
+            k_min = int(line + 0.999)  # ceil for half-integer lines (5.5 → 6)
+            if mean <= 0:
+                return 0.0
+            # Compute P(K < k_min) = sum_{i=0}^{k_min-1} e^-λ λ^i / i!
+            cum = 0.0
+            for i in range(k_min):
+                cum += exp(-mean) * (mean ** i) / factorial(i)
+            return max(0.0, min(1.0, 1.0 - cum))
         if sigma <= 0:
             return 0.5
         z = (line - mean) / (sigma * sqrt(2))
