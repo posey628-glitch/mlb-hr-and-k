@@ -102,6 +102,91 @@ def _form_arrow(recent: float, season: float, threshold: float = 0.10) -> str:
     return "→"
 
 
+def _classify_role(row, min_ip: float, min_gs: int, full_ip: float) -> str:
+    """Module-level role classifier — single source of truth for both
+    build_pitcher_slate() and recompute_pitcher_roles().
+
+    Previously this 60-line function was duplicated as a nested function
+    inside both call sites, which caused logic drift over time.
+
+    Inputs (from row):
+      ip, games_started, games_played, is_rookie, primary_position (MLB SP/RP),
+      days_since_return, il_count_this_season
+
+    Returns one of:
+      ✓ / 🌱 ✓ / 🌱 NEW STARTER / 🏥 RETURNING / 🔄 SWING / 🚨 OPENER /
+      ⚠️ LOW IP / ❔ NO DATA
+    """
+    ip = row.get("ip")
+    gs = row.get("games_started")
+    gp = row.get("games_played")
+    _rookie_raw = row.get("is_rookie", False)
+    try:
+        is_rookie = bool(_rookie_raw) if (_rookie_raw is not None and not pd.isna(_rookie_raw)) else False
+    except (TypeError, ValueError):
+        is_rookie = False
+    # MLB's official primaryPosition: "SP" / "RP" / "P" / "TWP" / ""
+    _pos_raw = row.get("primary_position")
+    mlb_position = "" if (_pos_raw is None or pd.isna(_pos_raw)) else str(_pos_raw).upper()
+    # IL info (NA-safe)
+    days_since_return = row.get("days_since_return")
+    if pd.isna(days_since_return):
+        days_since_return = None
+    _il_raw = row.get("il_count_this_season", 0)
+    try:
+        il_count = 0 if pd.isna(_il_raw) else (int(_il_raw) if _il_raw else 0)
+    except (TypeError, ValueError):
+        il_count = 0
+    is_returning_starter = (
+        days_since_return is not None
+        and 0 <= days_since_return <= 30
+    ) or (il_count >= 1)
+
+    # NO DATA case
+    if (ip is None or pd.isna(ip)) and (gs is None or pd.isna(gs)):
+        return "❔ NO DATA"
+
+    rookie_prefix = "🌱 " if is_rookie else ""
+    gs_n = float(gs) if (gs is not None and not pd.isna(gs)) else 0
+    gp_n = float(gp) if (gp is not None and not pd.isna(gp)) else 0
+    ip_n = float(ip) if (ip is not None and not pd.isna(ip)) else 0
+
+    # Case 1: MLB explicitly says this pitcher is an RP — opener role
+    if mlb_position == "RP":
+        return rookie_prefix + "🚨 OPENER"
+
+    # Case 2: MLB explicitly says SP — trust that, refine for IL/rookie status
+    if mlb_position == "SP":
+        if is_returning_starter and ip_n < min_ip * 0.8:
+            return rookie_prefix + "🏥 RETURNING"
+        if is_rookie and gs_n < min_gs:
+            return "🌱 NEW STARTER"
+        return rookie_prefix + "✓"
+
+    # Case 3: No MLB SP/RP designation — use heuristics
+    # SWING man: started SOME but mostly relief with short outings
+    if gs_n > 0 and gp_n > gs_n * 1.5:
+        ip_per_outing = ip_n / gp_n if gp_n > 0 else 5.0
+        if ip_per_outing < 3.0:
+            return rookie_prefix + "🔄 SWING"
+
+    # Zero starts but has appearances → opener
+    if gs_n == 0 and gp_n > 0:
+        return rookie_prefix + "🚨 OPENER"
+    # Zero games entirely → debut
+    if gs_n == 0 and gp_n == 0:
+        return "🌱 NEW STARTER"
+
+    # Has starts. Refine:
+    if is_returning_starter and ip_n < min_ip * 0.8:
+        return rookie_prefix + "🏥 RETURNING"
+    if is_rookie or gs_n < min_gs:
+        return "🌱 NEW STARTER"
+    if ip_n < full_ip * 0.6:
+        return rookie_prefix + "⚠️ LOW IP"
+    return rookie_prefix + "✓" if rookie_prefix else "✓"
+
+
 def build_matchup_table(
     lineup: list[dict],
     pitcher_row: pd.Series | None,
@@ -644,104 +729,12 @@ def build_pitcher_slate(
     df["reliability"] = df.apply(_reliability, axis=1)
 
     # ------------------------------------------------------------------
-    # ROLE FLAG - season-aware, never auto-defaults to RELIEVER without evidence
+    # ROLE FLAG - uses module-level _classify_role (shared with recompute)
     # ------------------------------------------------------------------
-    def _role_flag(row):
-        ip = row.get("ip")
-        gs = row.get("games_started")
-        gp = row.get("games_played")
-        _rookie_raw = row.get("is_rookie", False)
-        try:
-            is_rookie = bool(_rookie_raw) if (_rookie_raw is not None and not pd.isna(_rookie_raw)) else False
-        except (TypeError, ValueError):
-            is_rookie = False
-        # MLB's official primaryPosition: "SP" / "RP" / "P" / "TWP" / ""
-        # When MLB says SP, trust it as a starter regardless of low season IP.
-        mlb_position = (row.get("primary_position") or "").upper()
-        # IL info — be defensive about pandas NA. `or 0` raises NAType.__bool__
-        # error when the field is pd.NA, so we explicitly check for NA first.
-        days_since_return = row.get("days_since_return")
-        if pd.isna(days_since_return):
-            days_since_return = None
-        _il_raw = row.get("il_count_this_season", 0)
-        try:
-            il_count = 0 if pd.isna(_il_raw) else (int(_il_raw) if _il_raw else 0)
-        except (TypeError, ValueError):
-            il_count = 0
-        is_returning_starter = (
-            days_since_return is not None
-            and 0 <= days_since_return <= 30
-        ) or (il_count >= 1)
-
-        # NO DATA case
-        if (ip is None or pd.isna(ip)) and (gs is None or pd.isna(gs)):
-            return "❔ NO DATA"
-
-        rookie_prefix = "🌱 " if is_rookie else ""
-
-        # Safe numeric values
-        gs_n = float(gs) if (gs is not None and not pd.isna(gs)) else 0
-        gp_n = float(gp) if (gp is not None and not pd.isna(gp)) else 0
-        ip_n = float(ip) if (ip is not None and not pd.isna(ip)) else 0
-
-        # CRITICAL: Every pitcher in p_slate IS a probable starter for tonight.
-        # So we never need to flag them as a "RELIEVER" in the everyday sense.
-        # The role classification here is about EXPECTED WORKLOAD tonight:
-        #   ✓             = established starter, expect full game (5-6+ IP)
-        #   🌱 NEW STARTER = rookie/recent recall with few starts (3-4 IP expected)
-        #   🏥 RETURNING   = recently back from IL (4-5 IP, abundance of caution)
-        #   🔄 SWING       = legit swing-man (3 IP expected, bullpen game)
-        #   🚨 OPENER      = MLB designates RP but he's starting tonight (1-2 IP)
-        #   ⚠️ LOW IP      = below-expected season IP, recent struggles or short leash
-
-        # Case 1: MLB explicitly says this guy is an RP (not just generic P)
-        # AND he's the probable starter → opener situation
-        if mlb_position == "RP":
-            return rookie_prefix + "🚨 OPENER"
-
-        # Case 2: MLB explicitly says SP → trust that. He's a starter.
-        # Just refine if returning from IL or rookie with limited starts.
-        if mlb_position == "SP":
-            if is_returning_starter and ip_n < min_ip * 0.8:
-                return rookie_prefix + "🏥 RETURNING"
-            if is_rookie and gs_n < min_gs:
-                return "🌱 NEW STARTER"
-            return rookie_prefix + "✓"
-
-        # Case 3: No MLB SP/RP designation (just "P" or empty) — use heuristics.
-
-        # SWING man: started SOME games but mostly relief (gs > 0 AND gp > gs * 1.5)
-        # AND short outings (<3 IP per outing on average). This catches true
-        # swing-men. Pure starters always have gp ≈ gs.
-        if gs_n > 0 and gp_n > gs_n * 1.5:
-            ip_per_outing = ip_n / gp_n if gp_n > 0 else 5.0
-            if ip_per_outing < 3.0:
-                return rookie_prefix + "🔄 SWING"
-
-        # ZERO career starts this season AND has appeared in games → opener/RP role
-        if gs_n == 0 and gp_n > 0:
-            return rookie_prefix + "🚨 OPENER"
-
-        # ZERO games at all → MLB debut tonight
-        if gs_n == 0 and gp_n == 0:
-            return "🌱 NEW STARTER"
-
-        # HAS STARTS — they're a starter. Refine further:
-        # - Returning from IL with low IP → 🏥 RETURNING
-        # - Rookie or low-GS player → 🌱 NEW STARTER (Coleman Crow case)
-        # - Low IP without IL → ⚠️ LOW IP
-        # - Otherwise → ✓
-        if is_returning_starter and ip_n < min_ip * 0.8:
-            return rookie_prefix + "🏥 RETURNING"
-        if is_rookie or gs_n < min_gs:
-            # Rookie with any starts = NEW STARTER (not RELIEVER!)
-            # Non-rookie with less than min_gs starts = also limited workload
-            return "🌱 NEW STARTER"
-        if ip_n < full_ip * 0.6:
-            return rookie_prefix + "⚠️ LOW IP"
-        return rookie_prefix + "✓" if rookie_prefix else "✓"
-
-    df["role"] = df.apply(_role_flag, axis=1)
+    df["role"] = df.apply(
+        lambda r: _classify_role(r, min_ip=min_ip, min_gs=min_gs, full_ip=full_ip),
+        axis=1,
+    )
 
     # ------------------------------------------------------------------
     # COMPOSITE SCORE COMPONENTS - real data only, no fake-50 defaults
@@ -774,30 +767,34 @@ def build_pitcher_slate(
         df["k_score_blended"] = df["k_score"]
 
     # ------------------------------------------------------------------
-    # TEST SCORE - rebalanced. K is now 35% (was 40%), with new ERA component
-    # ------------------------------------------------------------------
-    # Weights: K-blended 30%, Whiff 20%, Suppress (xwOBA) 25%, ERA 15%, base K 10%
-    # Total weight = 1.0 if all components present; less means data is incomplete
+    # TEST SCORE — composite K-suppression score across the slate.
+    # Honest weights (no double-counting): K-blended captures the K rate signal
+    # via blend of K% and K/9, so we don't need the standalone base k_score too.
+    # Weights:
+    #   K-blended       35%  (blend of K% and K/9, the primary K signal)
+    #   Whiff%          20%  (called/swinging strike rate, K-leading indicator)
+    #   xwOBA suppress  25%  (overall stuff quality vs all hitters)
+    #   ERA             20%  (results-based check on the above)
+    # Total = 100%. Effective K-focused weight is 35% + ~10% (whiff overlap) = ~45%
+    # which honestly reflects that this is a strikeout-leaning score.
     def _composite_test(row):
         parts = []
-        max_weight = 0.30 + 0.20 + 0.25 + 0.15 + 0.10  # = 1.0
+        max_weight = 0.35 + 0.20 + 0.25 + 0.20  # = 1.0
         if pd.notna(row.get("k_score_blended")):
-            parts.append((row["k_score_blended"], 0.30))
+            parts.append((row["k_score_blended"], 0.35))
         if pd.notna(row.get("whiff_score")):
             parts.append((row["whiff_score"], 0.20))
         if pd.notna(row.get("suppress_score")):
             parts.append((row["suppress_score"], 0.25))
         if pd.notna(row.get("era_score")):
-            parts.append((row["era_score"], 0.15))
-        if pd.notna(row.get("k_score")):
-            parts.append((row["k_score"], 0.10))
+            parts.append((row["era_score"], 0.20))
         if not parts:
             return np.nan
         total_w = sum(w for _, w in parts)
         raw = sum(v * w for v, w in parts) / total_w
-        # Data completeness penalty: only count fully when we have all 5 components
-        # If only 3 of 5 weights are present, score gets multiplied by 0.85
-        # If only 2 of 5, by 0.75. This penalizes inflated scores from sparse data.
+        # Data completeness penalty: only count fully when we have all 4 components.
+        # If only 2 of 4 weights are present, score gets penalized so sparse data
+        # doesn't masquerade as a high-confidence score.
         completeness = total_w / max_weight
         if completeness < 0.5:
             penalty = 0.80
@@ -936,6 +933,10 @@ def build_pitcher_slate(
             # Role-based defaults take PRIORITY over IP-based ones.
             # Jax case: 5 GS / 16 GP / 27.2 IP → if we just check ip/gs we miss
             # that he's a swing-man pitching ~1.7 IP per outing.
+            # NOTE: "🔄 BULK" and "🚨 RELIEVER" labels are deprecated — app.py
+            # normalizes them to "🚨 OPENER" before _expected_ip runs, so we
+            # only need to check for OPENER here. Kept RELIEVER as a defensive
+            # fallback in case role classification ran without normalization.
             if "🚨 OPENER" in str(role) or "🚨 RELIEVER" in str(role):
                 # Opener typically goes 1-2 IP then a bulk reliever takes over
                 base_ip = 1.5
@@ -945,8 +946,6 @@ def build_pitcher_slate(
             elif "🏥 RETURNING" in str(role):
                 # Returning from IL — abundance of caution, 4-5 IP
                 base_ip = 4.5
-            elif "🔄 BULK" in str(role):
-                base_ip = 3.0
             elif "🔄 SWING" in str(role):
                 # For swing-man, base on actual ip_per_outing capped at 3.5
                 if (ip is not None and not pd.isna(ip) and gp is not None
@@ -1027,61 +1026,10 @@ def recompute_pitcher_roles(p_slate: pd.DataFrame, slate_date=None) -> pd.DataFr
     min_ip = thresholds["min_ip"]
     min_gs = thresholds["min_gs"]
     full_ip = thresholds["full_ip"]
-    full_gs = thresholds["full_gs"]
-
-    def _role_flag(row):
-        ip = row.get("ip")
-        gs = row.get("games_started")
-        gp = row.get("games_played")
-        _rookie_raw = row.get("is_rookie", False)
-        try:
-            is_rookie = bool(_rookie_raw) if (_rookie_raw is not None and not pd.isna(_rookie_raw)) else False
-        except (TypeError, ValueError):
-            is_rookie = False
-        mlb_position = (row.get("primary_position") or "").upper()
-        # NA-safe IL info handling. `or 0` raises NAType.__bool__ on pd.NA.
-        days_since_return = row.get("days_since_return")
-        if pd.isna(days_since_return):
-            days_since_return = None
-        _il_raw = row.get("il_count_this_season", 0)
-        try:
-            il_count = 0 if pd.isna(_il_raw) else (int(_il_raw) if _il_raw else 0)
-        except (TypeError, ValueError):
-            il_count = 0
-        is_returning_starter = (
-            days_since_return is not None
-            and 0 <= days_since_return <= 30
-        ) or (il_count >= 1)
-        if (ip is None or pd.isna(ip)) and (gs is None or pd.isna(gs)):
-            return "❔ NO DATA"
-        rookie_prefix = "🌱 " if is_rookie else ""
-        gs_n = float(gs) if (gs is not None and not pd.isna(gs)) else 0
-        gp_n = float(gp) if (gp is not None and not pd.isna(gp)) else 0
-        ip_n = float(ip) if (ip is not None and not pd.isna(ip)) else 0
-        if mlb_position == "RP":
-            return rookie_prefix + "🚨 OPENER"
-        if mlb_position == "SP":
-            if is_returning_starter and ip_n < min_ip * 0.8:
-                return rookie_prefix + "🏥 RETURNING"
-            if is_rookie and gs_n < min_gs:
-                return "🌱 NEW STARTER"
-            return rookie_prefix + "✓"
-        if gs_n > 0 and gp_n > gs_n * 1.5:
-            ip_per_outing = ip_n / gp_n if gp_n > 0 else 5.0
-            if ip_per_outing < 3.0:
-                return rookie_prefix + "🔄 SWING"
-        if gs_n == 0 and gp_n > 0:
-            return rookie_prefix + "🚨 OPENER"
-        if gs_n == 0 and gp_n == 0:
-            return "🌱 NEW STARTER"
-        if is_returning_starter and ip_n < min_ip * 0.8:
-            return rookie_prefix + "🏥 RETURNING"
-        if is_rookie or gs_n < min_gs:
-            return "🌱 NEW STARTER"
-        if ip_n < full_ip * 0.6:
-            return rookie_prefix + "⚠️ LOW IP"
-        return rookie_prefix + "✓" if rookie_prefix else "✓"
 
     p_slate = p_slate.copy()
-    p_slate["role"] = p_slate.apply(_role_flag, axis=1)
+    p_slate["role"] = p_slate.apply(
+        lambda r: _classify_role(r, min_ip=min_ip, min_gs=min_gs, full_ip=full_ip),
+        axis=1,
+    )
     return p_slate
