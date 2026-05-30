@@ -115,7 +115,7 @@ def wind_component_out(wind_dir_deg: float, cf_bearing_deg: float) -> float:
     return math.cos(angle_diff)
 
 
-def hr_multiplier(weather: dict, park: dict) -> tuple[float, str]:
+def hr_multiplier(weather: dict, park: dict, skip_wind: bool = False) -> tuple[float, str]:
     """
     Combine weather + park into a single HR multiplier (1.0 = neutral).
     Returns (multiplier, plain-English summary).
@@ -178,9 +178,13 @@ def hr_multiplier(weather: dict, park: dict) -> tuple[float, str]:
             summary.append(f"{temp:.0f}°F")
 
     # Wind
+    # When skip_wind=True (called from per-hitter loop with pull-side wind
+    # already applied separately), we skip wind here to avoid double-counting.
+    # The pull-side wind multiplier from park_factors.wind_pull_side_multiplier
+    # captures both directional and pull-side wind effects per handedness.
     wind_mph = weather.get("wind_mph", 0)
     wind_dir = weather.get("wind_dir_deg")
-    if wind_mph and wind_dir is not None:
+    if wind_mph and wind_dir is not None and not skip_wind:
         component = wind_component_out(wind_dir, park.get("cf_bearing", 0))
         net = component * wind_mph
         wind_eff = max(-0.25, net * 0.01)
