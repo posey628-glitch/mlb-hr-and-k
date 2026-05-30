@@ -684,20 +684,43 @@ def build_pitcher_slate(
     df["ip_per_outing"] = df.apply(_ip_per_outing, axis=1)
 
     # ------------------------------------------------------------------
-    # SAMPLE NOISE FLAG - catches stat inconsistencies (high ERA + low WHIP, etc)
+    # SAMPLE NOISE FLAG - catches stat inconsistencies that suggest the
+    # pitcher's season numbers are misleading due to small sample.
     # ------------------------------------------------------------------
     def _sample_noise(row):
         ip = row.get("ip")
         era = row.get("era")
         whip = row.get("whip")
-        if (ip is not None and not pd.isna(ip) and ip < 20
-                and era is not None and not pd.isna(era) and era > 5.0
-                and whip is not None and not pd.isna(whip) and whip < 1.1):
+        ip_n = float(ip) if (ip is not None and not pd.isna(ip)) else None
+        era_n = float(era) if (era is not None and not pd.isna(era)) else None
+        whip_n = float(whip) if (whip is not None and not pd.isna(whip)) else None
+
+        # Pattern 1: classic mismatch — high ERA but low WHIP (HR-heavy bad luck)
+        if (ip_n is not None and ip_n < 20
+                and era_n is not None and era_n > 5.0
+                and whip_n is not None and whip_n < 1.1):
             return True
+
+        # Pattern 2: small-sample extreme on EITHER end. Tyler Phillips (May
+        # 2026 case study) had 33 IP and a 1.07 ERA which was flagged as
+        # EXPLOIT-able by the grade system but the underlying sample was too
+        # small to be predictive. The earlier filter required ERA>5.0 so
+        # ultra-low-ERA small-sample pitchers slipped through.
+        # Now flag: under 40 IP AND ERA outside (2.00, 6.00). The 40 IP
+        # threshold corresponds to ~7 starts which is around when ERA starts
+        # to stabilize for starters; under that, extreme ERAs are usually
+        # sample noise rather than real signal.
+        if (ip_n is not None and ip_n < 40
+                and era_n is not None and (era_n < 2.00 or era_n > 6.00)):
+            return True
+
+        # Pattern 3: barrel rate suspiciously zero in tiny sample
         barrel = row.get("barrel_allowed")
-        if (ip is not None and not pd.isna(ip) and ip < 10
-                and barrel is not None and not pd.isna(barrel) and barrel == 0):
+        if (ip_n is not None and ip_n < 10
+                and barrel is not None and not pd.isna(barrel)
+                and float(barrel) == 0):
             return True
+
         return False
 
     df["sample_noise"] = df.apply(_sample_noise, axis=1)
