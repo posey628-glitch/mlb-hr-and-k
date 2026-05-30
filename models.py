@@ -164,10 +164,26 @@ def _classify_role(row, min_ip: float, min_gs: int, full_ip: float) -> str:
         return rookie_prefix + "✓"
 
     # Case 3: No MLB SP/RP designation — use heuristics
-    # SWING man: started SOME but mostly relief with short outings
-    if gs_n > 0 and gp_n > gs_n * 1.5:
+    # SWING man: started SOME games but mostly relief, AND average start length
+    # is short. The previous check (gp > gs*1.5 AND IP/outing < 3) misclassified
+    # starters like Ben Brown who had a piggyback appearance or two early in
+    # the season but still go 5+ IP in their actual starts.
+    #
+    # Now we require ALL of:
+    #   - gp >= gs * 2.0 (much more relief than starts — was 1.5)
+    #   - at least 3 relief appearances (gp - gs >= 3)
+    #   - IP/outing < 2.8 (short outings — was <3.0)
+    #   - AND IP/GS < 4.0 (their actual starts are also short, not just relief)
+    # The IP/GS check is the key safeguard against Ben Brown false positives.
+    if gs_n > 0 and gp_n >= gs_n * 2.0 and (gp_n - gs_n) >= 3:
         ip_per_outing = ip_n / gp_n if gp_n > 0 else 5.0
-        if ip_per_outing < 3.0:
+        # Approximate IP-per-start: assume relief outings are ~1.0 IP, the
+        # rest are starts. If that "implied start IP" is still short, it's
+        # a true swingman; if it's 4+, he's a starter who did some relief.
+        relief_ip_est = (gp_n - gs_n) * 1.0
+        start_ip_est = max(0, ip_n - relief_ip_est)
+        ip_per_start_est = start_ip_est / gs_n if gs_n > 0 else 0
+        if ip_per_outing < 2.8 and ip_per_start_est < 4.0:
             return rookie_prefix + "🔄 SWING"
 
     # Zero starts but has appearances → opener
@@ -972,6 +988,19 @@ def build_pitcher_slate(
                     base_ip = min(base_ip, 3.5)
                 else:
                     base_ip = base_ip * 0.85
+            # HIGH WORKLOAD ADJUSTMENT: pitchers who averaged 105+ pitches in
+            # their recent starts are more likely to be pulled early in the
+            # next start (manager wants to manage cumulative workload). Real
+            # research: starters with 110+ avg pitch counts in prior 3 starts
+            # go ~0.5 IP shorter on average in the next outing.
+            avg_pitches = row.get("avg_recent_pitches")
+            if (avg_pitches is not None and not pd.isna(avg_pitches)
+                    and avg_pitches > 105):
+                # 105-110 → mild dampener; 110+ → stronger
+                if avg_pitches > 110:
+                    base_ip = base_ip * 0.88
+                else:
+                    base_ip = base_ip * 0.94
             return base_ip
         df["expected_ip"] = df.apply(_expected_ip, axis=1)
 
