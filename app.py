@@ -24,7 +24,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.05.30-leaders-v17b"
+APP_VERSION = "2026.05.30-leaders-v17c"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -3217,114 +3217,6 @@ else:
         st.success(f"✅ **All {n_total} games have confirmed lineups** — projections use real batting positions.")
 
 
-# ============================================================================
-# SLATE LEADERS — who's #1 in each meaningful category across the whole slate
-# ============================================================================
-# Build a single dataframe combining all hitters across all games, then find
-# the leader in each category. Mark them with 🏆 in the main displays via a
-# slate_leader_flags column on combined_all (built below this section).
-slate_leader_cats = []  # list of (category_label, player_id, player_name, value, fmt)
-slate_leader_pid_map = {}  # pid → list of category labels (for icon display)
-
-def _track_leader(label, pid, name, value, fmt="{:.2f}"):
-    """Record a slate leader for display + emoji marking."""
-    if pid is None or pd.isna(pid) or name is None:
-        return
-    slate_leader_cats.append((label, int(pid), name, value, fmt))
-    slate_leader_pid_map.setdefault(int(pid), []).append(label)
-
-# Hitter leaders (require sufficient sample for stats-based categories)
-if all_hitters:
-    _combined_lead = pd.concat(all_hitters, ignore_index=True)
-    # Dedupe by player_id — same hitter may appear in multiple rosters
-    if "player_id" in _combined_lead.columns:
-        _combined_lead["_pid"] = pd.to_numeric(_combined_lead["player_id"], errors="coerce")
-        _combined_lead = _combined_lead.drop_duplicates(subset="_pid", keep="first")
-
-    def _leader_by(df, col, label, min_pa=100, ascending=False, fmt="{:.2f}"):
-        if col not in df.columns:
-            return
-        sub = df[df[col].notna()].copy()
-        if "pa" in sub.columns:
-            sub = sub[sub["pa"].fillna(0) >= min_pa]
-        if sub.empty:
-            return
-        sub = sub.sort_values(col, ascending=ascending)
-        top = sub.iloc[0]
-        _track_leader(label, top.get("player_id"), top.get("player_name"),
-                       top[col], fmt)
-
-    # Quality leaders (stats)
-    _leader_by(_combined_lead, "barrel_pct",  "💥 Slate-best Barrel%",       fmt="{:.1f}%")
-    _leader_by(_combined_lead, "iso",         "⚡ Slate-best ISO",            fmt="{:.3f}")
-    _leader_by(_combined_lead, "xwoba",       "🎯 Slate-best xwOBA",          fmt="{:.3f}")
-    _leader_by(_combined_lead, "hard_hit",    "💪 Slate-best Hard-Hit%",      fmt="{:.1f}%")
-    _leader_by(_combined_lead, "avg_ev",      "🚀 Slate-best Exit Velo",      fmt="{:.1f} mph")
-    _leader_by(_combined_lead, "home_run",    "🏟️ Slate-best Season HRs",     min_pa=50, fmt="{:.0f}")
-    _leader_by(_combined_lead, "recent_hr",   "🔥 Slate-best Recent HRs (L15)", min_pa=50, fmt="{:.0f}")
-
-    # Today's matchup leaders (need projection columns to be populated)
-    _leader_by(_combined_lead, "hr_game_pct", "🎲 Slate-best HR Game%",       min_pa=50, fmt="{:.1f}%")
-    _leader_by(_combined_lead, "power_score", "💎 Slate-best Power Score",    min_pa=50, fmt="{:.1f}")
-    _leader_by(_combined_lead, "sleeper_score", "💤 Slate-best Sleeper",      min_pa=100, fmt="{:.1f}")
-
-    # Environment-leader: best HR-friendly env on the slate
-    if "env_boost" in _combined_lead.columns and _combined_lead["env_boost"].notna().any():
-        env_sub = _combined_lead.dropna(subset=["env_boost"])
-        max_env = env_sub["env_boost"].max()
-        top_env = env_sub[env_sub["env_boost"] >= max_env - 0.001]
-        # Among hitters in the best env, pick the one with the highest barrel%
-        # so the leader is also a quality bat, not someone in Coors with no skill
-        if "barrel_pct" in top_env.columns and top_env["barrel_pct"].notna().any():
-            top_env = top_env.sort_values("barrel_pct", ascending=False)
-        top = top_env.iloc[0]
-        _track_leader("🌞 Slate-best Environment + bat",
-                        top.get("player_id"), top.get("player_name"),
-                        top["env_boost"], "{:.2f}×")
-
-# Pitcher leaders (from p_slate)
-if not p_slate.empty:
-    def _p_leader(df, col, label, ascending=False, fmt="{:.1f}", min_ip=20):
-        if col not in df.columns:
-            return
-        sub = df[df[col].notna()].copy()
-        if "ip" in sub.columns:
-            sub = sub[sub["ip"].fillna(0) >= min_ip]
-        if sub.empty:
-            return
-        sub = sub.sort_values(col, ascending=ascending)
-        top = sub.iloc[0]
-        _track_leader(label, top.get("pitcher_id"), top.get("pitcher_name"),
-                       top[col], fmt)
-
-    _p_leader(p_slate, "test_score",   "🛡️ Slate-best Test Score (pitcher)", fmt="{:.1f}")
-    _p_leader(p_slate, "hr_suppress",  "🚫 Slate-best HR Suppress (pitcher)", fmt="{:.1f}")
-    _p_leader(p_slate, "k9",           "⚡ Slate-best K/9 (pitcher)",         fmt="{:.2f}")
-    _p_leader(p_slate, "whiff_pct",    "💨 Slate-best Whiff% (pitcher)",      fmt="{:.1f}%")
-    _p_leader(p_slate, "proj_k",       "📊 Slate-best Projected K (pitcher)", fmt="{:.1f}")
-
-    # Worst pitchers — these are smash targets for HITTERS
-    _p_leader(p_slate, "test_score",   "🎯 Slate-easiest Test Score (smash)",  ascending=True, fmt="{:.1f}")
-    _p_leader(p_slate, "hr9",          "🔥 Slate-worst HR/9 (smash)",         fmt="{:.2f}", min_ip=20)
-
-if slate_leader_cats:
-    st.subheader("🏆 Slate Leaders — who tops the slate in each category")
-    st.caption(
-        "These players have the slate-best value in each named category. "
-        "Players appearing here will be highlighted with 🏆 in the top picks "
-        "and matchup tables. A player can lead multiple categories."
-    )
-    lc1, lc2 = st.columns(2)
-    half = (len(slate_leader_cats) + 1) // 2
-    for col, items in [(lc1, slate_leader_cats[:half]), (lc2, slate_leader_cats[half:])]:
-        with col:
-            for label, pid, name, val, fmt in items:
-                try:
-                    val_str = fmt.format(val)
-                except Exception:
-                    val_str = str(val)
-                st.markdown(f"- {label}: **{name}** ({val_str})")
-
 st.divider()
 
 
@@ -3351,6 +3243,11 @@ combined_all = None
 top10 = None
 top_picks_export = None
 two_leg_df = None
+# Slate-leader containers — populated below once combined_picks is built.
+# Pre-init so downstream references (per-game best HR caption, exports) are safe
+# even if all_hitters_for_picks ends up empty.
+slate_leader_cats = []
+slate_leader_pid_map = {}
 three_leg_df = None
 two_leg_parlay_export = None
 three_leg_parlay_export = None
@@ -3380,7 +3277,112 @@ for gpk, ctx in game_context_map.items():
 
 if all_hitters_for_picks:
     combined_picks = pd.concat(all_hitters_for_picks, ignore_index=True)
-    # Slate-leader flag — re-uses the map built in the Slate Leaders section.
+
+    # ====================================================================
+    # SLATE LEADERS — who's #1 in each meaningful category across the slate
+    # ====================================================================
+    # Initialized here (not earlier) because we need combined_picks to exist.
+    # The map is then used to tag both combined_picks and (later) combined_all
+    # with a slate_leader_flag column.
+    slate_leader_cats = []     # list of (label, pid, name, value, fmt)
+    slate_leader_pid_map = {}  # pid → list of category labels
+
+    def _track_leader(label, pid, name, value, fmt="{:.2f}"):
+        if pid is None or pd.isna(pid) or name is None:
+            return
+        slate_leader_cats.append((label, int(pid), name, value, fmt))
+        slate_leader_pid_map.setdefault(int(pid), []).append(label)
+
+    # Dedupe hitters by player_id for accurate slate-wide ranking
+    _combined_lead = combined_picks.copy()
+    if "player_id" in _combined_lead.columns:
+        _combined_lead["_pid"] = pd.to_numeric(_combined_lead["player_id"], errors="coerce")
+        _combined_lead = _combined_lead.drop_duplicates(subset="_pid", keep="first")
+
+    def _leader_by(df, col, label, min_pa=100, ascending=False, fmt="{:.2f}"):
+        if col not in df.columns:
+            return
+        sub = df[df[col].notna()].copy()
+        if "pa" in sub.columns:
+            sub = sub[sub["pa"].fillna(0) >= min_pa]
+        if sub.empty:
+            return
+        sub = sub.sort_values(col, ascending=ascending)
+        top = sub.iloc[0]
+        _track_leader(label, top.get("player_id"), top.get("player_name"),
+                       top[col], fmt)
+
+    # Hitter quality leaders
+    _leader_by(_combined_lead, "barrel_pct",  "💥 Slate-best Barrel%",       fmt="{:.1f}%")
+    _leader_by(_combined_lead, "iso",         "⚡ Slate-best ISO",            fmt="{:.3f}")
+    _leader_by(_combined_lead, "xwoba",       "🎯 Slate-best xwOBA",          fmt="{:.3f}")
+    _leader_by(_combined_lead, "hard_hit",    "💪 Slate-best Hard-Hit%",      fmt="{:.1f}%")
+    _leader_by(_combined_lead, "avg_ev",      "🚀 Slate-best Exit Velo",      fmt="{:.1f} mph")
+    _leader_by(_combined_lead, "home_run",    "🏟️ Slate-best Season HRs",     min_pa=50, fmt="{:.0f}")
+    _leader_by(_combined_lead, "recent_hr",   "🔥 Slate-best Recent HRs (L15)", min_pa=50, fmt="{:.0f}")
+    # Today's matchup leaders
+    _leader_by(_combined_lead, "hr_game_pct", "🎲 Slate-best HR Game%",       min_pa=50, fmt="{:.1f}%")
+    _leader_by(_combined_lead, "power_score", "💎 Slate-best Power Score",    min_pa=50, fmt="{:.1f}")
+    _leader_by(_combined_lead, "sleeper_score", "💤 Slate-best Sleeper",      min_pa=100, fmt="{:.1f}")
+
+    # Environment-leader: pick the BAT-quality leader within the best env
+    if "env_boost" in _combined_lead.columns and _combined_lead["env_boost"].notna().any():
+        env_sub = _combined_lead.dropna(subset=["env_boost"])
+        max_env = env_sub["env_boost"].max()
+        top_env = env_sub[env_sub["env_boost"] >= max_env - 0.001]
+        if "barrel_pct" in top_env.columns and top_env["barrel_pct"].notna().any():
+            top_env = top_env.sort_values("barrel_pct", ascending=False)
+        top = top_env.iloc[0]
+        _track_leader("🌞 Slate-best Environment + bat",
+                        top.get("player_id"), top.get("player_name"),
+                        top["env_boost"], "{:.2f}×")
+
+    # Pitcher leaders
+    if not p_slate.empty:
+        def _p_leader(df, col, label, ascending=False, fmt="{:.1f}", min_ip=20):
+            if col not in df.columns:
+                return
+            sub = df[df[col].notna()].copy()
+            if "ip" in sub.columns:
+                sub = sub[sub["ip"].fillna(0) >= min_ip]
+            if sub.empty:
+                return
+            sub = sub.sort_values(col, ascending=ascending)
+            top = sub.iloc[0]
+            _track_leader(label, top.get("pitcher_id"), top.get("pitcher_name"),
+                           top[col], fmt)
+
+        _p_leader(p_slate, "test_score",   "🛡️ Slate-best Test Score (pitcher)", fmt="{:.1f}")
+        _p_leader(p_slate, "hr_suppress",  "🚫 Slate-best HR Suppress (pitcher)", fmt="{:.1f}")
+        _p_leader(p_slate, "k9",           "⚡ Slate-best K/9 (pitcher)",         fmt="{:.2f}")
+        _p_leader(p_slate, "whiff_pct",    "💨 Slate-best Whiff% (pitcher)",      fmt="{:.1f}%")
+        _p_leader(p_slate, "proj_k",       "📊 Slate-best Projected K (pitcher)", fmt="{:.1f}")
+        # Worst pitchers — smash targets for HITTERS
+        _p_leader(p_slate, "test_score",   "🎯 Slate-easiest Test Score (smash)",  ascending=True, fmt="{:.1f}")
+        _p_leader(p_slate, "hr9",          "🔥 Slate-worst HR/9 (smash)",         fmt="{:.2f}", min_ip=20)
+
+    # Render the Leaders section right here, above the picks
+    if slate_leader_cats:
+        st.markdown("---")
+        st.subheader("🏆 Slate Leaders — who tops the slate in each category")
+        st.caption(
+            "These players have the slate-best value in each named category. "
+            "Players appearing here will be highlighted with 🏆 in the top picks "
+            "and matchup tables. A player can lead multiple categories."
+        )
+        lc1, lc2 = st.columns(2)
+        half = (len(slate_leader_cats) + 1) // 2
+        for col, items in [(lc1, slate_leader_cats[:half]), (lc2, slate_leader_cats[half:])]:
+            with col:
+                for label, pid, name, val, fmt in items:
+                    try:
+                        val_str = fmt.format(val)
+                    except Exception:
+                        val_str = str(val)
+                    st.markdown(f"- {label}: **{name}** ({val_str})")
+        st.markdown("---")
+
+    # Slate-leader flag column on combined_picks (drives 🏆 in tables/exports)
     if slate_leader_pid_map and "player_id" in combined_picks.columns:
         def _leader_flag_pick(pid):
             try:
