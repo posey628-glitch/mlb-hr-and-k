@@ -138,13 +138,28 @@ def hr_prob_per_pa(
     # If a RHP gives up 4.5% HR/PA to LHB but only 2.1% to RHB,
     # an LHB facing him should see the 4.5 number, not the average.
     h_bats = (hitter_row.get("bats") or "").upper()
+    # Fetch pitcher throws early so we can do switch-hitter handling
+    p_throws_early = (pitcher_row.get("p_throws") or pitcher_row.get("throws") or "").upper() if pitcher_row else ""
     split_hr_per_pa = None
     split_pa_count = 0
     split_source = None  # for debugging: "hr_per_pa" or "slg_derived"
-    if pitcher_row is not None and h_bats in ("L", "R"):
-        # Switch hitters effectively bat opposite of the pitcher, so use the
-        # opposite-side split if available
-        col_prefix = "vs_lhb_" if h_bats == "L" else "vs_rhb_"
+    # Determine which side of the pitcher's splits to use.
+    # - LHB → vs_lhb_ (pitcher's stats vs LHB)
+    # - RHB → vs_rhb_
+    # - Switch hitter: bats opposite of pitcher's throwing arm
+    #     vs RHP → switch bats L → use vs_lhb_ (pitcher's LHB-facing stats)
+    #     vs LHP → switch bats R → use vs_rhb_
+    effective_side = None
+    if h_bats == "L":
+        effective_side = "L"
+    elif h_bats == "R":
+        effective_side = "R"
+    elif h_bats == "S" and p_throws_early in ("L", "R"):
+        # Switch hitter chooses opposite side from the pitcher
+        effective_side = "L" if p_throws_early == "R" else "R"
+
+    if pitcher_row is not None and effective_side in ("L", "R"):
+        col_prefix = "vs_lhb_" if effective_side == "L" else "vs_rhb_"
         split_hr = pitcher_row.get(f"{col_prefix}hr_per_pa")
         split_pa = pitcher_row.get(f"{col_prefix}pa")
 
@@ -245,7 +260,17 @@ def hr_prob_per_pa(
                 platoon_mult = 1.07 if h_bats == "L" else 1.06
             else:
                 platoon_mult = 0.94 if h_bats == "L" else 0.96
-    # Switch hitters (S) stay at 1.0 since they hit the favorable side
+    elif h_bats == "S" and p_throws in ("L", "R"):
+        # Switch hitters ALWAYS bat from the favorable side, so they always get
+        # the platoon advantage. If we already pulled the opposite-side split
+        # above (the typical case now), the data encodes it — use a small residual.
+        # If no splits available, give the full opposite-side bonus.
+        if split_hr_per_pa is not None:
+            # Residual after splits already applied (smaller)
+            platoon_mult = 1.022  # avg of L/R favorable values
+        else:
+            # No splits — give the full opposite-side bonus
+            platoon_mult = 1.065  # avg of L/R favorable values
 
     # Pitch match adjustment - only if we have a real score
     # Was: 0.6-1.6 range, too generous (gave non-power hitters huge boosts)
@@ -343,7 +368,9 @@ def k_total_projection(
     if opp_lineup_k_pct is None or pd.isna(opp_lineup_k_pct):
         lineup_adj = 1.0  # no adjustment when we don't have it
     else:
-        lineup_adj = opp_lineup_k_pct / 22  # league avg ~22%
+        # 2024-2025 league-avg K rate is ~22.5%. Using 22 here gave every K
+        # projection a +2.3% upward bias for league-average lineups.
+        lineup_adj = opp_lineup_k_pct / 22.5
 
     proj_k9 = (
         blended_k9
