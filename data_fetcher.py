@@ -1686,7 +1686,11 @@ def get_hitter_launch_angle_season(player_id: int, season: int = CURRENT_SEASON)
         f"&player_event_sort=api_p_release_speed&sort_order=desc&min_pas=0&type=details"
     )
     try:
-        r = requests.get(url, headers=HEADERS, timeout=30)
+        # Statcast season CSVs for one player can be 5MB+, so the per-player
+        # search is slow. Bump timeout to 60s. The bulk leaderboard fetch
+        # in fill_hitter_la_for_slate handles 95%+ of players in one call,
+        # so this slow path only runs for a handful of names per slate.
+        r = requests.get(url, headers=HEADERS, timeout=60)
         r.raise_for_status()
         df = pd.read_csv(io.StringIO(r.text))
         if df.empty:
@@ -1708,8 +1712,12 @@ def fill_hitter_la_for_slate(hitter_stats: pd.DataFrame, slate: pd.DataFrame,
                                 season: int = CURRENT_SEASON) -> pd.DataFrame:
     """
     For every hitter projected to play today, if launch_angle is missing,
-    fetch it from Statcast search. Only ~150-200 hitters per slate so
-    this is tractable. Cached for 24h per player.
+    patch it in.
+
+    STRATEGY (May 2026): try bulk leaderboard FIRST, then fall back to slow
+    per-player Statcast search only for any IDs the bulk pull missed.
+    Previous version only did per-player which timed out at 30s for
+    150-200 slate hitters (Statcast season CSVs can be 5MB+ each).
 
     Returns the hitter_stats df with launch_angle patched in.
     """
@@ -1719,7 +1727,63 @@ def fill_hitter_la_for_slate(hitter_stats: pd.DataFrame, slate: pd.DataFrame,
         hitter_stats = hitter_stats.copy()
         hitter_stats["launch_angle"] = pd.NA
 
-    # Collect hitter IDs from today's slate's team rosters - any player likely to play
+    df = hitter_stats.copy()
+    df["player_id"] = pd.to_numeric(df["player_id"], errors="coerce").astype("Int64")
+
+    # ----- STEP 1: Bulk leaderboard pull (single API hit, covers everyone) -----
+    # Same endpoints as the in-pipeline fallback in get_hitter_stats.
+    bulk_la_urls = [
+        f"https://baseballsavant.mlb.com/leaderboard/statcast"
+        f"?type=batter&year={season}&position=&team=&min=1&csv=true",
+        f"https://baseballsavant.mlb.com/leaderboard/custom"
+        f"?year={season}&type=batter&filter=&min=1"
+        f"&selections=pa,launch_angle,launch_speed,avg_hit_angle"
+        f"&chart=false&x=pa&y=pa&r=no&csv=true",
+        f"https://baseballsavant.mlb.com/leaderboard/exit-velocity"
+        f"?type=batter&year={season}&min=1&csv=true",
+    ]
+    la_map_bulk = {}
+    for url in bulk_la_urls:
+        try:
+            rr = requests.get(url, headers=HEADERS, timeout=20)
+            rr.raise_for_status()
+            ev_df = pd.read_csv(io.StringIO(rr.text))
+            if ev_df.empty:
+                continue
+            la_col = None
+            for cand in ["launch_angle", "avg_hit_angle", "angle",
+                            "avg_launch_angle", "avg_la", "la"]:
+                if cand in ev_df.columns:
+                    coerced = pd.to_numeric(ev_df[cand], errors="coerce")
+                    if coerced.notna().any():
+                        ev_df[cand] = coerced
+                        la_col = cand
+                        break
+            id_col = None
+            for cand in ["player_id", "mlb_id", "MLBAMID", "playerid", "id"]:
+                if cand in ev_df.columns:
+                    id_col = cand
+                    break
+            if la_col and id_col:
+                ev_df[id_col] = pd.to_numeric(ev_df[id_col], errors="coerce").astype("Int64")
+                tmp_map = dict(zip(ev_df[id_col], ev_df[la_col]))
+                # Drop NaNs from the map
+                la_map_bulk = {k: v for k, v in tmp_map.items()
+                                if v is not None and not pd.isna(v)}
+                if la_map_bulk:
+                    break
+        except Exception:
+            continue
+
+    if la_map_bulk:
+        # Apply bulk values everywhere we have a missing LA
+        missing_mask = df["launch_angle"].isna()
+        df.loc[missing_mask, "launch_angle"] = (
+            df.loc[missing_mask, "player_id"].map(la_map_bulk)
+        )
+
+    # ----- STEP 2: Per-player slow fetch ONLY for slate-relevant hitters
+    # who are STILL missing after the bulk pull -----
     relevant_ids = set()
     if not slate.empty:
         for _, g in slate.iterrows():
@@ -1737,11 +1801,8 @@ def fill_hitter_la_for_slate(hitter_stats: pd.DataFrame, slate: pd.DataFrame,
                     continue
 
     if not relevant_ids:
-        return hitter_stats
+        return df
 
-    # Only fetch for hitters in pitcher_stats who are missing LA
-    df = hitter_stats.copy()
-    df["player_id"] = pd.to_numeric(df["player_id"], errors="coerce").astype("Int64")
     missing_la_ids = set()
     for pid in relevant_ids:
         rows = df[df["player_id"] == pid]
@@ -1751,8 +1812,11 @@ def fill_hitter_la_for_slate(hitter_stats: pd.DataFrame, slate: pd.DataFrame,
         if existing_la is None or pd.isna(existing_la):
             missing_la_ids.add(pid)
 
-    # Fetch LA per player and patch in (silently skip failures)
-    for pid in missing_la_ids:
+    # Cap per-player fetches to 50 to bound worst-case time. Anyone past 50
+    # gets neutral (no LA) — far better than hanging the page.
+    for i, pid in enumerate(missing_la_ids):
+        if i >= 50:
+            break
         la = get_hitter_launch_angle_season(pid, season)
         if la is not None:
             df.loc[df["player_id"] == pid, "launch_angle"] = la
