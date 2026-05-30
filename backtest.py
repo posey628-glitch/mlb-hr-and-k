@@ -58,7 +58,18 @@ def save_snapshot(snapshot_date, matchup_df: pd.DataFrame,
     try:
         path = SNAPSHOT_DIR / f"snapshot_{snapshot_date}.json"
 
-        # Slim hitter projections
+        # Slim hitter projections.
+        # CRITICAL: do NOT fillna(0) here. NaN HR Game% means "insufficient
+        # sample, no projection" — converting to 0 would land those hitters
+        # in the 0-5% calibration band when evaluated, inflating that band's
+        # apparent accuracy (since "0% predicted, didn't homer" looks correct
+        # but was never actually a prediction). Use None (JSON null) instead
+        # so evaluate_hitter_projections can filter them out.
+        def _na_safe_records(df, keep_cols):
+            sub = df[keep_cols].copy()
+            # Convert NaN to None so JSON serializes as null, not 0
+            return sub.where(sub.notna(), None).to_dict("records")
+
         hitter_records = []
         if matchup_df is not None and not matchup_df.empty:
             keep_cols = [c for c in [
@@ -66,9 +77,8 @@ def save_snapshot(snapshot_date, matchup_df: pd.DataFrame,
                 "power_score", "hr_game_pct", "hr_pa_pct",
                 "matchup", "sleeper_score", "barrel_pct", "iso",
             ] if c in matchup_df.columns]
-            hitter_records = matchup_df[keep_cols].fillna(0).to_dict("records")
+            hitter_records = _na_safe_records(matchup_df, keep_cols)
 
-        # Slim pitcher projections
         pitcher_records = []
         if pitcher_slate_df is not None and not pitcher_slate_df.empty:
             keep_cols = [c for c in [
@@ -76,7 +86,7 @@ def save_snapshot(snapshot_date, matchup_df: pd.DataFrame,
                 "test_score", "kHR", "hr_suppress",
                 "proj_k", "role", "reliability",
             ] if c in pitcher_slate_df.columns]
-            pitcher_records = pitcher_slate_df[keep_cols].fillna(0).to_dict("records")
+            pitcher_records = _na_safe_records(pitcher_slate_df, keep_cols)
 
         payload = {
             "date": str(snapshot_date),
@@ -126,7 +136,7 @@ def fetch_hitter_outcomes(target_date) -> dict:
     try:
         url = (
             f"https://statsapi.mlb.com/api/v1/schedule"
-            f"?sportId=1&date={target_date}&hydrate=team,probablePitcher,boxscore"
+            f"?sportId=1&date={target_date}&hydrate=team,probablePitcher"
         )
         r = requests.get(url, headers=HEADERS, timeout=20)
         r.raise_for_status()
@@ -296,6 +306,19 @@ def evaluate_hitter_projections(snapshot: dict, actuals: dict) -> dict:
     # Accuracy by HR Game% band
     df_played = df[df["actual_ab"] > 0].copy()
     if not df_played.empty and df_played["hr_game_pct"].notna().any():
+        # BRIER SCORE — the single most informative calibration metric for
+        # probabilistic forecasts. Lower = better. For rare events like HRs,
+        # well-calibrated models score around 0.04-0.06; values <0.03 are
+        # excellent, >0.08 mean systematic over-prediction.
+        # Formula: mean((predicted_probability - actual_outcome)^2)
+        valid = df_played[df_played["hr_game_pct"].notna()].copy()
+        if len(valid) > 0:
+            valid["predicted_p"] = valid["hr_game_pct"] / 100
+            valid["homered_int"] = valid["homered"].astype(int)
+            brier = float(((valid["predicted_p"] - valid["homered_int"]) ** 2).mean())
+            metrics["brier_score"] = round(brier, 4)
+            metrics["brier_n"] = int(len(valid))
+
         bands = [(0, 5), (5, 12), (12, 18), (18, 25), (25, 100)]
         band_summary = []
         for low, high in bands:
@@ -340,7 +363,9 @@ def evaluate_hitter_projections(snapshot: dict, actuals: dict) -> dict:
             }
             for _, r in top10.iterrows()
         ]
-        metrics["top10_hr_hit_rate"] = round(top10["homered"].sum() / 10 * 100, 1)
+        metrics["top10_hr_hit_rate"] = round(
+            top10["homered"].sum() / len(top10) * 100, 1
+        ) if len(top10) > 0 else 0.0
 
     # Sleeper accuracy - top 10 by sleeper_score
     if "sleeper_score" in df_played.columns and df_played["sleeper_score"].notna().any():
