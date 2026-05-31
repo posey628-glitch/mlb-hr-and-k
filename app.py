@@ -24,7 +24,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.05.30-leaders-v17c"
+APP_VERSION = "2026.05.31-clarity-v18"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -943,8 +943,10 @@ if not hitter_stats.empty:
     if needs_la:
         try:
             from data_fetcher import fill_hitter_la_for_slate
+            la_log: list = []
             with st.spinner("Fetching real launch angles from Statcast (bulk first, ~5s)..."):
-                hitter_stats = fill_hitter_la_for_slate(hitter_stats, slate)
+                hitter_stats = fill_hitter_la_for_slate(hitter_stats, slate, log_steps=la_log)
+            st.session_state["_la_fill_steps"] = la_log
             # Re-measure coverage AFTER fill so we can report the delta
             if "launch_angle" in hitter_stats.columns:
                 n_missing_after = hitter_stats["launch_angle"].isna().sum()
@@ -955,7 +957,9 @@ if not hitter_stats.empty:
             else:
                 st.session_state["_la_missing_pct_after"] = 100.0
         except Exception as e:
-            st.session_state["_la_fill_error"] = str(e)[:200]
+            st.session_state["_la_fill_error"] = f"{type(e).__name__}: {str(e)[:200]}"
+            import traceback as _tb
+            st.session_state["_la_fill_traceback"] = _tb.format_exc()[:1500]
             st.warning(f"LA fill skipped: {e}")
     else:
         # Already healthy — record current coverage as the "after" too
@@ -1818,6 +1822,37 @@ if not p_slate.empty:
         ),
         axis=1,
     )
+    # GRADE CAVEAT — flag misleading EXPLOIT/EXPLOIT+ grades.
+    # John King case (May 2026): test_score=21 (low-K) → EXPLOIT+ grade, but
+    # ERA=2.52, WHIP=0.72, HR9=0.36. He's a real contact pitcher who limits
+    # damage despite not striking guys out. The EXPLOIT+ label is correctly
+    # signaling "low K threat" but reads as "bad overall" — which he isn't.
+    # The caveat flag exposes this so users don't blindly target him for HRs.
+    def _grade_caveat(r):
+        grade = r.get("grade", "—")
+        if grade not in ("EXPLOIT", "EXPLOIT+"):
+            return ""
+        # Caveat applies when grade is exploitable but underlying results are
+        # actually good. Conditions: low K-ability driving the grade, BUT
+        # ERA/WHIP/HR9 indicate competent results.
+        try:
+            era = float(r.get("era")) if r.get("era") is not None and not pd.isna(r.get("era")) else None
+            whip = float(r.get("whip")) if r.get("whip") is not None and not pd.isna(r.get("whip")) else None
+            hr9 = float(r.get("hr9")) if r.get("hr9") is not None and not pd.isna(r.get("hr9")) else None
+            hr_suppress = float(r.get("hr_suppress")) if r.get("hr_suppress") is not None and not pd.isna(r.get("hr_suppress")) else None
+        except (TypeError, ValueError):
+            return ""
+        # Two patterns that warrant the caveat:
+        # A) Real results good (ERA<3.50, WHIP<1.15, HR/9<1.0)
+        #    AND hr_suppress is actually decent (>40) — means low-K is the
+        #    main driver of the EXPLOIT label, not actual HR vulnerability
+        if (era is not None and era < 3.50
+                and whip is not None and whip < 1.15
+                and hr9 is not None and hr9 < 1.0
+                and hr_suppress is not None and hr_suppress >= 40):
+            return "📉 low-K, results OK"
+        return ""
+    p_slate["grade_caveat"] = p_slate.apply(_grade_caveat, axis=1)
     # Add hidden numeric rank for sortable Grade column.
     # When users click the Grade header, they want EXPLOIT+ first (best HR targets),
     # not alphabetical order. We sort the dataframe by this BEFORE display.
@@ -1918,7 +1953,7 @@ if not p_slate.empty:
         p_slate["recent_hr_flag"] = p_slate.apply(_recent_hr_flag, axis=1)
 
     show_cols = [c for c in [
-        "alert", "grade", "role", "warn", "platoon_hr_flag", "recent_hr_flag",
+        "alert", "grade", "grade_caveat", "role", "warn", "platoon_hr_flag", "recent_hr_flag",
         "pitcher_name", "team", "home_away", "opp", "throws",
         "test_score", "kHR", "hr_suppress", "proj_k", "form_arrow",
         "era", "whip", "k9", "bb9", "hr9",
@@ -1954,7 +1989,22 @@ if not p_slate.empty:
                 "MIXED    = neutral, no edge either way\n"
                 "TOUGH    = avoid HR plays, pitcher has the edge\n"
                 "ELITE    = strong avoid (top suppress + top K stuff)\n"
-                "—        = insufficient sample"
+                "—        = insufficient sample\n\n"
+                "NOTE: A pitcher graded EXPLOIT+ purely for low K-ability "
+                "(not HR vulnerability) gets a 📉 caveat in the next column. "
+                "Those pitchers are NOT necessarily bad — they just don't miss bats."
+            ),
+        ),
+        "grade_caveat": st.column_config.TextColumn(
+            "Caveat", width="small",
+            help=(
+                "📉 low-K, results OK = grade is EXPLOIT/EXPLOIT+ because of "
+                "low strikeout rate, BUT real ERA/WHIP/HR9 are good. "
+                "This means the pitcher limits hard contact even though he "
+                "doesn't strike guys out. Common for contact pitchers (Cease "
+                "of 2019, John King). The EXPLOIT label is technically right "
+                "for K props but misleading for HR props — treat as MIXED-ish "
+                "for HR targeting."
             ),
         ),
         "role": st.column_config.TextColumn(
@@ -2286,6 +2336,16 @@ if not p_slate.empty:
         st.write(f"**LA fill ran this session:** {'✓ yes' if la_ran else '— no (already ≤30% missing)'}")
         if la_err:
             st.error(f"LA fill error: {la_err}")
+            tb = st.session_state.get("_la_fill_traceback")
+            if tb:
+                with st.expander("Show traceback"):
+                    st.code(tb, language="text")
+        # Show step-by-step diagnostic log from inside fill_hitter_la_for_slate
+        la_steps = st.session_state.get("_la_fill_steps") or []
+        if la_steps:
+            with st.expander(f"📋 Step-by-step log ({len(la_steps)} entries)", expanded=la_after is not None and la_after > 50):
+                for step in la_steps:
+                    st.text(step)
         if not la_ran and (la_before is not None and la_before > 30):
             st.warning(
                 "LA fill was needed but didn't run. This usually means an "
@@ -2294,8 +2354,9 @@ if not p_slate.empty:
         if la_after is not None and la_after > 50:
             st.warning(
                 "More than half of hitters still missing LA after fill. "
-                "Statcast bulk endpoint may be down or rate-limited. Power "
-                "Score will be reduced for affected players."
+                "Check the step-by-step log above — it shows which Statcast "
+                "endpoints failed or returned no data. Streamlit Cloud's "
+                "outbound IP range may be blocked or rate-limited."
             )
 
 st.divider()
