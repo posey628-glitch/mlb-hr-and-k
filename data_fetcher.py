@@ -581,16 +581,26 @@ def get_pitcher_stats(season: int = CURRENT_SEASON, _stats_day: str = "") -> pd.
         df["bb9_savant"] = (df["bb_percent"] * 4.3 * 9 / 100).round(2)
         df["bb9"] = df["bb9_savant"]
     # WHIP from (H + BB) / IP - if Savant gave us hits and walks
+    # Cap at 5.0 to prevent absurd values from tiny IP samples (Savant IP is
+    # estimated from PA which can be off by ~30% in small samples).
     if "hits" in df.columns and "walks_drawn" in df.columns and "ip_savant" in df.columns:
-        df["whip_savant"] = ((df["hits"] + df["walks_drawn"]) / df["ip_savant"].replace(0, pd.NA)).round(2)
+        whip_raw = (df["hits"] + df["walks_drawn"]) / df["ip_savant"].replace(0, pd.NA)
+        df["whip_savant"] = whip_raw.clip(upper=5.0).round(2)
         df["whip"] = df["whip_savant"]
     # ERA from earned_runs × 9 / IP
+    # Cap at 12.0: Savant IP is estimated from PA (pa / 4.3) which gets
+    # inflated for tiny samples. Jordan Wicks case (May 2026): 24 PA gave
+    # ip_savant=5.58 but real IP was 4.1, making ERA derive to 16.62 vs
+    # real ~12.4. The cap prevents the display from showing nonsense values.
+    # Real ERA gets prioritized in the coalesce step (app.py) when available.
     if "earned_runs" in df.columns and "ip_savant" in df.columns:
-        df["era_savant"] = (df["earned_runs"] * 9 / df["ip_savant"].replace(0, pd.NA)).round(2)
+        era_raw = df["earned_runs"] * 9 / df["ip_savant"].replace(0, pd.NA)
+        df["era_savant"] = era_raw.clip(upper=12.0).round(2)
         df["era"] = df["era_savant"]
-    # HR/9 from home_run × 9 / IP
+    # HR/9 from home_run × 9 / IP — cap at 6.0 for the same reason
     if "home_run" in df.columns and "ip_savant" in df.columns:
-        df["hr9_savant"] = (df["home_run"] * 9 / df["ip_savant"].replace(0, pd.NA)).round(2)
+        hr9_raw = df["home_run"] * 9 / df["ip_savant"].replace(0, pd.NA)
+        df["hr9_savant"] = hr9_raw.clip(upper=6.0).round(2)
         df["hr9"] = df["hr9_savant"]
 
     return df
@@ -1709,7 +1719,8 @@ def get_hitter_launch_angle_season(player_id: int, season: int = CURRENT_SEASON)
 
 
 def fill_hitter_la_for_slate(hitter_stats: pd.DataFrame, slate: pd.DataFrame,
-                                season: int = CURRENT_SEASON) -> pd.DataFrame:
+                                season: int = CURRENT_SEASON,
+                                log_steps: list | None = None) -> pd.DataFrame:
     """
     For every hitter projected to play today, if launch_angle is missing,
     patch it in.
@@ -1719,16 +1730,28 @@ def fill_hitter_la_for_slate(hitter_stats: pd.DataFrame, slate: pd.DataFrame,
     Previous version only did per-player which timed out at 30s for
     150-200 slate hitters (Statcast season CSVs can be 5MB+ each).
 
+    DIAGNOSTIC: pass a `log_steps` list to receive per-step messages about
+    which bulk endpoints were tried, which succeeded, how many IDs were
+    matched, and whether per-player fallback ran. Used by the LA diagnostic
+    expander in app.py to make silent failures visible.
+
     Returns the hitter_stats df with launch_angle patched in.
     """
+    def _log(msg):
+        if log_steps is not None:
+            log_steps.append(msg)
+
     if hitter_stats is None or hitter_stats.empty:
+        _log("EARLY EXIT: hitter_stats is None or empty")
         return hitter_stats
     if "launch_angle" not in hitter_stats.columns:
         hitter_stats = hitter_stats.copy()
         hitter_stats["launch_angle"] = pd.NA
+        _log("Created launch_angle column (was missing)")
 
     df = hitter_stats.copy()
     df["player_id"] = pd.to_numeric(df["player_id"], errors="coerce").astype("Int64")
+    _log(f"Input: {len(df)} hitters, {df['launch_angle'].isna().sum()} missing LA")
 
     # ----- STEP 1: Bulk leaderboard pull (single API hit, covers everyone) -----
     # Same endpoints as the in-pipeline fallback in get_hitter_stats.
@@ -1743,12 +1766,14 @@ def fill_hitter_la_for_slate(hitter_stats: pd.DataFrame, slate: pd.DataFrame,
         f"?type=batter&year={season}&min=1&csv=true",
     ]
     la_map_bulk = {}
-    for url in bulk_la_urls:
+    for i, url in enumerate(bulk_la_urls, 1):
+        url_label = url.split("/leaderboard/")[1].split("?")[0]
         try:
             rr = requests.get(url, headers=HEADERS, timeout=20)
             rr.raise_for_status()
             ev_df = pd.read_csv(io.StringIO(rr.text))
             if ev_df.empty:
+                _log(f"  [{i}/{len(bulk_la_urls)}] {url_label}: empty CSV")
                 continue
             la_col = None
             for cand in ["launch_angle", "avg_hit_angle", "angle",
@@ -1770,17 +1795,27 @@ def fill_hitter_la_for_slate(hitter_stats: pd.DataFrame, slate: pd.DataFrame,
                 # Drop NaNs from the map
                 la_map_bulk = {k: v for k, v in tmp_map.items()
                                 if v is not None and not pd.isna(v)}
+                _log(f"  [{i}/{len(bulk_la_urls)}] {url_label}: {len(la_map_bulk)} IDs (la_col={la_col}, id_col={id_col})")
                 if la_map_bulk:
                     break
-        except Exception:
+            else:
+                avail_cols = list(ev_df.columns)[:8]
+                _log(f"  [{i}/{len(bulk_la_urls)}] {url_label}: no la_col or id_col found. Got: {avail_cols}")
+        except Exception as e:
+            _log(f"  [{i}/{len(bulk_la_urls)}] {url_label}: EXCEPTION {type(e).__name__}: {str(e)[:120]}")
             continue
 
     if la_map_bulk:
         # Apply bulk values everywhere we have a missing LA
         missing_mask = df["launch_angle"].isna()
+        n_before = missing_mask.sum()
         df.loc[missing_mask, "launch_angle"] = (
             df.loc[missing_mask, "player_id"].map(la_map_bulk)
         )
+        n_after = df["launch_angle"].isna().sum()
+        _log(f"Bulk pull patched {n_before - n_after} LA values; {n_after} still missing")
+    else:
+        _log("Bulk pull returned no map. ALL endpoints failed or empty.")
 
     # ----- STEP 2: Per-player slow fetch ONLY for slate-relevant hitters
     # who are STILL missing after the bulk pull -----
@@ -1801,6 +1836,7 @@ def fill_hitter_la_for_slate(hitter_stats: pd.DataFrame, slate: pd.DataFrame,
                     continue
 
     if not relevant_ids:
+        _log("No slate-relevant IDs to fetch per-player. Done.")
         return df
 
     missing_la_ids = set()
@@ -1812,14 +1848,25 @@ def fill_hitter_la_for_slate(hitter_stats: pd.DataFrame, slate: pd.DataFrame,
         if existing_la is None or pd.isna(existing_la):
             missing_la_ids.add(pid)
 
+    _log(f"Per-player fallback: {len(missing_la_ids)} slate hitters still missing LA")
+
     # Cap per-player fetches to 50 to bound worst-case time. Anyone past 50
     # gets neutral (no LA) — far better than hanging the page.
+    patched = 0
+    failed = 0
     for i, pid in enumerate(missing_la_ids):
         if i >= 50:
+            _log(f"  Capped at 50 per-player fetches; {len(missing_la_ids) - 50} skipped")
             break
         la = get_hitter_launch_angle_season(pid, season)
         if la is not None:
             df.loc[df["player_id"] == pid, "launch_angle"] = la
+            patched += 1
+        else:
+            failed += 1
+    _log(f"Per-player fallback: patched {patched}, failed {failed}")
+    final_missing = df["launch_angle"].isna().sum()
+    _log(f"FINAL: {len(df) - final_missing}/{len(df)} hitters have LA ({final_missing} still missing)")
 
     return df
 
