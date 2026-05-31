@@ -1,7 +1,7 @@
 """
 app.py
 =======
-Posey MLB HR & K Data dashboard - Streamlit main entry.
+HR CALC dashboard - Streamlit main entry.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.05.31-clarity-v18"
+APP_VERSION = "2026.05.31-hrcalc-v19"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -209,7 +209,7 @@ except Exception:
 # ============================================================================
 
 st.set_page_config(
-    page_title="Posey MLB HR & K Data",
+    page_title="HR CALC",
     page_icon="⚾",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -466,14 +466,14 @@ def pitcher_grade_sort_key(grade):
 # ============================================================================
 
 with st.sidebar:
-    st.title("⚾ Posey MLB Props")
+    st.title("⚾ HR CALC")
     selected_date = st.date_input("Slate date", value=date.today())
 
     # ========================================================================
     # OWNER MODE — toggle to expose owner-only features
     #
     # 🔑 EASIEST SETUP (no Streamlit secrets needed):
-    #   1. Change OWNER_KEY below from "posey-mlb-owner-2026" to your own
+    #   1. Change OWNER_KEY below from "your-secret-string" to your own
     #      secret passphrase (any string — make it long and random)
     #   2. Save and deploy
     #   3. Bookmark: https://your-app-url/?owner=YOUR_KEY_HERE
@@ -490,7 +490,7 @@ with st.sidebar:
     # ========================================================================
 
     # 👇 Key is now loaded from Streamlit Secrets (set in app Settings → Secrets):
-    #    owner_key = "Posey628628!"
+    #    owner_key = "YourOwnSecretKeyHere"
     # Leaving this empty keeps your secret out of the public GitHub repo.
     OWNER_KEY = ""
 
@@ -941,11 +941,21 @@ if not hitter_stats.empty:
     st.session_state["_la_fill_error"] = None
 
     if needs_la:
+        # Status placeholder that gets replaced after the fill completes —
+        # this is visible IMMEDIATELY so we can confirm the function was
+        # actually invoked. If the page shows the spinner and then never
+        # the success/error message, an upstream exception killed the script.
+        la_status = st.empty()
+        la_status.info(f"🔄 Calling LA fill ({la_n_total_before} hitters need processing)...")
+        import time as _time
+        _t_start = _time.time()
         try:
             from data_fetcher import fill_hitter_la_for_slate
             la_log: list = []
             with st.spinner("Fetching real launch angles from Statcast (bulk first, ~5s)..."):
                 hitter_stats = fill_hitter_la_for_slate(hitter_stats, slate, log_steps=la_log)
+            elapsed = _time.time() - _t_start
+            st.session_state["_la_fill_elapsed_sec"] = round(elapsed, 2)
             st.session_state["_la_fill_steps"] = la_log
             # Re-measure coverage AFTER fill so we can report the delta
             if "launch_angle" in hitter_stats.columns:
@@ -954,13 +964,32 @@ if not hitter_stats.empty:
                 pct_after = (n_missing_after / n_total_after * 100.0
                                 if n_total_after > 0 else 0.0)
                 st.session_state["_la_missing_pct_after"] = pct_after
+                # Replace the status placeholder with the outcome
+                if pct_after < 10:
+                    la_status.success(
+                        f"✅ LA fill complete: {n_total_after - n_missing_after}/{n_total_after} "
+                        f"hitters now have LA ({elapsed:.1f}s)"
+                    )
+                elif pct_after < 50:
+                    la_status.warning(
+                        f"⚠️ LA fill partial: {n_total_after - n_missing_after}/{n_total_after} "
+                        f"have LA ({pct_after:.0f}% still missing, {elapsed:.1f}s). "
+                        f"See LA diagnostic expander below."
+                    )
+                else:
+                    la_status.error(
+                        f"❌ LA fill failed mostly: only {n_total_after - n_missing_after}/{n_total_after} "
+                        f"have LA ({pct_after:.0f}% still missing). "
+                        f"Open the LA diagnostic expander below to see endpoint errors."
+                    )
             else:
                 st.session_state["_la_missing_pct_after"] = 100.0
+                la_status.error("❌ LA column missing entirely after fill.")
         except Exception as e:
             st.session_state["_la_fill_error"] = f"{type(e).__name__}: {str(e)[:200]}"
             import traceback as _tb
             st.session_state["_la_fill_traceback"] = _tb.format_exc()[:1500]
-            st.warning(f"LA fill skipped: {e}")
+            la_status.error(f"❌ LA fill crashed: {type(e).__name__}: {str(e)[:120]}")
     else:
         # Already healthy — record current coverage as the "after" too
         st.session_state["_la_missing_pct_after"] = la_missing_pct_before
@@ -1018,7 +1047,7 @@ if use_sprint_speed:
 # HEADER + DATA AVAILABILITY
 # ============================================================================
 
-st.title(f"⚾ Posey MLB HR & K Data — {selected_date.strftime('%A, %B %d, %Y')}")
+st.title(f"⚾ HR CALC — {selected_date.strftime('%A, %B %d, %Y')}")
 
 # BIG visible deploy version. If this doesn't say v6-NUCLEAR, deploy hasn't taken effect.
 st.markdown(
@@ -2334,6 +2363,10 @@ if not p_slate.empty:
                 help="After fill ran (if it ran). Target: <10% missing.",
             )
         st.write(f"**LA fill ran this session:** {'✓ yes' if la_ran else '— no (already ≤30% missing)'}")
+        la_elapsed = st.session_state.get("_la_fill_elapsed_sec")
+        if la_elapsed is not None:
+            st.write(f"**Fill duration:** {la_elapsed:.2f}s "
+                       f"({'fast bulk' if la_elapsed < 5 else 'slow' if la_elapsed < 30 else 'very slow — endpoint issue'})")
         if la_err:
             st.error(f"LA fill error: {la_err}")
             tb = st.session_state.get("_la_fill_traceback")
@@ -4489,7 +4522,7 @@ if all_hitters:
                 st.download_button(
                     "📥 Export ALL to Excel",
                     data=buffer.getvalue(),
-                    file_name=f"posey_mlb_{_dt.now().strftime('%Y-%m-%d_%H-%M')}.xlsx",
+                    file_name=f"hr_calc_{_dt.now().strftime('%Y-%m-%d_%H-%M')}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     help="Hitters + Pitchers + Top lists in one Excel workbook.",
                 )
@@ -4508,7 +4541,7 @@ if all_hitters:
                 st.download_button(
                     "📥 Export ALL to CSV",
                     data=csv_buf.getvalue(),
-                    file_name=f"posey_mlb_{_dt.now().strftime('%Y-%m-%d_%H-%M')}.csv",
+                    file_name=f"hr_calc_{_dt.now().strftime('%Y-%m-%d_%H-%M')}.csv",
                     mime="text/csv",
                     help="Combined CSV - openpyxl not installed for Excel export.",
                 )
@@ -5812,5 +5845,5 @@ for _, game in slate.iterrows():
 st.caption(
     f"Built {datetime.now().strftime('%Y-%m-%d %H:%M')} · "
     f"Sources: MLB Stats API, Baseball Savant, Open-Meteo · "
-    f"Posey MLB HR & K Data"
+    f"HR CALC"
 )
