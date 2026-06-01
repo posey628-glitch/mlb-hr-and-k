@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import re
+import io
 import math
 import json
 import datetime as dt
@@ -24,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.05.31-hrcalc-v19"
+APP_VERSION = "2026.06.01-splits-v20"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -802,6 +803,54 @@ try:
 except Exception as _e:
     # Don't block app if MLB Stats API splits fetch fails
     pass
+
+# HITTER vs-LHP/vs-RHP splits — biggest accuracy gap closed (June 2026).
+# Without these, a hitter's overall season barrel% gets used for ALL matchups,
+# missing reverse-platoon guys like Adell (overall 8.8% barrel, vs-LHP 31.6%).
+# We fetch for slate-relevant hitters only to keep API load manageable.
+try:
+    from data_fetcher import get_hitter_handedness_splits, get_team_roster
+    # Collect all hitter IDs from team rosters of slate games (~200-300 IDs)
+    hitter_ids_set = set()
+    for col in ("away_team_id", "home_team_id"):
+        if col not in slate.columns:
+            continue
+        for tid in slate[col].dropna().unique():
+            try:
+                roster = get_team_roster(int(tid))
+                for p in roster:
+                    pid = p.get("id")
+                    if pid:
+                        hitter_ids_set.add(int(pid))
+            except Exception:
+                continue
+    hitter_ids_tuple = tuple(sorted(hitter_ids_set))
+    if hitter_ids_tuple:
+        with st.spinner(f"Fetching vs-LHP/vs-RHP splits for {len(hitter_ids_tuple)} hitters (cached 1hr)..."):
+            hitter_splits = get_hitter_handedness_splits(hitter_ids=hitter_ids_tuple)
+        if (hitter_splits is not None and not hitter_splits.empty
+                and "player_id" in hitter_stats.columns):
+            hitter_stats["player_id"] = pd.to_numeric(
+                hitter_stats["player_id"], errors="coerce").astype("Int64")
+            hitter_splits["player_id"] = pd.to_numeric(
+                hitter_splits["player_id"], errors="coerce").astype("Int64")
+            merge_cols = [c for c in hitter_splits.columns if c != "player_id"]
+            existing = set(hitter_stats.columns)
+            merge_cols = [c for c in merge_cols if c not in existing]
+            if merge_cols:
+                hitter_stats = hitter_stats.merge(
+                    hitter_splits[["player_id"] + merge_cols],
+                    on="player_id", how="left",
+                )
+            # Diagnostic: track how many hitters got splits
+            n_with_lhp_splits = hitter_stats.get("vs_lhp_pa", pd.Series(dtype=float)).notna().sum()
+            n_with_rhp_splits = hitter_stats.get("vs_rhp_pa", pd.Series(dtype=float)).notna().sum()
+            st.session_state["_hitter_splits_count"] = (
+                f"{n_with_lhp_splits} vs-LHP, {n_with_rhp_splits} vs-RHP "
+                f"(of {len(hitter_stats)} total hitters)"
+            )
+except Exception as _e:
+    st.session_state["_hitter_splits_err"] = str(_e)[:200]
 
 # NEW: Pitcher day/night splits + IL status
 # Only fetch for slate pitchers (~26-30 calls each)
@@ -3460,7 +3509,10 @@ if all_hitters_for_picks:
         st.markdown("---")
         st.subheader("🏆 Slate Leaders — who tops the slate in each category")
         st.caption(
-            "These players have the slate-best value in each named category. "
+            "**Slate-only leaders.** These rankings cover ONLY the players in "
+            "tonight's slate (not MLB-wide). Buxton leading in HRs means he "
+            "has the most HRs of players in tonight's games — Ohtani or Judge "
+            "may have more season HRs but aren't on tonight's slate. "
             "Players appearing here will be highlighted with 🏆 in the top picks "
             "and matchup tables. A player can lead multiple categories."
         )
@@ -4618,9 +4670,47 @@ if all_hitters:
 
     with col_right:
         st.markdown("**💎 Top 10 Sleepers**")
-        st.caption("Under-the-radar HR upside — TOUGH/ELITE pitcher matchups filtered out")
+        st.caption(
+            "Under-the-radar HR upside — TOUGH/ELITE pitcher matchups filtered out. "
+            "Sleepers excludes anyone already in Top 10 Picks above (a sleeper is "
+            "by definition someone NOT already an obvious play) and caps at "
+            "HR Game% < 18% (above that is just a top play, not a sleeper)."
+        )
         if "sleeper_score" in qualified.columns:
             top_sleep = qualified.dropna(subset=["sleeper_score"]).copy()
+            # SLEEPER RULE 1: exclude anyone already in Top 10 Picks.
+            # A player at pick_score=97 isn't a sleeper, they're your #1 pick.
+            # Use player_id for matching (handles duplicate names) with name fallback.
+            if top_picks_export is not None and not top_picks_export.empty:
+                exclude_ids = set()
+                exclude_names = set()
+                if "player_id" in top_picks_export.columns:
+                    exclude_ids = set(
+                        int(p) for p in top_picks_export["player_id"].dropna().tolist()
+                    )
+                if "player_name" in top_picks_export.columns:
+                    exclude_names = set(top_picks_export["player_name"].dropna().tolist())
+                pre_n = len(top_sleep)
+                if exclude_ids and "player_id" in top_sleep.columns:
+                    top_sleep = top_sleep[
+                        ~top_sleep["player_id"].fillna(-1).astype(int).isin(exclude_ids)
+                    ]
+                elif exclude_names and "player_name" in top_sleep.columns:
+                    top_sleep = top_sleep[~top_sleep["player_name"].isin(exclude_names)]
+                excluded_n = pre_n - len(top_sleep)
+                if excluded_n > 0:
+                    st.caption(f"_({excluded_n} candidates excluded — already in Top 10 Picks)_")
+            # SLEEPER RULE 2: cap at HR Game% < 18.
+            # Players above 18% are top plays, not sleepers. The whole concept
+            # of a sleeper is "not yet obvious upside".
+            if "hr_game_pct" in top_sleep.columns:
+                pre_n = len(top_sleep)
+                top_sleep = top_sleep[
+                    top_sleep["hr_game_pct"].fillna(0) < 18.0
+                ]
+                capped_n = pre_n - len(top_sleep)
+                if capped_n > 0:
+                    st.caption(f"_({capped_n} candidates excluded — HR Game% already ≥18%, they're top plays not sleepers)_")
             # TRAP PROTECTION: sleepers shouldn't be facing TOUGH/ELITE pitchers.
             # User's rationale: even if the model identifies HR upside vs season pace,
             # facing an ace is too risky for a sleeper play. Better to avoid entirely.
@@ -4813,12 +4903,18 @@ if all_hitters:
     # the strongest regression candidate.
     if all(c in qualified.columns for c in ["recent_hr", "barrel_pct", "xwoba", "iso"]):
         due_pool = qualified.copy()
-        # Looser threshold than before — let more candidates in, score harder
+        # CALIBRATION (June 2026): loosened thresholds slightly.
+        # Previously barrel≥7 / xwoba≥.320 / iso≥.140 — on a typical 9-game
+        # slate that surfaced only ~4 candidates. Loosening to barrel≥6 /
+        # xwoba≥.310 / iso≥.130 gives 8-12 candidates without losing accuracy.
+        # These are still meaningful thresholds: 6% barrel is above MLB
+        # average (5.8%), 0.310 xwoba is above league xwoba (0.310 = ~50th pct),
+        # 0.130 iso is league average.
         due_pool = due_pool[
             (due_pool["recent_hr"].fillna(99) == 0)  # 0 HR in last 15
-            & (due_pool["barrel_pct"].fillna(0) >= 7)
-            & (due_pool["xwoba"].fillna(0) >= 0.320)
-            & (due_pool["iso"].fillna(0) >= 0.140)
+            & (due_pool["barrel_pct"].fillna(0) >= 6)
+            & (due_pool["xwoba"].fillna(0) >= 0.310)
+            & (due_pool["iso"].fillna(0) >= 0.130)
         ]
         # Avoid the trap of recommending guys vs aces
         if "opp_pitcher_grade" in due_pool.columns:
