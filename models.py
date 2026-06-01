@@ -476,10 +476,15 @@ def add_power_score(
         ("iso",            0.20, 0.080, 0.350),  # Top is ~.330
         ("hard_hit",       0.10, 25.0, 65.0),    # Top is ~62
         ("avg_ev",         0.10, 86.0, 98.0),    # Top is ~96.5
-        ("fb_pct",         0.08, 18.0, 50.0),    # 50 is rare
+        ("fb_pct",         0.07, 18.0, 50.0),    # 50 is rare
         ("pulled_brl_pct", 0.07, 0.5,  9.0),     # Top ~8
         ("slg",            0.07, 0.330, 0.620),  # Top ~.610
         ("recent_iso",     0.05, 0.080, 0.350),
+        # NEW (June 2026): sweet_spot_pct replaces most of the LA weight.
+        # Higher correlation with HR Game% (0.349 vs 0.306 for avg LA) and
+        # doesn't have the "wrong target" problem the LA-28° formula had.
+        # League avg ~33%, elite ~47% (e.g. classic gap hitters).
+        ("sweet_spot_pct", 0.05, 28.0, 47.0),
     ]
 
     def absolute_score(val, poor, elite):
@@ -502,17 +507,26 @@ def add_power_score(
             if pd.notna(score):
                 total_score += score * w
                 total_weight += w
-        # Launch angle - special "sweet spot" scoring (peak ~ 28°)
+        # Launch angle — fixed target (June 2026).
+        # OLD: target=28°, weight=0.08. That was wrong because 28° is the peak
+        # angle for an INDIVIDUAL HR-hit ball, but `la` is season-average
+        # `avg_launch_angle` across ALL batted balls including grounders.
+        # League avg `avg_launch_angle` is ~12°; elite power hitters sit at
+        # 16-20° (Judge 16, Schwarber 19, Stanton 18). Targeting 28° meant the
+        # formula penalized every hitter including the elites.
+        # FIX: target=16°, wider tolerance (slope 3 instead of 5 → 33° away
+        # = 0). Weight reduced from 0.08 to 0.04 since sweet_spot_pct now
+        # covers part of this signal.
         if "la" in df.columns:
             la = row.get("la")
             if pd.notna(la):
-                la_dist = abs(float(la) - 28.0)
-                la_score = max(0, 100 - la_dist * 5)  # 0° away = 100; 20° away = 0
-                total_score += la_score * 0.08
-                total_weight += 0.08
+                la_dist = abs(float(la) - 16.0)
+                la_score = max(0, 100 - la_dist * 3)
+                total_score += la_score * 0.04
+                total_weight += 0.04
         if total_weight == 0:
             return np.nan
-        max_weight = sum(w for _, w, _, _ in specs) + 0.08
+        max_weight = sum(w for _, w, _, _ in specs) + 0.04
         completeness = total_weight / max_weight
         # Hard threshold: if we have <60% of components, return NaN
         # (don't fake a score from sparse data)
