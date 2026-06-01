@@ -406,6 +406,17 @@ def get_hitter_stats(season: int = CURRENT_SEASON, _stats_day: str = "") -> pd.D
             if "iso" in df.columns and df["iso"].notna().any():
                 break
 
+    # Clamp ISO at zero. ISO = SLG - AVG, which is mathematically ≥ 0 because
+    # every hit contributes to SLG with weight ≥ AVG-weight (a single counts
+    # 1 in both, a double counts 2 in SLG vs 1 in AVG, etc). Negative values
+    # only appear when Savant returns xISO for tiny samples (expected stats
+    # can invert at low PA). Affects ~9 fringe hitters with PA < 80 — they're
+    # already excluded from picks via the PA gate, but the displayed value
+    # looks like a data error. Clamping fixes the display without altering
+    # downstream calculations (negatives never reach the projections).
+    if "iso" in df.columns:
+        df["iso"] = pd.to_numeric(df["iso"], errors="coerce").clip(lower=0)
+
     # LA must come from a real Statcast source. NEVER estimated/derived.
     # Try every known column name where Savant might return real LA data.
     la_candidates = [
@@ -739,6 +750,138 @@ def get_pitcher_handedness_splits(season: int = CURRENT_SEASON,
         splits = _fetch_pitcher_splits_single(pid_int, season)
         if splits:
             splits["player_id"] = pid_int
+            rows.append(splits)
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows)
+
+
+# ----------------------------------------------------------------------------
+# HITTER splits vs LHP / vs RHP - the SINGLE biggest accuracy gap in the model
+# until June 2026. Reference apps that nail platoon predictions all use these.
+#
+# Jo Adell case study: overall barrel% = 8.8% (looks weak) but vs-LHP barrel% =
+# 31.6% (elite). Without these splits, the model uses the 8.8% for ALL matchups
+# and dramatically underestimates Adell vs lefties. Same for any reverse-platoon
+# or strong-platoon hitter.
+# ----------------------------------------------------------------------------
+
+def _fetch_hitter_splits_single(hitter_id: int, season: int) -> dict:
+    """
+    Fetch a single hitter's vs-LHP and vs-RHP splits from MLB Stats API.
+    Returns dict with keys like vs_lhp_pa, vs_lhp_hr_per_pa, vs_lhp_iso, etc.
+
+    Field naming convention: `vs_lhp_*` / `vs_rhp_*` (vs pitcher hand).
+    Note this differs from pitcher splits which use `vs_lhb_*` / `vs_rhb_*`
+    (vs batter hand). The codes from MLB API are the same (vl/vr) but the
+    semantic is opposite depending on the player type.
+    """
+    out = {}
+    url = (
+        f"https://statsapi.mlb.com/api/v1/people/{hitter_id}/stats"
+        f"?stats=statSplits&sitCodes=vl,vr&group=hitting&season={season}"
+    )
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=15)
+        if r.status_code != 200:
+            return out
+        data = r.json()
+        for stat_group in data.get("stats", []):
+            for split in stat_group.get("splits", []):
+                code = split.get("split", {}).get("code", "")
+                # For HITTERS: vl = vs LHP, vr = vs RHP
+                if code == "vl":
+                    label = "lhp"
+                elif code == "vr":
+                    label = "rhp"
+                else:
+                    continue
+                stat = split.get("stat", {})
+
+                def _to_int(v):
+                    if v is None: return None
+                    try: return int(v)
+                    except (TypeError, ValueError):
+                        try: return int(float(v))
+                        except (TypeError, ValueError): return None
+
+                def _to_float(v):
+                    if v is None: return None
+                    try: return float(v)
+                    except (TypeError, ValueError): return None
+
+                pa = _to_int(stat.get("plateAppearances") or stat.get("pa"))
+                ab = _to_int(stat.get("atBats") or stat.get("ab"))
+                hr = _to_int(stat.get("homeRuns") or stat.get("hr"))
+                k = _to_int(stat.get("strikeOuts") or stat.get("so"))
+                bb = _to_int(stat.get("baseOnBalls") or stat.get("bb"))
+                hits = _to_int(stat.get("hits") or stat.get("h"))
+                avg = _to_float(stat.get("avg") or stat.get("battingAverage"))
+                obp = _to_float(stat.get("obp") or stat.get("onBasePercentage"))
+                slg = _to_float(stat.get("slg") or stat.get("sluggingPercentage"))
+                ops = _to_float(stat.get("ops"))
+
+                if pa is None and ab and bb is not None:
+                    pa = ab + bb
+                denom = pa if (pa and pa > 0) else ab
+
+                if pa and pa > 0:
+                    out[f"vs_{label}_pa"] = pa
+                if denom and denom > 0:
+                    if hr is not None:
+                        out[f"vs_{label}_hr_per_pa"] = round(hr / denom * 100, 3)
+                    if k is not None:
+                        out[f"vs_{label}_k_percent"] = round(k / denom * 100, 2)
+                    if bb is not None:
+                        out[f"vs_{label}_bb_percent"] = round(bb / denom * 100, 2)
+                if avg is not None:
+                    out[f"vs_{label}_avg"] = avg
+                if obp is not None:
+                    out[f"vs_{label}_obp"] = obp
+                if slg is not None:
+                    out[f"vs_{label}_slg"] = slg
+                    # ISO = SLG - AVG (the math definition)
+                    if avg is not None:
+                        out[f"vs_{label}_iso"] = round(max(0.0, slg - avg), 3)
+                if ops is not None:
+                    out[f"vs_{label}_ops"] = ops
+    except Exception:
+        pass
+    return out
+
+
+@st.cache_data(ttl=3600)
+def get_hitter_handedness_splits(season: int = CURRENT_SEASON,
+                                   hitter_ids: tuple = (),
+                                   _cache_version: str = "v1") -> pd.DataFrame:
+    """
+    Fetch vs-LHP and vs-RHP splits from MLB Stats API for the given hitter IDs.
+
+    Why this matters: a hitter's overall season stats average across BOTH
+    handednesses. For platoon hitters (most of MLB) the rate vs the opposite
+    arm is meaningfully different. Reverse-platoon guys like Jo Adell can have
+    overall barrel% of 8% but vs-LHP barrel% of 31% — without the split,
+    we project him as a weak HR threat vs lefties when he's actually elite.
+
+    Returns DataFrame with columns:
+      player_id, vs_lhp_pa, vs_lhp_avg, vs_lhp_obp, vs_lhp_slg, vs_lhp_iso,
+      vs_lhp_ops, vs_lhp_hr_per_pa, vs_lhp_k_percent, vs_lhp_bb_percent
+      (and matching vs_rhp_* columns)
+
+    Pass hitter_ids from today's slate to avoid hammering the API.
+    """
+    if not hitter_ids:
+        return pd.DataFrame()
+
+    rows = []
+    for hid in hitter_ids:
+        try:
+            hid_int = int(hid)
+        except (TypeError, ValueError):
+            continue
+        splits = _fetch_hitter_splits_single(hid_int, season)
+        if splits:
+            splits["player_id"] = hid_int
             rows.append(splits)
     if not rows:
         return pd.DataFrame()
