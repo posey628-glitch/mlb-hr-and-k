@@ -255,6 +255,30 @@ def build_matchup_table(
         df["pitcher_barrel_allowed"] = np.nan
 
     # Normalize column names to consistent shorts
+    # COALESCE LA SOURCES BEFORE RENAME
+    # The rename below maps multiple Savant column names to "la". If two map
+    # to the same target, pandas creates duplicate columns and the dedupe
+    # at the bottom keeps whichever appears first — which may be the empty
+    # one. Pre-emptively pick the most-populated LA candidate and drop the
+    # rest, so the survivor carries real data through the rename.
+    la_candidates = ["launch_angle", "launch_angle_avg", "avg_hit_angle",
+                       "la_avg", "la"]
+    la_present = [c for c in la_candidates if c in df.columns]
+    if len(la_present) > 1:
+        # Score each by populated count; keep the winner
+        best_col = None
+        best_count = -1
+        for c in la_present:
+            coerced = pd.to_numeric(df[c], errors="coerce")
+            n = int(coerced.notna().sum())
+            if n > best_count:
+                best_count = n
+                best_col = c
+        if best_col is not None:
+            # Drop the others so the rename has a single source for "la"
+            to_drop = [c for c in la_present if c != best_col]
+            df = df.drop(columns=to_drop)
+
     rename = {
         "barrel_batted_rate": "barrel_pct",
         "hard_hit_percent": "hard_hit",
@@ -362,9 +386,35 @@ def build_matchup_table(
     # Drop synthetic pitches/bip estimates — they were 100% derived, not real
 
     # Final column order matching the screenshots
+    # CONTACT PROFILE FLAG
+    # Contact hitters (Arraez, Kwan, Tucker, classic high-OBP guys) hit so
+    # few HRs that they always show low HR Game%. The model is correct; the
+    # issue is user expectations. Flag them explicitly so users know not to
+    # use them as HR plays. Threshold: ISO < 0.120 AND barrel% < 5 AND
+    # K% < 16 — Arraez profile (ISO ~0.05, barrel ~0%, K% ~4%).
+    # Less strict: ISO < 0.140 AND barrel% < 7 AND K% < 18 — Tucker tier.
+    def _contact_flag(row):
+        try:
+            iso = float(row.get("iso")) if not pd.isna(row.get("iso")) else None
+            barrel = float(row.get("barrel_pct")) if not pd.isna(row.get("barrel_pct")) else None
+            k_pct = float(row.get("k_pct")) if not pd.isna(row.get("k_pct")) else None
+        except (TypeError, ValueError):
+            return ""
+        if iso is None or barrel is None or k_pct is None:
+            return ""
+        # Extreme contact (Arraez tier)
+        if iso < 0.120 and barrel < 5.0 and k_pct < 16.0:
+            return "🎯 contact, not HR"
+        # Solid contact, low power (Kwan/Hoerner tier)
+        if iso < 0.140 and barrel < 7.0 and k_pct < 18.0:
+            return "🎯 low-power profile"
+        return ""
+    df["contact_flag"] = df.apply(_contact_flag, axis=1)
+
     display_cols = [
         "player_id", "player_name", "lineup_pos", "position", "bats",
         "is_roster_fill",  # CRITICAL: flag for whether lineup_pos is real or fill
+        "contact_flag",  # 🎯 contact profile (set expectations)
         # Composites (matching screenshot order)
         "matchup", "test_score", "ceiling", "zone_fit",
         "hr_form", "hr_form_label", "hr_form_arrow", "kHR",
