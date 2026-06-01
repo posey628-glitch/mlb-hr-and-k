@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.01-splits-v20"
+APP_VERSION = "2026.06.01-la-target-v21"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
