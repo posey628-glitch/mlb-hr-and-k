@@ -88,6 +88,58 @@ def hr_prob_per_pa(
         # No barrel data - fall back to observed only
         h_base = h_observed
 
+    # HITTER vs-HANDEDNESS SPLIT ADJUSTMENT (June 2026)
+    # The h_base above uses OVERALL season stats. But platoon effects are
+    # real and large — Adell case study has 8.8% overall barrel but 31.6%
+    # vs-LHP barrel. Without this adjustment, a strong reverse-platoon hitter
+    # facing his preferred arm gets projected at his weak overall rate.
+    #
+    # Strategy: if we have vs-LHP/vs-RHP HR rate from MLB Stats API,
+    # compute a multiplier = (split HR/PA) / (overall HR/PA), shrunken by
+    # split sample size, and apply to h_base.
+    # Switch hitters bat opposite of pitcher arm → look up that side.
+    p_throws_now = (pitcher_row.get("p_throws") or pitcher_row.get("throws") or "").upper() if pitcher_row else ""
+    h_bats_now = (hitter_row.get("bats") or "").upper() if hitter_row else ""
+    # Determine which split applies. A LHB always faces vs-RHP if pitcher is R,
+    # but the hitter's split is denoted by the pitcher's hand (vs-LHP, vs-RHP).
+    h_split_key = None
+    if p_throws_now == "L":
+        h_split_key = "lhp"
+    elif p_throws_now == "R":
+        h_split_key = "rhp"
+    # For switch hitters: they bat opposite the pitcher, so they will face
+    # the pitcher with the favorable platoon. The split lookup is the same:
+    # use the pitcher's hand to find the hitter's vs-LHP or vs-RHP rate.
+    # Switch hitter splits already reflect this — their vs-RHP stats are from
+    # them batting left vs RHP.
+
+    if h_split_key:
+        split_hr_rate = hitter_row.get(f"vs_{h_split_key}_hr_per_pa")
+        split_pa = hitter_row.get(f"vs_{h_split_key}_pa")
+        if (split_hr_rate is not None and not pd.isna(split_hr_rate)
+                and split_pa is not None and not pd.isna(split_pa)
+                and float(split_pa) >= 30):
+            try:
+                split_hr_pa = float(split_hr_rate) / 100.0  # pct → rate
+                # Compute multiplier vs the overall rate.
+                # Use h_observed_raw (not the league-shrunk h_observed) as
+                # the "overall" baseline since split stats are also observed.
+                # Guard against divide-by-zero on contact hitters with 0 HR.
+                overall_rate = h_observed_raw if h_observed_raw > 0.005 else 0.025
+                split_mult_raw = split_hr_pa / overall_rate
+                # Shrink the multiplier toward 1.0 based on split sample size.
+                # 30 PA: very heavy shrink (most weight to overall);
+                # 150 PA: ~50% confidence;
+                # 400 PA: ~75% confidence in split.
+                split_pa_f = float(split_pa)
+                split_w = split_pa_f / (split_pa_f + 100)  # 100 PA prior
+                # Cap shrunk multiplier in [0.5, 2.0] to prevent extreme outliers
+                split_mult_shrunk = 1.0 + (split_mult_raw - 1.0) * split_w
+                split_mult_shrunk = max(0.5, min(2.0, split_mult_shrunk))
+                h_base = h_base * split_mult_shrunk
+            except (TypeError, ValueError, ZeroDivisionError):
+                pass
+
     # NEW: RECENCY ADJUSTMENT - blend in recent-form hot/cold signal.
     # recent_hr_weighted_rate gives last-3 games triple-weight, weighted across
     # last 15 games. If this rate is significantly above/below season h_base,
