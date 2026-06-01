@@ -437,6 +437,16 @@ def build_matchup_table(
         "vs_day_hr_per_pa", "vs_day_k_percent",
         "vs_night_pa", "vs_night_avg", "vs_night_obp", "vs_night_slg", "vs_night_ops",
         "vs_night_hr_per_pa", "vs_night_k_percent",
+        # HITTER vs-LHP / vs-RHP splits — CRITICAL: must be in display_cols
+        # whitelist or they get dropped before reaching hr_prob_per_pa().
+        # Was the silent bug that prevented the entire hitter-split system
+        # added in v20 from ever actually firing on projections.
+        "vs_lhp_pa", "vs_lhp_avg", "vs_lhp_obp", "vs_lhp_slg",
+        "vs_lhp_iso", "vs_lhp_ops", "vs_lhp_hr_per_pa",
+        "vs_lhp_k_percent", "vs_lhp_bb_percent",
+        "vs_rhp_pa", "vs_rhp_avg", "vs_rhp_obp", "vs_rhp_slg",
+        "vs_rhp_iso", "vs_rhp_ops", "vs_rhp_hr_per_pa",
+        "vs_rhp_k_percent", "vs_rhp_bb_percent",
         # Today's HR projection
         "likely_hr_pct",
     ]
@@ -471,20 +481,26 @@ def add_power_score(
     # "Elite" should be a near-ceiling that even MLB's best rarely hit.
     # We set elite ABOVE the actual top of the league so even Judge tops out
     # around 75-80, leaving headroom for env factors.
+    #
+    # WEIGHTING NOTE (June 2026): `pulled_brl_pct` has the highest single-
+    # variable correlation with HR Game% in our dataset (0.806) — higher than
+    # barrel_pct itself (because only PULLED barrels become HRs at
+    # meaningful rates). Bumped weight 0.07→0.11 and reduced slg 0.07→0.03
+    # to reflect the data's actual signal strength.
     specs = [
         ("barrel_pct",     0.25, 2.0,  25.0),    # Elite raised: top is ~22%, so 25 = nobody hits 100
         ("iso",            0.20, 0.080, 0.350),  # Top is ~.330
+        ("pulled_brl_pct", 0.11, 0.5,  9.0),     # Boosted: highest HR correlation
         ("hard_hit",       0.10, 25.0, 65.0),    # Top is ~62
         ("avg_ev",         0.10, 86.0, 98.0),    # Top is ~96.5
         ("fb_pct",         0.07, 18.0, 50.0),    # 50 is rare
-        ("pulled_brl_pct", 0.07, 0.5,  9.0),     # Top ~8
-        ("slg",            0.07, 0.330, 0.620),  # Top ~.610
         ("recent_iso",     0.05, 0.080, 0.350),
         # NEW (June 2026): sweet_spot_pct replaces most of the LA weight.
         # Higher correlation with HR Game% (0.349 vs 0.306 for avg LA) and
         # doesn't have the "wrong target" problem the LA-28° formula had.
         # League avg ~33%, elite ~47% (e.g. classic gap hitters).
         ("sweet_spot_pct", 0.05, 28.0, 47.0),
+        ("slg",            0.03, 0.330, 0.620),  # Reduced: redundant with iso, barrel
     ]
 
     def absolute_score(val, poor, elite):
