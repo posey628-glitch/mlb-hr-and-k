@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.01-la-target-v21"
+APP_VERSION = "2026.06.01-pipeline-v22"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -1921,13 +1921,19 @@ if not p_slate.empty:
         except (TypeError, ValueError):
             return ""
         # Two patterns that warrant the caveat:
-        # A) Real results good (ERA<3.50, WHIP<1.15, HR/9<1.0)
-        #    AND hr_suppress is actually decent (>40) — means low-K is the
-        #    main driver of the EXPLOIT label, not actual HR vulnerability
-        if (era is not None and era < 3.50
-                and whip is not None and whip < 1.15
-                and hr9 is not None and hr9 < 1.0
-                and hr_suppress is not None and hr_suppress >= 40):
+        # A) Real results acceptable (ERA<4.00, WHIP<1.25, HR/9<1.20)
+        #    AND hr_suppress is actually decent (>=35) — means low-K is the
+        #    main driver of the EXPLOIT label, not actual HR vulnerability.
+        #
+        # THRESHOLDS LOOSENED (June 2026): previously era<3.50/whip<1.15/
+        # hr9<1.00/hr_suppress>=40. That was so strict it never fired on real
+        # slates — Alcantara (ERA 4.66), deGrom (3.77) both failed despite
+        # being canonical "low K, results OK" cases. New thresholds catch
+        # the pitchers the caveat was designed for without false positives.
+        if (era is not None and era < 4.00
+                and whip is not None and whip < 1.25
+                and hr9 is not None and hr9 < 1.20
+                and hr_suppress is not None and hr_suppress >= 35):
             return "📉 low-K, results OK"
         return ""
     p_slate["grade_caveat"] = p_slate.apply(_grade_caveat, axis=1)
@@ -4505,11 +4511,37 @@ if all_hitters:
                         if not top_pow.empty:
                             top_pow.to_excel(writer, sheet_name="Top 20 Power", index=False)
                     if "sleeper_score" in qualified.columns:
-                        # Apply same TOUGH/ELITE filter to export as to the display widget
+                        # Apply the SAME filters as the display widget:
+                        #   1. Exclude TOUGH/ELITE pitcher matchups (trap protection)
+                        #   2. Exclude players already in Top 10 Picks
+                        #   3. Cap at HR Game% < 18 (above that = top play, not sleeper)
+                        # Without these, the export sheet diverged from the UI
+                        # and showed Carroll/Caglianone/Burleson type cases twice.
                         sleep_export = qualified.dropna(subset=["sleeper_score"]).copy()
                         if "opp_pitcher_grade" in sleep_export.columns:
                             sleep_export = sleep_export[
                                 ~sleep_export["opp_pitcher_grade"].isin(["TOUGH", "ELITE"])
+                            ]
+                        # Exclude anyone in Top 10 Picks (by player_id with name fallback)
+                        if top_picks_export is not None and not top_picks_export.empty:
+                            if "player_id" in top_picks_export.columns and "player_id" in sleep_export.columns:
+                                exclude_ids = set(
+                                    int(p) for p in top_picks_export["player_id"].dropna().tolist()
+                                )
+                                if exclude_ids:
+                                    sleep_export = sleep_export[
+                                        ~sleep_export["player_id"].fillna(-1).astype(int).isin(exclude_ids)
+                                    ]
+                            elif "player_name" in top_picks_export.columns and "player_name" in sleep_export.columns:
+                                exclude_names = set(top_picks_export["player_name"].dropna().tolist())
+                                if exclude_names:
+                                    sleep_export = sleep_export[
+                                        ~sleep_export["player_name"].isin(exclude_names)
+                                    ]
+                        # Cap at HR Game% < 18
+                        if "hr_game_pct" in sleep_export.columns:
+                            sleep_export = sleep_export[
+                                sleep_export["hr_game_pct"].fillna(0) < 18.0
                             ]
                         top_sl = sleep_export.sort_values(
                             "sleeper_score", ascending=False).head(20)
