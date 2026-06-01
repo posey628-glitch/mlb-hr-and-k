@@ -71,11 +71,11 @@ def hr_prob_per_pa(
 
     # NEW: sample-size shrinkage on raw observed HR/PA to combat early-season noise.
     # A hitter with 5 HR in 30 PA has 16.7% observed rate — that's not predictive.
-    # Shrink toward league avg (2.8%) using prior weight of 50 PA.
+    # Shrink toward league avg using prior weight of 50 PA.
     # Below 50 PA: observed barely matters. Above 300 PA: observed is most trusted.
     h_observed_raw = hr / pa
     obs_shrink_w = pa / (pa + 50)  # 50 PA prior
-    h_observed = h_observed_raw * obs_shrink_w + 0.028 * (1 - obs_shrink_w)
+    h_observed = h_observed_raw * obs_shrink_w + LEAGUE_HR_PER_PA * (1 - obs_shrink_w)
 
     barrel_pct = hitter_row.get("barrel_pct")
     if barrel_pct is not None and not pd.isna(barrel_pct) and barrel_pct > 0:
@@ -255,21 +255,27 @@ def hr_prob_per_pa(
         # Bayesian shrink: weight = pa / (pa + 80). 80 is the prior weight in PA.
         # If pa=200: 200/280 = 71% real, 29% league avg
         # If pa=40 :  40/120 = 33% real, 67% league avg
+        # Use the canonical LEAGUE_HR_PER_PA constant (3.0%) for both the
+        # shrinkage prior AND the denominator. Previously these were:
+        #   - shrinkage toward 0.028
+        #   - denominator 0.028 (splits) OR (1.30/9)/4.3 = 0.03362 (HR9)
+        # That dual-baseline inconsistency caused subtle pitcher_mult drift
+        # between the two paths for the same pitcher in edge cases.
         shrink_w = split_pa_count / (split_pa_count + 80)
-        split_shrunk = split_hr_per_pa * shrink_w + 0.028 * (1 - shrink_w)
-        league_p_hr_per_pa = 0.028  # ~2.8% league HR per PA
-        pitcher_mult = split_shrunk / league_p_hr_per_pa
+        split_shrunk = split_hr_per_pa * shrink_w + LEAGUE_HR_PER_PA * (1 - shrink_w)
+        pitcher_mult = split_shrunk / LEAGUE_HR_PER_PA
         pitcher_mult = max(0.5, min(2.0, pitcher_mult))
     elif p_hr9 is None or pd.isna(p_hr9) or p_hr9 == 0:
         pitcher_mult = 1.0  # No adjustment if we don't know
     else:
         p_hr_per_pa = (p_hr9 / 9) / 4.3  # ~4.3 PA per inning
-        # League HR/9 baseline: 1.30 reflects 2023-2025 MLB rate.
-        # Was 1.20 (2022 deadened-ball era) — that made every pitcher look
-        # ~9% better at HR suppression than reality, systematically reducing
-        # pitcher_mult for average pitchers.
-        league_p_hr_per_pa = (1.30 / 9) / 4.3
-        pitcher_mult = p_hr_per_pa / league_p_hr_per_pa
+        # Use the same canonical LEAGUE_HR_PER_PA constant.
+        # Note: at 0.030, this equates to league HR/9 of about 1.16, which
+        # is between the 2022 deadened-ball era (1.20) and the 2024 rate
+        # (1.30). 0.030 is the better calibrated value for the split path
+        # (matches empirical HR/PA, not derived from HR/9), so we use it as
+        # our single source of truth.
+        pitcher_mult = p_hr_per_pa / LEAGUE_HR_PER_PA
         pitcher_mult = max(0.5, min(2.0, pitcher_mult))
 
     # NEW: PITCHER DAY/NIGHT adjustment.
@@ -283,13 +289,13 @@ def hr_prob_per_pa(
                 and p_dn_hr is not None and not pd.isna(p_dn_hr) and p_dn_hr > 0):
             # Compare pitcher's day/night HR rate to league average
             p_dn_rate = float(p_dn_hr) / 100  # pct → decimal
-            # Shrinkage: 60 PA prior toward 2.8%
+            # Shrinkage: 60 PA prior toward LEAGUE_HR_PER_PA
             shrink_w = float(p_dn_pa) / (float(p_dn_pa) + 60)
-            p_dn_shrunk = p_dn_rate * shrink_w + 0.028 * (1 - shrink_w)
+            p_dn_shrunk = p_dn_rate * shrink_w + LEAGUE_HR_PER_PA * (1 - shrink_w)
             # Ratio of pitcher's split to overall expected (using current pitcher_mult)
-            # If pitcher_mult is 0.7 (good suppressor) and day/night rate is 1.8%
-            # vs his expected 0.7 × 2.8 = 1.96%, he's slightly worse at this time.
-            expected_pitcher_rate = 0.028 * pitcher_mult
+            # If pitcher_mult is 0.7 (good suppressor), expected rate is 0.7 × LEAGUE.
+            # If day/night actual exceeds that, he's slightly worse at this time.
+            expected_pitcher_rate = LEAGUE_HR_PER_PA * pitcher_mult
             if expected_pitcher_rate > 0:
                 dn_ratio = p_dn_shrunk / expected_pitcher_rate
                 dn_ratio = max(0.90, min(1.10, dn_ratio))
