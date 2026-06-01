@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.01-pipeline-v22"
+APP_VERSION = "2026.06.01-arsenal-v23"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -1117,6 +1117,43 @@ try:
         f"All game times shown in ET"
     )
     st.caption(_time_caption)
+except Exception:
+    pass
+
+# ============================================================================
+# PAGE-OPEN-TIME / LATE-SCRATCH AWARENESS
+# ============================================================================
+# When a starter is scratched late (illness, weather), the cached lineups
+# and probable-pitcher data can be stale for a few minutes. This banner warns
+# the user when the page has been open long enough that data could be stale,
+# and shows a quick-refresh button right there.
+try:
+    import time as _time_mod
+    # Track when this session started. session_state persists across reruns
+    # within a session but resets on a new browser tab / hard refresh.
+    if "_session_started_at" not in st.session_state:
+        st.session_state["_session_started_at"] = _time_mod.time()
+    session_age_min = (_time_mod.time() - st.session_state["_session_started_at"]) / 60
+
+    # Warn at 10 minutes (lineups TTL is 3 min; probables 5 min; rosters 15
+    # min — at 10 min there's a decent chance something has changed)
+    if session_age_min >= 10:
+        warn_cols = st.columns([3, 1])
+        with warn_cols[0]:
+            st.warning(
+                f"⚠️ **Page open {session_age_min:.0f} min** — late scratches "
+                f"(illness, weather) and lineup changes may not be reflected. "
+                f"Click refresh on the right or use the sidebar's '🔄 Force "
+                f"refresh' to re-fetch all data."
+            )
+        with warn_cols[1]:
+            if st.button("🔄 Refresh now", key="stale_refresh", use_container_width=True):
+                try:
+                    st.cache_data.clear()
+                except Exception:
+                    pass
+                st.session_state["_session_started_at"] = _time_mod.time()
+                st.rerun()
 except Exception:
     pass
 
@@ -2876,6 +2913,47 @@ for _, game in slate.iterrows():
         matchup_df["best_pitch_xwoba"] = bestxw
         matchup_df["worst_pitch"] = worsts
 
+        # ARSENAL EXPLOIT FLAG — combines pitch_hr_score + best_pitch usage
+        # into a single human-readable column so users see "this hitter crushes
+        # the pitcher's main pitch" without needing to interpret two numbers.
+        #
+        # Tiers:
+        #   🎯💥 ELITE EXPLOIT — pitch_hr_score >= 80 AND best_pitch xwoba >= 0.420
+        #     "This hitter crushes nearly every pitch this guy throws"
+        #   🎯  STRONG EXPLOIT — pitch_hr_score >= 65 AND best_pitch xwoba >= 0.380
+        #     "Significant edge against the pitcher's arsenal"
+        #   ⚡  pitch-specific — best_pitch xwoba >= 0.400 but overall match weaker
+        #     "Has one pitch he hammers (best_pitch) — game-state dependent"
+        #   🚫  ARSENAL TRAP — pitch_match_score <= 25 AND pitch_hr_score <= 20
+        #     "This pitcher's mix is exactly what this hitter can't hit"
+        # Otherwise: empty string (neutral, no edge worth flagging)
+        def _arsenal_flag(row):
+            phr = row.get("pitch_hr_score")
+            pms = row.get("pitch_match_score")
+            bp_xw = row.get("best_pitch_xwoba")
+            bp = row.get("best_pitch")
+            if phr is None or pd.isna(phr):
+                return ""
+            try:
+                phr = float(phr)
+                pms = float(pms) if pms is not None and not pd.isna(pms) else 50
+                bp_xw = float(bp_xw) if bp_xw is not None and not pd.isna(bp_xw) else 0
+            except (TypeError, ValueError):
+                return ""
+            # Elite exploit
+            if phr >= 80 and bp_xw >= 0.420:
+                return f"🎯💥 crushes {bp or 'arsenal'}"
+            if phr >= 65 and bp_xw >= 0.380:
+                return f"🎯 exploits {bp or 'arsenal'}"
+            # Trap (the pitcher's mix is bad for this hitter)
+            if pms <= 25 and phr <= 20:
+                return "🚫 arsenal trap"
+            # Specific pitch edge but weaker overall match
+            if bp_xw >= 0.400 and bp:
+                return f"⚡ crushes {bp}"
+            return ""
+        matchup_df["arsenal_flag"] = matchup_df.apply(_arsenal_flag, axis=1)
+
     if use_pitch_match and HAVE_PITCH_MATCH:
         try:
             _apply_pitch_match(away_matchup, home_p_row)
@@ -3730,7 +3808,8 @@ if all_hitters_for_picks:
         top10["rank"] = range(1, len(top10) + 1)
 
         cols_to_show = [c for c in [
-            "rank", "slate_leader_flag", "player_name", "team", "game", "opp_pitcher",
+            "rank", "slate_leader_flag", "arsenal_flag",
+            "player_name", "team", "game", "opp_pitcher",
             "pick_score", "hr_game_pct", "matchup", "barrel_pct",
             "hr_form", "env_boost",
         ] if c in top10.columns]
@@ -3743,6 +3822,19 @@ if all_hitters_for_picks:
                 "slate_leader_flag": st.column_config.TextColumn(
                     "🏆", width="small",
                     help="🏆 = slate leader in at least one category. ×N = leader in N categories.",
+                ),
+                "arsenal_flag": st.column_config.TextColumn(
+                    "Arsenal", width="medium",
+                    help=(
+                        "Pitcher-arsenal exploitation flag. Based on this hitter's "
+                        "career xwOBA/barrel vs each pitch type, weighted by how "
+                        "often this pitcher throws each pitch.\n\n"
+                        "🎯💥 crushes [pitch] = elite exploit (hammers his main mix)\n"
+                        "🎯 exploits [pitch] = strong edge vs this arsenal\n"
+                        "⚡ crushes [pitch] = has one pitch he hammers\n"
+                        "🚫 arsenal trap = this pitcher's mix is his weakness\n"
+                        "(empty) = neutral, no notable edge either way"
+                    ),
                 ),
                 "player_name": st.column_config.TextColumn("Hitter"),
                 "team": st.column_config.TextColumn("Tm", width="small"),
@@ -5434,7 +5526,8 @@ def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
         insufficient = pd.DataFrame()
 
     cols_to_show = [c for c in [
-        "alert", "grade", "smash_spot", "player_name", "lineup_pos", "bats", "position",
+        "alert", "grade", "smash_spot", "arsenal_flag", "contact_flag", "slate_leader_flag",
+        "player_name", "lineup_pos", "bats", "position",
         "power_score", "matchup_opp", "hr_game_pct", "hr_pa_pct", "matchup", "test_score",
         "streak_label",
         "pa", "barrel_pct", "iso", "xwoba", "xwobacon",
