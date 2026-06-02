@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.01-hand-arsenal-v24"
+APP_VERSION = "2026.06.01-aesthetic-v25"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -242,6 +242,380 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# ============================================================================
+# CUSTOM CSS — Dark + Sleek + Electric Blue (v25 aesthetic overhaul)
+# ============================================================================
+# Color palette:
+#   Background:    #0a0e1a (deep navy-black)
+#   Card surface:  #131826 (lifted dark)
+#   Card border:   #1f2738
+#   Primary text:  #e8ecf3
+#   Muted text:    #8893a8
+#   Accent:        #00d4ff (electric blue)
+#   Accent hover:  #33ddff
+#   Success:       #00ff9d (neon green for HR/win signals)
+#   Warning:       #ffb84d
+#   Danger:        #ff4d6d
+# ============================================================================
+st.markdown("""
+<style>
+/* Import sleek modern font */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600&display=swap');
+
+/* === GLOBAL === */
+html, body, [class*="css"], .stApp {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif !important;
+    color: #e8ecf3 !important;
+}
+
+.stApp {
+    background:
+        radial-gradient(ellipse at top, #0d1525 0%, #0a0e1a 50%, #060912 100%) fixed !important;
+}
+
+/* === SIDEBAR === */
+section[data-testid="stSidebar"] {
+    background: linear-gradient(180deg, #0d1422 0%, #0a0e1a 100%) !important;
+    border-right: 1px solid #1f2738 !important;
+}
+section[data-testid="stSidebar"] * {
+    color: #e8ecf3 !important;
+}
+section[data-testid="stSidebar"] .stMarkdown h1,
+section[data-testid="stSidebar"] .stMarkdown h2,
+section[data-testid="stSidebar"] .stMarkdown h3 {
+    color: #00d4ff !important;
+    font-weight: 700 !important;
+    text-shadow: 0 0 20px rgba(0, 212, 255, 0.3);
+}
+
+/* === HEADERS === */
+h1, h2, h3, h4, h5, h6 {
+    color: #ffffff !important;
+    font-weight: 700 !important;
+    letter-spacing: -0.02em !important;
+}
+h1 {
+    background: linear-gradient(135deg, #00d4ff 0%, #5eb3ff 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    font-weight: 800 !important;
+    text-shadow: 0 0 40px rgba(0, 212, 255, 0.4);
+}
+h2 {
+    border-bottom: 1px solid #1f2738;
+    padding-bottom: 0.4em;
+    margin-top: 1.2em;
+}
+h3 {
+    color: #00d4ff !important;
+}
+
+/* === BUTTONS === */
+.stButton > button {
+    background: linear-gradient(135deg, #1a2842 0%, #131826 100%) !important;
+    color: #00d4ff !important;
+    border: 1px solid #2a3a5a !important;
+    border-radius: 8px !important;
+    font-weight: 600 !important;
+    transition: all 0.2s ease !important;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+.stButton > button:hover {
+    background: linear-gradient(135deg, #00d4ff 0%, #0099cc 100%) !important;
+    color: #0a0e1a !important;
+    border: 1px solid #00d4ff !important;
+    box-shadow: 0 0 20px rgba(0, 212, 255, 0.5) !important;
+    transform: translateY(-1px);
+}
+.stButton > button:active {
+    transform: translateY(0);
+}
+.stDownloadButton > button {
+    background: linear-gradient(135deg, #00d4ff 0%, #0099cc 100%) !important;
+    color: #0a0e1a !important;
+    border: none !important;
+    font-weight: 700 !important;
+    box-shadow: 0 0 20px rgba(0, 212, 255, 0.4) !important;
+}
+.stDownloadButton > button:hover {
+    box-shadow: 0 0 30px rgba(0, 212, 255, 0.7) !important;
+    transform: translateY(-1px);
+}
+
+/* === METRICS === */
+[data-testid="stMetric"] {
+    background: linear-gradient(135deg, #131826 0%, #0f1420 100%) !important;
+    border: 1px solid #1f2738 !important;
+    border-radius: 12px !important;
+    padding: 1em !important;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    transition: all 0.2s ease;
+}
+[data-testid="stMetric"]:hover {
+    border-color: #00d4ff !important;
+    box-shadow: 0 0 24px rgba(0, 212, 255, 0.25) !important;
+}
+[data-testid="stMetricValue"] {
+    color: #00d4ff !important;
+    font-weight: 700 !important;
+    font-family: 'JetBrains Mono', monospace !important;
+    font-size: 1.6em !important;
+}
+[data-testid="stMetricLabel"] {
+    color: #8893a8 !important;
+    font-size: 0.85em !important;
+    font-weight: 500 !important;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+[data-testid="stMetricDelta"] {
+    font-family: 'JetBrains Mono', monospace !important;
+}
+
+/* === DATAFRAMES === */
+[data-testid="stDataFrame"] {
+    background: #0f1420 !important;
+    border: 1px solid #1f2738 !important;
+    border-radius: 10px !important;
+    overflow: hidden;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+}
+[data-testid="stDataFrame"] table {
+    background: #0f1420 !important;
+    color: #e8ecf3 !important;
+}
+[data-testid="stDataFrame"] thead {
+    background: linear-gradient(180deg, #1a2842 0%, #131826 100%) !important;
+}
+[data-testid="stDataFrame"] thead th {
+    color: #00d4ff !important;
+    font-weight: 700 !important;
+    text-transform: uppercase;
+    font-size: 0.75em !important;
+    letter-spacing: 0.05em;
+    border-bottom: 2px solid #00d4ff !important;
+}
+[data-testid="stDataFrame"] tbody tr:hover {
+    background: rgba(0, 212, 255, 0.05) !important;
+}
+[data-testid="stDataFrame"] tbody td {
+    border-bottom: 1px solid #1a2030 !important;
+    font-family: 'JetBrains Mono', monospace !important;
+    font-size: 0.9em !important;
+}
+
+/* === EXPANDERS === */
+.streamlit-expanderHeader, [data-testid="stExpander"] summary {
+    background: linear-gradient(135deg, #131826 0%, #0f1420 100%) !important;
+    color: #e8ecf3 !important;
+    border: 1px solid #1f2738 !important;
+    border-radius: 8px !important;
+    font-weight: 600 !important;
+    transition: all 0.2s ease;
+}
+.streamlit-expanderHeader:hover, [data-testid="stExpander"] summary:hover {
+    border-color: #00d4ff !important;
+    background: linear-gradient(135deg, #1a2030 0%, #131826 100%) !important;
+}
+[data-testid="stExpander"] {
+    background: #0d1220 !important;
+    border: 1px solid #1f2738 !important;
+    border-radius: 8px !important;
+    margin: 0.5em 0;
+}
+
+/* === ALERTS / INFO / WARNING === */
+[data-testid="stAlert"] {
+    border-radius: 8px !important;
+    border-left-width: 4px !important;
+    backdrop-filter: blur(10px);
+}
+[data-baseweb="notification"][kind="info"], div[data-testid="stAlert"][data-baseweb="notification"] {
+    background: rgba(0, 212, 255, 0.08) !important;
+    border-left-color: #00d4ff !important;
+    color: #c5e8ff !important;
+}
+[data-baseweb="notification"][kind="positive"] {
+    background: rgba(0, 255, 157, 0.08) !important;
+    border-left-color: #00ff9d !important;
+    color: #b5ffd9 !important;
+}
+[data-baseweb="notification"][kind="warning"] {
+    background: rgba(255, 184, 77, 0.08) !important;
+    border-left-color: #ffb84d !important;
+    color: #ffd9a0 !important;
+}
+[data-baseweb="notification"][kind="negative"] {
+    background: rgba(255, 77, 109, 0.08) !important;
+    border-left-color: #ff4d6d !important;
+    color: #ffb5c1 !important;
+}
+
+/* === INPUTS === */
+.stTextInput input, .stNumberInput input, .stDateInput input,
+.stTextArea textarea, .stSelectbox [data-baseweb="select"] > div {
+    background: #131826 !important;
+    color: #e8ecf3 !important;
+    border: 1px solid #1f2738 !important;
+    border-radius: 6px !important;
+    font-family: 'JetBrains Mono', monospace !important;
+}
+.stTextInput input:focus, .stNumberInput input:focus,
+.stSelectbox [data-baseweb="select"] > div:focus-within {
+    border-color: #00d4ff !important;
+    box-shadow: 0 0 0 2px rgba(0, 212, 255, 0.25) !important;
+}
+
+/* === TABS === */
+.stTabs [data-baseweb="tab-list"] {
+    gap: 4px;
+    background: transparent;
+    border-bottom: 1px solid #1f2738;
+}
+.stTabs [data-baseweb="tab"] {
+    background: #131826 !important;
+    color: #8893a8 !important;
+    border-radius: 8px 8px 0 0 !important;
+    border: 1px solid #1f2738 !important;
+    border-bottom: none !important;
+    padding: 0.5em 1.2em !important;
+    font-weight: 600 !important;
+    transition: all 0.2s ease;
+}
+.stTabs [data-baseweb="tab"]:hover {
+    background: #1a2030 !important;
+    color: #e8ecf3 !important;
+}
+.stTabs [aria-selected="true"] {
+    background: linear-gradient(180deg, #1a2842 0%, #131826 100%) !important;
+    color: #00d4ff !important;
+    border-color: #00d4ff !important;
+    box-shadow: 0 -2px 0 0 #00d4ff inset !important;
+}
+
+/* === CHECKBOXES & RADIOS === */
+.stCheckbox label, .stRadio label {
+    color: #e8ecf3 !important;
+}
+.stCheckbox > label > div[role="checkbox"][aria-checked="true"] {
+    background: #00d4ff !important;
+    border-color: #00d4ff !important;
+}
+
+/* === SLIDERS === */
+.stSlider [data-baseweb="slider"] [role="slider"] {
+    background: #00d4ff !important;
+    box-shadow: 0 0 12px rgba(0, 212, 255, 0.5) !important;
+}
+.stSlider [data-baseweb="slider"] div[data-testid="stTickBar"] > div {
+    background: #00d4ff !important;
+}
+
+/* === DIVIDERS === */
+hr {
+    border: none !important;
+    border-top: 1px solid #1f2738 !important;
+    margin: 1.5em 0 !important;
+}
+
+/* === CAPTIONS === */
+.caption, [data-testid="stCaptionContainer"] {
+    color: #8893a8 !important;
+    font-size: 0.85em !important;
+}
+
+/* === LINKS === */
+a, a:visited {
+    color: #00d4ff !important;
+    text-decoration: none;
+    transition: all 0.2s ease;
+}
+a:hover {
+    color: #33ddff !important;
+    text-shadow: 0 0 8px rgba(0, 212, 255, 0.4);
+}
+
+/* === CODE BLOCKS === */
+code {
+    background: #0a0e1a !important;
+    color: #00d4ff !important;
+    border: 1px solid #1f2738 !important;
+    padding: 0.15em 0.4em !important;
+    border-radius: 4px !important;
+    font-family: 'JetBrains Mono', monospace !important;
+    font-size: 0.88em !important;
+}
+pre {
+    background: #0a0e1a !important;
+    border: 1px solid #1f2738 !important;
+    border-radius: 8px !important;
+}
+
+/* === TOOLTIPS === */
+[data-baseweb="tooltip"] {
+    background: #131826 !important;
+    color: #e8ecf3 !important;
+    border: 1px solid #00d4ff !important;
+    border-radius: 6px !important;
+    box-shadow: 0 0 20px rgba(0, 212, 255, 0.3) !important;
+}
+
+/* === SUBTLE ANIMATIONS === */
+[data-testid="stMetric"], [data-testid="stExpander"], .stButton > button {
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* === SCROLLBARS === */
+::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+}
+::-webkit-scrollbar-track {
+    background: #0a0e1a;
+}
+::-webkit-scrollbar-thumb {
+    background: #1f2738;
+    border-radius: 5px;
+}
+::-webkit-scrollbar-thumb:hover {
+    background: #00d4ff;
+}
+
+/* === BIG VERSION CALLOUT === */
+.stMarkdown h3:has(code) {
+    background: linear-gradient(135deg, rgba(0, 212, 255, 0.08) 0%, transparent 100%);
+    border-left: 3px solid #00d4ff;
+    padding: 0.6em 1em;
+    border-radius: 0 8px 8px 0;
+}
+
+/* === DATAFRAME ROW STRIPING for readability === */
+[data-testid="stDataFrame"] tbody tr:nth-child(even) {
+    background: rgba(255, 255, 255, 0.015) !important;
+}
+
+/* === PROGRESS BARS === */
+.stProgress > div > div {
+    background: linear-gradient(90deg, #00d4ff 0%, #0099cc 100%) !important;
+    box-shadow: 0 0 10px rgba(0, 212, 255, 0.5);
+}
+
+/* === SPINNER === */
+.stSpinner > div {
+    border-top-color: #00d4ff !important;
+}
+
+/* === MULTISELECT TAGS === */
+[data-baseweb="tag"] {
+    background: linear-gradient(135deg, #1a2842 0%, #131826 100%) !important;
+    color: #00d4ff !important;
+    border: 1px solid #00d4ff !important;
+}
+</style>
+""", unsafe_allow_html=True)
 
 # AUTO CACHE INVALIDATION — proper version
 # Use @st.cache_data to store the deployed version PROCESS-WIDE (survives
@@ -3534,6 +3908,8 @@ all_hitters_for_picks = []
 combined_picks = None
 combined_all = None
 top10 = None
+honorable_mentions = pd.DataFrame()
+best_matchups_export = pd.DataFrame()
 top_picks_export = None
 two_leg_df = None
 # Slate-leader containers — populated below once combined_picks is built.
@@ -3873,6 +4249,32 @@ if all_hitters_for_picks:
             top10 = q_sorted.head(10).reset_index(drop=True)
         top10["rank"] = range(1, len(top10) + 1)
 
+        # HONORABLE MENTIONS — plays that would have made top 10 if not for
+        # the per-game diversity cap. Take the top 8 by pick_score that are
+        # NOT in top10 AND have pick_score >= 70 (genuine quality threshold).
+        # Kurtz vs Taillon was the canonical case: #2 raw HR Game% on the
+        # slate but excluded because Langeliers + Rooker already filled the
+        # ATH slot.
+        top10_keys = set()
+        if not top10.empty:
+            for _, r in top10.iterrows():
+                top10_keys.add((r.get("player_name"), r.get("team")))
+        honorable_mentions = pd.DataFrame()
+        try:
+            hm_pool = q_sorted[
+                q_sorted.apply(
+                    lambda r: (r.get("player_name"), r.get("team")) not in top10_keys,
+                    axis=1,
+                )
+            ].copy()
+            if "pick_score" in hm_pool.columns:
+                hm_pool = hm_pool[hm_pool["pick_score"].fillna(0) >= 70]
+            honorable_mentions = hm_pool.head(8).reset_index(drop=True)
+            if not honorable_mentions.empty:
+                honorable_mentions["rank"] = range(1, len(honorable_mentions) + 1)
+        except Exception:
+            honorable_mentions = pd.DataFrame()
+
         cols_to_show = [c for c in [
             "rank", "slate_leader_flag", "arsenal_flag",
             "player_name", "team", "game", "opp_pitcher",
@@ -3951,6 +4353,149 @@ if all_hitters_for_picks:
             for _, r in top10.head(5).iterrows()
         )
         st.markdown(f"**Top 5 at a glance:** {glance}")
+
+        # ====================================================================
+        # HONORABLE MENTIONS — plays squeezed out by the 2-per-game diversity
+        # rule. The Kurtz vs Taillon case (June 2026): #2 raw HR Game% on the
+        # slate but excluded because Langeliers + Rooker filled the ATH game
+        # slot. The diversity rule prevents the top 10 from piling onto one
+        # matchup, but you SHOULD know about the high-quality plays it filtered.
+        # ====================================================================
+        if not honorable_mentions.empty:
+            st.markdown("---")
+            st.markdown("### 🌟 Honorable Mentions — squeezed out by the 2-per-game rule")
+            st.caption(
+                "These plays would have made the Top 10 (all have pick_score ≥ 70), "
+                "but were filtered out because two other hitters from the same game "
+                "were already in the picks. Still legitimate plays — worth knowing about "
+                "for manual selection. **The diversity rule prevents top picks piling "
+                "onto one matchup; it's NOT saying these plays are worse.**"
+            )
+            hm_cols = [c for c in [
+                "rank", "slate_leader_flag", "arsenal_flag",
+                "player_name", "team", "game", "opp_pitcher",
+                "pick_score", "hr_game_pct", "matchup", "barrel_pct",
+                "hr_profile_label",
+                "hr_form", "env_boost",
+            ] if c in honorable_mentions.columns]
+            hm_disp = honorable_mentions[hm_cols].copy()
+            st.dataframe(
+                hm_disp, hide_index=True, use_container_width=True,
+                column_config={
+                    "rank": st.column_config.NumberColumn("#", width="small"),
+                    "slate_leader_flag": st.column_config.TextColumn(
+                        "🏆", width="small",
+                        help="🏆 = slate leader in at least one category."
+                    ),
+                    "arsenal_flag": st.column_config.TextColumn("Arsenal", width="medium"),
+                    "hr_profile_label": st.column_config.TextColumn("HR Profile", width="medium"),
+                    "player_name": st.column_config.TextColumn("Hitter"),
+                    "team": st.column_config.TextColumn("Tm", width="small"),
+                    "game": st.column_config.TextColumn("Game"),
+                    "opp_pitcher": st.column_config.TextColumn("vs Pitcher"),
+                    "pick_score": st.column_config.NumberColumn("Pick Score", format="%.1f"),
+                    "hr_game_pct": st.column_config.NumberColumn("HR%", format="%.1f%%"),
+                    "matchup": st.column_config.NumberColumn("Match", format="%.0f"),
+                    "barrel_pct": st.column_config.NumberColumn("Brl%", format="%.1f%%"),
+                    "hr_form": st.column_config.NumberColumn("Form", format="%.0f"),
+                    "env_boost": st.column_config.NumberColumn("Env", format="%.2fx"),
+                },
+            )
+            st.markdown("---")
+
+        # ====================================================================
+        # BEST MATCHUPS — pure hitter-vs-pitcher quality, decoupled from env
+        # ====================================================================
+        # Different from Top 10 Picks: ignores park/weather environment and
+        # batting order traffic. Surfaces matchups where the hitter is
+        # genuinely strong AND the pitcher is genuinely vulnerable on a
+        # pitch-level basis. Use this when you want to find the underlying
+        # quality matchup, not the matchup most boosted by Coors/wind.
+        try:
+            mq_pool = q_sorted.copy()
+            # Build matchup_quality score:
+            #   - power_score: hitter's underlying HR ability (0-100)
+            #   - pitch_hr_score: how this hitter performs vs THIS pitcher's
+            #     specific arsenal — barrel/SLG weighted by pitch usage (0-100)
+            #   - opp_pitcher_hr_suppress_inv: inverse of pitcher's HR
+            #     suppression (100 - hr_suppress). Higher = more vulnerable.
+            # Average the three, requiring at least 2 to be populated.
+            def _matchup_quality(r):
+                ps = r.get("power_score")
+                phs = r.get("pitch_hr_score")
+                # Opp pitcher HR vulnerability — need to look it up since the
+                # hitter row doesn't carry hr_suppress directly. opp_pitcher_grade
+                # is the only pitcher field consistently on hitter rows, but
+                # we can use barrel_allowed if it's there or fall back to grade
+                # mapping.
+                opp_grade = r.get("opp_pitcher_grade", "")
+                grade_vuln_map = {
+                    "EXPLOIT+": 90, "EXPLOIT": 75, "MIXED": 50, "TOUGH": 25, "ELITE": 10,
+                }
+                opp_vuln = grade_vuln_map.get(opp_grade) if opp_grade else None
+
+                vals = []
+                if ps is not None and not pd.isna(ps):
+                    vals.append(float(ps))
+                if phs is not None and not pd.isna(phs):
+                    vals.append(float(phs))
+                if opp_vuln is not None:
+                    vals.append(float(opp_vuln))
+                if len(vals) < 2:
+                    return None
+                return round(sum(vals) / len(vals), 1)
+            mq_pool["matchup_quality"] = mq_pool.apply(_matchup_quality, axis=1)
+            mq_pool = mq_pool.dropna(subset=["matchup_quality"])
+            mq_pool = mq_pool.sort_values("matchup_quality", ascending=False).head(15)
+            if not mq_pool.empty:
+                mq_pool["rank"] = range(1, len(mq_pool) + 1)
+                st.markdown("### 🥊 Best Matchups — pure hitter vs pitcher quality")
+                st.caption(
+                    "**Ignores environment** (park, weather, lineup position). "
+                    "Ranks matchups by pure underlying quality: hitter Power Score "
+                    "+ pitch-arsenal exploit score + pitcher HR vulnerability. "
+                    "Use this when you want to identify the strongest SKILL matchups, "
+                    "not necessarily the highest projected HR%. Players appearing "
+                    "here often overlap with Top Picks, but some surface that don't "
+                    "make Top Picks because their park/weather aren't favorable — "
+                    "they're still great matchups, just in tougher conditions."
+                )
+                mq_cols = [c for c in [
+                    "rank", "matchup_quality",
+                    "player_name", "team", "game", "opp_pitcher",
+                    "power_score", "pitch_hr_score", "arsenal_flag",
+                    "hr_game_pct", "barrel_pct", "hr_profile_label",
+                ] if c in mq_pool.columns]
+                mq_disp = mq_pool[mq_cols].copy()
+                st.dataframe(
+                    mq_disp, hide_index=True, use_container_width=True,
+                    column_config={
+                        "rank": st.column_config.NumberColumn("#", width="small"),
+                        "matchup_quality": st.column_config.NumberColumn(
+                            "Match Q", format="%.1f",
+                            help=(
+                                "Pure quality score (0-100): avg of hitter Power "
+                                "Score, pitch-arsenal exploit score, and pitcher HR "
+                                "vulnerability (derived from grade). Environment-free."
+                            ),
+                        ),
+                        "player_name": st.column_config.TextColumn("Hitter"),
+                        "team": st.column_config.TextColumn("Tm", width="small"),
+                        "opp_pitcher": st.column_config.TextColumn("vs Pitcher"),
+                        "power_score": st.column_config.NumberColumn("Power", format="%.1f"),
+                        "pitch_hr_score": st.column_config.NumberColumn("Arsenal HR", format="%.1f"),
+                        "arsenal_flag": st.column_config.TextColumn("Flag", width="medium"),
+                        "hr_game_pct": st.column_config.NumberColumn("HR%", format="%.1f%%"),
+                        "barrel_pct": st.column_config.NumberColumn("Brl%", format="%.1f%%"),
+                        "hr_profile_label": st.column_config.TextColumn("Profile", width="medium"),
+                    },
+                )
+                # Stash for export
+                best_matchups_export = mq_pool[mq_cols].copy()
+            else:
+                best_matchups_export = pd.DataFrame()
+        except Exception:
+            best_matchups_export = pd.DataFrame()
 
         # ====================================================================
         # PARLAY SUGGESTIONS — combine top picks into 2-leg and 3-leg HR parlays
@@ -4726,6 +5271,14 @@ if all_hitters:
                     try:
                         if 'top_picks_export' in dir() and top_picks_export is not None and not top_picks_export.empty:
                             top_picks_export.to_excel(writer, sheet_name="Top 10 Picks", index=False)
+                        # Honorable mentions — diversity-filtered plays worth knowing
+                        if ('honorable_mentions' in dir() and honorable_mentions is not None
+                                and not honorable_mentions.empty):
+                            honorable_mentions.to_excel(writer, sheet_name="Honorable Mentions", index=False)
+                        # Best Matchups — pure hitter/pitcher quality, env-free
+                        if ('best_matchups_export' in dir() and best_matchups_export is not None
+                                and not best_matchups_export.empty):
+                            best_matchups_export.to_excel(writer, sheet_name="Best Matchups", index=False)
                         # NEW: Parlay suggestion sheets
                         if 'two_leg_parlay_export' in dir() and two_leg_parlay_export is not None and not two_leg_parlay_export.empty:
                             two_leg_parlay_export.to_excel(writer, sheet_name="2-Leg Parlays", index=False)
