@@ -441,3 +441,114 @@ def evaluate_pitcher_projections(snapshot: dict, actuals: dict) -> dict:
     ]
 
     return metrics
+
+
+# ----------------------------------------------------------------------------
+# ROLLING AGGREGATE — combine multiple days of snapshot+actuals into one
+# season-summary metrics dict. The single biggest signal for model trust.
+# ----------------------------------------------------------------------------
+
+def rolling_aggregate_hitters(snapshot_dates: list[str] | None = None,
+                                max_days: int = 30) -> dict:
+    """
+    Aggregate hitter projection accuracy across multiple snapshots.
+
+    Returns a dict with:
+      - n_snapshots: how many days included
+      - total_hitters: total hitter-game observations
+      - total_hrs: total HRs that happened
+      - top10_hit_rate: % of days where at least one Top 10 pick homered
+      - top10_hr_rate_pct: HR rate of all Top 10 picks across days
+      - slate_hr_rate_pct: HR rate of all qualified hitters (comparison baseline)
+      - power_score_bands: per-band cross-day HR rate
+      - hr_pct_bands: per-band cross-day HR rate
+      - brier_mean: average Brier score across days
+      - per_day_summary: one row per snapshot with rate + count
+
+    If snapshot_dates is None, uses all available snapshots up to max_days.
+    """
+    available = list_snapshots()
+    if not available:
+        return {"error": "No snapshots available"}
+    if snapshot_dates is None:
+        # Use most recent max_days snapshots
+        snapshot_dates = sorted(available)[-max_days:]
+
+    n_snapshots = 0
+    all_top10_rows = []  # accumulate top10 picks across days
+    all_qualified_rows = []  # accumulate ALL qualified hitters
+    all_brier = []
+    per_day = []
+
+    for sd in snapshot_dates:
+        snapshot = load_snapshot(sd)
+        if not snapshot:
+            continue
+        hitter_actuals = fetch_hitter_outcomes(sd)
+        if not hitter_actuals:
+            continue
+        h_metrics = evaluate_hitter_projections(snapshot, hitter_actuals)
+        if not h_metrics or h_metrics.get("error"):
+            continue
+        n_snapshots += 1
+
+        # Per-day summary row
+        day_summary = {
+            "date": sd,
+            "hitters_played": h_metrics.get("hitters_who_played", 0),
+            "actual_hrs": h_metrics.get("total_actual_hrs", 0),
+            "slate_hr_rate_pct": h_metrics.get("actual_hr_rate_pct", 0),
+            "top10_hit_rate_pct": h_metrics.get("top10_hr_hit_rate", 0),
+            "brier": h_metrics.get("brier_score"),
+        }
+        per_day.append(day_summary)
+        if h_metrics.get("brier_score") is not None:
+            all_brier.append(h_metrics["brier_score"])
+
+        # Pull each Top 10 prediction with its homered outcome
+        for entry in h_metrics.get("top10_hr_predictions", []):
+            all_top10_rows.append({
+                "date": sd,
+                "name": entry.get("name"),
+                "predicted_pct": entry.get("predicted_hr_pct"),
+                "homered": int(entry.get("homered", False)),
+            })
+
+    if n_snapshots == 0:
+        return {"error": "No snapshots had matched actuals"}
+
+    # Aggregate Top 10 performance across all days
+    top10_total = len(all_top10_rows)
+    top10_hr_count = sum(r["homered"] for r in all_top10_rows)
+    top10_hr_rate = (top10_hr_count / top10_total * 100) if top10_total else 0
+
+    # Per-day slate baseline (average across days)
+    slate_rates = [d["slate_hr_rate_pct"] for d in per_day if d["slate_hr_rate_pct"]]
+    avg_slate_rate = sum(slate_rates) / len(slate_rates) if slate_rates else 0
+
+    # Top 10 "hit any" rate — % of days where at least one top 10 pick homered
+    days_with_hit = 0
+    days_total = 0
+    by_date = {}
+    for r in all_top10_rows:
+        by_date.setdefault(r["date"], []).append(r["homered"])
+    for d, picks in by_date.items():
+        days_total += 1
+        if sum(picks) > 0:
+            days_with_hit += 1
+    any_hit_rate = (days_with_hit / days_total * 100) if days_total else 0
+
+    return {
+        "n_snapshots": n_snapshots,
+        "snapshot_dates": sorted([d["date"] for d in per_day]),
+        "top10_picks_total": top10_total,
+        "top10_hrs_hit": top10_hr_count,
+        "top10_hr_rate_pct": round(top10_hr_rate, 1),
+        "slate_baseline_hr_rate_pct": round(avg_slate_rate, 1),
+        "edge_vs_slate_pp": round(top10_hr_rate - avg_slate_rate, 1),
+        "days_with_any_top10_hit": days_with_hit,
+        "days_total": days_total,
+        "any_hit_rate_pct": round(any_hit_rate, 1),
+        "brier_mean": round(sum(all_brier) / len(all_brier), 4) if all_brier else None,
+        "per_day_summary": per_day,
+    }
