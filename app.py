@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.02-altitude-wind-v28"
+APP_VERSION = "2026.06.02-cold-form-v29"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -3904,6 +3904,47 @@ st.caption(
     "tough matchup but other factors are compensating. Max 2 per game; "
     "max 3 if slate is small."
 )
+
+# LINEUP-FILL WARNING (June 2026)
+# Lineups for 7:05 PM games typically post by 4-5 PM ET. If we're past
+# 5 PM ET and STILL 95%+ of hitters are roster fills (not confirmed
+# lineup positions), something's off. Either the lineup API hasn't been
+# updated, our cache is stale, or it's a slate with unusually late lineup
+# posts. Warn the user so they know smash spots = 0 and PA scaling are
+# expected to be inactive.
+try:
+    _now_et_check = pd.Timestamp.now(tz="US/Eastern")
+    if _now_et_check.hour >= 17 and matchup_tables:  # 5 PM ET or later
+        total_hitters = 0
+        fill_count = 0
+        for _gpk, (_am, _hm) in matchup_tables.items():
+            for tbl in (_am, _hm):
+                if tbl is None or tbl.empty:
+                    continue
+                if "is_roster_fill" in tbl.columns:
+                    total_hitters += len(tbl)
+                    fill_count += int(tbl["is_roster_fill"].fillna(False).sum())
+        if total_hitters > 0:
+            fill_pct = fill_count / total_hitters * 100
+            # Warn at 95%+ fills after 5 PM
+            if fill_pct >= 95:
+                st.warning(
+                    f"⚠️ **Lineups not yet confirmed** — {fill_pct:.0f}% of hitters "
+                    f"shown are roster fills (default lineup positions, not actual "
+                    f"posted lineups). It's {_now_et_check.strftime('%-I:%M %p ET')} — "
+                    f"lineups should be posting soon. Smash spots and PA scaling "
+                    f"are inactive until lineups confirm. Click 🔄 Force refresh in "
+                    f"the sidebar to re-fetch lineup data."
+                )
+            elif fill_pct >= 50 and _now_et_check.hour >= 18:
+                # Mixed state at 6+ PM — some games confirmed, some not
+                st.info(
+                    f"ℹ️ **Partial lineup confirmation** — {100-fill_pct:.0f}% of "
+                    f"hitters have confirmed batting orders, {fill_pct:.0f}% are "
+                    f"still roster fills. Picks may shift as remaining lineups post."
+                )
+except Exception:
+    pass
 
 # Gather all qualified hitters with game context
 # Pre-initialize variables to None so any unexpected reference order can't
