@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.01-aesthetic-v25"
+APP_VERSION = "2026.06.02-cameron-v26"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -2397,19 +2397,23 @@ if not p_slate.empty:
         except (TypeError, ValueError):
             return ""
         # Two patterns that warrant the caveat:
-        # A) Real results acceptable (ERA<4.00, WHIP<1.25, HR/9<1.20)
-        #    AND hr_suppress is actually decent (>=35) — means low-K is the
-        #    main driver of the EXPLOIT label, not actual HR vulnerability.
+        # A) Real results acceptable (ERA<4.75, WHIP<1.25, HR/9<1.20)
+        #    AND hr_suppress is at least league-roughly (>=32) — means low-K
+        #    is the main driver of the EXPLOIT label, not actual HR vulnerability.
         #
-        # THRESHOLDS LOOSENED (June 2026): previously era<3.50/whip<1.15/
-        # hr9<1.00/hr_suppress>=40. That was so strict it never fired on real
-        # slates — Alcantara (ERA 4.66), deGrom (3.77) both failed despite
-        # being canonical "low K, results OK" cases. New thresholds catch
-        # the pitchers the caveat was designed for without false positives.
-        if (era is not None and era < 4.00
+        # THRESHOLD HISTORY:
+        # - Original: era<3.50/whip<1.15/hr9<1.00/hr_suppress>=40 — too strict,
+        #   never fired even on Alcantara (ERA 4.66), deGrom (3.77).
+        # - v22: era<4.00 — caught Hancock/Rodriguez cases but still missed
+        #   Noah Cameron (June 2026): ERA 4.61, HR/9 0.85, hr_suppress 34.9.
+        # - v26 (current): era<4.75, hr_suppress>=32 — Cameron has below-avg
+        #   HR/9 and roughly league-average hr_suppress despite his ERA. The
+        #   HR/9<1.20 cap prevents false positives on truly bad pitchers
+        #   (Taillon, Lauer, Mikolas all fail HR/9 check at 2.83/2.55/1.60+).
+        if (era is not None and era < 4.75
                 and whip is not None and whip < 1.25
                 and hr9 is not None and hr9 < 1.20
-                and hr_suppress is not None and hr_suppress >= 35):
+                and hr_suppress is not None and hr_suppress >= 32):
             return "📉 low-K, results OK"
         return ""
     p_slate["grade_caveat"] = p_slate.apply(_grade_caveat, axis=1)
