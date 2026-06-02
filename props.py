@@ -268,15 +268,42 @@ def hr_prob_per_pa(
     elif p_hr9 is None or pd.isna(p_hr9) or p_hr9 == 0:
         pitcher_mult = 1.0  # No adjustment if we don't know
     else:
-        p_hr_per_pa = (p_hr9 / 9) / 4.3  # ~4.3 PA per inning
-        # Use the same canonical LEAGUE_HR_PER_PA constant.
-        # Note: at 0.030, this equates to league HR/9 of about 1.16, which
-        # is between the 2022 deadened-ball era (1.20) and the 2024 rate
-        # (1.30). 0.030 is the better calibrated value for the split path
-        # (matches empirical HR/PA, not derived from HR/9), so we use it as
-        # our single source of truth.
-        pitcher_mult = p_hr_per_pa / LEAGUE_HR_PER_PA
-        pitcher_mult = max(0.5, min(2.0, pitcher_mult))
+        # IP GATE — Lyon Richardson case (June 2026).
+        # Without this, a pitcher with 0.2 IP and 1 HR allowed has HR/9=13.50
+        # which clips to the 2.0× cap on EVERY hitter facing him. KC lineup
+        # was inflated to 20-24% HR Game% because of this single bad sample.
+        # Below 10 IP: treat as neutral (1.0×) — sample too noisy.
+        # 10-30 IP: shrink toward 1.0 (partial credit, scales with IP).
+        # 30+ IP: use raw HR/9 as before (real signal).
+        # Same principle as the era_savant clip(upper=12.0) and the splits-path
+        # Bayesian shrinkage — every other pitcher-rate path already guards
+        # against tiny samples; HR/9 was the one hole.
+        pitcher_ip_val = pitcher_row.get("ip") if pitcher_row else None
+        try:
+            pitcher_ip_f = (float(pitcher_ip_val)
+                            if pitcher_ip_val is not None and not pd.isna(pitcher_ip_val)
+                            else None)
+        except (TypeError, ValueError):
+            pitcher_ip_f = None
+
+        if pitcher_ip_f is not None and pitcher_ip_f < 10.0:
+            # Below 10 IP — treat as neutral. Sample too noisy.
+            pitcher_mult = 1.0
+        else:
+            p_hr_per_pa = (p_hr9 / 9) / 4.3  # ~4.3 PA per inning
+            raw_mult = p_hr_per_pa / LEAGUE_HR_PER_PA
+            # Bayesian shrinkage toward 1.0 for IP in [10, 30].
+            # At IP=10: 50% real, 50% league avg (1.0)
+            # At IP=30: ~75% real, 25% league avg
+            # At IP=60: ~86% real, 14% league avg
+            # At IP=100: ~91% real (close to raw)
+            if pitcher_ip_f is not None:
+                ip_shrink_w = pitcher_ip_f / (pitcher_ip_f + 10.0)
+                shrunk_mult = raw_mult * ip_shrink_w + 1.0 * (1 - ip_shrink_w)
+            else:
+                # No IP data — use raw with caps
+                shrunk_mult = raw_mult
+            pitcher_mult = max(0.5, min(2.0, shrunk_mult))
 
     # NEW: PITCHER DAY/NIGHT adjustment.
     # Some pitchers are dramatically better at night (or day). Apply a modest
