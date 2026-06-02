@@ -447,6 +447,9 @@ def build_matchup_table(
         "vs_rhp_pa", "vs_rhp_avg", "vs_rhp_obp", "vs_rhp_slg",
         "vs_rhp_iso", "vs_rhp_ops", "vs_rhp_hr_per_pa",
         "vs_rhp_k_percent", "vs_rhp_bb_percent",
+        # HR PROFILE — avg HR distance + max exit velo (June 2026)
+        "avg_hr_distance", "max_hit_speed",
+        "hr_profile", "hr_profile_label",
         # Today's HR projection
         "likely_hr_pct",
     ]
