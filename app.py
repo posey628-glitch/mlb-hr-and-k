@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.01-arsenal-v23"
+APP_VERSION = "2026.06.01-hand-arsenal-v24"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -103,7 +103,7 @@ except ImportError:
     def fill_pitcher_stats_for_slate(p, s, season=None): return p
     def fill_hitter_bats(lineups, ids=None): return {}
 from models import build_matchup_table, build_pitcher_slate
-from sleepers import hr_probability, find_sleepers, grand_slam_probability
+from sleepers import hr_probability, find_sleepers
 # Props - core functions are required, verdict_color is optional
 from props import hr_prob_per_pa, k_total_projection
 
@@ -146,19 +146,46 @@ try:
         return _hitter_arsenal_cache["df"]
 
     # Wrapper bridging old call signature in app.py to real function
-    def pitch_match_score_for_hitter(batter_id, pitcher_row, pitcher_arsenal_df):
+    def pitch_match_score_for_hitter(batter_id, pitcher_row, pitcher_arsenal_df,
+                                       batter_hand=None,
+                                       arsenal_vs_L=None, arsenal_vs_R=None):
         """
         Old call: (batter_id, pitcher_row_dict, full_pitcher_arsenal_df)
-        New call: (batter_id, single_pitcher_arsenal_df, single_hitter_arsenal_df)
+
+        NEW (June 2026): if batter_hand and the hand-split arsenals are passed,
+        we use the pitcher's arsenal split by THIS batter's handedness. Pitchers
+        throw different mixes vs LHB vs RHB, so the per-pitch matchup is much
+        more accurate when we use the hand-specific arsenal.
+
+        If hand-split data isn't available for this pitcher, falls back to the
+        combined arsenal (same as before).
         """
         try:
-            # Filter the big pitcher arsenal df to just this pitcher
             p_id = pitcher_row.get("player_id") if hasattr(pitcher_row, "get") else None
-            if p_id is None or pitcher_arsenal_df is None or pitcher_arsenal_df.empty:
+            if p_id is None:
                 return {"pitch_match_score": None}
-            this_pitcher_arsenal = pitcher_arsenal_df[
-                pitcher_arsenal_df["player_id"] == p_id
-            ] if "player_id" in pitcher_arsenal_df.columns else pd.DataFrame()
+
+            # Try the hand-specific arsenal first
+            this_pitcher_arsenal = pd.DataFrame()
+            if batter_hand == "L" and arsenal_vs_L is not None and not arsenal_vs_L.empty:
+                if "player_id" in arsenal_vs_L.columns:
+                    this_pitcher_arsenal = arsenal_vs_L[
+                        arsenal_vs_L["player_id"] == p_id
+                    ]
+            elif batter_hand == "R" and arsenal_vs_R is not None and not arsenal_vs_R.empty:
+                if "player_id" in arsenal_vs_R.columns:
+                    this_pitcher_arsenal = arsenal_vs_R[
+                        arsenal_vs_R["player_id"] == p_id
+                    ]
+
+            # Fall back to combined arsenal if hand-split not available
+            if this_pitcher_arsenal.empty:
+                if pitcher_arsenal_df is None or pitcher_arsenal_df.empty:
+                    return {"pitch_match_score": None}
+                this_pitcher_arsenal = pitcher_arsenal_df[
+                    pitcher_arsenal_df["player_id"] == p_id
+                ] if "player_id" in pitcher_arsenal_df.columns else pd.DataFrame()
+
             if this_pitcher_arsenal.empty:
                 return {"pitch_match_score": None}
             # Filter hitter arsenal to this batter
@@ -769,6 +796,20 @@ except Exception:
     # Arsenal is non-critical; fall back to empty
     pitcher_arsenal_all = pd.DataFrame()
 
+# HAND-SPLIT ARSENALS (June 2026)
+# Pitchers throw very different pitch mixes vs LHB vs RHB. A RHP might throw
+# 38% sliders to RHB but only 12% sliders to LHB (slider moves same-side away;
+# changeup runs opposite-side away). Without these splits, projections use the
+# pitcher's overall mix which dramatically misrepresents what a hitter will
+# actually see in a same-side or opposite-side matchup.
+try:
+    from data_fetcher import get_pitcher_arsenal_vs_hand
+    pitcher_arsenal_vs_L = get_pitcher_arsenal_vs_hand(batter_hand="L") if not slate.empty else pd.DataFrame()
+    pitcher_arsenal_vs_R = get_pitcher_arsenal_vs_hand(batter_hand="R") if not slate.empty else pd.DataFrame()
+except Exception:
+    pitcher_arsenal_vs_L = pd.DataFrame()
+    pitcher_arsenal_vs_R = pd.DataFrame()
+
 # Pitcher handedness splits (vs LHB / vs RHB)
 # Use MLB Stats API statSplits which IS documented and works on Streamlit Cloud.
 # We only fetch splits for pitchers in TODAY'S slate (typically 26-30 pitchers)
@@ -851,6 +892,30 @@ try:
             )
 except Exception as _e:
     st.session_state["_hitter_splits_err"] = str(_e)[:200]
+
+# HR PROFILE (June 2026): avg HR distance + max exit velo per hitter.
+# Adds hr_profile (categorical) and hr_profile_label (display) columns.
+# Lets users see "moonshot vs laser" so they can factor park dimensions
+# and wind effects appropriately.
+try:
+    from data_fetcher import get_hitter_hr_profile
+    hr_profile = get_hitter_hr_profile()
+    if (hr_profile is not None and not hr_profile.empty
+            and "player_id" in hitter_stats.columns):
+        hitter_stats["player_id"] = pd.to_numeric(
+            hitter_stats["player_id"], errors="coerce").astype("Int64")
+        hr_profile["player_id"] = pd.to_numeric(
+            hr_profile["player_id"], errors="coerce").astype("Int64")
+        merge_cols = [c for c in hr_profile.columns if c != "player_id"]
+        existing = set(hitter_stats.columns)
+        merge_cols = [c for c in merge_cols if c not in existing]
+        if merge_cols:
+            hitter_stats = hitter_stats.merge(
+                hr_profile[["player_id"] + merge_cols],
+                on="player_id", how="left",
+            )
+except Exception as _e:
+    st.session_state["_hr_profile_err"] = str(_e)[:200]
 
 # NEW: Pitcher day/night splits + IL status
 # Only fetch for slate pitchers (~26-30 calls each)
@@ -2880,18 +2945,35 @@ for _, game in slate.iterrows():
     except Exception:
         pass
 
-    # Pitch match score - single call per hitter, captures all outputs
+    # Pitch match score - single call per hitter, captures all outputs.
+    # NEW (June 2026): batter_hand passes the hitter's bat side ("L", "R", "S")
+    # so the function can pick the pitcher's arsenal split AGAINST that side.
+    # Switch hitters bat opposite the pitcher arm, so for "S" we derive
+    # the effective hand from the pitcher's throwing arm.
     def _apply_pitch_match(matchup_df, opp_p_row):
         if not opp_p_row or matchup_df is None or matchup_df.empty:
             return
+        opp_p_throws = (opp_p_row.get("p_throws") or opp_p_row.get("throws") or "").upper()
         scores, hr_scores, bests, bestxw, worsts = [], [], [], [], []
         for _, hitter_row in matchup_df.iterrows():
             pid = hitter_row.get("player_id")
+            bats = (hitter_row.get("bats") or "").upper()
+            # Switch hitters: bat opposite the pitcher → effective hand
+            # is opposite of pitcher's throwing arm.
+            if bats == "S":
+                effective_hand = "L" if opp_p_throws == "R" else "R"
+            elif bats in ("L", "R"):
+                effective_hand = bats
+            else:
+                effective_hand = None
             ps = None
             if pid is not None and not pd.isna(pid):
                 try:
                     ps = pitch_match_score_for_hitter(
-                        int(pid), opp_p_row, pitcher_arsenal_all
+                        int(pid), opp_p_row, pitcher_arsenal_all,
+                        batter_hand=effective_hand,
+                        arsenal_vs_L=pitcher_arsenal_vs_L,
+                        arsenal_vs_R=pitcher_arsenal_vs_R,
                     )
                 except Exception:
                     ps = None
@@ -3226,29 +3308,13 @@ for _, game in slate.iterrows():
                 season_pct = matchup_df["home_run"].rank(pct=True) * 100
                 matchup_df["sleeper_score"] = (hr_pct - season_pct).round(1)
 
-    # Grand slam compound probability - real signature: (df, pitcher_row, hr_mult)
-    # Adds a gs_score column per hitter. Sum to get a team-level value.
+    # NOTE: Grand Slam probability was removed (June 2026).
+    # Reason: too many uncertain inputs stacked (lineup confirmation, team OBP
+    # for runners-on-base, pitcher WHIP × order traffic). The compound
+    # uncertainty made it not actionable. gs_score, away_gs, home_gs all
+    # removed from the export and UI.
     away_gs = 0.0
     home_gs = 0.0
-    try:
-        if not away_matchup.empty:
-            away_matchup = grand_slam_probability(
-                away_matchup,
-                pd.Series(home_p_row) if home_p_row else None,
-                hr_mult=full_hr_mult,
-            )
-            if "gs_score" in away_matchup.columns:
-                away_gs = float(away_matchup["gs_score"].fillna(0).sum())
-        if not home_matchup.empty:
-            home_matchup = grand_slam_probability(
-                home_matchup,
-                pd.Series(away_p_row) if away_p_row else None,
-                hr_mult=full_hr_mult,
-            )
-            if "gs_score" in home_matchup.columns:
-                home_gs = float(home_matchup["gs_score"].fillna(0).sum())
-    except Exception:
-        pass
 
     # K projection
     away_k_col = away_matchup["k_pct"] if "k_pct" in away_matchup.columns else pd.Series(dtype=float)
@@ -3811,6 +3877,7 @@ if all_hitters_for_picks:
             "rank", "slate_leader_flag", "arsenal_flag",
             "player_name", "team", "game", "opp_pitcher",
             "pick_score", "hr_game_pct", "matchup", "barrel_pct",
+            "hr_profile_label",
             "hr_form", "env_boost",
         ] if c in top10.columns]
         disp = top10[cols_to_show].copy()
@@ -3834,6 +3901,22 @@ if all_hitters_for_picks:
                         "⚡ crushes [pitch] = has one pitch he hammers\n"
                         "🚫 arsenal trap = this pitcher's mix is his weakness\n"
                         "(empty) = neutral, no notable edge either way"
+                    ),
+                ),
+                "hr_profile_label": st.column_config.TextColumn(
+                    "HR Profile", width="medium",
+                    help=(
+                        "How this hitter's HOME RUNS specifically look. Based on "
+                        "avg HR distance + max exit velo across all HRs hit.\n\n"
+                        "🚀 moonshot (415+ ft) = high-trajectory bombs — affected MORE "
+                        "by wind, less by park dimensions\n"
+                        "⚖️ balanced+ (405-414 ft) = mix of moonshots and line drives\n"
+                        "⚖️ balanced (390-404 ft) = average HR profile\n"
+                        "⚡ laser (112+ mph max, <400 ft) = line-drive HRs — affected "
+                        "LESS by wind, more by park dimensions\n"
+                        "📏 short porch (<390 ft) = barely-clear-the-wall HRs — "
+                        "matchup-dependent\n"
+                        "(empty) = no HRs hit / no data"
                     ),
                 ),
                 "player_name": st.column_config.TextColumn("Hitter"),
@@ -4639,12 +4722,6 @@ if all_hitters:
                             "sleeper_score", ascending=False).head(20)
                         if not top_sl.empty:
                             top_sl.to_excel(writer, sheet_name="Top 20 Sleepers", index=False)
-                    # NEW: Top 10 Grand Slam scores
-                    if "gs_score" in qualified.columns and qualified["gs_score"].notna().any():
-                        top_gs_export = qualified.dropna(subset=["gs_score", "hr_game_pct"]).sort_values(
-                            "gs_score", ascending=False).head(10)
-                        if not top_gs_export.empty:
-                            top_gs_export.to_excel(writer, sheet_name="Top 10 Grand Slam", index=False)
                     # NEW: Top 10 Picks (the curated daily picks from Top Picks section)
                     try:
                         if 'top_picks_export' in dir() and top_picks_export is not None and not top_picks_export.empty:
@@ -5159,52 +5236,11 @@ if all_hitters:
         )
 
     # ====================================================================
-    # Top 10 Grand Slam — new leaderboard
-    # ====================================================================
-    if "gs_score" in qualified.columns and qualified["gs_score"].notna().any():
-        st.markdown("---")
-        st.markdown("**⚡ Top 10 Grand Slam Opportunities**")
-        st.caption(
-            "Per-hitter grand slam score: combines HR probability × lineup traffic "
-            "(runners on base from teammates' OBP and pitcher's WHIP). High score = "
-            "elite power hitter ALSO getting bases-loaded chances tonight. Note: "
-            "lineup traffic estimates are more accurate when batting order is "
-            "confirmed."
-        )
-        # CRITICAL FIX: Filter out players whose hr_game_pct is NaN (small sample).
-        # Without this filter, low-PA players like Conforto (80 PA) and Goldschmidt
-        # (98 PA) ranked #1-#3 with NaN HR%, because their hr_score (composite) was
-        # high but hr_game_pct correctly returned NaN for insufficient sample.
-        # We can't make grand slam projections without a valid HR probability.
-        top_gs = qualified.dropna(subset=["gs_score", "hr_game_pct"]).sort_values(
-            "gs_score", ascending=False
-        ).head(10)
-        if not top_gs.empty:
-            gs_cols = [c for c in [
-                "player_name", "team", "game", "lineup_pos",
-                "gs_score", "hr_game_pct", "barrel_pct", "iso",
-            ] if c in top_gs.columns]
-            gs_disp = top_gs[gs_cols].copy().reset_index(drop=True)
-            st.dataframe(
-                gs_disp, hide_index=True, use_container_width=True,
-                column_config={
-                    "player_name": st.column_config.TextColumn("Hitter"),
-                    "team": st.column_config.TextColumn("Tm"),
-                    "game": st.column_config.TextColumn("Game"),
-                    "lineup_pos": st.column_config.NumberColumn(
-                        "#", help="Batting order if confirmed; '—' otherwise.",
-                    ),
-                    "gs_score": st.column_config.NumberColumn(
-                        "GS Score", format="%.1f",
-                        help="Grand Slam composite. 0-100 scale.",
-                    ),
-                    "hr_game_pct": st.column_config.NumberColumn("HR%", format="%.1f%%"),
-                    "barrel_pct": st.column_config.NumberColumn("Brl%", format="%.1f%%"),
-                    "iso": st.column_config.NumberColumn("ISO", format="%.3f"),
-                },
-            )
-        else:
-            st.caption("No grand slam scores computed yet.")
+    # Top 10 Grand Slam — REMOVED (June 2026).
+    # GS probability required three uncertain inputs stacked (lineup
+    # confirmation, team OBP for runners on base, pitcher WHIP × order
+    # traffic). The compound uncertainty made it not actionable. The
+    # underlying gs_score column is no longer computed.
 else:
     st.caption("Waiting for matchup data to populate.")
 
@@ -5528,12 +5564,14 @@ def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
     cols_to_show = [c for c in [
         "alert", "grade", "smash_spot", "arsenal_flag", "contact_flag", "slate_leader_flag",
         "player_name", "lineup_pos", "bats", "position",
+        "hr_profile_label",
         "power_score", "matchup_opp", "hr_game_pct", "hr_pa_pct", "matchup", "test_score",
         "streak_label",
         "pa", "barrel_pct", "iso", "xwoba", "xwobacon",
         "obp", "slg", "ops",
         "pitch_match_score", "pitch_hr_score", "best_pitch", "best_pitch_xwoba", "worst_pitch",
         "fb_pct", "la", "avg_ev", "hard_hit",
+        "avg_hr_distance", "max_hit_speed",
         "k_pct", "bb_pct", "whiff_pct",
         "home_run", "recent_hr", "recent_hr_weighted_rate", "sleeper_score",
     ] if c in matchup_df.columns]
@@ -6037,28 +6075,65 @@ for _, game in slate.iterrows():
                 )
 
     if not pitcher_arsenal_all.empty:
-        with st.expander("🔬 Deep dive: Pitcher arsenal"):
+        with st.expander("🔬 Deep dive: Pitcher arsenal (combined + by hitter handedness)"):
             st.caption(
                 "**What this shows:** the actual pitches each pitcher throws — "
                 "usage %, velocity, xwOBA allowed per pitch type. "
-                "Use this to see what pitches the pitcher leans on and which "
-                "ones give up the most damage."
+                "**vs LHB / vs RHB tabs** show how the pitch mix CHANGES "
+                "depending on the batter's handedness. E.g. a RHP often throws "
+                "way more sliders to RHB (slider runs same-side away) and more "
+                "changeups to LHB (changeup runs opposite-side away). The arsenal "
+                "your hitter actually sees depends on which side they bat."
             )
+
+            def _render_arsenal_tabs(p_id, p_name_label):
+                """Render combined / vs LHB / vs RHB arsenal tables for one pitcher."""
+                if not p_id:
+                    return
+                ars_combined = (pitcher_arsenal_all[pitcher_arsenal_all["player_id"] == p_id]
+                                if "player_id" in pitcher_arsenal_all.columns
+                                else pd.DataFrame())
+                ars_vs_L = (pitcher_arsenal_vs_L[pitcher_arsenal_vs_L["player_id"] == p_id]
+                             if (not pitcher_arsenal_vs_L.empty
+                                 and "player_id" in pitcher_arsenal_vs_L.columns)
+                             else pd.DataFrame())
+                ars_vs_R = (pitcher_arsenal_vs_R[pitcher_arsenal_vs_R["player_id"] == p_id]
+                             if (not pitcher_arsenal_vs_R.empty
+                                 and "player_id" in pitcher_arsenal_vs_R.columns)
+                             else pd.DataFrame())
+                if ars_combined.empty and ars_vs_L.empty and ars_vs_R.empty:
+                    return
+                st.markdown(f"**{p_name_label} arsenal**")
+                tabs_inner = st.tabs(["Combined", "vs LHB", "vs RHB"])
+                with tabs_inner[0]:
+                    if not ars_combined.empty:
+                        st.dataframe(ars_combined, hide_index=True, use_container_width=True)
+                    else:
+                        st.caption("No combined arsenal data.")
+                with tabs_inner[1]:
+                    if not ars_vs_L.empty:
+                        st.dataframe(ars_vs_L, hide_index=True, use_container_width=True)
+                    else:
+                        st.caption(
+                            "No vs-LHB arsenal data. The pitcher may not have faced "
+                            "enough LHB this season for Savant's minimum threshold."
+                        )
+                with tabs_inner[2]:
+                    if not ars_vs_R.empty:
+                        st.dataframe(ars_vs_R, hide_index=True, use_container_width=True)
+                    else:
+                        st.caption(
+                            "No vs-RHB arsenal data. The pitcher may not have faced "
+                            "enough RHB this season for Savant's minimum threshold."
+                        )
+
             sub1, sub2 = st.columns(2)
             with sub1:
-                h_pid = safe_int(game.get("home_pitcher_id"))
-                if h_pid:
-                    ars = pitcher_arsenal_all[pitcher_arsenal_all["player_id"] == h_pid]
-                    if not ars.empty:
-                        st.markdown(f"**{game.get('home_pitcher', 'TBD')} arsenal**")
-                        st.dataframe(ars, hide_index=True, use_container_width=True)
+                _render_arsenal_tabs(safe_int(game.get("home_pitcher_id")),
+                                       game.get("home_pitcher", "TBD"))
             with sub2:
-                a_pid = safe_int(game.get("away_pitcher_id"))
-                if a_pid:
-                    ars = pitcher_arsenal_all[pitcher_arsenal_all["player_id"] == a_pid]
-                    if not ars.empty:
-                        st.markdown(f"**{game.get('away_pitcher', 'TBD')} arsenal**")
-                        st.dataframe(ars, hide_index=True, use_container_width=True)
+                _render_arsenal_tabs(safe_int(game.get("away_pitcher_id")),
+                                       game.get("away_pitcher", "TBD"))
 
     st.divider()
 
