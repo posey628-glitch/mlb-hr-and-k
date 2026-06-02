@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.02-cameron-v26"
+APP_VERSION = "2026.06.02-split-warn-v27"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -4280,7 +4280,7 @@ if all_hitters_for_picks:
             honorable_mentions = pd.DataFrame()
 
         cols_to_show = [c for c in [
-            "rank", "slate_leader_flag", "arsenal_flag",
+            "rank", "slate_leader_flag", "arsenal_flag", "split_confidence",
             "player_name", "team", "game", "opp_pitcher",
             "pick_score", "hr_game_pct", "matchup", "barrel_pct",
             "hr_profile_label",
@@ -4307,6 +4307,18 @@ if all_hitters_for_picks:
                         "⚡ crushes [pitch] = has one pitch he hammers\n"
                         "🚫 arsenal trap = this pitcher's mix is his weakness\n"
                         "(empty) = neutral, no notable edge either way"
+                    ),
+                ),
+                "split_confidence": st.column_config.TextColumn(
+                    "Split", width="small",
+                    help=(
+                        "Sample-size warning on the vs-LHP/vs-RHP split that's "
+                        "driving this projection. Small splits can produce "
+                        "extreme rates that don't reflect true skill.\n\n"
+                        "⚠️ thin split = <40 PA in the relevant split — treat as "
+                        "highly speculative\n"
+                        "📊 small split = 40-69 PA — some confidence but watch out\n"
+                        "(empty) = ≥70 PA OR no split-based adjustment applied"
                     ),
                 ),
                 "hr_profile_label": st.column_config.TextColumn(
@@ -4357,6 +4369,42 @@ if all_hitters_for_picks:
             for _, r in top10.head(5).iterrows()
         )
         st.markdown(f"**Top 5 at a glance:** {glance}")
+
+        # RAW POWER LEADER — highest HR Game% NOT in Top 10. The pick_score
+        # formula penalizes non-EXPLOIT matchups, so a hitter facing a
+        # MIXED-grade pitcher can have the slate's highest HR Game% and still
+        # miss Top 10 (Juan Soto vs Logan Gilbert in June 2026 was the canonical
+        # case). Surface it as a one-line callout so it's not silently hidden.
+        try:
+            if (not q_sorted.empty and "hr_game_pct" in q_sorted.columns):
+                top10_keys_for_leader = set()
+                if not top10.empty:
+                    for _, r in top10.iterrows():
+                        top10_keys_for_leader.add((r.get("player_name"), r.get("team")))
+                pool = q_sorted.dropna(subset=["hr_game_pct"]).copy()
+                pool = pool[
+                    pool.apply(
+                        lambda r: (r.get("player_name"), r.get("team")) not in top10_keys_for_leader,
+                        axis=1,
+                    )
+                ]
+                if not pool.empty:
+                    raw_leader = pool.sort_values("hr_game_pct", ascending=False).iloc[0]
+                    rl_pct = raw_leader.get("hr_game_pct", 0)
+                    rl_opp = raw_leader.get("opp_pitcher", "")
+                    rl_grade = raw_leader.get("opp_pitcher_grade", "")
+                    # Only show if the leader has a real HR%
+                    if rl_pct and float(rl_pct) >= 18.0:
+                        grade_str = f" — pitcher grade: {rl_grade}" if rl_grade else ""
+                        st.caption(
+                            f"⭐ **Highest HR Game% NOT in Top 10**: "
+                            f"**{raw_leader.get('player_name')}** ({raw_leader.get('team')}) "
+                            f"at {float(rl_pct):.2f}% vs {rl_opp}{grade_str}. "
+                            f"Excluded from Top 10 because the pick_score formula "
+                            f"weights matchup grade heavily."
+                        )
+        except Exception:
+            pass
 
         # ====================================================================
         # HONORABLE MENTIONS — plays squeezed out by the 2-per-game diversity
@@ -6119,7 +6167,7 @@ def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
         insufficient = pd.DataFrame()
 
     cols_to_show = [c for c in [
-        "alert", "grade", "smash_spot", "arsenal_flag", "contact_flag", "slate_leader_flag",
+        "alert", "grade", "smash_spot", "arsenal_flag", "contact_flag", "split_confidence", "slate_leader_flag",
         "player_name", "lineup_pos", "bats", "position",
         "hr_profile_label",
         "power_score", "matchup_opp", "hr_game_pct", "hr_pa_pct", "matchup", "test_score",
