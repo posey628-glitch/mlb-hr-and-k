@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.02-outsiders-v31"
+APP_VERSION = "2026.06.02-content-v32"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -1830,6 +1830,103 @@ if show_backtest:
                                                 })
                             if not h_metrics and not p_metrics:
                                 st.warning("Snapshot loaded but no actual outcomes matched. Possible if games haven't been played yet.")
+
+            # ============================================================
+            # ROLLING AGGREGATE — multi-day model performance
+            # ============================================================
+            if snaps and len(snaps) >= 2:
+                st.divider()
+                st.markdown("### 📊 Rolling Aggregate — model accuracy across multiple days")
+                st.caption(
+                    "Aggregates ALL available snapshots into a single performance summary. "
+                    "Use this to track whether the model's Top 10 picks are actually "
+                    "outperforming the slate-wide HR rate over time. This is the single "
+                    "biggest signal for whether the model is providing real edge."
+                )
+                window_choice = st.selectbox(
+                    "Window:",
+                    options=["Last 7 days", "Last 14 days", "Last 30 days", "All available"],
+                    index=2,
+                    key="rolling_window_choice",
+                )
+                if st.button("🔄 Compute rolling aggregate", key="rolling_compute_btn"):
+                    from backtest import rolling_aggregate_hitters
+                    max_d = {"Last 7 days": 7, "Last 14 days": 14,
+                              "Last 30 days": 30, "All available": 365}[window_choice]
+                    with st.spinner(f"Aggregating up to {max_d} snapshots..."):
+                        agg = rolling_aggregate_hitters(max_days=max_d)
+                    if agg.get("error"):
+                        st.warning(agg["error"])
+                    else:
+                        ac1, ac2, ac3, ac4 = st.columns(4)
+                        ac1.metric(
+                            "Snapshots", agg.get("n_snapshots", 0),
+                            help="Number of days with matched outcomes."
+                        )
+                        ac2.metric(
+                            "Top 10 HR rate",
+                            f"{agg.get('top10_hr_rate_pct', 0)}%",
+                            help=(
+                                f"% of all Top 10 picks across these days "
+                                f"that hit a HR ({agg.get('top10_hrs_hit', 0)}/"
+                                f"{agg.get('top10_picks_total', 0)})."
+                            ),
+                        )
+                        ac3.metric(
+                            "Slate baseline",
+                            f"{agg.get('slate_baseline_hr_rate_pct', 0)}%",
+                            help="Average HR rate across all qualified hitters on those days.",
+                        )
+                        edge = agg.get("edge_vs_slate_pp", 0)
+                        edge_label = "above" if edge > 0 else "below" if edge < 0 else "neutral"
+                        ac4.metric(
+                            "Edge vs slate",
+                            f"{edge:+.1f}pp",
+                            delta=edge_label,
+                            delta_color="normal" if edge > 0 else "inverse",
+                            help=(
+                                "Top 10 HR rate MINUS slate baseline. Positive = "
+                                "model's picks are hitting at a meaningfully higher rate "
+                                "than random qualified hitters. The big number that "
+                                "tells you the model is or isn't working."
+                            ),
+                        )
+
+                        # "Days where at least one top 10 picked homered" — the
+                        # Twitter-worthy headline number.
+                        st.markdown(
+                            f"**Days with at least one Top 10 HR**: "
+                            f"{agg.get('days_with_any_top10_hit', 0)} / "
+                            f"{agg.get('days_total', 0)} "
+                            f"(**{agg.get('any_hit_rate_pct', 0)}%**)"
+                        )
+                        if agg.get("brier_mean") is not None:
+                            brier_m = agg["brier_mean"]
+                            quality = "Excellent" if brier_m < 0.04 else "Good" if brier_m < 0.06 else "OK" if brier_m < 0.08 else "Needs tuning"
+                            st.markdown(f"**Mean Brier score**: {brier_m:.4f} — {quality}")
+
+                        # Per-day table
+                        per_day = agg.get("per_day_summary", [])
+                        if per_day:
+                            st.markdown("**Per-day breakdown**")
+                            pdf = pd.DataFrame(per_day)
+                            st.dataframe(
+                                pdf, hide_index=True, use_container_width=True,
+                                column_config={
+                                    "date": st.column_config.TextColumn("Date"),
+                                    "hitters_played": st.column_config.NumberColumn("Hitters"),
+                                    "actual_hrs": st.column_config.NumberColumn("HRs"),
+                                    "slate_hr_rate_pct": st.column_config.NumberColumn(
+                                        "Slate HR%", format="%.1f%%",
+                                    ),
+                                    "top10_hit_rate_pct": st.column_config.NumberColumn(
+                                        "Top 10 hit %", format="%.1f%%",
+                                    ),
+                                    "brier": st.column_config.NumberColumn(
+                                        "Brier", format="%.4f",
+                                    ),
+                                },
+                            )
         except Exception as e:
             st.error(f"Backtest panel error: {e}")
 
@@ -4515,6 +4612,109 @@ if all_hitters_for_picks:
                 },
             )
             st.markdown("---")
+
+        # ====================================================================
+        # MODEL PICKS TWEET — owner-only Twitter post generator
+        # ====================================================================
+        if owner_mode and top10 is not None and not top10.empty:
+            with st.expander("🐦 Generate Twitter post for Top Picks (owner only)"):
+                st.caption(
+                    "One-click tweet of tonight's top HR plays. Multiple format "
+                    "options based on character count. Edit before posting."
+                )
+                tweet_format = st.radio(
+                    "Format:",
+                    options=["Top 5 (short)", "Top 10 (full)",
+                              "Top 5 + Smash Spots", "Top 5 + edge stat"],
+                    index=0,
+                    key="tweet_format_choice",
+                    horizontal=True,
+                )
+
+                # Build the tweet body
+                date_str = selected_date.strftime("%b %-d")
+                t10_subset = top10.head(5) if "short" in tweet_format.lower() or "+" in tweet_format else top10.head(10)
+
+                pick_lines = []
+                for i, (_, r) in enumerate(t10_subset.iterrows(), 1):
+                    name = r.get("player_name", "?")
+                    team = r.get("team", "")
+                    pct = r.get("hr_game_pct", 0)
+                    if pct and not pd.isna(pct):
+                        pick_lines.append(f"{i}. {name} ({team}) — {float(pct):.1f}%")
+                    else:
+                        pick_lines.append(f"{i}. {name} ({team})")
+                picks_block = "\n".join(pick_lines)
+
+                if tweet_format == "Top 5 + Smash Spots":
+                    # Find players flagged as smash spots
+                    smash_names = []
+                    try:
+                        if combined_all is not None and "smash_spot" in combined_all.columns:
+                            smashers = combined_all[
+                                combined_all["smash_spot"].fillna("").str.contains(
+                                    "SMASH", na=False
+                                )
+                            ]
+                            smash_names = smashers["player_name"].head(6).tolist()
+                    except Exception:
+                        pass
+                    smash_line = ""
+                    if smash_names:
+                        smash_line = f"\n\n🔥 Smash spots: {', '.join(smash_names)}"
+                    tweet_body = (
+                        f"⚾ HR CALC Top 5 — {date_str}\n\n"
+                        f"{picks_block}"
+                        f"{smash_line}\n\n"
+                        f"#MLB #HRprops #DFS"
+                    )
+                elif tweet_format == "Top 5 + edge stat":
+                    edge_line = ""
+                    try:
+                        from backtest import rolling_aggregate_hitters
+                        agg = rolling_aggregate_hitters(max_days=14)
+                        if not agg.get("error"):
+                            edge_pp = agg.get("edge_vs_slate_pp", 0)
+                            t10_pct = agg.get("top10_hr_rate_pct", 0)
+                            n_days = agg.get("n_snapshots", 0)
+                            if n_days >= 3 and edge_pp:
+                                edge_line = (
+                                    f"\n\n📊 Last {n_days} days: Top 10 picks hit "
+                                    f"{t10_pct}% vs slate average "
+                                    f"{agg.get('slate_baseline_hr_rate_pct', 0)}% "
+                                    f"({edge_pp:+.1f}pp edge)"
+                                )
+                    except Exception:
+                        pass
+                    tweet_body = (
+                        f"⚾ HR CALC Top 5 — {date_str}\n\n"
+                        f"{picks_block}"
+                        f"{edge_line}\n\n"
+                        f"#MLB #HRprops #DFS"
+                    )
+                else:  # Top 5 short or Top 10 full
+                    tweet_body = (
+                        f"⚾ HR CALC Top {len(pick_lines)} — {date_str}\n\n"
+                        f"{picks_block}\n\n"
+                        f"#MLB #HRprops #DFS"
+                    )
+
+                # Display with character count
+                st.text_area(
+                    "Tweet preview (copy this):",
+                    value=tweet_body,
+                    height=260,
+                    key=f"top_picks_tweet_{selected_date.isoformat()}",
+                )
+                chars = len(tweet_body)
+                if chars > 280:
+                    st.warning(
+                        f"⚠️ {chars}/280 characters — too long for one tweet. "
+                        f"Either switch to a shorter format above, or post as a "
+                        f"thread (Twitter will auto-split if you paste this directly)."
+                    )
+                else:
+                    st.caption(f"✅ {chars}/280 characters — fits one tweet")
 
         # ====================================================================
         # BEST MATCHUPS — pure hitter-vs-pitcher quality, decoupled from env
