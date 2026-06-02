@@ -327,6 +327,47 @@ def build_matchup_table(
     df["hr_form"] = _score_from_weights(df, SCORING_WEIGHTS["hr_form"])
     df["ceiling"] = _score_from_weights(df, SCORING_WEIGHTS["ceiling"])
 
+    # COLD-STREAK CEILING on hr_form (June 2026)
+    # The hr_form score above is built from SEASON-LONG power metrics
+    # (barrel%, iso, hard_hit, etc.) — none of which decay when a hitter
+    # goes cold. Result: an elite power hitter who hasn't homered in 13
+    # games still scores 90+ on hr_form, which then inflates pick_score and
+    # crowds out genuinely-hot hitters from the picks.
+    #
+    # Carroll case (June 2026): games_since_hr=13, hr_last_5=0, but hr_form=92.78
+    # → ranked #3 in picks, squeezing Kurtz (hr_last_5=2, games_since_hr=1)
+    # out of picks AND honorable mentions entirely.
+    #
+    # Fix: apply a games_since_hr ceiling. "Hot form" should require recent
+    # HRs. Cold streaks cap the form score regardless of underlying power.
+    if "hr_form" in df.columns and "games_since_hr" in df.columns:
+        def _apply_cold_ceiling(row):
+            form = row.get("hr_form")
+            if form is None or pd.isna(form):
+                return form
+            gsh = row.get("games_since_hr")
+            if gsh is None or pd.isna(gsh):
+                return form  # No data — don't penalize
+            try:
+                gsh_n = float(gsh)
+            except (TypeError, ValueError):
+                return form
+            # Ceiling schedule:
+            #   < 5 games:   no cap (hot or recent enough)
+            #   5-6 games:   75 ceiling (cooling off)
+            #   7-9 games:   60 ceiling (notable cold streak)
+            #   10+ games:   40 ceiling (clearly cold, can't be "hot form")
+            if gsh_n >= 10:
+                ceiling = 40.0
+            elif gsh_n >= 7:
+                ceiling = 60.0
+            elif gsh_n >= 5:
+                ceiling = 75.0
+            else:
+                return form  # No cap
+            return min(float(form), ceiling)
+        df["hr_form"] = df.apply(_apply_cold_ceiling, axis=1)
+
     # Test Score = matchup × PA sample weight, BLENDED with recent form so it's
     # meaningfully different from matchup (which is mostly season stats).
     # 70% matchup + 30% hr_form weighted by PA reliability.
