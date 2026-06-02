@@ -1282,6 +1282,54 @@ def get_pitcher_arsenal(season: int = CURRENT_SEASON) -> pd.DataFrame:
     return df
 
 
+@st.cache_data(ttl=3600)
+def get_pitcher_arsenal_vs_hand(season: int = CURRENT_SEASON,
+                                  batter_hand: str = "R") -> pd.DataFrame:
+    """
+    Pitcher arsenal split by hitter handedness.
+
+    Why this matters: pitchers throw very different mixes vs LHB vs RHB.
+    A right-handed pitcher might throw 38% sliders to RHB (slider moves
+    away from same-side hitter) but only 12% sliders to LHB. Same pitcher,
+    completely different arsenal depending on who's at the plate. RHP
+    typically throw more changeups to LHB (changeup runs away from
+    opposite-hand hitter) and more sinkers to RHB.
+
+    Without this split, we project a LHB facing a slider-heavy RHP using
+    the pitcher's OVERALL slider usage — which dramatically understates
+    the changeup he's actually going to see.
+
+    Returns a DataFrame matching get_pitcher_arsenal() schema, but with
+    only the rows where the pitcher faced batters of `batter_hand` ("L" or "R").
+    """
+    if batter_hand not in ("L", "R"):
+        return pd.DataFrame()
+    # Savant's pitch-arsenal-stats endpoint accepts &stand=L or &stand=R to
+    # filter by batter side. (This is the SAME endpoint as get_pitcher_arsenal,
+    # just with the stand param set.)
+    url = (
+        "https://baseballsavant.mlb.com/leaderboard/pitch-arsenal-stats"
+        f"?type=pitcher&pitchType=&year={season}&team=&min=10&hand="
+        f"&stand={batter_hand}&csv=true"
+    )
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=30)
+        r.raise_for_status()
+        df = pd.read_csv(io.StringIO(r.text))
+        if df.empty:
+            return df
+        if "last_name, first_name" in df.columns:
+            df["player_name"] = df["last_name, first_name"].apply(
+                lambda s: " ".join(reversed([p.strip() for p in str(s).split(",")]))
+                if isinstance(s, str) and "," in s else s
+            )
+        # Tag rows so we know which hand split they're from when merging
+        df["vs_batter_hand"] = batter_hand
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
 @st.cache_data(ttl=1800)
 def get_pitcher_full_season_from_gamelog(pitcher_id: int,
                                             season: int = CURRENT_SEASON) -> dict:
@@ -2012,6 +2060,110 @@ def fill_hitter_la_for_slate(hitter_stats: pd.DataFrame, slate: pd.DataFrame,
     _log(f"FINAL: {len(df) - final_missing}/{len(df)} hitters have LA ({final_missing} still missing)")
 
     return df
+
+
+# ----------------------------------------------------------------------------
+# HR PROFILE: avg exit velo on HRs + avg HR distance (June 2026)
+# ----------------------------------------------------------------------------
+# For each hitter, what's their average exit velocity ON HOME RUNS specifically
+# (not all batted balls), and how far does that HR go on average?
+#
+# A player who hits 110+ mph HRs at 380 ft has a "laser" profile — line-drive
+# HRs over the wall. A player who hits 100 mph HRs at 425 ft has a "moonshot"
+# profile — high-trajectory HRs that clear the fence on arc.
+#
+# Both can be productive HR hitters but they project differently:
+#   - Laser HRs are LESS affected by wind/altitude (lower hang time)
+#   - Moonshot HRs are MORE affected by park dimensions and weather
+#
+# Data source: Savant's barrels-leaderboard endpoint, which has avg_hr_distance
+# and max_hit_speed natively. We pull it once per slate (cached 1hr).
+# ----------------------------------------------------------------------------
+
+@st.cache_data(ttl=3600)
+def get_hitter_hr_profile(season: int = CURRENT_SEASON) -> pd.DataFrame:
+    """
+    Returns per-hitter HR profile metrics:
+      - player_id
+      - avg_hr_distance  (avg distance of THIS hitter's HRs, in feet)
+      - max_hit_speed    (max exit velo of any batted ball — proxy for top-end power)
+      - hr_profile       (categorical: "moonshot" / "balanced" / "laser" / None)
+      - hr_profile_label (display string with emoji)
+    """
+    url = (
+        "https://baseballsavant.mlb.com/leaderboard/statcast"
+        f"?type=batter&year={season}&position=&team=&min=1&csv=true"
+    )
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=30)
+        r.raise_for_status()
+        df = pd.read_csv(io.StringIO(r.text))
+        if df.empty:
+            return pd.DataFrame()
+
+        # Column name candidates (Savant varies slightly across endpoints)
+        id_col = None
+        for cand in ("player_id", "mlb_id", "playerid", "id", "MLBAMID"):
+            if cand in df.columns:
+                id_col = cand
+                break
+        if id_col is None:
+            return pd.DataFrame()
+
+        dist_col = None
+        for cand in ("avg_hr_distance", "avg_hr_dist", "hr_distance_avg"):
+            if cand in df.columns:
+                dist_col = cand
+                break
+
+        ev_col = None
+        for cand in ("max_hit_speed", "max_ev", "max_exit_velocity"):
+            if cand in df.columns:
+                ev_col = cand
+                break
+
+        if not dist_col and not ev_col:
+            return pd.DataFrame()
+
+        out = pd.DataFrame()
+        out["player_id"] = pd.to_numeric(df[id_col], errors="coerce").astype("Int64")
+        if dist_col:
+            out["avg_hr_distance"] = pd.to_numeric(df[dist_col], errors="coerce").round(1)
+        if ev_col:
+            out["max_hit_speed"] = pd.to_numeric(df[ev_col], errors="coerce").round(1)
+
+        # Classify HR profile:
+        #   moonshot — high distance (>= 415 ft avg HR distance)
+        #   laser    — high EV but lower distance (max EV >= 110 AND avg_hr_dist < 400)
+        #   balanced — middle ground
+        #   None     — no data
+        def _classify(r):
+            dist = r.get("avg_hr_distance")
+            ev = r.get("max_hit_speed")
+            if (dist is None or pd.isna(dist)) and (ev is None or pd.isna(ev)):
+                return (None, None)
+            try:
+                dist_f = float(dist) if (dist is not None and not pd.isna(dist)) else None
+                ev_f = float(ev) if (ev is not None and not pd.isna(ev)) else None
+            except (TypeError, ValueError):
+                return (None, None)
+            if dist_f is not None and dist_f >= 415:
+                return ("moonshot", f"🚀 moonshot ({dist_f:.0f}ft)")
+            if dist_f is not None and dist_f >= 405:
+                return ("balanced+", f"⚖️ balanced+ ({dist_f:.0f}ft)")
+            if ev_f is not None and ev_f >= 112 and (dist_f is None or dist_f < 400):
+                return ("laser", f"⚡ laser ({ev_f:.0f}mph)")
+            if dist_f is not None and dist_f >= 390:
+                return ("balanced", f"⚖️ balanced ({dist_f:.0f}ft)")
+            if dist_f is not None:
+                return ("short", f"📏 short porch ({dist_f:.0f}ft)")
+            return (None, None)
+        classifications = out.apply(_classify, axis=1)
+        out["hr_profile"] = [c[0] for c in classifications]
+        out["hr_profile_label"] = [c[1] for c in classifications]
+        return out
+    except Exception:
+        return pd.DataFrame()
 
 
 def fill_pitcher_stats_for_slate(pitcher_stats: pd.DataFrame, slate: pd.DataFrame,
