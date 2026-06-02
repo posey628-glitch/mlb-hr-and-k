@@ -224,6 +224,15 @@ def wind_pull_side_multiplier(venue_name: str, bats: str,
         # Switch hitter or unknown - skip the side effect
         return 1.0, ""
 
+    # ALTITUDE DAMPENING (June 2026): apply the same 0.6× dampener at
+    # high-altitude parks that weather.py applies to the global wind effect.
+    # Coors/Sutter park HR factors (1.21, 1.13) already embed historical
+    # out-blowing wind effects, so layering full real-time wind on top
+    # double-counts. The dampener attenuates but doesn't eliminate.
+    HIGH_ALTITUDE_PARKS = {"Coors Field", "Sutter Health Park"}
+    if venue_name in HIGH_ALTITUDE_PARKS:
+        roof_factor = roof_factor * 0.6
+
     # Wind direction in meteorology is the direction wind is COMING FROM.
     # We want the direction wind is BLOWING TOWARD = (wind_dir_deg + 180) % 360.
     wind_to = (wind_dir_deg + 180) % 360
