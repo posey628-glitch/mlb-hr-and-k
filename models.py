@@ -411,10 +411,50 @@ def build_matchup_table(
         return ""
     df["contact_flag"] = df.apply(_contact_flag, axis=1)
 
+    # SPLIT CONFIDENCE FLAG (June 2026)
+    # When a hitter's projection is being driven by a vs-LHP or vs-RHP split
+    # with a small PA sample, the user has no way to know that. A hitter with
+    # 22.77% HR Game% based on 35 PA vs LHP is much shakier than one based
+    # on 300 PA. Flag them so speculative plays are visible.
+    #
+    # Determine which split applies (based on pitcher hand) and the PA count:
+    #   < 40 PA  → ⚠️ thin split (highly speculative)
+    #   < 70 PA  → 📊 small split (some confidence)
+    #   >= 70 PA → (empty, normal)
+    p_throws_raw = None
+    if pitcher_row is not None:
+        try:
+            p_throws_raw = (pitcher_row.get("p_throws") or pitcher_row.get("throws") or "")
+            p_throws_raw = str(p_throws_raw).upper() if p_throws_raw else None
+        except Exception:
+            p_throws_raw = None
+
+    def _split_confidence(row):
+        if not p_throws_raw or p_throws_raw not in ("L", "R"):
+            return ""
+        # Use the pitcher's hand directly to find the split. This matches
+        # the props.py split-adjustment logic — switch hitters' vs-LHP/vs-RHP
+        # stats already reflect them batting opposite the pitcher arm.
+        split_key = "lhp" if p_throws_raw == "L" else "rhp"
+        pa_val = row.get(f"vs_{split_key}_pa")
+        if pa_val is None or pd.isna(pa_val):
+            return ""  # No split data — handled separately
+        try:
+            pa_f = float(pa_val)
+        except (TypeError, ValueError):
+            return ""
+        if pa_f < 40:
+            return "⚠️ thin split"
+        if pa_f < 70:
+            return "📊 small split"
+        return ""
+    df["split_confidence"] = df.apply(_split_confidence, axis=1)
+
     display_cols = [
         "player_id", "player_name", "lineup_pos", "position", "bats",
         "is_roster_fill",  # CRITICAL: flag for whether lineup_pos is real or fill
         "contact_flag",  # 🎯 contact profile (set expectations)
+        "split_confidence",  # ⚠️ thin split / 📊 small split (caution flag)
         # Composites (matching screenshot order)
         "matchup", "test_score", "ceiling", "zone_fit",
         "hr_form", "hr_form_label", "hr_form_arrow", "kHR",
