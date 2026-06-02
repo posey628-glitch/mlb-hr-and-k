@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.02-cold-form-v29"
+APP_VERSION = "2026.06.02-smash-fix-v30"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -3608,8 +3608,6 @@ for _, game in slate.iterrows():
                 # NOTE: uses wx_mult_nowind to avoid double-counting wind
                 # (pull_mult already encodes the pull-side wind effect).
                 full_env = hand_park * wx_mult_nowind * pull_mult
-                # Combined park-side factor (hand-aware × pull-wind)
-                full_park = hand_park * pull_mult
 
                 pitcher_name = (row_dict.get("opp_pitcher") or "").upper()
                 pitcher_is_tbd = pitcher_name in ("TBD", "TBA", "")
@@ -3623,12 +3621,20 @@ for _, game in slate.iterrows():
                     and not pitcher_is_tbd
                 )
                 game_pct_ok = game_pct_val is not None and game_pct_val >= 15
-                # Slightly looser thresholds: env ≥1.03 (was 1.05), park ≥1.02 (was 1.04).
-                # User was seeing 0 smash spots at 1.05/1.04 even with 100+ confirmed
-                # lineups. The stricter cutoff was excluding legitimate plays where
-                # park is roof-controlled (≈1.03) and weather is modest.
+
+                # SMASH SPOT THRESHOLD (June 2026 fix)
+                # Previously we had TWO conditions: env_favorable (park × weather
+                # × wind ≥ 1.03) AND park_favorable (park × wind ONLY ≥ 1.02,
+                # NO weather). At HR-suppressing parks for the hitter's side
+                # (e.g. Minute Maid LHB hand factor 0.99, no wind), the
+                # park_favorable check failed even when full_env got over 1.03
+                # via warm weather. Alvarez at Minute Maid: 24.5% HR% +
+                # EXPLOIT pitcher + confirmed lineup + env 1.065, no smash flag.
+                #
+                # Fix: only check env_favorable. The full_env already encodes
+                # park × weather × wind — checking park separately and stripping
+                # weather is redundant and broken.
                 env_favorable = full_env >= 1.03
-                park_favorable = full_park >= 1.02
 
                 # CRITICAL: Smash spots only apply to CONFIRMED LINEUPS.
                 # is_roster_fill is the authoritative flag set in models.py when
@@ -3640,14 +3646,14 @@ for _, game in slate.iterrows():
                 )
 
                 if (lineup_truly_confirmed and game_pct_ok and pitcher_super_exploitable
-                        and env_favorable and park_favorable
+                        and env_favorable
                         and game_pct_val >= 19):
                     smash_label = "🔥🔥🔥 ELITE SMASH"
                 elif (lineup_truly_confirmed and game_pct_ok and pitcher_exploitable
-                        and env_favorable and park_favorable):
+                        and env_favorable):
                     smash_label = "🔥🔥 STRONG SMASH"
-                elif (lineup_truly_confirmed and game_pct_ok and pitcher_exploitable
-                        and (env_favorable or park_favorable)):
+                elif (lineup_truly_confirmed and game_pct_ok and pitcher_exploitable):
+                    # Decent matchup but env not favorable — base SMASH tier
                     smash_label = "🔥 SMASH"
             except Exception:
                 smash_label = ""
@@ -6206,6 +6212,16 @@ def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
     else:
         qualified = matchup_df
         insufficient = pd.DataFrame()
+
+    # Sort qualified hitters by HR Game% descending (best plays first).
+    # Previously sorted by lineup_pos (batting order), which buries the
+    # best plays mid-table. Schwarber (A+, 23.9%) batting 5th would show
+    # below Turner (B+, 16.1%) batting 2nd, making it hard to scan.
+    # Lineup position is still visible in the # column for context.
+    if "hr_game_pct" in qualified.columns and qualified["hr_game_pct"].notna().any():
+        qualified = qualified.sort_values(
+            "hr_game_pct", ascending=False, na_position="last"
+        )
 
     cols_to_show = [c for c in [
         "alert", "grade", "smash_spot", "arsenal_flag", "contact_flag", "split_confidence", "slate_leader_flag",
