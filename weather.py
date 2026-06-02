@@ -189,12 +189,20 @@ def hr_multiplier(weather: dict, park: dict, skip_wind: bool = False) -> tuple[f
     # already applied separately), we skip wind here to avoid double-counting.
     # The pull-side wind multiplier from park_factors.wind_pull_side_multiplier
     # captures both directional and pull-side wind effects per handedness.
+    #
+    # ALTITUDE DAMPENING for wind (June 2026): Coors and Sutter Health park
+    # factors (1.21, 1.13) already embed historical out-blowing wind effects
+    # from decades of games at altitude. Adding the full real-time wind on top
+    # produces a double-count on already HR-friendly conditions. Apply a 0.6×
+    # dampener at altitude parks to reduce the wind multiplier without
+    # eliminating real-time signal entirely.
+    wind_dampener = 0.6 if park.get("name") in HIGH_ALTITUDE_PARKS else 1.0
     wind_mph = weather.get("wind_mph", 0)
     wind_dir = weather.get("wind_dir_deg")
     if wind_mph and wind_dir is not None and not skip_wind:
         component = wind_component_out(wind_dir, park.get("cf_bearing", 0))
         net = component * wind_mph
-        wind_eff = max(-0.25, net * 0.01)
+        wind_eff = max(-0.25, net * 0.01) * wind_dampener
         mult *= (1 + wind_eff * roof_factor)
         if net >= 8:
             summary.append(f"💨 {wind_mph:.0f}mph OUT (huge HR boost)")
