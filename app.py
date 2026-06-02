@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.02-smash-fix-v30"
+APP_VERSION = "2026.06.02-outsiders-v31"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -4417,11 +4417,14 @@ if all_hitters_for_picks:
         )
         st.markdown(f"**Top 5 at a glance:** {glance}")
 
-        # RAW POWER LEADER — highest HR Game% NOT in Top 10. The pick_score
+        # POWER OUTSIDERS — highest HR Game% NOT in Top 10. The pick_score
         # formula penalizes non-EXPLOIT matchups, so a hitter facing a
-        # MIXED-grade pitcher can have the slate's highest HR Game% and still
-        # miss Top 10 (Juan Soto vs Logan Gilbert in June 2026 was the canonical
-        # case). Surface it as a one-line callout so it's not silently hidden.
+        # MIXED-grade pitcher can have the slate's #2-3 raw HR Game% and
+        # still miss Top 10 (Juan Soto vs Logan Gilbert in June 2026 was the
+        # canonical recurring case — flagged in 4+ exports across one day).
+        #
+        # Upgraded from a single-line caption (v27) to a full callout box
+        # listing the top 3 raw-HR% outsiders, so users can't miss them.
         try:
             if (not q_sorted.empty and "hr_game_pct" in q_sorted.columns):
                 top10_keys_for_leader = set()
@@ -4435,21 +4438,32 @@ if all_hitters_for_picks:
                         axis=1,
                     )
                 ]
+                # Only consider hitters with real HR% (>= 18%)
+                pool = pool[pool["hr_game_pct"].fillna(0) >= 18.0]
+                pool = pool.sort_values("hr_game_pct", ascending=False).head(3)
                 if not pool.empty:
-                    raw_leader = pool.sort_values("hr_game_pct", ascending=False).iloc[0]
-                    rl_pct = raw_leader.get("hr_game_pct", 0)
-                    rl_opp = raw_leader.get("opp_pitcher", "")
-                    rl_grade = raw_leader.get("opp_pitcher_grade", "")
-                    # Only show if the leader has a real HR%
-                    if rl_pct and float(rl_pct) >= 18.0:
-                        grade_str = f" — pitcher grade: {rl_grade}" if rl_grade else ""
-                        st.caption(
-                            f"⭐ **Highest HR Game% NOT in Top 10**: "
-                            f"**{raw_leader.get('player_name')}** ({raw_leader.get('team')}) "
-                            f"at {float(rl_pct):.2f}% vs {rl_opp}{grade_str}. "
-                            f"Excluded from Top 10 because the pick_score formula "
-                            f"weights matchup grade heavily."
+                    lines = []
+                    for _, r in pool.iterrows():
+                        pct = float(r.get("hr_game_pct", 0))
+                        opp = r.get("opp_pitcher", "")
+                        grade = r.get("opp_pitcher_grade", "—")
+                        team = r.get("team", "")
+                        name = r.get("player_name", "")
+                        lines.append(
+                            f"- **{name}** ({team}, **{pct:.1f}%**) vs {opp} ({grade} grade)"
                         )
+                    bullets = "\n".join(lines)
+                    st.info(
+                        "⭐ **Power Outsiders — high HR% plays NOT in Top 10**\n\n"
+                        + bullets +
+                        "\n\nThese are the highest HR Game% projections on the slate "
+                        "that fell outside Top 10 because their pitcher grades MIXED "
+                        "(not EXPLOIT/EXPLOIT+). The pick_score formula weights "
+                        "matchup grade heavily to avoid piling onto bad pitchers, but "
+                        "elite power hitters facing average pitchers can still be "
+                        "strong plays — the model is just less confident in them. "
+                        "Treat as 'fade the matchup, back the hitter' speculative plays."
+                    )
         except Exception:
             pass
 
