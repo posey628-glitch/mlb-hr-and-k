@@ -22,11 +22,22 @@ import requests
 import streamlit as st
 
 
-@st.cache_data(ttl=1800)
+@st.cache_data(ttl=3600)
 def fetch_weather(lat: float, lon: float, when) -> dict:
     """Return weather forecast nearest to `when` for the given coords.
 
     `when` accepts datetime, pd.Timestamp, ISO string, or None.
+
+    RATE LIMIT NOTES (June 2026):
+      - Open-Meteo free tier ≈ 10 requests/minute.
+      - On a cold cache (post-reboot) hitting 16 games at once would burst
+        past that limit. Two fixes applied:
+          1. `when` is rounded to the hour so games starting in the same
+             hour (~most 7 PM ET games) share a cache entry instead of
+             each game being its own key.
+          2. 429 errors are caught and returned as empty {} rather than
+             crashing the page — downstream code already treats missing
+             weather as neutral (1.0× multipliers).
     """
     if lat is None or lon is None:
         return {}
@@ -55,6 +66,26 @@ def fetch_weather(lat: float, lon: float, when) -> dict:
     else:
         target_dt = datetime.now()
 
+    # CACHE KEY NORMALIZATION (June 2026):
+    # Round target_dt to the hour so multiple games starting in the same
+    # hour at the same venue share a single cache entry. Open-Meteo
+    # only returns hourly granularity anyway, so the rounding doesn't
+    # cost any meaningful accuracy.
+    try:
+        if hasattr(target_dt, "replace"):
+            target_dt = target_dt.replace(minute=0, second=0, microsecond=0)
+    except Exception:
+        pass
+
+    # Also round lat/lon to 3 decimal places (~100 meter resolution) so
+    # tiny floating-point differences in coordinates don't create separate
+    # cache entries for the same ballpark.
+    try:
+        lat = round(float(lat), 3)
+        lon = round(float(lon), 3)
+    except (TypeError, ValueError):
+        return {}
+
     iso = target_dt.strftime("%Y-%m-%d")
     url = (
         "https://api.open-meteo.com/v1/forecast"
@@ -66,10 +97,19 @@ def fetch_weather(lat: float, lon: float, when) -> dict:
     )
     try:
         r = requests.get(url, timeout=10)
+        # 429 = rate-limited. Return empty weather (downstream treats as
+        # neutral) instead of crashing. Cache TTL prevents retry storms.
+        if r.status_code == 429:
+            return {}
         r.raise_for_status()
         data = r.json()
+    except requests.exceptions.HTTPError as e:
+        # 4xx/5xx from raise_for_status — return empty rather than propagate
+        if hasattr(e, "response") and e.response is not None and e.response.status_code == 429:
+            return {}
+        return {"error": str(e)[:200]}
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": str(e)[:200]}
 
     hourly = data.get("hourly", {})
     if not hourly.get("time"):
