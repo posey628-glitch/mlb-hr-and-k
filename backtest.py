@@ -15,6 +15,12 @@ import json
 import pandas as pd
 import requests
 
+try:
+    import streamlit as st
+    _HAVE_ST = True
+except ImportError:
+    _HAVE_ST = False
+
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 
@@ -448,35 +454,17 @@ def evaluate_pitcher_projections(snapshot: dict, actuals: dict) -> dict:
 # season-summary metrics dict. The single biggest signal for model trust.
 # ----------------------------------------------------------------------------
 
-def rolling_aggregate_hitters(snapshot_dates: list[str] | None = None,
-                                max_days: int = 30) -> dict:
-    """
-    Aggregate hitter projection accuracy across multiple snapshots.
-
-    Returns a dict with:
-      - n_snapshots: how many days included
-      - total_hitters: total hitter-game observations
-      - total_hrs: total HRs that happened
-      - top10_hit_rate: % of days where at least one Top 10 pick homered
-      - top10_hr_rate_pct: HR rate of all Top 10 picks across days
-      - slate_hr_rate_pct: HR rate of all qualified hitters (comparison baseline)
-      - power_score_bands: per-band cross-day HR rate
-      - hr_pct_bands: per-band cross-day HR rate
-      - brier_mean: average Brier score across days
-      - per_day_summary: one row per snapshot with rate + count
-
-    If snapshot_dates is None, uses all available snapshots up to max_days.
-    """
+def _rolling_aggregate_uncached(snapshot_dates_key: str, max_days: int) -> dict:
+    """Inner implementation. snapshot_dates_key is a stable cache-key string."""
+    snapshot_dates = snapshot_dates_key.split(",") if snapshot_dates_key else None
     available = list_snapshots()
     if not available:
         return {"error": "No snapshots available"}
-    if snapshot_dates is None:
-        # Use most recent max_days snapshots
+    if snapshot_dates is None or snapshot_dates == [""]:
         snapshot_dates = sorted(available)[-max_days:]
 
     n_snapshots = 0
-    all_top10_rows = []  # accumulate top10 picks across days
-    all_qualified_rows = []  # accumulate ALL qualified hitters
+    all_top10_rows = []
     all_brier = []
     per_day = []
 
@@ -492,7 +480,6 @@ def rolling_aggregate_hitters(snapshot_dates: list[str] | None = None,
             continue
         n_snapshots += 1
 
-        # Per-day summary row
         day_summary = {
             "date": sd,
             "hitters_played": h_metrics.get("hitters_who_played", 0),
@@ -505,7 +492,6 @@ def rolling_aggregate_hitters(snapshot_dates: list[str] | None = None,
         if h_metrics.get("brier_score") is not None:
             all_brier.append(h_metrics["brier_score"])
 
-        # Pull each Top 10 prediction with its homered outcome
         for entry in h_metrics.get("top10_hr_predictions", []):
             all_top10_rows.append({
                 "date": sd,
@@ -517,16 +503,13 @@ def rolling_aggregate_hitters(snapshot_dates: list[str] | None = None,
     if n_snapshots == 0:
         return {"error": "No snapshots had matched actuals"}
 
-    # Aggregate Top 10 performance across all days
     top10_total = len(all_top10_rows)
     top10_hr_count = sum(r["homered"] for r in all_top10_rows)
     top10_hr_rate = (top10_hr_count / top10_total * 100) if top10_total else 0
 
-    # Per-day slate baseline (average across days)
     slate_rates = [d["slate_hr_rate_pct"] for d in per_day if d["slate_hr_rate_pct"]]
     avg_slate_rate = sum(slate_rates) / len(slate_rates) if slate_rates else 0
 
-    # Top 10 "hit any" rate — % of days where at least one top 10 pick homered
     days_with_hit = 0
     days_total = 0
     by_date = {}
@@ -552,3 +535,40 @@ def rolling_aggregate_hitters(snapshot_dates: list[str] | None = None,
         "brier_mean": round(sum(all_brier) / len(all_brier), 4) if all_brier else None,
         "per_day_summary": per_day,
     }
+
+
+# Apply Streamlit caching only if streamlit is available (i.e., we're inside
+# the Streamlit runtime). Avoids ImportError if backtest.py is used standalone.
+if _HAVE_ST:
+    _rolling_aggregate_uncached_cached = st.cache_data(ttl=1800)(_rolling_aggregate_uncached)
+else:
+    _rolling_aggregate_uncached_cached = _rolling_aggregate_uncached
+
+
+def rolling_aggregate_hitters(snapshot_dates: list[str] | None = None,
+                                max_days: int = 30) -> dict:
+    """
+    Aggregate hitter projection accuracy across multiple snapshots.
+
+    Returns a dict with:
+      - n_snapshots: how many days included
+      - total_hitters: total hitter-game observations
+      - total_hrs: total HRs that happened
+      - top10_hit_rate: % of days where at least one Top 10 pick homered
+      - top10_hr_rate_pct: HR rate of all Top 10 picks across days
+      - slate_hr_rate_pct: HR rate of all qualified hitters (comparison baseline)
+      - power_score_bands: per-band cross-day HR rate
+      - hr_pct_bands: per-band cross-day HR rate
+      - brier_mean: average Brier score across days
+      - per_day_summary: one row per snapshot with rate + count
+
+    If snapshot_dates is None, uses all available snapshots up to max_days.
+
+    CACHING (v32 update): aggregation can loop through 20+ snapshots each
+    fetching same-day MLB API actuals. Was recomputing on every rerender of
+    the Twitter "edge stat" expander or the Backtest panel. Now cached for
+    30 minutes per (snapshot_dates, max_days) key.
+    """
+    # Stable cache key: comma-joined sorted dates, or empty string for "use all"
+    cache_key = ",".join(sorted(snapshot_dates)) if snapshot_dates else ""
+    return _rolling_aggregate_uncached_cached(cache_key, max_days)
