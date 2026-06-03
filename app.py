@@ -1,7 +1,7 @@
 """
 app.py
 =======
-HR CALC dashboard - Streamlit main entry.
+DingerMaven dashboard - Streamlit main entry.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.02-cache-v33"
+APP_VERSION = "2026.06.03-weather-429-v35"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -237,7 +237,7 @@ except Exception:
 # ============================================================================
 
 st.set_page_config(
-    page_title="HR CALC",
+    page_title="DingerMaven",
     page_icon="⚾",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -868,7 +868,7 @@ def pitcher_grade_sort_key(grade):
 # ============================================================================
 
 with st.sidebar:
-    st.title("⚾ HR CALC")
+    st.title("💣 DingerMaven")
     selected_date = st.date_input("Slate date", value=date.today())
 
     # ========================================================================
@@ -1535,7 +1535,7 @@ if use_sprint_speed:
 # HEADER + DATA AVAILABILITY
 # ============================================================================
 
-st.title(f"⚾ HR CALC — {selected_date.strftime('%A, %B %d, %Y')}")
+st.title(f"💣 DingerMaven — {selected_date.strftime('%A, %B %d, %Y')}")
 
 # BIG visible deploy version. If this doesn't say v6-NUCLEAR, deploy hasn't taken effect.
 st.markdown(
@@ -4663,7 +4663,7 @@ if all_hitters_for_picks:
                     if smash_names:
                         smash_line = f"\n\n🔥 Smash spots: {', '.join(smash_names)}"
                     tweet_body = (
-                        f"⚾ HR CALC Top 5 — {date_str}\n\n"
+                        f"💣 DingerMaven Top 5 — {date_str}\n\n"
                         f"{picks_block}"
                         f"{smash_line}\n\n"
                         f"#MLB #HRprops #DFS"
@@ -4687,14 +4687,14 @@ if all_hitters_for_picks:
                     except Exception:
                         pass
                     tweet_body = (
-                        f"⚾ HR CALC Top 5 — {date_str}\n\n"
+                        f"💣 DingerMaven Top 5 — {date_str}\n\n"
                         f"{picks_block}"
                         f"{edge_line}\n\n"
                         f"#MLB #HRprops #DFS"
                     )
                 else:  # Top 5 short or Top 10 full
                     tweet_body = (
-                        f"⚾ HR CALC Top {len(pick_lines)} — {date_str}\n\n"
+                        f"💣 DingerMaven Top {len(pick_lines)} — {date_str}\n\n"
                         f"{picks_block}\n\n"
                         f"#MLB #HRprops #DFS"
                     )
@@ -5641,7 +5641,7 @@ if all_hitters:
                 st.download_button(
                     "📥 Export ALL to Excel",
                     data=buffer.getvalue(),
-                    file_name=f"hr_calc_{_dt.now().strftime('%Y-%m-%d_%H-%M')}.xlsx",
+                    file_name=f"dingermaven_{_dt.now().strftime('%Y-%m-%d_%H-%M')}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     help="Hitters + Pitchers + Top lists in one Excel workbook.",
                 )
@@ -5660,7 +5660,7 @@ if all_hitters:
                 st.download_button(
                     "📥 Export ALL to CSV",
                     data=csv_buf.getvalue(),
-                    file_name=f"hr_calc_{_dt.now().strftime('%Y-%m-%d_%H-%M')}.csv",
+                    file_name=f"dingermaven_{_dt.now().strftime('%Y-%m-%d_%H-%M')}.csv",
                     mime="text/csv",
                     help="Combined CSV - openpyxl not installed for Excel export.",
                 )
@@ -7017,5 +7017,5 @@ for _, game in slate.iterrows():
 st.caption(
     f"Built {datetime.now().strftime('%Y-%m-%d %H:%M')} · "
     f"Sources: MLB Stats API, Baseball Savant, Open-Meteo · "
-    f"HR CALC"
+    f"DingerMaven"
 )
