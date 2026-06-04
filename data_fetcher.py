@@ -2364,6 +2364,55 @@ def get_team_pitching_proxy(team_id: int, season: int = CURRENT_SEASON,
     return proxy
 
 
+@st.cache_data(ttl=21600)  # 6 hour cache
+def get_team_bullpen_hr9(team_id: int, season: int = CURRENT_SEASON) -> float | None:
+    """
+    Fetch the team's BULLPEN-ONLY HR/9 (excludes starters).
+
+    Used for bullpen-leverage adjustment: when a starter exits early, the
+    bullpen pitches the remainder. A team with a high bullpen HR/9
+    (Rockies, Twins, A's, etc.) means even good starters expose hitters to
+    HR-vulnerable relievers later in the game.
+
+    Returns None if data unavailable (caller should fall back to league avg).
+    """
+    url = (
+        "https://statsapi.mlb.com/api/v1/stats"
+        f"?stats=season&group=pitching&season={season}&sportIds=1"
+        f"&teamId={team_id}&playerPool=ALL"
+    )
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=12)
+        r.raise_for_status()
+        splits = r.json().get("stats", [{}])[0].get("splits", [])
+    except Exception:
+        return None
+
+    # Aggregate HR and IP across all pitchers on the team where the pitcher
+    # appears as a reliever (gamesStarted < 50% of appearances).
+    total_hr = 0
+    total_ip = 0.0
+    for s in splits:
+        try:
+            stat = s.get("stat", {}) or {}
+            games = _safe_int(stat.get("gamesPlayed")) or 0
+            starts = _safe_int(stat.get("gamesStarted")) or 0
+            if games == 0:
+                continue
+            if starts / games >= 0.5:
+                continue  # Classified as a starter
+            hr = _safe_int(stat.get("homeRuns")) or 0
+            ip = _safe_float(stat.get("inningsPitched")) or 0.0
+            total_hr += hr
+            total_ip += ip
+        except Exception:
+            continue
+
+    if total_ip < 30:
+        return None
+    return round((total_hr * 9.0) / total_ip, 2)
+
+
 @st.cache_data(ttl=3600)
 def get_team_hitting_aggregates(season: int = CURRENT_SEASON) -> pd.DataFrame:
     """
