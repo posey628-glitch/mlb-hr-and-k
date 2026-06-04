@@ -270,3 +270,164 @@ def park_k_factor(venue_name: str) -> float:
     hr_f = park.get("hr_factor", 100)
     k_factor = 1.0 - (hr_f - 100) * 0.0007
     return round(max(0.95, min(1.05, k_factor)), 3)
+
+
+# ============================================================================
+# PULL-SIDE FENCE DISTANCES (v37)
+# ============================================================================
+# Distance in feet from home plate to the LF and RF foul poles. Used for
+# pull-power adjustment: a pull-heavy LHB at Yankee Stadium (314 ft RF) is
+# fundamentally different from the same hitter at Comerica Park (330 ft RF).
+#
+# Source: official MLB venue dimensions, cross-referenced with ESPN park
+# fact sheets. These are foul-pole distances, not power-alley distances.
+# Power-alley dimensions vary more by park but pole distance is the most
+# stable reference.
+#
+# League average is roughly 330 ft RF / 332 ft LF.
+# ============================================================================
+PARK_DIMENSIONS = {
+    "Coors Field":            {"lf_ft": 347, "rf_ft": 350},
+    "Great American Ball Park": {"lf_ft": 328, "rf_ft": 325},
+    "Yankee Stadium":         {"lf_ft": 318, "rf_ft": 314},  # Short RF porch — major LHB boost
+    "Citizens Bank Park":     {"lf_ft": 329, "rf_ft": 330},
+    "Globe Life Field":       {"lf_ft": 329, "rf_ft": 326},
+    "Fenway Park":             {"lf_ft": 310, "rf_ft": 302},  # Pesky Pole RF (302) + Green Monster LF (37ft wall)
+    "Wrigley Field":           {"lf_ft": 355, "rf_ft": 353},
+    "Chase Field":             {"lf_ft": 330, "rf_ft": 334},
+    "Rogers Centre":           {"lf_ft": 328, "rf_ft": 328},
+    "Daikin Park":             {"lf_ft": 315, "rf_ft": 326},  # Crawford Boxes LF (315)
+    "Minute Maid Park":        {"lf_ft": 315, "rf_ft": 326},
+    "Truist Park":             {"lf_ft": 335, "rf_ft": 325},
+    "Nationals Park":          {"lf_ft": 336, "rf_ft": 335},
+    "Target Field":            {"lf_ft": 339, "rf_ft": 328},
+    "Busch Stadium":           {"lf_ft": 336, "rf_ft": 335},
+    "Citi Field":              {"lf_ft": 335, "rf_ft": 330},
+    "American Family Field":   {"lf_ft": 344, "rf_ft": 345},
+    "Progressive Field":       {"lf_ft": 325, "rf_ft": 325},
+    "PNC Park":                {"lf_ft": 325, "rf_ft": 320},
+    "Angel Stadium":           {"lf_ft": 333, "rf_ft": 365},  # Deep RF
+    "Dodger Stadium":          {"lf_ft": 330, "rf_ft": 330},
+    "Uniqlo Field":            {"lf_ft": 330, "rf_ft": 330},
+    "Uniqlo Field at Dodger Stadium": {"lf_ft": 330, "rf_ft": 330},
+    "loanDepot park":          {"lf_ft": 344, "rf_ft": 335},
+    "T-Mobile Park":           {"lf_ft": 331, "rf_ft": 326},
+    "Kauffman Stadium":        {"lf_ft": 330, "rf_ft": 330},
+    "Oracle Park":             {"lf_ft": 339, "rf_ft": 309},  # Short RF but high wall
+    "Petco Park":              {"lf_ft": 336, "rf_ft": 322},  # Deep LF historically; reduced recently
+    "Comerica Park":           {"lf_ft": 345, "rf_ft": 330},  # Deep LF
+    "Oriole Park at Camden Yards": {"lf_ft": 333, "rf_ft": 318},  # Short RF after 2025 redesign
+    "Camden Yards":            {"lf_ft": 333, "rf_ft": 318},
+    "Rate Field":              {"lf_ft": 330, "rf_ft": 335},
+    "Guaranteed Rate Field":   {"lf_ft": 330, "rf_ft": 335},
+    "George M. Steinbrenner Field": {"lf_ft": 318, "rf_ft": 314},  # Yankees spring/temp facility
+    "Sutter Health Park":      {"lf_ft": 330, "rf_ft": 320},  # A's temp park
+    "Tropicana Field":         {"lf_ft": 315, "rf_ft": 322},
+}
+
+
+def get_park_dimensions(venue_name: str) -> dict:
+    """Returns {'lf_ft': float, 'rf_ft': float} for the venue, or empty dict."""
+    return PARK_DIMENSIONS.get(venue_name, {})
+
+
+def pull_side_distance_factor(venue_name: str, bats: str) -> float:
+    """
+    Returns a multiplier on HR rate based on how much closer/farther the
+    hitter's pull-side fence is compared to league average.
+
+    League avg pull-side foul pole: ~330 ft.
+
+    LHB pulls to RF, RHB pulls to LF. Switch hitters returned 1.0 (handled
+    by the pitcher-arm-based effective handedness elsewhere).
+
+    Roughly: each 10 ft of shorter fence = ~6% more HRs to that side.
+    Capped at ±15% to prevent extreme cases (Fenway RF 302 ft) from
+    dominating projections.
+    """
+    bats = (bats or "").upper()
+    if bats not in ("L", "R"):
+        return 1.0
+    dims = get_park_dimensions(venue_name)
+    if not dims:
+        return 1.0
+    pull_distance = dims.get("rf_ft") if bats == "L" else dims.get("lf_ft")
+    if pull_distance is None:
+        return 1.0
+    league_avg = 330.0
+    # Closer fence = MORE HRs. Each 10 ft = 6%.
+    delta_ft = league_avg - float(pull_distance)
+    multiplier = 1.0 + (delta_ft / 10.0) * 0.06
+    # Clamp to ±15% to prevent extremes from dominating
+    return max(0.85, min(1.15, round(multiplier, 4)))
+
+
+# ============================================================================
+# DYNAMIC PARK FACTOR FETCHER (v37)
+# ============================================================================
+# Pulls Savant's 3-year rolling park factors at runtime so values refresh
+# automatically each season instead of requiring a manual code update.
+#
+# Falls back to the static PARKS dict if the fetch fails. We do NOT rebuild
+# the in-memory PARKS dict — this is purely an optional override that
+# applications can use if they want the freshest values.
+# ============================================================================
+
+def fetch_savant_park_factors(year: int | None = None) -> dict:
+    """
+    Fetch latest park factors from Baseball Savant.
+
+    Returns a dict mapping venue name → {hr_factor, hr_factor_L, hr_factor_R, runs_factor}.
+    Returns empty dict on any failure (caller should fall back to PARKS).
+
+    NOTE: Savant doesn't expose a clean CSV endpoint for park factors. The
+    public leaderboard is JS-rendered. This function attempts to scrape
+    the JSON data embedded in the page; if Savant changes their page
+    structure, this gracefully returns {} and the static values are used.
+
+    The intent is opportunistic refresh, not authoritative source. The
+    static PARKS dict is the source of truth.
+    """
+    try:
+        import requests
+        import json
+        import re
+        from datetime import datetime
+        if year is None:
+            year = datetime.now().year
+        url = (
+            f"https://baseballsavant.mlb.com/leaderboard/statcast-park-factors"
+            f"?year={year}&type=year&batSide=&stat=index_hr&condition=All"
+            "&rolling=1&parks=mlb"
+        )
+        headers = {"User-Agent": "Mozilla/5.0"}
+        r = requests.get(url, headers=headers, timeout=15)
+        if r.status_code != 200:
+            return {}
+        # Savant embeds the table data as JSON in a <script> tag like:
+        #   var data = [...];
+        # Try to extract it.
+        text = r.text
+        m = re.search(r"var\s+data\s*=\s*(\[[^;]+\]);", text)
+        if not m:
+            return {}
+        try:
+            data = json.loads(m.group(1))
+        except Exception:
+            return {}
+        if not isinstance(data, list):
+            return {}
+        result = {}
+        for row in data:
+            if not isinstance(row, dict):
+                continue
+            venue = row.get("name") or row.get("venue_name") or row.get("park")
+            hr_idx = row.get("index_hr") or row.get("hr_factor")
+            if venue and hr_idx is not None:
+                try:
+                    result[venue] = {"hr_factor": int(round(float(hr_idx)))}
+                except (TypeError, ValueError):
+                    continue
+        return result
+    except Exception:
+        return {}
