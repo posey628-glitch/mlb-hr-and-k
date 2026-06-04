@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.03-weather-gb-v36"
+APP_VERSION = "2026.06.04-pull-dim-v37"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -3659,8 +3659,21 @@ for _, game in slate.iterrows():
 
             pull_mults_col.append(round(pull_mult, 3))
 
-            # Combined park factor for this specific hitter: hand-aware × pull-wind
-            hitter_park_mult = hand_park * pull_mult
+            # PULL-SIDE FENCE DISTANCE FACTOR (v37)
+            # Pull-heavy hitters at parks with short pull-side foul poles
+            # (Yankee Stadium 314 ft RF for LHB, Fenway 302 ft RF for LHB)
+            # have an inherent HR advantage beyond what overall park HR
+            # factor captures, because that factor is a league-average over
+            # all batted ball directions. We add a small per-hand adjustment.
+            try:
+                from park_factors import pull_side_distance_factor
+                pull_dist_mult = pull_side_distance_factor(venue_name, bats)
+            except Exception:
+                pull_dist_mult = 1.0
+
+            # Combined park factor for this specific hitter: hand-aware ×
+            # pull-wind × pull-distance
+            hitter_park_mult = hand_park * pull_mult * pull_dist_mult
 
             # Pitch-type HR match multiplier
             # NOTE: pitch_match_score is ALREADY applied inside hr_prob_per_pa
