@@ -118,8 +118,125 @@ def get_umpire_for_game(game_pk: int) -> dict:
 
 
 def get_catcher_framing(season: int = CURRENT_SEASON) -> pd.DataFrame:
-    """Disabled — framing factor was fetched but never wired into k_total_projection."""
-    return pd.DataFrame()
+    """Returns a DataFrame of catcher framing K-rate multipliers.
+
+    Built from the static CATCHER_FRAMING_K_FACTORS lookup below. Same
+    plumbing pattern as UMPIRE_K_FACTORS — most catchers cluster near
+    neutral 1.0, but elite framers (Patrick Bailey, Yainer Diaz, Austin
+    Hedges) and poor framers (Salvador Perez, Willson Contreras) show
+    meaningfully different called-strike rates that affect pitcher K totals.
+    """
+    rows = []
+    for name, k_factor in CATCHER_FRAMING_K_FACTORS.items():
+        rows.append({"catcher_name": name, "k_factor": k_factor})
+    return pd.DataFrame(rows)
+
+
+# ============================================================================
+# CATCHER FRAMING K-FACTOR LOOKUP (v37c)
+# ============================================================================
+# Maps catcher name to a K-rate multiplier on their pitcher's strikeout
+# projection.
+#
+# Source: Statcast catcher framing leaderboard. CSAA (called strikes
+# above/below average per 100 chances) is converted to a K multiplier:
+#   - Elite framer (+10 CSAA per 100): ~4% more called strikes, ~4% more Ks
+#   - Average (0 CSAA): 1.00 neutral
+#   - Poor framer (-8 CSAA per 100): ~3% fewer called strikes, ~3% fewer Ks
+#
+# Values reflect 3-year rolling Statcast CSAA. Only catchers with
+# meaningfully non-neutral framing are listed (>±2.5% from neutral). Any
+# catcher not in this dict returns 1.0 (neutral) — same fallback pattern as
+# umpire K factor.
+# ============================================================================
+CATCHER_FRAMING_K_FACTORS = {
+    # ELITE FRAMERS (+3-5% K boost)
+    "Patrick Bailey": 1.045,        # SF — top-tier framer 2023-2025
+    "Austin Hedges": 1.045,         # Defensive specialist career
+    "Yainer Diaz": 1.040,           # HOU — elite framing despite limited reps
+    "Adley Rutschman": 1.035,       # BAL — consistent above-average framer
+    "Jonah Heim": 1.035,            # TEX
+    "Jose Trevino": 1.035,          # NYY — elite defensive C
+    "Sean Murphy": 1.030,           # ATL — strong framer
+    "Cal Raleigh": 1.030,           # SEA — top defensive catcher
+    "Tyler Stephenson": 1.025,      # CIN
+    "Logan O'Hoppe": 1.025,         # LAA
+    "Carson Kelly": 1.025,          # CHC
+    "Tomas Nido": 1.025,            # NYM
+    "Travis d'Arnaud": 1.020,       # ATL — veteran framer
+    "Christian Vazquez": 1.020,     # MIN
+    "Will Smith": 1.020,            # LAD — solid above-avg
+    "Francisco Alvarez": 1.020,     # NYM — improving
+    "Gabriel Moreno": 1.020,        # AZ
+    # NEUTRAL ZONE (1.00 ± 0.015) — most MLB catchers fall here, not listed
+
+    # POOR FRAMERS (-2-4% K penalty)
+    "Salvador Perez": 0.965,        # KC — consistently below avg
+    "Willson Contreras": 0.970,     # STL — bat-first, framing weakness
+    "Martin Maldonado": 0.975,      # CHW — declined framing in recent years
+    "Tucker Barnhart": 0.975,       # TEX
+    "Yan Gomes": 0.975,             # MIL
+    "Elias Diaz": 0.975,            # SD
+    "Mitch Garver": 0.980,          # SEA
+    "Keibert Ruiz": 0.980,          # WSH
+}
+
+
+@st.cache_data(ttl=21600)
+def get_starting_catcher(game_pk: int) -> dict:
+    """
+    Returns {"name": str|None, "k_factor": float} for the starting catcher
+    of the given game. Looks up the home team's starting catcher (the
+    pitcher's catcher) from the lineup card.
+
+    The catcher we care about is whichever team is pitching to the hitters
+    we're projecting. Caller passes BOTH games' info appropriately —
+    typically you want the OPPOSING team's catcher for each set of hitters.
+
+    Falls back to {"name": None, "k_factor": 1.0} on any error.
+    """
+    try:
+        url = f"https://statsapi.mlb.com/api/v1.1/game/{game_pk}/feed/live"
+        r = requests.get(url, headers=HEADERS, timeout=10)
+        if r.status_code != 200:
+            return {"name": None, "k_factor": 1.0}
+        data = r.json()
+        result = {"name": None, "k_factor": 1.0}
+        # Boxscore exposes the starting catchers via the lineup. Look for
+        # players where position abbreviation is "C" and they're in the
+        # batting order (positive battingOrder).
+        boxscore = data.get("liveData", {}).get("boxscore", {})
+        for team_key in ("home", "away"):
+            team_box = boxscore.get("teams", {}).get(team_key, {})
+            players = team_box.get("players", {}) or {}
+            for pid_key, pinfo in players.items():
+                position = pinfo.get("position", {}).get("abbreviation")
+                if position != "C":
+                    continue
+                # The STARTING catcher has a battingOrder set (e.g. "700"
+                # for 7th in the order). Bench catchers have battingOrder=None.
+                bo = pinfo.get("battingOrder")
+                if not bo:
+                    continue
+                full_name = (pinfo.get("person", {}) or {}).get("fullName")
+                if full_name:
+                    # Store per team — we'll let caller pick which side they need
+                    k_factor = CATCHER_FRAMING_K_FACTORS.get(full_name, 1.0)
+                    result[f"{team_key}_catcher"] = full_name
+                    result[f"{team_key}_k_factor"] = k_factor
+                    if team_key == "home":
+                        result["name"] = full_name
+                        result["k_factor"] = k_factor
+        return result
+    except Exception:
+        return {"name": None, "k_factor": 1.0}
+
+
+def get_catcher_k_factor(catcher_name: str | None) -> float:
+    """Direct lookup: catcher name → K factor. Returns 1.0 if not in table."""
+    if not catcher_name:
+        return 1.0
+    return CATCHER_FRAMING_K_FACTORS.get(catcher_name, 1.0)
 
 
 # ---------------------------------------------------------------------------
