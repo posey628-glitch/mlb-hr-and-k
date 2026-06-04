@@ -1,13 +1,35 @@
 """
 weather.py
 ==========
-Pulls game-time weather from Open-Meteo (free, no API key, no signup) and
-converts it into an HR-impact multiplier based on:
+Pulls game-time weather from Open-Meteo and converts it into an HR-impact
+multiplier based on:
   - wind speed
   - wind direction relative to park's CF bearing (out / in / cross)
   - temperature (warm air = ball travels further)
   - humidity & air pressure (lower density = more carry)
   - indoor/retractable roof (neutralizes weather effects)
+
+ARCHITECTURE (June 2026, v36):
+  Open-Meteo is the single weather provider. NWS (api.weather.gov) was
+  tried in v35 as a primary with Open-Meteo fallback, but NWS returns
+  403 "Host not in allowlist" from many cloud provider IPs (including
+  Streamlit Cloud), making it unreliable as a primary provider.
+
+  Open-Meteo:
+    - Free, no API key, CDN-backed (works from any cloud platform)
+    - Supports up to 1000 locations in a SINGLE request via comma-separated
+      coordinate lists. Means one API call for entire slate = no rate limit
+      problems even on cold cache.
+    - 10 req/min limit only matters if we burst many single-location calls
+    - Free tier: 10,000 calls/day
+
+  Strategy:
+    - prefetch_weather_batch(coords_list, when) — one call for all games,
+      warms cache for every (lat, lon, hour) tuple in the slate
+    - fetch_weather(lat, lon, when) — hits warmed cache, falls back to
+      single-location API call if cache miss (e.g., schedule changes
+      mid-page-render)
+    - Diagnostic logging captures actual failure reasons when they happen
 
 Open-Meteo docs: https://open-meteo.com/en/docs
 """
@@ -22,41 +44,29 @@ import requests
 import streamlit as st
 
 
-@st.cache_data(ttl=3600)
-def fetch_weather(lat: float, lon: float, when) -> dict:
-    """Return weather forecast nearest to `when` for the given coords.
+# Module-level diagnostics — captures last error for surfacing in UI
+_LAST_ERROR: str | None = None
+_LAST_SOURCE: str | None = None
 
-    `when` accepts datetime, pd.Timestamp, ISO string, or None.
 
-    RATE LIMIT NOTES (June 2026):
-      - Open-Meteo free tier ≈ 10 requests/minute.
-      - On a cold cache (post-reboot) hitting 16 games at once would burst
-        past that limit. Two fixes applied:
-          1. `when` is rounded to the hour so games starting in the same
-             hour (~most 7 PM ET games) share a cache entry instead of
-             each game being its own key.
-          2. 429 errors are caught and returned as empty {} rather than
-             crashing the page — downstream code already treats missing
-             weather as neutral (1.0× multipliers).
-    """
-    if lat is None or lon is None:
-        return {}
+def get_last_weather_error() -> str | None:
+    """Return the last weather fetch error (or None if last fetch succeeded)."""
+    return _LAST_ERROR
 
-    # Normalize `when` to a datetime
+
+def _normalize_target_dt(when) -> datetime:
+    """Normalize various time inputs to a naive datetime rounded to the hour."""
     if when is None:
         target_dt = datetime.now()
     elif isinstance(when, str):
         try:
-            # Handle timezone suffixes by stripping them for simplicity
             cleaned = when.replace("Z", "+00:00")
             target_dt = datetime.fromisoformat(cleaned)
-            # Strip timezone for naive comparison later
             if target_dt.tzinfo is not None:
                 target_dt = target_dt.replace(tzinfo=None)
         except (ValueError, TypeError):
             target_dt = datetime.now()
     elif hasattr(when, "strftime"):
-        # datetime or pd.Timestamp
         target_dt = when
         if hasattr(target_dt, "tz_localize") and getattr(target_dt, "tz", None) is not None:
             try:
@@ -66,26 +76,60 @@ def fetch_weather(lat: float, lon: float, when) -> dict:
     else:
         target_dt = datetime.now()
 
-    # CACHE KEY NORMALIZATION (June 2026):
-    # Round target_dt to the hour so multiple games starting in the same
-    # hour at the same venue share a single cache entry. Open-Meteo
-    # only returns hourly granularity anyway, so the rounding doesn't
-    # cost any meaningful accuracy.
+    # Round to hour for cache normalization (Open-Meteo only returns hourly anyway)
     try:
         if hasattr(target_dt, "replace"):
             target_dt = target_dt.replace(minute=0, second=0, microsecond=0)
     except Exception:
         pass
+    return target_dt
 
-    # Also round lat/lon to 3 decimal places (~100 meter resolution) so
-    # tiny floating-point differences in coordinates don't create separate
-    # cache entries for the same ballpark.
-    try:
-        lat = round(float(lat), 3)
-        lon = round(float(lon), 3)
-    except (TypeError, ValueError):
+
+def _parse_om_response_for_hour(response: dict, target_dt: datetime) -> dict:
+    """Extract weather at target hour from an Open-Meteo single-location response."""
+    hourly = response.get("hourly", {})
+    times = hourly.get("time") or []
+    if not times:
         return {}
 
+    target_naive = target_dt.replace(tzinfo=None) if target_dt.tzinfo else target_dt
+    try:
+        dts = [datetime.fromisoformat(t) for t in times]
+        idx = min(range(len(dts)),
+                   key=lambda i: abs((dts[i] - target_naive).total_seconds()))
+    except Exception:
+        idx = min(12, len(times) - 1)
+
+    def _safe(key):
+        arr = hourly.get(key) or []
+        if idx < len(arr):
+            v = arr[idx]
+            try:
+                return float(v) if v is not None else None
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    return {
+        "temp_f": _safe("temperature_2m"),
+        "wind_mph": _safe("wind_speed_10m"),
+        "wind_dir_deg": _safe("wind_direction_10m"),
+        "humidity": _safe("relative_humidity_2m"),
+        "pressure_hpa": _safe("surface_pressure"),
+        "precip_prob": _safe("precipitation_probability"),
+        "_source": "OpenMeteo",
+    }
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _fetch_single_om(lat: float, lon: float, target_dt_str: str) -> dict:
+    """
+    Cached single-location Open-Meteo fetch. Cache key is (lat, lon, hour-iso).
+
+    Public callers should use fetch_weather() which normalizes inputs first.
+    """
+    global _LAST_ERROR, _LAST_SOURCE
+    target_dt = datetime.fromisoformat(target_dt_str)
     iso = target_dt.strftime("%Y-%m-%d")
     url = (
         "https://api.open-meteo.com/v1/forecast"
@@ -97,45 +141,175 @@ def fetch_weather(lat: float, lon: float, when) -> dict:
     )
     try:
         r = requests.get(url, timeout=10)
-        # 429 = rate-limited. Return empty weather (downstream treats as
-        # neutral) instead of crashing. Cache TTL prevents retry storms.
         if r.status_code == 429:
+            _LAST_ERROR = "Open-Meteo rate limited (429). Try again in 60s."
             return {}
-        r.raise_for_status()
+        if r.status_code != 200:
+            _LAST_ERROR = f"Open-Meteo HTTP {r.status_code}: {r.text[:120]}"
+            return {}
         data = r.json()
-    except requests.exceptions.HTTPError as e:
-        # 4xx/5xx from raise_for_status — return empty rather than propagate
-        if hasattr(e, "response") and e.response is not None and e.response.status_code == 429:
+        result = _parse_om_response_for_hour(data, target_dt)
+        if result.get("temp_f") is None:
+            _LAST_ERROR = "Open-Meteo returned no hourly data for target time"
             return {}
-        return {"error": str(e)[:200]}
+        _LAST_ERROR = None
+        _LAST_SOURCE = "OpenMeteo-single"
+        return result
+    except requests.exceptions.Timeout:
+        _LAST_ERROR = "Open-Meteo request timed out (10s)"
+        return {}
     except Exception as e:
-        return {"error": str(e)[:200]}
-
-    hourly = data.get("hourly", {})
-    if not hourly.get("time"):
+        _LAST_ERROR = f"Open-Meteo exception: {type(e).__name__}: {str(e)[:120]}"
         return {}
 
-    # Find the hour nearest target time
-    try:
-        times = [datetime.fromisoformat(t) for t in hourly["time"]]
-        target = target_dt.replace(tzinfo=None) if hasattr(target_dt, "replace") else target_dt
-        # Make sure target has no tzinfo for comparison
-        if hasattr(target, "tzinfo") and target.tzinfo is not None:
-            target = target.replace(tzinfo=None)
-        idx = min(range(len(times)), key=lambda i: abs((times[i] - target).total_seconds()))
-    except Exception:
-        # Fall back to midday hour
-        idx = min(12, len(hourly["time"]) - 1)
 
+def fetch_weather(lat: float, lon: float, when) -> dict:
+    """
+    Return weather forecast nearest to `when` for the given coords.
+
+    `when` accepts datetime, pd.Timestamp, ISO string, or None.
+    Cache key is normalized to (rounded lat/lon, hour-of-day).
+    """
+    if lat is None or lon is None:
+        return {}
+    try:
+        lat = round(float(lat), 3)
+        lon = round(float(lon), 3)
+    except (TypeError, ValueError):
+        return {}
+    target_dt = _normalize_target_dt(when)
+    return _fetch_single_om(lat, lon, target_dt.isoformat())
+
+
+def prefetch_weather_batch(coords_when_list: list[tuple[float, float, object]]) -> dict:
+    """
+    Fetch weather for many (lat, lon, when) tuples in a SINGLE Open-Meteo call,
+    then prime the per-location cache so subsequent fetch_weather() calls are
+    instant cache hits.
+
+    Returns a summary dict: {n_locations, n_success, n_cached, source}.
+
+    This is the recommended way to load weather for an entire slate. Call it
+    once near the top of the page, BEFORE the per-game loop that calls
+    fetch_weather. One HTTP request for the whole slate instead of 16.
+    """
+    global _LAST_ERROR, _LAST_SOURCE
+    if not coords_when_list:
+        return {"n_locations": 0, "n_success": 0}
+
+    # Deduplicate by (rounded lat, rounded lon, rounded hour)
+    seen = {}
+    for lat, lon, when in coords_when_list:
+        if lat is None or lon is None:
+            continue
+        try:
+            lat_r = round(float(lat), 3)
+            lon_r = round(float(lon), 3)
+        except (TypeError, ValueError):
+            continue
+        target_dt = _normalize_target_dt(when)
+        key = (lat_r, lon_r, target_dt.isoformat())
+        seen[key] = (lat_r, lon_r, target_dt)
+
+    if not seen:
+        return {"n_locations": 0, "n_success": 0}
+
+    unique_keys = list(seen.values())
+    n_locations = len(unique_keys)
+
+    # Open-Meteo multi-location: comma-separated lat/lon lists. All locations
+    # share the same date range (we use widest range across all targets).
+    # Since all MLB games typically happen on the same calendar date, this is fine.
+    lats_str = ",".join(f"{k[0]:.3f}" for k in unique_keys)
+    lons_str = ",".join(f"{k[1]:.3f}" for k in unique_keys)
+    # Pick the earliest and latest dates across all targets
+    all_dates = [k[2].strftime("%Y-%m-%d") for k in unique_keys]
+    start_date = min(all_dates)
+    end_date = max(all_dates)
+
+    url = (
+        "https://api.open-meteo.com/v1/forecast"
+        f"?latitude={lats_str}&longitude={lons_str}"
+        "&hourly=temperature_2m,relative_humidity_2m,precipitation_probability,"
+        "wind_speed_10m,wind_direction_10m,surface_pressure"
+        f"&start_date={start_date}&end_date={end_date}"
+        "&temperature_unit=fahrenheit&wind_speed_unit=mph&timezone=auto"
+    )
+
+    try:
+        r = requests.get(url, timeout=20)
+        if r.status_code == 429:
+            _LAST_ERROR = "Open-Meteo rate limited (429) on batch prefetch"
+            return {"n_locations": n_locations, "n_success": 0, "error": _LAST_ERROR}
+        if r.status_code != 200:
+            _LAST_ERROR = f"Open-Meteo batch HTTP {r.status_code}: {r.text[:120]}"
+            return {"n_locations": n_locations, "n_success": 0, "error": _LAST_ERROR}
+        data = r.json()
+    except requests.exceptions.Timeout:
+        _LAST_ERROR = "Open-Meteo batch request timed out (20s)"
+        return {"n_locations": n_locations, "n_success": 0, "error": _LAST_ERROR}
+    except Exception as e:
+        _LAST_ERROR = f"Open-Meteo batch exception: {type(e).__name__}: {str(e)[:120]}"
+        return {"n_locations": n_locations, "n_success": 0, "error": _LAST_ERROR}
+
+    # Open-Meteo returns a LIST when multiple locations were requested,
+    # or a single object for one location.
+    locations = data if isinstance(data, list) else [data]
+
+    # Prime the cache for each location
+    n_success = 0
+    for i, (lat_r, lon_r, target_dt) in enumerate(unique_keys):
+        if i >= len(locations):
+            break
+        loc_data = locations[i]
+        if not loc_data:
+            continue
+        result = _parse_om_response_for_hour(loc_data, target_dt)
+        if result.get("temp_f") is not None:
+            # Manually populate the cache for this (lat, lon, target_dt) key.
+            # Streamlit's @st.cache_data uses argument values as the cache key,
+            # so calling _fetch_single_om with these exact args will populate
+            # the cache. But we already HAVE the data — instead, store it in
+            # a module-level dict that fetch_weather can check before hitting
+            # the single-location API.
+            _BATCH_CACHE[(lat_r, lon_r, target_dt.isoformat())] = result
+            n_success += 1
+
+    if n_success > 0:
+        _LAST_ERROR = None
+        _LAST_SOURCE = "OpenMeteo-batch"
     return {
-        "temp_f":       hourly["temperature_2m"][idx],
-        "humidity":     hourly["relative_humidity_2m"][idx],
-        "precip_prob":  hourly["precipitation_probability"][idx],
-        "wind_mph":     hourly["wind_speed_10m"][idx],
-        "wind_dir_deg": hourly["wind_direction_10m"][idx],
-        "pressure_hpa": hourly["surface_pressure"][idx],
-        "time": hourly["time"][idx],
+        "n_locations": n_locations,
+        "n_success": n_success,
+        "source": _LAST_SOURCE,
     }
+
+
+# In-memory batch cache populated by prefetch_weather_batch. Reset on app reboot,
+# but during a single page render this holds the entire slate's weather after
+# one batch call. fetch_weather checks here first before hitting the API.
+_BATCH_CACHE: dict[tuple, dict] = {}
+
+
+def _fetch_with_batch_cache_check(lat: float, lon: float, when) -> dict:
+    """fetch_weather that checks _BATCH_CACHE before going to API."""
+    if lat is None or lon is None:
+        return {}
+    try:
+        lat = round(float(lat), 3)
+        lon = round(float(lon), 3)
+    except (TypeError, ValueError):
+        return {}
+    target_dt = _normalize_target_dt(when)
+    key = (lat, lon, target_dt.isoformat())
+    if key in _BATCH_CACHE:
+        return _BATCH_CACHE[key]
+    # Fall through to cached single-location API call
+    return _fetch_single_om(lat, lon, target_dt.isoformat())
+
+
+# Override the public name to use the batch-aware version
+fetch_weather = _fetch_with_batch_cache_check
 
 
 def wind_component_out(wind_dir_deg: float, cf_bearing_deg: float) -> float:
