@@ -329,6 +329,47 @@ def hr_prob_per_pa(
                 pitcher_mult = pitcher_mult * (1.0 + (dn_ratio - 1.0) * 0.50)
                 pitcher_mult = max(0.5, min(2.0, pitcher_mult))
 
+    # GROUND BALL DAMPENER (June 2026)
+    # Pitchers with high ground-ball rates physically suppress HRs because
+    # ground balls don't leave the yard. The pitcher_mult derived above
+    # captures HR/9 directly, but HR/9 lags real GB tendency — early-season
+    # GB pitchers might have an inflated HR/9 from a few flyball outliers.
+    #
+    # We apply a small explicit dampener:
+    #   GB% 45-50%: -2.5% pitcher_mult (above-average GB pitcher)
+    #   GB% 50-55%: -5% pitcher_mult (strong GB pitcher)
+    #   GB% 55%+:   -7.5% pitcher_mult (elite GB suppressor)
+    # Symmetric on the flyball side:
+    #   GB% 35-40%: +2.5% pitcher_mult (flyball-prone)
+    #   GB% 30-35%: +5% pitcher_mult (heavy flyball pitcher)
+    #   GB% <30%:   +7.5% pitcher_mult (extreme flyball, HR-prone)
+    # League avg GB% ≈ 43%. Multiplier neutral at 40-45%.
+    gb_pct_raw = None
+    if pitcher_row is not None:
+        for key in ("gb_pct", "groundballs_percent", "gb_allowed"):
+            v = pitcher_row.get(key)
+            if v is not None:
+                try:
+                    gb_pct_raw = float(v)
+                    break
+                except (TypeError, ValueError):
+                    continue
+    if gb_pct_raw is not None and not pd.isna(gb_pct_raw):
+        if gb_pct_raw >= 55:
+            pitcher_mult *= 0.925
+        elif gb_pct_raw >= 50:
+            pitcher_mult *= 0.95
+        elif gb_pct_raw >= 45:
+            pitcher_mult *= 0.975
+        elif gb_pct_raw < 30:
+            pitcher_mult *= 1.075
+        elif gb_pct_raw < 35:
+            pitcher_mult *= 1.05
+        elif gb_pct_raw < 40:
+            pitcher_mult *= 1.025
+        # Re-clamp
+        pitcher_mult = max(0.5, min(2.0, pitcher_mult))
+
     # PLATOON ADVANTAGE multiplier
     # Real MLB data: opposite-handed matchups produce ~12% more HRs than same-side
     # (LHB vs RHP: 1.07x baseline; LHB vs LHP: 0.94x; RHB vs LHP: 1.06x; RHB vs RHP: 0.96x)
