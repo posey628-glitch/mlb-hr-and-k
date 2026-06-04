@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.04-bullpen-v37b"
+APP_VERSION = "2026.06.04-catcher-v37c"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -3912,6 +3912,10 @@ for _, game in slate.iterrows():
     home_lineup_k_pct = float(home_k_col.mean()) if not home_k_col.empty and not home_k_col.isna().all() else None
 
     away_k_proj, home_k_proj = {}, {}
+    away_catcher_kf = 1.0
+    home_catcher_kf = 1.0
+    away_catcher_name = None
+    home_catcher_name = None
     try:
         # Park K factor (small effect, but worth including)
         pkf = park_k_factor(venue) if venue else 1.0
@@ -3935,11 +3939,27 @@ for _, game in slate.iterrows():
             return 5.5  # fallback to legacy default
         # Pull umpire K-factor (neutral 1.0 for ~90% of games)
         ump_k = float(ump.get("k_factor", 1.0)) if ump else 1.0
+
+        # CATCHER FRAMING K-FACTOR (v37c)
+        # Each pitcher uses their OWN team's catcher's framing factor —
+        # the catcher catches their pitcher. So home pitcher gets home
+        # catcher's framing; away pitcher gets away catcher's framing.
+        try:
+            from game_context import get_starting_catcher
+            catcher_info = get_starting_catcher(gpk)
+            away_catcher_kf = float(catcher_info.get("away_k_factor", 1.0))
+            home_catcher_kf = float(catcher_info.get("home_k_factor", 1.0))
+            away_catcher_name = catcher_info.get("away_catcher")
+            home_catcher_name = catcher_info.get("home_catcher")
+        except Exception:
+            pass
+
         if away_p_row:
             away_exp_ip = _exp_ip_for_pitcher(away_p_row)
             away_k_proj = k_total_projection(
                 away_p_row, home_lineup_k_pct,
                 ump_k_factor=ump_k,
+                catcher_framing_factor=away_catcher_kf,
                 park_k_factor=pkf,
                 expected_ip=away_exp_ip,
             )
@@ -3948,6 +3968,7 @@ for _, game in slate.iterrows():
             home_k_proj = k_total_projection(
                 home_p_row, away_lineup_k_pct,
                 ump_k_factor=ump_k,
+                catcher_framing_factor=home_catcher_kf,
                 park_k_factor=pkf,
                 expected_ip=home_exp_ip,
             )
@@ -3959,6 +3980,10 @@ for _, game in slate.iterrows():
         "park_mult": park_mult, "hr_mult": full_hr_mult,
         "summary": wx_summary, "vegas": vegas_row, "ump": ump,
         "framing": framing,
+        "away_catcher_name": away_catcher_name,
+        "home_catcher_name": home_catcher_name,
+        "away_catcher_kf": away_catcher_kf,
+        "home_catcher_kf": home_catcher_kf,
         "away_matchup": away_matchup, "home_matchup": home_matchup,
         "away_p_row": away_p_row, "home_p_row": home_p_row,
         "away_k_proj": away_k_proj, "home_k_proj": home_k_proj,
@@ -6915,6 +6940,28 @@ for _, game in slate.iterrows():
                 st.caption(f"👨‍⚖️ **HP: {ump_name}** · K-suppressing ({ump_k:.2f}×)")
             else:
                 st.caption(f"👨‍⚖️ HP: {ump_name} · slight K dampener ({ump_k:.2f}×)")
+
+        # CATCHER FRAMING DISPLAY (v37c)
+        # Show flag for each starting catcher if their K factor is meaningfully
+        # non-neutral. Most catchers cluster at 1.0 and won't show anything.
+        away_catcher = ctx.get("away_catcher_name")
+        home_catcher = ctx.get("home_catcher_name")
+        away_kf = ctx.get("away_catcher_kf", 1.0)
+        home_kf = ctx.get("home_catcher_kf", 1.0)
+        for c_name, c_kf, team_label in [
+            (away_catcher, away_kf, game.get("away_team_abbr", "AWY")),
+            (home_catcher, home_kf, game.get("home_team_abbr", "HM")),
+        ]:
+            if not c_name:
+                continue
+            if c_kf >= 1.035:
+                st.caption(f"🧤 **{team_label} C: {c_name}** · elite framer (+{(c_kf-1)*100:.1f}% K)")
+            elif c_kf >= 1.02:
+                st.caption(f"🧤 {team_label} C: {c_name} · above-avg framer (+{(c_kf-1)*100:.1f}% K)")
+            elif c_kf <= 0.97:
+                st.caption(f"🧤 **{team_label} C: {c_name}** · poor framer ({(c_kf-1)*100:+.1f}% K)")
+            elif c_kf <= 0.985:
+                st.caption(f"🧤 {team_label} C: {c_name} · below-avg framer ({(c_kf-1)*100:+.1f}% K)")
 
     # Per-game Top HR Hitter + Top Sleeper, combining both lineups
     am = ctx.get("away_matchup")
