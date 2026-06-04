@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.03-weather-429-v35"
+APP_VERSION = "2026.06.03-weather-gb-v36"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -126,7 +126,7 @@ try:
     from park_factors import park_k_factor
 except ImportError:
     def park_k_factor(venue_name): return 1.0
-from weather import fetch_weather, hr_multiplier
+from weather import fetch_weather, hr_multiplier, prefetch_weather_batch, get_last_weather_error
 
 # splits.py was deleted — never used in main data flow.
 # Per-pitch matchup data is captured by pitch_match_score (pitch_match.py),
@@ -3032,6 +3032,53 @@ st.divider()
 game_context_map = {}
 matchup_tables = {}
 
+# BATCH WEATHER PREFETCH (June 2026, v36)
+# Open-Meteo accepts up to 1000 locations in a single API call. We pull
+# weather for every game in the slate with ONE HTTP request, then prime an
+# in-memory cache that fetch_weather() reads from. This eliminates the
+# 16-burst-request problem that was hitting Open-Meteo's 10/min rate limit
+# on cold cache, and reduces page load time noticeably.
+try:
+    from park_factors import get_park
+    weather_batch_coords = []
+    for _, _g in slate.iterrows():
+        venue = _g.get("venue_name") or _g.get("home_team_venue") or ""
+        if not venue:
+            continue
+        park = get_park(venue) or {}
+        lat = park.get("lat")
+        lon = park.get("lon")
+        if lat is None or lon is None:
+            continue
+        # game time: prefer game_datetime, fall back to today at 7 PM
+        gdt = _g.get("game_datetime") or _g.get("gameDate")
+        weather_batch_coords.append((lat, lon, gdt))
+    if weather_batch_coords:
+        _batch_result = prefetch_weather_batch(weather_batch_coords)
+        # Stash for diagnostic display
+        st.session_state["_weather_batch_result"] = _batch_result
+except Exception as _e:
+    st.session_state["_weather_batch_result"] = {
+        "error": f"prefetch failed: {type(_e).__name__}: {str(_e)[:100]}"
+    }
+
+# Diagnostic banner: surface weather fetch failures clearly so user knows WHY
+_wbr = st.session_state.get("_weather_batch_result", {})
+if _wbr.get("error"):
+    st.error(
+        f"⚠️ **Weather batch fetch failed**: {_wbr['error']}\n\n"
+        f"Per-game fetch will be attempted as fallback. If individual games "
+        f"also fail, you'll see 'Weather unavailable' in each game card."
+    )
+elif _wbr.get("n_success", 0) > 0 and _wbr.get("n_locations", 0) > 0:
+    n_s = _wbr["n_success"]
+    n_l = _wbr["n_locations"]
+    if n_s < n_l:
+        st.warning(
+            f"⚠️ Weather: got data for {n_s}/{n_l} venues "
+            f"(some may show as unavailable)"
+        )
+
 for _, game in slate.iterrows():
     gpk = int(game["gamePk"])
 
@@ -3510,6 +3557,35 @@ for _, game in slate.iterrows():
                 return f"⚡ crushes {bp}"
             return ""
         matchup_df["arsenal_flag"] = matchup_df.apply(_arsenal_flag, axis=1)
+
+        # GROUND BALL PITCHER FLAG (June 2026, v36)
+        # Visible UI signal when the opposing pitcher induces a lot of GBs
+        # (which can't be HRs). Pairs with the pitcher_mult dampener applied
+        # in props.py hr_prob_per_pa. Surfaces "⬇️ GB pitcher" so users can
+        # see why a hitter's HR% might be suppressed against a Webb-tier GB
+        # specialist.
+        def _gb_flag(row):
+            # row is a hitter row; gb_pct lives on the opposing pitcher.
+            # We use the loop-scope `opp_p_row` since it's stable per matchup_df.
+            if not opp_p_row:
+                return ""
+            v = opp_p_row.get("gb_pct") or opp_p_row.get("groundballs_percent")
+            if v is None:
+                return ""
+            try:
+                gb_f = float(v)
+            except (TypeError, ValueError):
+                return ""
+            if gb_f >= 55:
+                return f"⬇️ elite GB pitcher ({gb_f:.0f}%)"
+            if gb_f >= 50:
+                return f"⬇️ GB pitcher ({gb_f:.0f}%)"
+            if gb_f < 30:
+                return f"⬆️ extreme FB pitcher ({gb_f:.0f}%)"
+            if gb_f < 35:
+                return f"⬆️ FB-prone ({gb_f:.0f}%)"
+            return ""
+        matchup_df["gb_flag"] = matchup_df.apply(_gb_flag, axis=1)
 
     if use_pitch_match and HAVE_PITCH_MATCH:
         try:
@@ -4424,7 +4500,7 @@ if all_hitters_for_picks:
             honorable_mentions = pd.DataFrame()
 
         cols_to_show = [c for c in [
-            "rank", "slate_leader_flag", "arsenal_flag", "split_confidence",
+            "rank", "slate_leader_flag", "arsenal_flag", "gb_flag", "split_confidence",
             "player_name", "team", "game", "opp_pitcher",
             "pick_score", "hr_game_pct", "matchup", "barrel_pct",
             "hr_profile_label",
@@ -4463,6 +4539,20 @@ if all_hitters_for_picks:
                         "highly speculative\n"
                         "📊 small split = 40-69 PA — some confidence but watch out\n"
                         "(empty) = ≥70 PA OR no split-based adjustment applied"
+                    ),
+                ),
+                "gb_flag": st.column_config.TextColumn(
+                    "GB/FB", width="medium",
+                    help=(
+                        "Opposing pitcher's ground-ball / fly-ball tendency. "
+                        "Ground balls can't be home runs, so GB pitchers physically "
+                        "suppress HRs even when their HR/9 looks normal. Flyball "
+                        "pitchers do the opposite.\n\n"
+                        "⬇️ elite GB pitcher (55%+) = ~7.5% HR suppression beyond HR/9\n"
+                        "⬇️ GB pitcher (50-54%) = ~5% HR suppression\n"
+                        "⬆️ FB-prone (30-34%) = ~5% HR boost\n"
+                        "⬆️ extreme FB pitcher (<30%) = ~7.5% HR boost\n"
+                        "(empty) = league-average GB rate (40-50%)"
                     ),
                 ),
                 "hr_profile_label": st.column_config.TextColumn(
@@ -6438,7 +6528,7 @@ def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
         )
 
     cols_to_show = [c for c in [
-        "alert", "grade", "smash_spot", "arsenal_flag", "contact_flag", "split_confidence", "slate_leader_flag",
+        "alert", "grade", "smash_spot", "arsenal_flag", "gb_flag", "contact_flag", "split_confidence", "slate_leader_flag",
         "player_name", "lineup_pos", "bats", "position",
         "hr_profile_label",
         "power_score", "matchup_opp", "hr_game_pct", "hr_pa_pct", "matchup", "test_score",
