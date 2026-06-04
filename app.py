@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.04-pull-dim-v37"
+APP_VERSION = "2026.06.04-bullpen-v37b"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -3351,6 +3351,21 @@ for _, game in slate.iterrows():
     except Exception:
         pass
 
+    # BULLPEN HR/9 for both teams (v37+)
+    # Fetched once per game and used for the bullpen-leverage blend in
+    # hr_prob_per_pa. Awa_bullpen_hr9 = hr/9 of the AWAY team's bullpen
+    # (which the HOME team's hitters face after the starter exits). And vice-versa.
+    away_bullpen_hr9 = None
+    home_bullpen_hr9 = None
+    try:
+        from data_fetcher import get_team_bullpen_hr9
+        if game.get("away_team_id"):
+            away_bullpen_hr9 = get_team_bullpen_hr9(int(game["away_team_id"]))
+        if game.get("home_team_id"):
+            home_bullpen_hr9 = get_team_bullpen_hr9(int(game["home_team_id"]))
+    except Exception:
+        pass
+
     if use_recent_form:
         try:
             if away_p_id:
@@ -3602,7 +3617,10 @@ for _, game in slate.iterrows():
     wind_dir = (weather or {}).get("wind_dir_deg")
     pull_summaries = {}  # for displaying in game header
 
-    for matchup_df, opp_p_row in [(away_matchup, home_p_row), (home_matchup, away_p_row)]:
+    for matchup_df, opp_p_row, opp_bullpen_hr9 in [
+        (away_matchup, home_p_row, home_bullpen_hr9),
+        (home_matchup, away_p_row, away_bullpen_hr9),
+    ]:
         if matchup_df is None or matchup_df.empty:
             continue
 
@@ -3695,6 +3713,7 @@ for _, game in slate.iterrows():
                     row_dict, opp_p_row,
                     park_factor=hitter_park_mult, weather_mult=wx_mult_nowind,
                     pitch_match_score=row_dict.get("pitch_match_score"),
+                    bullpen_hr9=opp_bullpen_hr9,
                 )
                 # Apply pitch_hr_score as an additional fine adjustment
                 # BUT re-apply the soft squash so we don't blow past the cap.
