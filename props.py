@@ -40,6 +40,7 @@ def hr_prob_per_pa(
     ttop_mult: float = 1.0,
     defense_factor: float = 1.0,
     min_pa: int = 100,
+    bullpen_hr9: float | None = None,  # v37+ bullpen leverage adjustment
 ) -> float | None:
     """
     Returns P(HR | single PA today) using ONLY real data.
@@ -291,6 +292,27 @@ def hr_prob_per_pa(
             pitcher_mult = 1.0
         else:
             p_hr_per_pa = (p_hr9 / 9) / 4.3  # ~4.3 PA per inning
+
+            # BULLPEN LEVERAGE BLEND (v37+)
+            # In a typical game, ~70% of opposing PAs come against the
+            # starter and ~30% come against relievers (after the starter
+            # exits in inning 5-6). If the team's bullpen has a notably
+            # high or low HR/9, the hitter's TRUE HR exposure is the
+            # weighted average, not just the starter's number.
+            #
+            # League-avg bullpen HR/9 ≈ 1.15. We blend at 70/30 by IP share:
+            #   blended_hr_per_pa = 0.7 * starter_hr_per_pa + 0.3 * bullpen_hr_per_pa
+            #
+            # Effect: matters most when bullpen and starter are very different.
+            # Examples:
+            #   - Good starter (HR/9 0.8) + bad bullpen (HR/9 1.6) →
+            #     starter alone says HR rate 2.1%, blended says 2.6% (+25%)
+            #   - Bad starter (HR/9 2.0) + good bullpen (HR/9 0.9) →
+            #     starter alone says 5.2%, blended says 4.4% (-15%)
+            if bullpen_hr9 is not None and not pd.isna(bullpen_hr9) and bullpen_hr9 > 0:
+                bp_hr_per_pa = (float(bullpen_hr9) / 9) / 4.3
+                p_hr_per_pa = 0.7 * p_hr_per_pa + 0.3 * bp_hr_per_pa
+
             raw_mult = p_hr_per_pa / LEAGUE_HR_PER_PA
             # Bayesian shrinkage toward 1.0 for IP in [10, 30].
             # At IP=10: 50% real, 50% league avg (1.0)
