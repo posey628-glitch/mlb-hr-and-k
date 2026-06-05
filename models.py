@@ -573,20 +573,29 @@ def add_power_score(
     # barrel_pct itself (because only PULLED barrels become HRs at
     # meaningful rates). Bumped weight 0.07→0.11 and reduced slg 0.07→0.03
     # to reflect the data's actual signal strength.
+    #
+    # v38 REWEIGHT (June 2026): Reviewer found fb_pct correlation 0.468 with
+    # HR Game% — same as ISO (0.20 weight) — but fb_pct was only weighted
+    # 0.07. SLG is largely redundant with iso and barrel_pct. Bumped fb_pct
+    # 0.07→0.13, dropped slg 0.03→0.00, gave the freed 0.03 to pulled_brl_pct
+    # (which has the highest single correlation 0.806). Total still sums to
+    # the same 0.96. The LA-weight slot deliberately stays open since
+    # sweet_spot_pct now carries that signal more cleanly.
     specs = [
         ("barrel_pct",     0.25, 2.0,  25.0),    # Elite raised: top is ~22%, so 25 = nobody hits 100
         ("iso",            0.20, 0.080, 0.350),  # Top is ~.330
-        ("pulled_brl_pct", 0.11, 0.5,  9.0),     # Boosted: highest HR correlation
+        ("pulled_brl_pct", 0.11, 0.5,  9.0),     # Highest HR correlation 0.806
+        ("fb_pct",         0.13, 18.0, 50.0),    # v38: was 0.07, bumped per reviewer correlation analysis
         ("hard_hit",       0.10, 25.0, 65.0),    # Top is ~62
         ("avg_ev",         0.10, 86.0, 98.0),    # Top is ~96.5
-        ("fb_pct",         0.07, 18.0, 50.0),    # 50 is rare
-        ("recent_iso",     0.05, 0.080, 0.350),
+        ("recent_iso",     0.06, 0.080, 0.350),  # Was 0.05, +0.01 from slg removal
         # NEW (June 2026): sweet_spot_pct replaces most of the LA weight.
         # Higher correlation with HR Game% (0.349 vs 0.306 for avg LA) and
         # doesn't have the "wrong target" problem the LA-28° formula had.
         # League avg ~33%, elite ~47% (e.g. classic gap hitters).
         ("sweet_spot_pct", 0.05, 28.0, 47.0),
-        ("slg",            0.03, 0.330, 0.620),  # Reduced: redundant with iso, barrel
+        # slg removed in v38 — redundant with iso + barrel_pct
+        # Weights sum to 1.00
     ]
 
     def absolute_score(val, poor, elite):
