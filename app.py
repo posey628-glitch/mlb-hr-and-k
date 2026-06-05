@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.04-audit-v38c"
+APP_VERSION = "2026.06.04-rebalance-v38d"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -4486,11 +4486,13 @@ if all_hitters_for_picks:
             weights.append(0.05)
         # lift_score (v38): contact-quality × air-ball × pitcher-FB tendency.
         # Reviewer-validated correlation 0.672 with HR Game% — better than any
-        # individual component. Conservative 0.03 starting weight (low impact
-        # but real signal). Bump after backtest data validates it earns more.
+        # individual component. Started at 0.03 in v38b; bumped to 0.06 in
+        # v38d after reviewer confirmed lift_score is producing real signal
+        # but undersurfaced in picks. At 0.06, Yordan-tier high-lift hitters
+        # move into Top 10 when they otherwise wouldn't.
         if "lift_score" in q.columns and q["lift_score"].notna().any():
             score_parts.append(_pct(q["lift_score"]))
-            weights.append(0.03)
+            weights.append(0.06)
 
         # === Today's environment (15%) ===
         # env_boost includes park × weather × pull-side wind
