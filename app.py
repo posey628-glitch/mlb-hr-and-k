@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.04-reweight-v38b"
+APP_VERSION = "2026.06.04-audit-v38c"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -6375,6 +6375,18 @@ def build_col_config():
                  "barrel%, SLG, recent ISO) percentile-ranked across this "
                  "lineup, then multiplied by park × weather × pitcher HR/9 "
                  "× pitcher barrel%-allowed. Higher = better HR play today."
+        ),
+        "lift_score": st.column_config.NumberColumn(
+            "Lift", format="%.1f",
+            help=(
+                "Lift Score (0-100): contact-quality × air-ball × pitcher "
+                "FB tendency. Correlation 0.672 with HR Game%.\n\n"
+                "Components: hard_hit% (35%), fb_pct (25%), sweet_spot% (25%), "
+                "pitcher FB tendency (15%).\n\n"
+                "Distinguishes power-AND-elevation hitters (Schwarber, "
+                "Alvarez) from power-but-grounded hitters (Cruz). A 17% "
+                "barrel hitter who pounds it into the ground can't homer."
+            ),
         ),
         "matchup_opp": st.column_config.NumberColumn(
             "Opp", format="%.1f",
