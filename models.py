@@ -581,21 +581,30 @@ def add_power_score(
     # (which has the highest single correlation 0.806). Total still sums to
     # the same 0.96. The LA-weight slot deliberately stays open since
     # sweet_spot_pct now carries that signal more cleanly.
+    # meaningful rates). Bumped weight 0.07→0.11 and reduced slg 0.07→0.03
+    # to reflect the data's actual signal strength.
+    #
+    # v38d FULL REBALANCE (June 2026): Reviewer correlation analysis across
+    # all power components produced data-driven weights. Key insight: hard_hit
+    # (0.590 corr) and avg_ev (0.605 corr) were underweighted at 0.10 each
+    # given their signal. fb_pct was first bumped 0.07→0.13 in v38b, then
+    # trimmed to 0.10 in v38d to diversify across multiple high-correlation
+    # signals rather than overweight any single one. sweet_spot_pct was
+    # found to be noisier than expected (0.257) and trimmed 0.05→0.03. LA
+    # re-added at small 0.02 (noisy but non-zero signal).
+    #
+    # Total weights sum to exactly 1.00.
     specs = [
-        ("barrel_pct",     0.25, 2.0,  25.0),    # Elite raised: top is ~22%, so 25 = nobody hits 100
-        ("iso",            0.20, 0.080, 0.350),  # Top is ~.330
-        ("pulled_brl_pct", 0.11, 0.5,  9.0),     # Highest HR correlation 0.806
-        ("fb_pct",         0.13, 18.0, 50.0),    # v38: was 0.07, bumped per reviewer correlation analysis
-        ("hard_hit",       0.10, 25.0, 65.0),    # Top is ~62
-        ("avg_ev",         0.10, 86.0, 98.0),    # Top is ~96.5
-        ("recent_iso",     0.06, 0.080, 0.350),  # Was 0.05, +0.01 from slg removal
-        # NEW (June 2026): sweet_spot_pct replaces most of the LA weight.
-        # Higher correlation with HR Game% (0.349 vs 0.306 for avg LA) and
-        # doesn't have the "wrong target" problem the LA-28° formula had.
-        # League avg ~33%, elite ~47% (e.g. classic gap hitters).
-        ("sweet_spot_pct", 0.05, 28.0, 47.0),
-        # slg removed in v38 — redundant with iso + barrel_pct
-        # Weights sum to 1.00
+        ("barrel_pct",     0.25, 4.0, 22.0),    # 0.749 corr — anchor
+        ("iso",            0.18, 0.100, 0.350), # 0.20→0.18 slight trim (redundant w/ barrel)
+        ("pulled_brl_pct", 0.11, 2.0, 18.0),    # 0.737 corr — keeps top-tier weight when data available
+        ("hard_hit",       0.13, 30.0, 60.0),   # 0.10→0.13 (0.590 corr was underweighted)
+        ("avg_ev",         0.12, 85.0, 95.0),   # 0.10→0.12 (0.605 corr was underweighted)
+        ("fb_pct",         0.10, 18.0, 50.0),   # 0.461 corr — diversified from v38b's 0.13
+        ("recent_iso",     0.06, 0.080, 0.380), # 0.465 corr — slight bump
+        ("sweet_spot_pct", 0.03, 10.0, 40.0),   # 0.257 corr — 0.05→0.03 (overweighted)
+        ("la",             0.02, 4.0, 22.0),    # noisy but small non-zero signal
+        # slg removed v38b — redundant with iso + barrel_pct
     ]
 
     def absolute_score(val, poor, elite):
