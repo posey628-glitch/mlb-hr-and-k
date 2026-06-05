@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.04-lift-v38"
+APP_VERSION = "2026.06.04-reweight-v38b"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -756,7 +756,8 @@ def pitcher_signal_emoji(test_score, sample_size=None, pa_threshold=80):
     return "🔴"
 
 
-def pitcher_grade(test_score, hr_suppress=None, sample_size=None, pa_threshold=80):
+def pitcher_grade(test_score, hr_suppress=None, sample_size=None, pa_threshold=80,
+                    era=None, hr9=None):
     """Letter grade + label for pitchers — matches BetGravy style.
 
     Combines test_score (K-focused) and hr_suppress (HR-friendly avoidance)
@@ -770,8 +771,38 @@ def pitcher_grade(test_score, hr_suppress=None, sample_size=None, pa_threshold=8
       MIXED        : test 45-65, hr_suppress 45-65 (neutral)
       TOUGH        : test ≥ 65 AND hr_suppress ≥ 65
       ELITE        : test ≥ 80 AND hr_suppress ≥ 75 (avoid HR plays here)
+
+    v38 fallback (Feltner case): When Savant-derived test_score is NaN but
+    we have basic MLB Stats API data (ERA + HR/9), assign a simplified grade
+    from those two. Prevents pitchers with real data from showing "—" just
+    because the Statcast merge failed silently.
     """
     if test_score is None or pd.isna(test_score):
+        # v38 ERA/HR9 fallback — only fires if both are present AND sample_size meets threshold
+        if (era is not None and not pd.isna(era)
+                and hr9 is not None and not pd.isna(hr9)
+                and sample_size is not None and not pd.isna(sample_size)
+                and sample_size >= pa_threshold):
+            try:
+                era_f = float(era)
+                hr9_f = float(hr9)
+            except (TypeError, ValueError):
+                return "—"
+            # Simple fallback grade from ERA + HR/9:
+            #   ELITE:    era < 2.75 AND hr9 < 0.80
+            #   TOUGH:    era < 3.50 AND hr9 < 1.00
+            #   EXPLOIT+: era >= 5.00 OR hr9 >= 1.80
+            #   EXPLOIT:  era >= 4.25 OR hr9 >= 1.40
+            #   MIXED:    everything else
+            if era_f < 2.75 and hr9_f < 0.80:
+                return "ELITE"
+            if era_f < 3.50 and hr9_f < 1.00:
+                return "TOUGH"
+            if era_f >= 5.00 or hr9_f >= 1.80:
+                return "EXPLOIT+"
+            if era_f >= 4.25 or hr9_f >= 1.40:
+                return "EXPLOIT"
+            return "MIXED"
         return "—"
     # NO sample (NaN/None) = insufficient. A pitcher with no PA faced shouldn't
     # get a grade. Was previously skipping the check for NaN which let pitchers
@@ -2470,6 +2501,7 @@ if not p_slate.empty:
         lambda r: pitcher_grade(
             r.get("test_score"), r.get("hr_suppress"), r.get("pa"),
             INSUFFICIENT_PA_THRESHOLD,
+            era=r.get("era"), hr9=r.get("hr9"),
         ),
         axis=1,
     )
@@ -4448,9 +4480,17 @@ if all_hitters_for_picks:
         # `((score + 70) / 1.5).clip(0, 100)` mapped all scores above ~77 to
         # ≈98-100, blurring rankings among the strongest sleepers (Julien 56,
         # Acuña 44 OK, but Schwarber-tier 80+ all collapsed).
+        # v38: reduced 0.08 → 0.05 to free weight for lift_score.
         if "sleeper_score" in q.columns and q["sleeper_score"].notna().any():
             score_parts.append(_pct(q["sleeper_score"]))
-            weights.append(0.08)
+            weights.append(0.05)
+        # lift_score (v38): contact-quality × air-ball × pitcher-FB tendency.
+        # Reviewer-validated correlation 0.672 with HR Game% — better than any
+        # individual component. Conservative 0.03 starting weight (low impact
+        # but real signal). Bump after backtest data validates it earns more.
+        if "lift_score" in q.columns and q["lift_score"].notna().any():
+            score_parts.append(_pct(q["lift_score"]))
+            weights.append(0.03)
 
         # === Today's environment (15%) ===
         # env_boost includes park × weather × pull-side wind
