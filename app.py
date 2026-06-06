@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.06-search-v39c"
+APP_VERSION = "2026.06.06-correlate-v39d"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -1151,6 +1151,15 @@ with st.sidebar:
              "- 🎯 **3/5** — Moderate consensus across 3 systems.\n"
              "- (empty) — 0-2 systems only.\n\n"
              "**Systems counted:** hr_game_pct, power_score, lift_score, matchup_opp, pitch_hr_score."),
+
+            ("🔗 Correlation Flag (same-game)",
+             "Warns when two Top 10 picks share a game (same pitcher matchup).\n"
+             "- 🔗 **+N** — N other Top 10 picks face the same pitcher\n"
+             "- Their outcomes are correlated: a pitcher meltdown or shutout "
+             "affects BOTH simultaneously\n"
+             "- **DO NOT parlay correlated picks** — joint probability is much "
+             "lower than (P1 × P2) assumes\n"
+             "- Bet them individually or pick the higher-confidence one"),
 
             ("🏆 Slate Leader",
              "Player leads slate in ≥1 stat (Brl%, ISO, HR%, etc).\n"
@@ -5007,6 +5016,45 @@ if all_hitters_for_picks:
             top10 = q_sorted.head(10).reset_index(drop=True)
         top10["rank"] = range(1, len(top10) + 1)
 
+        # SAME-GAME CORRELATION FLAG (v39d)
+        # When two Top 10 picks face the same pitcher (same game, opposite teams),
+        # they're correlated bets — if the pitcher gets pulled early or has a
+        # great night, BOTH legs are affected the same way. Reviewer feedback:
+        # "Don't parlay Seager + Nimmo — same pitcher." The parlay GENERATOR
+        # already skips same-game combos, but Top 10 picks don't show the
+        # correlation explicitly. This flag surfaces it visually.
+        #
+        # Logic: for each pick, count how many OTHER picks share its game.
+        # 0 others = no correlation, empty flag.
+        # 1+ others = correlated. Label: "🔗 same game as: X" or "🔗 +2 same"
+        try:
+            if not top10.empty and "game" in top10.columns:
+                game_counts = top10["game"].value_counts()
+                def _same_game_flag(row):
+                    g = row.get("game", "")
+                    if not g or pd.isna(g):
+                        return ""
+                    count = game_counts.get(g, 0)
+                    if count < 2:
+                        return ""
+                    # Find other picks in this game (exclude self by player_name)
+                    others = top10[
+                        (top10["game"] == g)
+                        & (top10["player_name"] != row.get("player_name"))
+                    ]
+                    if others.empty:
+                        return ""
+                    other_names = [
+                        f"#{int(r['rank'])} {r['player_name'].split()[-1]}"
+                        for _, r in others.iterrows()
+                    ]
+                    if len(other_names) == 1:
+                        return f"🔗 {other_names[0]}"
+                    return f"🔗 +{len(other_names)} ({', '.join(other_names)})"
+                top10["same_game_flag"] = top10.apply(_same_game_flag, axis=1)
+        except Exception:
+            top10["same_game_flag"] = ""
+
         # HONORABLE MENTIONS — plays that would have made top 10 if not for
         # the per-game diversity cap. Take the top 8 by pick_score that are
         # NOT in top10 AND have pick_score >= 70 (genuine quality threshold).
@@ -5034,7 +5082,8 @@ if all_hitters_for_picks:
             honorable_mentions = pd.DataFrame()
 
         cols_to_show = [c for c in [
-            "rank", "slate_leader_flag", "convergence_label", "arsenal_flag", "gb_flag", "split_confidence",
+            "rank", "slate_leader_flag", "convergence_label", "same_game_flag",
+            "arsenal_flag", "gb_flag", "split_confidence",
             "player_name", "team", "game", "opp_pitcher",
             "pick_score", "hr_game_pct", "matchup", "barrel_pct", "lift_score",
             "hr_profile_label",
@@ -5063,6 +5112,26 @@ if all_hitters_for_picks:
                         "Systems: hr_game_pct, power_score, lift_score, "
                         "matchup_opp, pitch_hr_score. Each measures a "
                         "fundamentally different angle on HR likelihood."
+                    ),
+                ),
+                "same_game_flag": st.column_config.TextColumn(
+                    "Correl", width="medium",
+                    help=(
+                        "Correlation warning — this pick shares a game with "
+                        "another Top 10 pick. They face the same pitcher, so "
+                        "their outcomes are correlated:\n\n"
+                        "• If the pitcher is pulled early, BOTH picks lose "
+                        "leverage simultaneously\n"
+                        "• If the pitcher has a dominant night, BOTH picks "
+                        "are suppressed together\n"
+                        "• If the pitcher melts down, BOTH picks benefit\n\n"
+                        "DO NOT parlay correlated picks — the joint probability "
+                        "is much lower than the (P1 × P2) calculation assumes. "
+                        "Bet them individually instead, or pick the higher-"
+                        "confidence one and skip the other.\n\n"
+                        "The parlay generator below already skips same-game "
+                        "combos automatically — this flag just makes the "
+                        "correlation visible in the Top 10 view."
                     ),
                 ),
                 "arsenal_flag": st.column_config.TextColumn(
