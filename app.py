@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.05-roster-40man-v38h"
+APP_VERSION = "2026.06.05-convergence-v39"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -4723,6 +4723,65 @@ if all_hitters_for_picks:
         else:
             q["pick_score"] = q.get("hr_game_pct", 0)
 
+        # ====================================================================
+        # CONVERGENCE SCORE (v39) — "how many independent systems agree?"
+        # ====================================================================
+        # Article insight: when multiple independent ranking systems all
+        # point to the same player, that player is "hard to eliminate" —
+        # measurably stronger than picks that only excel on one axis.
+        #
+        # We use 5 sub-rankings, each measuring a fundamentally different
+        # angle on HR likelihood:
+        #
+        #   1. hr_game_pct       — direct HR probability
+        #   2. power_score       — raw hitter power
+        #   3. lift_score        — contact-quality × elevation × pitcher FB
+        #   4. matchup_opp       — environment-boosted matchup
+        #   5. pitch_hr_score    — pitch-arsenal exploit
+        #
+        # Each ranking takes the top 15 by that metric. A player appearing
+        # in 4+ of these top-15 lists is highly convergent — multiple
+        # independent angles all flagging them.
+        #
+        # Outputs:
+        #   - convergence_count: int 0-5 (how many top-15 lists this player is in)
+        #   - convergence_label: "🎯🎯🎯 5/5 convergence" / "🎯🎯 4/5" / "🎯 3/5" / ""
+        # ====================================================================
+        try:
+            convergence_systems = []
+            for col_name in ("hr_game_pct", "power_score", "lift_score",
+                              "matchup_opp", "pitch_hr_score"):
+                if col_name in q.columns and q[col_name].notna().any():
+                    top15_ids = set(
+                        q.dropna(subset=[col_name])
+                         .sort_values(col_name, ascending=False)
+                         .head(15)["player_name"]
+                         .tolist()
+                    )
+                    convergence_systems.append(top15_ids)
+
+            n_systems = len(convergence_systems)
+
+            def _convergence_count(player_name):
+                if not convergence_systems:
+                    return 0
+                return sum(1 for s in convergence_systems if player_name in s)
+
+            def _convergence_label(count):
+                if count >= 5:
+                    return f"🎯🎯🎯 {count}/{n_systems}"
+                if count == 4:
+                    return f"🎯🎯 {count}/{n_systems}"
+                if count == 3:
+                    return f"🎯 {count}/{n_systems}"
+                return ""
+
+            q["convergence_count"] = q["player_name"].apply(_convergence_count)
+            q["convergence_label"] = q["convergence_count"].apply(_convergence_label)
+        except Exception:
+            q["convergence_count"] = 0
+            q["convergence_label"] = ""
+
         # Diversity rule: max 2 picks per game so the top 5 doesn't pile up
         # on one matchup. Greedy selection: sort by pick_score, take in order,
         # skipping any that would exceed 2-per-game.
@@ -4786,7 +4845,7 @@ if all_hitters_for_picks:
             honorable_mentions = pd.DataFrame()
 
         cols_to_show = [c for c in [
-            "rank", "slate_leader_flag", "arsenal_flag", "gb_flag", "split_confidence",
+            "rank", "slate_leader_flag", "convergence_label", "arsenal_flag", "gb_flag", "split_confidence",
             "player_name", "team", "game", "opp_pitcher",
             "pick_score", "hr_game_pct", "matchup", "barrel_pct", "lift_score",
             "hr_profile_label",
@@ -4801,6 +4860,21 @@ if all_hitters_for_picks:
                 "slate_leader_flag": st.column_config.TextColumn(
                     "🏆", width="small",
                     help="🏆 = slate leader in at least one category. ×N = leader in N categories.",
+                ),
+                "convergence_label": st.column_config.TextColumn(
+                    "Convergence", width="small",
+                    help=(
+                        "How many INDEPENDENT ranking systems put this player in "
+                        "their top 15. Players appearing in many systems are "
+                        "hard to eliminate — multiple angles all flag them.\n\n"
+                        "🎯🎯🎯 5/5 = appears in all 5 rankings (rare, elite play)\n"
+                        "🎯🎯 4/5 = appears in 4 rankings (strong consensus)\n"
+                        "🎯 3/5 = appears in 3 rankings (moderate consensus)\n"
+                        "(empty) = <3 — only one or two angles favor them\n\n"
+                        "Systems: hr_game_pct, power_score, lift_score, "
+                        "matchup_opp, pitch_hr_score. Each measures a "
+                        "fundamentally different angle on HR likelihood."
+                    ),
                 ),
                 "arsenal_flag": st.column_config.TextColumn(
                     "Arsenal", width="medium",
@@ -4975,7 +5049,7 @@ if all_hitters_for_picks:
                 "onto one matchup; it's NOT saying these plays are worse.**"
             )
             hm_cols = [c for c in [
-                "rank", "slate_leader_flag", "arsenal_flag",
+                "rank", "slate_leader_flag", "convergence_label", "arsenal_flag",
                 "player_name", "team", "game", "opp_pitcher",
                 "pick_score", "hr_game_pct", "matchup", "barrel_pct",
                 "hr_profile_label",
