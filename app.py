@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.05-convergence-v39"
+APP_VERSION = "2026.06.06-glossary-v39b"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -1123,6 +1123,150 @@ with st.sidebar:
         st.caption("Backtest module unavailable")
     show_backtest = st.checkbox("Show backtest panel", value=False,
                                   help="See accuracy of past projections vs actual outcomes.")
+
+    # =========================================================================
+    # LEGEND & GLOSSARY (v39) — unified reference for every term and flag
+    # =========================================================================
+    # The model has accumulated 20+ visible signals. Tooltips on individual
+    # columns help but there's no unified reference. This expander provides
+    # one. Organized by category so users can quickly find what they need.
+    # =========================================================================
+    with st.sidebar.expander("📖 Legend & Glossary", expanded=False):
+        st.markdown("""
+**🎯 Convergence Tier** — How many independent ranking systems put this player in their top 15.
+- 🎯🎯🎯 **5/5** — Every angle agrees. Rare. Elite play.
+- 🎯🎯 **4/5** — Strong consensus across 4 systems.
+- 🎯 **3/5** — Moderate consensus across 3 systems.
+- (empty) — 0-2 systems only.
+
+**Systems counted:** hr_game_pct, power_score, lift_score, matchup_opp, pitch_hr_score.
+
+---
+
+**🏆 Slate Leader** — Player leads slate in ≥1 stat (Brl%, ISO, HR%, etc).
+- 🏆 — Leads in 1 category
+- 🏆×2, 🏆×3 — Leads in multiple
+
+---
+
+**Pitcher Grade (matchup quality)**
+- **EXPLOIT+** — Target this pitcher. Worst HR-suppression on the slate.
+- **EXPLOIT** — Strong target. Above-avg HR allowance.
+- **MIXED** — Neutral. League average.
+- **TOUGH** — Avoid. Above-avg HR suppression.
+- **ELITE** — Avoid entirely. Top-tier HR suppression.
+- **—** — Insufficient data (Savant fetch failed; check ERA/HR9 fallback).
+
+---
+
+**Hitter Grade (HR Game%)**
+- **A+** — ≥22% HR Game% (top 5% of plays). Capped at A for same-side platoon.
+- **A** — 19-22%. Capped at B+ for same-side platoon.
+- **B+** — 16-19%.
+- **B / C+ / C / D / F** — descending tiers.
+
+---
+
+**🎯 Arsenal Flag** — Hitter vs pitcher pitch mix (hand-aware).
+- 🎯💥 **crushes [pitch]** — Elite exploit on this pitcher's main mix.
+- 🎯 **exploits [pitch]** — Strong edge vs the arsenal.
+- ⚡ **crushes [pitch]** — Has one pitch he hammers (game-state dependent).
+- 🚫 **arsenal trap** — This pitcher's mix is exactly his weakness.
+
+---
+
+**⬇️/⬆️ GB Flag (opposing pitcher)**
+- ⬇️ **elite GB pitcher (55%+)** — ~7.5% HR suppression beyond HR/9.
+- ⬇️ **GB pitcher (50-54%)** — ~5% HR suppression.
+- ⬆️ **FB-prone (30-34%)** — ~5% HR boost.
+- ⬆️ **extreme FB pitcher (<30%)** — ~7.5% HR boost.
+
+---
+
+**🎯 Contact Flag**
+- Shows when hitter has elite contact quality (Brl% ≥ 12%, hard_hit ≥ 50%).
+
+---
+
+**Split Confidence** — Sample size on the vs-LHP/vs-RHP split.
+- ⚠️ **thin** — <40 PA. Speculative.
+- 📊 **small** — 40-69 PA. Some confidence.
+- (empty) — ≥70 PA or no split-based adjustment.
+
+---
+
+**HR Profile** — What this hitter's HRs look like physically.
+- 🚀 **moonshot** (415+ ft) — High-trajectory bombs. Wind-sensitive.
+- ⚖️ **balanced+** (405-414 ft) — Mix of moonshots and lasers.
+- ⚖️ **balanced** (390-404 ft) — Average profile.
+- ⚡ **laser** (112+ mph max, <400 ft) — Line-drive HRs. Park-dim sensitive.
+- 📏 **short porch** (<390 ft) — Barely-clear-the-wall HRs.
+
+---
+
+**📉 Grade Caveat** — Pitcher has data gaps. Grade uses ERA/HR9 fallback.
+
+---
+
+**👨‍⚖️ Umpire** — Home plate ump's K-factor.
+- Most umps return neutral 1.0×.
+- Extreme framers shift K projections ±5%.
+
+---
+
+**🧤 Catcher Framing** — Starting catcher's framing impact on Ks.
+- Elite framers (Bailey, Hedges, Diaz): +3-5% K boost
+- Poor framers (S. Perez, W. Contreras): -2.5-3.5% K penalty
+
+---
+
+**🌬️ Wind / 🌡️ Temp** — Game-time weather from Open-Meteo.
+- Out to CF wind boosts HRs ~5% per 10mph.
+- Wind in suppresses ~5% per 10mph.
+- 70°F+ adds carry, <50°F suppresses.
+
+---
+
+**💥/💢 Platoon Flag**
+- 💥 — Hitter into favorable platoon (LHB vs RHP, RHB vs LHP).
+- 💢 — Hitter into unfavorable same-side platoon.
+
+---
+
+**🔥🔥🔥 Smash Spot** — Multi-factor convergence flag.
+- 🔥🔥🔥 **ELITE** — EXPLOIT+ pitcher + favorable park + favorable env + HR%≥19%
+- 🔥🔥 **STRONG** — EXPLOIT/EXPLOIT+ + favorable park + favorable env + HR%≥15%
+- 🔥 **SOLID** — EXPLOIT pitcher + favorable env + HR%≥12%
+
+---
+
+**Core Metrics**
+- **pick_score** — Composite ranking (weighted blend of all signals, 0-99).
+- **hr_game_pct** — Probability this hitter homers AT LEAST ONCE in this game.
+- **hr_pa_pct** — Probability per single plate appearance.
+- **power_score** — Pure power composite (barrel% + ISO + hard_hit + ...).
+- **lift_score** — Contact-quality × elevation × pitcher FB tendency (0.672 corr with HR%).
+- **matchup_opp** — Environment-boosted matchup score.
+- **pitch_hr_score** — Pitch-arsenal exploit score.
+- **hr_form** — Recent HR rate vs season pace (0-100, hot=high).
+- **sleeper_score** — Today's HR% minus season pace.
+- **env_boost** — Park × weather multiplier.
+
+---
+
+**Recent Form Arrow**
+- ⬆️ — Trending up (recent rate exceeds season rate)
+- ⬇️ — Trending down (recent rate below season rate)
+- ↔️ — Stable
+
+---
+
+**Underlying Math Layers**
+- Park HR factor × hand-aware × pull-side wind × pull-side distance
+- Starter HR/9 × bullpen blend (70/30)
+- Hitter splits × pitcher arsenal-by-hand × cold streak ceiling
+- Umpire K × catcher framing × park K
+        """)
 
 
 # ============================================================================
@@ -4980,6 +5124,69 @@ if all_hitters_for_picks:
             for _, r in top10.head(5).iterrows()
         )
         st.markdown(f"**Top 5 at a glance:** {glance}")
+
+        # MAXIMUM CONVERGENCE SECTION (v39)
+        # Surface the players appearing in the most independent ranking
+        # systems. Adaptively shows 5/5 if available, otherwise 4/5,
+        # otherwise an explanatory line if neither.
+        try:
+            if "convergence_count" in q_sorted.columns and q_sorted["convergence_count"].max() >= 3:
+                max_conv = int(q_sorted["convergence_count"].max())
+                # Show all players at the max convergence tier
+                if max_conv >= 4:
+                    conv_top = q_sorted[q_sorted["convergence_count"] >= max(4, max_conv)].head(5)
+                    tier_label = "Maximum Convergence (4-5/5)"
+                    tier_emoji = "🎯🎯🎯" if max_conv == 5 else "🎯🎯"
+                else:
+                    # max_conv == 3, show those
+                    conv_top = q_sorted[q_sorted["convergence_count"] == 3].head(5)
+                    tier_label = "Best Convergence Tonight (3/5)"
+                    tier_emoji = "🎯"
+
+                if not conv_top.empty:
+                    st.markdown(
+                        f"#### {tier_emoji} {tier_label} — players surviving "
+                        f"the most independent rankings"
+                    )
+                    st.caption(
+                        "These players appear in the top 15 of multiple "
+                        "independent ranking systems (hr_game_pct, power_score, "
+                        "lift_score, matchup_opp, pitch_hr_score). The article "
+                        "principle: players hard to eliminate are stronger "
+                        "than picks that excel on a single axis."
+                    )
+                    conv_cols = [c for c in [
+                        "convergence_label", "player_name", "team", "game",
+                        "opp_pitcher", "pick_score", "hr_game_pct",
+                        "matchup", "lift_score", "barrel_pct", "hr_form",
+                    ] if c in conv_top.columns]
+                    st.dataframe(
+                        conv_top[conv_cols].reset_index(drop=True),
+                        hide_index=True, use_container_width=True,
+                        column_config={
+                            "convergence_label": st.column_config.TextColumn(
+                                "Tier", width="small",
+                            ),
+                            "player_name": st.column_config.TextColumn("Player"),
+                            "pick_score": st.column_config.NumberColumn(
+                                "Pick", format="%.1f", width="small"),
+                            "hr_game_pct": st.column_config.NumberColumn(
+                                "HR%", format="%.2f", width="small"),
+                            "lift_score": st.column_config.NumberColumn(
+                                "Lift", format="%.1f", width="small"),
+                            "barrel_pct": st.column_config.NumberColumn(
+                                "Brl%", format="%.1f", width="small"),
+                            "hr_form": st.column_config.NumberColumn(
+                                "Form", format="%.0f", width="small"),
+                        },
+                    )
+            else:
+                st.caption(
+                    "🎯 No 3/5+ convergence plays on tonight's slate — each "
+                    "high-projection player excels on a different axis."
+                )
+        except Exception:
+            pass
 
         # POWER OUTSIDERS — highest HR Game% NOT in Top 10. The pick_score
         # formula penalizes non-EXPLOIT matchups, so a hitter facing a
