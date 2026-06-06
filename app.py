@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.05-recap-v38f"
+APP_VERSION = "2026.06.05-roster-40man-v38h"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -706,7 +706,8 @@ def hr_signal_emoji(hr_game_pct, sample_size=None, pa_threshold=80):
     return "🔴"
 
 
-def hr_grade(hr_game_pct, sample_size=None, pa_threshold=80):
+def hr_grade(hr_game_pct, sample_size=None, pa_threshold=80,
+              same_side_platoon=False):
     """Letter grade (A+/A/B+/B/C/D/F) for HR Game% - more intuitive than %.
 
     Calibrated to real-world MLB rates:
@@ -718,6 +719,17 @@ def hr_grade(hr_game_pct, sample_size=None, pa_threshold=80):
       C  : 6-9%   (below average)
       D  : 3-6%   (poor)
       F  : <3%    (avoid)
+
+    SAME-SIDE PLATOON CAP (v38g): LvL and RvR matchups are inherently tougher
+    than the projected HR% suggests, even when hitter splits are decent. A
+    LHB facing a LHP is rarely a true A+ play even when the math projects
+    one because:
+      - Same-side breaking balls move AWAY from the hitter (harder pickup)
+      - Sample sizes for same-side splits tend to be smaller (less reliable)
+      - Real-world betting markets discount same-side props ~5-8%
+    Cap same-side matchups at A (one tier down from where math would put
+    them at A+ tier). Doesn't change the underlying HR% projection — just
+    the letter grade visibility.
     """
     if hr_game_pct is None or pd.isna(hr_game_pct):
         return "—"
@@ -725,9 +737,11 @@ def hr_grade(hr_game_pct, sample_size=None, pa_threshold=80):
     if sample_size is None or pd.isna(sample_size) or sample_size < pa_threshold:
         return "—"
     if hr_game_pct >= 22:
-        return "A+"
+        # Same-side platoon: cap at A rather than A+
+        return "A" if same_side_platoon else "A+"
     if hr_game_pct >= 19:
-        return "A"
+        # Same-side at A-tier: drop one notch to B+ to surface the platoon discount
+        return "B+" if same_side_platoon else "A"
     if hr_game_pct >= 16:
         return "B+"
     if hr_game_pct >= 12:
@@ -1654,42 +1668,87 @@ hdr_col3.metric("Hitters w/ data", int(n_hitters))
 hdr_col4.metric("PA threshold", INSUFFICIENT_PA_THRESHOLD)
 
 # =============================================================================
-# AUTO-EVAL YESTERDAY'S SNAPSHOT (v38e)
+# AUTO-EVAL MOST RECENT SNAPSHOT (v38g — fixed)
 # =============================================================================
-# When the page opens for the first time today, automatically fetch
-# yesterday's actual outcomes and evaluate the snapshot. Surface results
-# in a banner so you can see how the model did without clicking anything.
+# Previous v38e logic only looked at "yesterday" (datetime.now().date() - 1).
+# Three problems with that:
+#   1. Timezone bug — datetime.now() uses server time (UTC on Streamlit Cloud),
+#      not Eastern, so "yesterday" was wrong for late-night ET users
+#   2. If you didn't open the app yesterday, today's "yesterday" had no snapshot
+#   3. Silent except: errors hid all failure reasons
 #
-# Cached in session_state so it only runs once per browser session.
+# v38g: Find the MOST RECENT snapshot in the past with games completed, eval
+# that one. Surface any errors visibly so we can see what's failing.
 # =============================================================================
 if "_auto_eval_done" not in st.session_state:
     st.session_state["_auto_eval_done"] = False
+    st.session_state["_auto_eval_error"] = None
 
 if not st.session_state["_auto_eval_done"]:
     try:
-        from datetime import timedelta as _td
+        from datetime import timedelta as _td, datetime as _dt
         from backtest import (
             list_snapshots, load_snapshot,
             fetch_hitter_outcomes, evaluate_hitter_projections,
         )
-        _yesterday = (datetime.now().date() - _td(days=1))
-        _yest_key = str(_yesterday)
-        if _yest_key in set(list_snapshots()):
-            _snapshot = load_snapshot(_yesterday)
-            if _snapshot:
-                _actuals = fetch_hitter_outcomes(_yesterday)
-                if _actuals:
+        # Use Eastern Time for the "today" comparison since that's when MLB
+        # games are played. A snapshot from "today" can't be evaluated yet
+        # because games haven't finished. Any earlier snapshot is fair game.
+        try:
+            import pytz
+            _et_now = _dt.now(pytz.timezone("US/Eastern"))
+            _today_et = _et_now.date()
+        except Exception:
+            # Fallback: assume ET is UTC-4 (EDT) or UTC-5 (EST). Use UTC-4 conservatively.
+            _today_et = (_dt.utcnow() - _td(hours=4)).date()
+
+        _all_snaps = sorted(list_snapshots())
+        # Find most recent snapshot before today
+        _eligible = [s for s in _all_snaps if s < str(_today_et)]
+        if not _eligible:
+            st.session_state["_auto_eval_error"] = (
+                "no_past_snapshots",
+                f"Found {len(_all_snaps)} snapshot(s) total but none before today "
+                f"({_today_et}). Snapshots from today can't be evaluated until games finish."
+            )
+        else:
+            _eval_target = _eligible[-1]  # most recent past snapshot
+            _snapshot = load_snapshot(_eval_target)
+            if not _snapshot:
+                st.session_state["_auto_eval_error"] = (
+                    "load_failed",
+                    f"Failed to load snapshot {_eval_target} from disk."
+                )
+            else:
+                _actuals = fetch_hitter_outcomes(_eval_target)
+                if not _actuals:
+                    st.session_state["_auto_eval_error"] = (
+                        "no_actuals",
+                        f"No actual outcomes returned from MLB Stats API for "
+                        f"{_eval_target}. The API may be slow, or no games were played."
+                    )
+                else:
                     _metrics = evaluate_hitter_projections(_snapshot, _actuals)
-                    if _metrics and not _metrics.get("error"):
+                    if not _metrics or _metrics.get("error"):
+                        _err_msg = _metrics.get("error", "unknown") if _metrics else "no metrics returned"
+                        st.session_state["_auto_eval_error"] = (
+                            "eval_failed", f"Evaluation failed: {_err_msg}"
+                        )
+                    else:
                         st.session_state["_auto_eval_metrics"] = _metrics
-                        st.session_state["_auto_eval_date"] = _yest_key
+                        st.session_state["_auto_eval_date"] = _eval_target
+                        st.session_state["_auto_eval_error"] = None
         st.session_state["_auto_eval_done"] = True
-    except Exception:
+    except Exception as _e:
+        st.session_state["_auto_eval_error"] = (
+            "exception", f"{type(_e).__name__}: {str(_e)[:200]}"
+        )
         st.session_state["_auto_eval_done"] = True
 
-# Surface yesterday's results banner if we have them
+# Surface yesterday's results banner if we have them, OR a diagnostic if we don't
 _eval_metrics = st.session_state.get("_auto_eval_metrics")
 _eval_date = st.session_state.get("_auto_eval_date")
+_eval_error = st.session_state.get("_auto_eval_error")
 if _eval_metrics and _eval_date:
     _hit_rate = _eval_metrics.get("top10_hr_hit_rate", 0)
     _slate_rate = _eval_metrics.get("actual_hr_rate_pct", 0)
@@ -1715,6 +1774,26 @@ if _eval_metrics and _eval_date:
             if "homered" in _pred_df.columns:
                 _pred_df["result"] = _pred_df["homered"].apply(lambda x: "💣 HR" if x else "—")
             st.dataframe(_pred_df, hide_index=True, use_container_width=True)
+elif _eval_error:
+    # Diagnostic banner so you can SEE why no recap appeared
+    _err_code, _err_msg = _eval_error
+    if _err_code == "no_past_snapshots":
+        st.info(
+            f"📊 **Auto-eval status:** {_err_msg}\n\n"
+            "If you saved a snapshot earlier today, that's expected — today's "
+            "games haven't finished yet. Tomorrow's page load will show today's results."
+        )
+    elif _err_code == "no_actuals":
+        st.warning(
+            f"⚠️ **Auto-eval status:** {_err_msg}\n\n"
+            "Try refreshing the page in a few minutes — sometimes the MLB API "
+            "lags after late games."
+        )
+    else:
+        st.warning(
+            f"⚠️ **Auto-eval status:** {_err_code} — {_err_msg}\n\n"
+            "Use the manual backtest panel in the sidebar to evaluate snapshots."
+        )
 
 
 if show_transactions:
@@ -3917,8 +3996,18 @@ for _, game in slate.iterrows():
             signals.append(hr_signal_emoji(
                 game_pct_val, sample, INSUFFICIENT_PA_THRESHOLD,
             ))
+            # Same-side platoon flag for hr_grade. Switch hitters (S) always
+            # bat opposite the pitcher's arm, so they're NEVER same-side.
+            _h_bats = (row_dict.get("bats") or "").upper() if row_dict else ""
+            _p_throws_now = (opp_p_row.get("p_throws") or opp_p_row.get("throws") or "").upper() if opp_p_row else ""
+            _same_side = bool(
+                _h_bats and _p_throws_now
+                and _h_bats != "S"
+                and _h_bats == _p_throws_now
+            )
             grades.append(hr_grade(
                 game_pct_val, sample, INSUFFICIENT_PA_THRESHOLD,
+                same_side_platoon=_same_side,
             ))
 
             # SMASH SPOT calculation - the "all stars align" flag.
