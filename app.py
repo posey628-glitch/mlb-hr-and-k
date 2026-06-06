@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.04-rebalance-v38d"
+APP_VERSION = "2026.06.05-auto-eval-v38e"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -757,7 +757,7 @@ def pitcher_signal_emoji(test_score, sample_size=None, pa_threshold=80):
 
 
 def pitcher_grade(test_score, hr_suppress=None, sample_size=None, pa_threshold=80,
-                    era=None, hr9=None):
+                    era=None, hr9=None, ip=None):
     """Letter grade + label for pitchers — matches BetGravy style.
 
     Combines test_score (K-focused) and hr_suppress (HR-friendly avoidance)
@@ -776,13 +776,30 @@ def pitcher_grade(test_score, hr_suppress=None, sample_size=None, pa_threshold=8
     we have basic MLB Stats API data (ERA + HR/9), assign a simplified grade
     from those two. Prevents pitchers with real data from showing "—" just
     because the Statcast merge failed silently.
+
+    v38e fix (Feltner reprise): The original v38 fallback required PA ≥ 80,
+    but PA comes from the same Savant fetch that failed — so PA was also
+    NaN, and the fallback never fired. Now we also accept IP ≥ 10 as the
+    sample threshold (matches the IP gate used elsewhere). MLB Stats API
+    returns IP reliably even when Savant data is missing.
     """
     if test_score is None or pd.isna(test_score):
-        # v38 ERA/HR9 fallback — only fires if both are present AND sample_size meets threshold
+        # v38 ERA/HR9 fallback — fires when both are present AND we have
+        # SOME sample data (either PA ≥ threshold OR IP ≥ 10)
+        has_sample = False
+        if (sample_size is not None and not pd.isna(sample_size)
+                and sample_size >= pa_threshold):
+            has_sample = True
+        elif ip is not None and not pd.isna(ip):
+            try:
+                if float(ip) >= 10.0:
+                    has_sample = True
+            except (TypeError, ValueError):
+                pass
+
         if (era is not None and not pd.isna(era)
                 and hr9 is not None and not pd.isna(hr9)
-                and sample_size is not None and not pd.isna(sample_size)
-                and sample_size >= pa_threshold):
+                and has_sample):
             try:
                 era_f = float(era)
                 hr9_f = float(hr9)
@@ -1637,8 +1654,69 @@ hdr_col3.metric("Hitters w/ data", int(n_hitters))
 hdr_col4.metric("PA threshold", INSUFFICIENT_PA_THRESHOLD)
 
 # =============================================================================
-# RECENT TRANSACTIONS — trades, signings, DFAs, IL, call-ups in last 2 days
+# AUTO-EVAL YESTERDAY'S SNAPSHOT (v38e)
 # =============================================================================
+# When the page opens for the first time today, automatically fetch
+# yesterday's actual outcomes and evaluate the snapshot. Surface results
+# in a banner so you can see how the model did without clicking anything.
+#
+# Cached in session_state so it only runs once per browser session.
+# =============================================================================
+if "_auto_eval_done" not in st.session_state:
+    st.session_state["_auto_eval_done"] = False
+
+if not st.session_state["_auto_eval_done"]:
+    try:
+        from datetime import timedelta as _td
+        from backtest import (
+            list_snapshots, load_snapshot,
+            fetch_hitter_outcomes, evaluate_hitter_projections,
+        )
+        _yesterday = (datetime.now().date() - _td(days=1))
+        _yest_key = str(_yesterday)
+        if _yest_key in set(list_snapshots()):
+            _snapshot = load_snapshot(_yesterday)
+            if _snapshot:
+                _actuals = fetch_hitter_outcomes(_yesterday)
+                if _actuals:
+                    _metrics = evaluate_hitter_projections(_snapshot, _actuals)
+                    if _metrics and not _metrics.get("error"):
+                        st.session_state["_auto_eval_metrics"] = _metrics
+                        st.session_state["_auto_eval_date"] = _yest_key
+        st.session_state["_auto_eval_done"] = True
+    except Exception:
+        st.session_state["_auto_eval_done"] = True
+
+# Surface yesterday's results banner if we have them
+_eval_metrics = st.session_state.get("_auto_eval_metrics")
+_eval_date = st.session_state.get("_auto_eval_date")
+if _eval_metrics and _eval_date:
+    _hit_rate = _eval_metrics.get("top10_hr_hit_rate", 0)
+    _slate_rate = _eval_metrics.get("actual_hr_rate_pct", 0)
+    _edge = _hit_rate - _slate_rate
+    _actual_hrs = _eval_metrics.get("total_actual_hrs", 0)
+    _top10_hits = _eval_metrics.get("top10_hrs_hit", 0)
+    edge_color = "🟢" if _edge >= 5 else "🟡" if _edge >= 0 else "🔴"
+    with st.expander(
+        f"{edge_color} **Yesterday's results ({_eval_date})** — "
+        f"Top 10 hit {_top10_hits}/10 ({_hit_rate:.0f}%) vs slate {_slate_rate:.1f}% "
+        f"(edge {_edge:+.1f}pp)",
+        expanded=False,
+    ):
+        st.caption(
+            f"Slate had {_actual_hrs} total HRs across "
+            f"{_eval_metrics.get('hitters_who_played', 0)} hitters. "
+            f"Brier score: {_eval_metrics.get('brier_score', 0):.4f}"
+        )
+        # Show each top 10 pick and whether they homered
+        _preds = _eval_metrics.get("top10_hr_predictions", [])
+        if _preds:
+            _pred_df = pd.DataFrame(_preds)
+            if "homered" in _pred_df.columns:
+                _pred_df["result"] = _pred_df["homered"].apply(lambda x: "💣 HR" if x else "—")
+            st.dataframe(_pred_df, hide_index=True, use_container_width=True)
+
+
 if show_transactions:
     try:
         from data_fetcher import get_recent_transactions
@@ -2501,7 +2579,7 @@ if not p_slate.empty:
         lambda r: pitcher_grade(
             r.get("test_score"), r.get("hr_suppress"), r.get("pa"),
             INSUFFICIENT_PA_THRESHOLD,
-            era=r.get("era"), hr9=r.get("hr9"),
+            era=r.get("era"), hr9=r.get("hr9"), ip=r.get("ip"),
         ),
         axis=1,
     )
