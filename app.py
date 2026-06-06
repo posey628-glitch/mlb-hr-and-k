@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.06-glossary-v39b"
+APP_VERSION = "2026.06.06-search-v39c"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -1132,141 +1132,169 @@ with st.sidebar:
     # one. Organized by category so users can quickly find what they need.
     # =========================================================================
     with st.sidebar.expander("📖 Legend & Glossary", expanded=False):
-        st.markdown("""
-**🎯 Convergence Tier** — How many independent ranking systems put this player in their top 15.
-- 🎯🎯🎯 **5/5** — Every angle agrees. Rare. Elite play.
-- 🎯🎯 **4/5** — Strong consensus across 4 systems.
-- 🎯 **3/5** — Moderate consensus across 3 systems.
-- (empty) — 0-2 systems only.
+        # Search filter inside glossary
+        _gloss_q = st.text_input(
+            "Search glossary",
+            value="",
+            placeholder="Type any term (e.g. 'smash', 'lift', 'EXPLOIT')",
+            key="_gloss_search",
+            help="Filter the glossary to entries matching your search.",
+        ).strip().lower()
 
-**Systems counted:** hr_game_pct, power_score, lift_score, matchup_opp, pitch_hr_score.
+        # Glossary entries: (heading, body_markdown).
+        # Each entry shows IFF its heading or body matches the search query.
+        glossary = [
+            ("🎯 Convergence Tier",
+             "How many independent ranking systems put this player in their top 15.\n"
+             "- 🎯🎯🎯 **5/5** — Every angle agrees. Rare. Elite play.\n"
+             "- 🎯🎯 **4/5** — Strong consensus across 4 systems.\n"
+             "- 🎯 **3/5** — Moderate consensus across 3 systems.\n"
+             "- (empty) — 0-2 systems only.\n\n"
+             "**Systems counted:** hr_game_pct, power_score, lift_score, matchup_opp, pitch_hr_score."),
 
----
+            ("🏆 Slate Leader",
+             "Player leads slate in ≥1 stat (Brl%, ISO, HR%, etc).\n"
+             "- 🏆 — Leads in 1 category\n"
+             "- 🏆×2, 🏆×3 — Leads in multiple"),
 
-**🏆 Slate Leader** — Player leads slate in ≥1 stat (Brl%, ISO, HR%, etc).
-- 🏆 — Leads in 1 category
-- 🏆×2, 🏆×3 — Leads in multiple
+            ("Pitcher Grade",
+             "Matchup quality from the batter's perspective.\n"
+             "- **EXPLOIT+** — Target this pitcher. Worst HR-suppression on the slate.\n"
+             "- **EXPLOIT** — Strong target. Above-avg HR allowance.\n"
+             "- **MIXED** — Neutral. League average.\n"
+             "- **TOUGH** — Avoid. Above-avg HR suppression.\n"
+             "- **ELITE** — Avoid entirely. Top-tier HR suppression.\n"
+             "- **—** — Insufficient data (Savant fetch failed; check ERA/HR9 fallback)."),
 
----
+            ("Hitter Grade (HR Game%)",
+             "Letter grade for projected HR Game%.\n"
+             "- **A+** — ≥22% HR Game% (top 5% of plays). Capped at A for same-side platoon.\n"
+             "- **A** — 19-22%. Capped at B+ for same-side platoon.\n"
+             "- **B+** — 16-19%.\n"
+             "- **B / C+ / C / D / F** — descending tiers."),
 
-**Pitcher Grade (matchup quality)**
-- **EXPLOIT+** — Target this pitcher. Worst HR-suppression on the slate.
-- **EXPLOIT** — Strong target. Above-avg HR allowance.
-- **MIXED** — Neutral. League average.
-- **TOUGH** — Avoid. Above-avg HR suppression.
-- **ELITE** — Avoid entirely. Top-tier HR suppression.
-- **—** — Insufficient data (Savant fetch failed; check ERA/HR9 fallback).
+            ("🎯 Arsenal Flag",
+             "Hitter vs pitcher pitch mix (hand-aware).\n"
+             "- 🎯💥 **crushes [pitch]** — Elite exploit on this pitcher's main mix.\n"
+             "- 🎯 **exploits [pitch]** — Strong edge vs the arsenal.\n"
+             "- ⚡ **crushes [pitch]** — Has one pitch he hammers (game-state dependent).\n"
+             "- 🚫 **arsenal trap** — This pitcher's mix is exactly his weakness."),
 
----
+            ("⬇️ ⬆️ GB Flag (opposing pitcher)",
+             "Opposing pitcher's ground-ball / fly-ball tendency.\n"
+             "- ⬇️ **elite GB pitcher (55%+)** — ~7.5% HR suppression beyond HR/9.\n"
+             "- ⬇️ **GB pitcher (50-54%)** — ~5% HR suppression.\n"
+             "- ⬆️ **FB-prone (30-34%)** — ~5% HR boost.\n"
+             "- ⬆️ **extreme FB pitcher (<30%)** — ~7.5% HR boost."),
 
-**Hitter Grade (HR Game%)**
-- **A+** — ≥22% HR Game% (top 5% of plays). Capped at A for same-side platoon.
-- **A** — 19-22%. Capped at B+ for same-side platoon.
-- **B+** — 16-19%.
-- **B / C+ / C / D / F** — descending tiers.
+            ("🎯 Contact Flag",
+             "Shows when hitter has elite contact quality (Brl% ≥ 12%, hard_hit ≥ 50%)."),
 
----
+            ("Split Confidence",
+             "Sample size on the vs-LHP/vs-RHP split.\n"
+             "- ⚠️ **thin** — <40 PA. Speculative.\n"
+             "- 📊 **small** — 40-69 PA. Some confidence.\n"
+             "- (empty) — ≥70 PA or no split-based adjustment."),
 
-**🎯 Arsenal Flag** — Hitter vs pitcher pitch mix (hand-aware).
-- 🎯💥 **crushes [pitch]** — Elite exploit on this pitcher's main mix.
-- 🎯 **exploits [pitch]** — Strong edge vs the arsenal.
-- ⚡ **crushes [pitch]** — Has one pitch he hammers (game-state dependent).
-- 🚫 **arsenal trap** — This pitcher's mix is exactly his weakness.
+            ("HR Profile",
+             "What this hitter's HRs look like physically.\n"
+             "- 🚀 **moonshot** (415+ ft) — High-trajectory bombs. Wind-sensitive.\n"
+             "- ⚖️ **balanced+** (405-414 ft) — Mix of moonshots and lasers.\n"
+             "- ⚖️ **balanced** (390-404 ft) — Average profile.\n"
+             "- ⚡ **laser** (112+ mph max, <400 ft) — Line-drive HRs. Park-dim sensitive.\n"
+             "- 📏 **short porch** (<390 ft) — Barely-clear-the-wall HRs."),
 
----
+            ("📉 Grade Caveat",
+             "Pitcher has data gaps. Grade uses ERA/HR9 fallback rather than full Savant data."),
 
-**⬇️/⬆️ GB Flag (opposing pitcher)**
-- ⬇️ **elite GB pitcher (55%+)** — ~7.5% HR suppression beyond HR/9.
-- ⬇️ **GB pitcher (50-54%)** — ~5% HR suppression.
-- ⬆️ **FB-prone (30-34%)** — ~5% HR boost.
-- ⬆️ **extreme FB pitcher (<30%)** — ~7.5% HR boost.
+            ("👨‍⚖️ Umpire",
+             "Home plate ump's K-factor. Most umps return neutral 1.0×. "
+             "Extreme framers shift K projections ±5%."),
 
----
+            ("🧤 Catcher Framing",
+             "Starting catcher's framing impact on Ks.\n"
+             "- Elite framers (Bailey, Hedges, Diaz): +3-5% K boost\n"
+             "- Poor framers (S. Perez, W. Contreras): -2.5-3.5% K penalty"),
 
-**🎯 Contact Flag**
-- Shows when hitter has elite contact quality (Brl% ≥ 12%, hard_hit ≥ 50%).
+            ("🌬️ 🌡️ Weather",
+             "Game-time weather from Open-Meteo.\n"
+             "- Out to CF wind boosts HRs ~5% per 10mph.\n"
+             "- Wind in suppresses ~5% per 10mph.\n"
+             "- 70°F+ adds carry, <50°F suppresses."),
 
----
+            ("💥 💢 Platoon Flag",
+             "- 💥 — Hitter into favorable platoon (LHB vs RHP, RHB vs LHP).\n"
+             "- 💢 — Hitter into unfavorable same-side platoon."),
 
-**Split Confidence** — Sample size on the vs-LHP/vs-RHP split.
-- ⚠️ **thin** — <40 PA. Speculative.
-- 📊 **small** — 40-69 PA. Some confidence.
-- (empty) — ≥70 PA or no split-based adjustment.
+            ("🔥 Smash Spot",
+             "Multi-factor convergence flag.\n"
+             "- 🔥🔥🔥 **ELITE** — EXPLOIT+ pitcher + favorable park + favorable env + HR%≥19%\n"
+             "- 🔥🔥 **STRONG** — EXPLOIT/EXPLOIT+ + favorable park + favorable env + HR%≥15%\n"
+             "- 🔥 **SOLID** — EXPLOIT pitcher + favorable env + HR%≥12%"),
 
----
+            ("pick_score",
+             "Composite ranking (weighted blend of all signals, 0-99)."),
 
-**HR Profile** — What this hitter's HRs look like physically.
-- 🚀 **moonshot** (415+ ft) — High-trajectory bombs. Wind-sensitive.
-- ⚖️ **balanced+** (405-414 ft) — Mix of moonshots and lasers.
-- ⚖️ **balanced** (390-404 ft) — Average profile.
-- ⚡ **laser** (112+ mph max, <400 ft) — Line-drive HRs. Park-dim sensitive.
-- 📏 **short porch** (<390 ft) — Barely-clear-the-wall HRs.
+            ("hr_game_pct",
+             "Probability this hitter homers AT LEAST ONCE in this game."),
 
----
+            ("hr_pa_pct",
+             "HR probability per single plate appearance."),
 
-**📉 Grade Caveat** — Pitcher has data gaps. Grade uses ERA/HR9 fallback.
+            ("power_score",
+             "Pure power composite (barrel% + ISO + hard_hit + avg_ev + fb_pct + ...)."),
 
----
+            ("lift_score",
+             "Contact-quality × elevation × pitcher FB tendency. "
+             "Validated 0.672 correlation with HR Game% — better than any single component. "
+             "Distinguishes power-AND-elevation hitters (Schwarber, Alvarez) from "
+             "power-but-grounded hitters (Cruz)."),
 
-**👨‍⚖️ Umpire** — Home plate ump's K-factor.
-- Most umps return neutral 1.0×.
-- Extreme framers shift K projections ±5%.
+            ("matchup_opp",
+             "Environment-boosted matchup score (park × weather × pitcher quality)."),
 
----
+            ("pitch_hr_score",
+             "Pitch-arsenal exploit score — how well this hitter's pitch-type performance "
+             "lines up against this pitcher's pitch mix."),
 
-**🧤 Catcher Framing** — Starting catcher's framing impact on Ks.
-- Elite framers (Bailey, Hedges, Diaz): +3-5% K boost
-- Poor framers (S. Perez, W. Contreras): -2.5-3.5% K penalty
+            ("hr_form",
+             "Recent HR rate vs season pace (0-100, hot=high). Cold-streak ceiling applies "
+             "(0-4 games = neutral 50, 5-6 = capped at 75, 7-9 capped 60, 10+ capped 40)."),
 
----
+            ("sleeper_score",
+             "Today's HR% minus season pace. High = matchup much better than typical."),
 
-**🌬️ Wind / 🌡️ Temp** — Game-time weather from Open-Meteo.
-- Out to CF wind boosts HRs ~5% per 10mph.
-- Wind in suppresses ~5% per 10mph.
-- 70°F+ adds carry, <50°F suppresses.
+            ("env_boost",
+             "Park × weather multiplier applied to all hitters in the game."),
 
----
+            ("Recent Form Arrow",
+             "- ⬆️ — Trending up (recent rate exceeds season rate)\n"
+             "- ⬇️ — Trending down (recent rate below season rate)\n"
+             "- ↔️ — Stable"),
 
-**💥/💢 Platoon Flag**
-- 💥 — Hitter into favorable platoon (LHB vs RHP, RHB vs LHP).
-- 💢 — Hitter into unfavorable same-side platoon.
+            ("Underlying Math Layers",
+             "- Park HR factor × hand-aware × pull-side wind × pull-side distance\n"
+             "- Starter HR/9 × bullpen blend (70/30)\n"
+             "- Hitter splits × pitcher arsenal-by-hand × cold streak ceiling\n"
+             "- Umpire K × catcher framing × park K"),
+        ]
 
----
-
-**🔥🔥🔥 Smash Spot** — Multi-factor convergence flag.
-- 🔥🔥🔥 **ELITE** — EXPLOIT+ pitcher + favorable park + favorable env + HR%≥19%
-- 🔥🔥 **STRONG** — EXPLOIT/EXPLOIT+ + favorable park + favorable env + HR%≥15%
-- 🔥 **SOLID** — EXPLOIT pitcher + favorable env + HR%≥12%
-
----
-
-**Core Metrics**
-- **pick_score** — Composite ranking (weighted blend of all signals, 0-99).
-- **hr_game_pct** — Probability this hitter homers AT LEAST ONCE in this game.
-- **hr_pa_pct** — Probability per single plate appearance.
-- **power_score** — Pure power composite (barrel% + ISO + hard_hit + ...).
-- **lift_score** — Contact-quality × elevation × pitcher FB tendency (0.672 corr with HR%).
-- **matchup_opp** — Environment-boosted matchup score.
-- **pitch_hr_score** — Pitch-arsenal exploit score.
-- **hr_form** — Recent HR rate vs season pace (0-100, hot=high).
-- **sleeper_score** — Today's HR% minus season pace.
-- **env_boost** — Park × weather multiplier.
-
----
-
-**Recent Form Arrow**
-- ⬆️ — Trending up (recent rate exceeds season rate)
-- ⬇️ — Trending down (recent rate below season rate)
-- ↔️ — Stable
-
----
-
-**Underlying Math Layers**
-- Park HR factor × hand-aware × pull-side wind × pull-side distance
-- Starter HR/9 × bullpen blend (70/30)
-- Hitter splits × pitcher arsenal-by-hand × cold streak ceiling
-- Umpire K × catcher framing × park K
-        """)
+        # Filter glossary by search query
+        if _gloss_q:
+            matches = [
+                (h, b) for h, b in glossary
+                if _gloss_q in h.lower() or _gloss_q in b.lower()
+            ]
+            if not matches:
+                st.caption(f"No entries match `{_gloss_q}`. Try a different term.")
+            else:
+                st.caption(f"Showing {len(matches)} of {len(glossary)} entries")
+                for h, b in matches:
+                    st.markdown(f"**{h}**\n\n{b}\n\n---")
+        else:
+            # Show full glossary
+            for h, b in glossary:
+                st.markdown(f"**{h}**\n\n{b}\n\n---")
 
 
 # ============================================================================
@@ -1742,6 +1770,23 @@ if use_sprint_speed:
 # ============================================================================
 
 st.title(f"💣 DingerMaven — {selected_date.strftime('%A, %B %d, %Y')}")
+
+# PLAYER SEARCH (v39c)
+# Quick filter — type a name fragment to find anyone in the slate.
+# Searches the all-hitters list and surfaces matching rows with their
+# computed projections, so you can find anyone without scrolling through
+# 15 game cards.
+_player_search = st.text_input(
+    "🔍 Find player",
+    value="",
+    placeholder="Type any part of a player's name (e.g. 'kurtz', 'soto', 'yordan')",
+    help=(
+        "Searches across all hitters in tonight's slate. Matches any part "
+        "of first or last name, case-insensitive. Leave blank to see "
+        "the normal full slate view."
+    ),
+    key="_player_search_query",
+).strip().lower()
 
 # BIG visible deploy version. If this doesn't say v6-NUCLEAR, deploy hasn't taken effect.
 st.markdown(
@@ -6226,6 +6271,72 @@ if all_hitters:
         qualified = combined_all[combined_all["pa"].notna() & (combined_all["pa"] >= INSUFFICIENT_PA_THRESHOLD)]
     else:
         qualified = combined_all
+
+    # PLAYER SEARCH RESULTS (v39c)
+    # If the user typed a search query, show matching players in a focused
+    # table at the top. Helps find specific players (Yordan, Kurtz, Pavin
+    # Smith) without scrolling through 15 game cards.
+    if _player_search:
+        try:
+            mask = combined_all["player_name"].fillna("").str.lower().str.contains(
+                _player_search, na=False
+            )
+            search_results = combined_all[mask].copy()
+            if not search_results.empty:
+                st.markdown(f"### 🔍 Search Results for `{_player_search}` ({len(search_results)} match{'es' if len(search_results) != 1 else ''})")
+                search_cols = [c for c in [
+                    "player_name", "team", "game", "lineup_pos", "is_roster_fill",
+                    "bats", "opp_pitcher", "grade",
+                    "hr_game_pct", "hr_pa_pct", "pick_score",
+                    "power_score", "lift_score", "matchup_opp",
+                    "barrel_pct", "iso", "hard_hit",
+                    "hr_form", "arsenal_flag", "gb_flag", "smash_spot",
+                    "convergence_label",
+                ] if c in search_results.columns]
+                # Sort by pick_score desc, then HR% desc, so best matches appear first
+                sort_cols = [c for c in ["pick_score", "hr_game_pct"] if c in search_results.columns]
+                if sort_cols:
+                    search_results = search_results.sort_values(sort_cols, ascending=False)
+                # Add a "bench/starter" indicator using is_roster_fill
+                if "is_roster_fill" in search_results.columns:
+                    search_results["status"] = search_results["is_roster_fill"].apply(
+                        lambda x: "🪑 bench/roster" if x else "✅ starter"
+                    )
+                    if "status" not in search_cols:
+                        search_cols.insert(2, "status")
+                st.dataframe(
+                    search_results[search_cols].reset_index(drop=True),
+                    hide_index=True, use_container_width=True,
+                    column_config={
+                        "player_name": st.column_config.TextColumn("Player"),
+                        "status": st.column_config.TextColumn("Status", width="small"),
+                        "pick_score": st.column_config.NumberColumn("Pick", format="%.1f"),
+                        "hr_game_pct": st.column_config.NumberColumn("HR%", format="%.2f"),
+                        "hr_pa_pct": st.column_config.NumberColumn("HR/PA%", format="%.2f"),
+                        "power_score": st.column_config.NumberColumn("Pwr", format="%.1f"),
+                        "lift_score": st.column_config.NumberColumn("Lift", format="%.1f"),
+                        "matchup_opp": st.column_config.NumberColumn("Opp", format="%.1f"),
+                        "barrel_pct": st.column_config.NumberColumn("Brl%", format="%.1f"),
+                        "iso": st.column_config.NumberColumn("ISO", format="%.3f"),
+                        "hard_hit": st.column_config.NumberColumn("HH%", format="%.1f"),
+                        "hr_form": st.column_config.NumberColumn("Form", format="%.0f"),
+                    },
+                )
+                st.caption(
+                    "🪑 bench/roster = lineup not confirmed for this player (roster-fill mode). "
+                    "✅ starter = confirmed in posted lineup. "
+                    "If a player you expected to be a confirmed starter shows as bench, "
+                    "the lineup may not be posted yet, or the cache may be stale "
+                    "(refresh the page after lineups post)."
+                )
+            else:
+                st.warning(
+                    f"🔍 No players match `{_player_search}` on tonight's slate. "
+                    f"Try a shorter fragment (e.g. 'kur' instead of 'kurtz')."
+                )
+            st.divider()
+        except Exception as _e:
+            st.caption(f"Search error: {type(_e).__name__}")
 
     # ==== AUTO-SNAPSHOT: critical for the model to learn ====
     # The model is meaningless without outcome data to calibrate against.
