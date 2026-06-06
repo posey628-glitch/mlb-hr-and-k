@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.05-auto-eval-v38e"
+APP_VERSION = "2026.06.05-recap-v38f"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -4929,7 +4929,8 @@ if all_hitters_for_picks:
                 tweet_format = st.radio(
                     "Format:",
                     options=["Top 5 (short)", "Top 10 (full)",
-                              "Top 5 + Smash Spots", "Top 5 + edge stat"],
+                              "Top 5 + Smash Spots", "Top 5 + edge stat",
+                              "Yesterday's recap", "Weekly recap (7d)"],
                     index=0,
                     key="tweet_format_choice",
                     horizontal=True,
@@ -4996,6 +4997,88 @@ if all_hitters_for_picks:
                         f"{edge_line}\n\n"
                         f"#MLB #HRprops #DFS"
                     )
+                elif tweet_format == "Yesterday's recap":
+                    # Pull yesterday's auto-eval results from session_state
+                    yest_metrics = st.session_state.get("_auto_eval_metrics")
+                    yest_date_str = st.session_state.get("_auto_eval_date", "")
+                    if not yest_metrics:
+                        tweet_body = (
+                            "💣 No recap data available yet.\n\n"
+                            "Save a snapshot tonight after lineups lock, and "
+                            "tomorrow this format will auto-populate with how "
+                            "the model did.\n\n"
+                            "#MLB #HRprops #DFS"
+                        )
+                    else:
+                        hit_rate = yest_metrics.get("top10_hr_hit_rate", 0)
+                        slate_rate = yest_metrics.get("actual_hr_rate_pct", 0)
+                        edge = hit_rate - slate_rate
+                        top10_hits = yest_metrics.get("top10_hrs_hit", 0)
+                        actual_hrs = yest_metrics.get("total_actual_hrs", 0)
+                        # Pull the names of picks that homered
+                        preds = yest_metrics.get("top10_hr_predictions", []) or []
+                        winners = [p.get("name") for p in preds if p.get("homered")]
+                        winners_str = ""
+                        if winners:
+                            # Truncate to first 4 to keep under 280 chars
+                            shown = winners[:4]
+                            extra = len(winners) - len(shown)
+                            winners_str = "\nHits: " + ", ".join(shown)
+                            if extra > 0:
+                                winners_str += f" +{extra} more"
+                        # Format the date nicely
+                        try:
+                            from datetime import datetime as _dt
+                            yest_dt = _dt.strptime(yest_date_str, "%Y-%m-%d")
+                            yest_pretty = yest_dt.strftime("%b %-d")
+                        except Exception:
+                            yest_pretty = yest_date_str
+                        emoji = "🟢" if edge >= 5 else "🟡" if edge >= 0 else "🔴"
+                        tweet_body = (
+                            f"💣 DingerMaven Recap — {yest_pretty}\n\n"
+                            f"{emoji} Top 10 picks: {top10_hits}/10 hit a HR\n"
+                            f"Hit rate: {hit_rate:.0f}% vs slate avg {slate_rate:.1f}%\n"
+                            f"Edge: {edge:+.1f}pp"
+                            f"{winners_str}\n\n"
+                            f"#MLB #HRprops #DFS"
+                        )
+                elif tweet_format == "Weekly recap (7d)":
+                    # Aggregate the last 7 days of evaluated snapshots
+                    weekly_summary = None
+                    try:
+                        from backtest import rolling_aggregate_hitters
+                        weekly_summary = rolling_aggregate_hitters(max_days=7)
+                    except Exception:
+                        pass
+                    if not weekly_summary or weekly_summary.get("error"):
+                        tweet_body = (
+                            "💣 No weekly recap data yet.\n\n"
+                            "Need at least 2 evaluated days to build a "
+                            "weekly recap. Keep the app open daily — "
+                            "snapshots auto-save and auto-evaluate.\n\n"
+                            "#MLB #HRprops #DFS"
+                        )
+                    else:
+                        n_days = weekly_summary.get("n_snapshots", 0)
+                        t10_rate = weekly_summary.get("top10_hr_rate_pct", 0)
+                        slate_rate = weekly_summary.get("slate_baseline_hr_rate_pct", 0)
+                        edge_pp = weekly_summary.get("edge_vs_slate_pp", 0)
+                        any_hit_pct = weekly_summary.get("any_hit_rate_pct", 0)
+                        days_with_hit = weekly_summary.get("days_with_any_top10_hit", 0)
+                        days_total = weekly_summary.get("days_total", 0)
+                        emoji = "🟢" if edge_pp >= 5 else "🟡" if edge_pp >= 0 else "🔴"
+                        # Calculate total HRs hit across the week
+                        t10_hrs = weekly_summary.get("top10_hrs_hit", 0)
+                        t10_picks = weekly_summary.get("top10_picks_total", 0)
+                        tweet_body = (
+                            f"💣 DingerMaven {n_days}-Day Recap\n\n"
+                            f"{emoji} Top 10 picks: {t10_hrs}/{t10_picks} HRs ({t10_rate:.1f}%)\n"
+                            f"Slate avg: {slate_rate:.1f}%\n"
+                            f"Edge vs slate: {edge_pp:+.1f}pp\n\n"
+                            f"Days with at least 1 Top 10 HR: "
+                            f"{days_with_hit}/{days_total} ({any_hit_pct:.0f}%)\n\n"
+                            f"#MLB #HRprops #DFS"
+                        )
                 else:  # Top 5 short or Top 10 full
                     tweet_body = (
                         f"💣 DingerMaven Top {len(pick_lines)} — {date_str}\n\n"
