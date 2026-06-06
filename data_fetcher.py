@@ -266,38 +266,62 @@ def get_lineup(game_pk: int, side: str = "home") -> list[dict]:
 
 @st.cache_data(ttl=900)  # 15min — catches mid-day call-ups, IL moves, demotions
 def get_team_roster(team_id: int) -> list[dict]:
-    """Active roster for a team - used as lineup fallback.
+    """Active roster + 40-man roster for a team — used as lineup fallback.
 
-    Hydrates with person.bats so bench players have batting handedness
-    (otherwise the bench display shows 'bats: None' for every player).
+    v38h fix: previously only pulled `/roster/active` (28-man), which silently
+    excluded freshly-called-up players (Pinango, McAdoo, Crooks, fresh
+    September promos) and players DFA'd or transferred mid-season but still
+    appearing in recent lineups. Now pulls 40-man roster AND active roster,
+    merges them with active flagged first.
+
+    The MLB Stats API has multiple roster types:
+      active        — 28-man currently active
+      40Man         — full 40-man (includes AAA-stashed players)
+      fullSeason    — all players who appeared this year (huge, noisy)
+
+    We use active + 40Man combined. Players on 40-man but not active are
+    typically AAA stashes that can be recalled any day — exactly the gap
+    that causes Pinango/McAdoo-tier omissions.
+
+    Hydrates with person.bats so bench players have batting handedness.
     """
-    url = (
-        f"https://statsapi.mlb.com/api/v1/teams/{team_id}/roster/active"
-        "?hydrate=person"
-    )
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=15)
-        r.raise_for_status()
-        out = []
-        for p in r.json().get("roster", []):
+    seen_ids = set()
+    out = []
+
+    def _fetch(roster_type):
+        url = (
+            f"https://statsapi.mlb.com/api/v1/teams/{team_id}/roster/{roster_type}"
+            "?hydrate=person"
+        )
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=15)
+            r.raise_for_status()
+            return r.json().get("roster", [])
+        except Exception:
+            return []
+
+    # Pull active first (these are the most reliable), then 40-man (catches AAA stashes)
+    for roster_type in ("active", "40Man"):
+        roster_data = _fetch(roster_type)
+        for p in roster_data:
             pos = p.get("position", {}).get("abbreviation", "")
-            # Skip pure pitchers (P/SP/RP). TWP (two-way players) ARE kept
-            # because they bat — Ohtani being the canonical example.
             if pos in ("P", "SP", "RP"):
                 continue
             person = p.get("person", {}) or {}
-            # batSide can be nested under person (hydrated) or absent
+            pid = person.get("id") or p.get("person", {}).get("id")
+            if not pid or pid in seen_ids:
+                continue
+            seen_ids.add(pid)
             bats = ((person.get("batSide") or {}).get("code")
                     or (p.get("batSide") or {}).get("code"))
             out.append({
-                "id": person.get("id") or p["person"]["id"],
+                "id": pid,
                 "name": person.get("fullName") or p["person"]["fullName"],
                 "position": pos,
                 "bats": bats,
+                "roster_type": roster_type,  # diagnostic — "active" or "40Man"
             })
-        return out
-    except Exception:
-        return []
+    return out
 
 
 @st.cache_data(ttl=3600)
