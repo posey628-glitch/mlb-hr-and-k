@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.07-il-perteam-v39h"
+APP_VERSION = "2026.06.07-split-thresh-v39i"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -1231,10 +1231,17 @@ with st.sidebar:
              "Shows when hitter has elite contact quality (Brl% ≥ 12%, hard_hit ≥ 50%)."),
 
             ("Split Confidence",
-             "Sample size on the vs-LHP/vs-RHP split.\n"
-             "- ⚠️ **thin** — <40 PA. Speculative.\n"
-             "- 📊 **small** — 40-69 PA. Some confidence.\n"
-             "- (empty) — ≥70 PA or no split-based adjustment."),
+             "Sample size on the vs-LHP/vs-RHP split for tonight's matchup.\n"
+             "- ⚠️ **thin** — sample too small for confidence in that split rate.\n"
+             "- 📊 **small** — meaningful but not bulletproof sample.\n"
+             "- (empty) — sample size adequate for the calendar date.\n\n"
+             "Thresholds are season-aware (raised as the year progresses):\n"
+             "- April: thin <20 PA, small <40\n"
+             "- May: thin <30 PA, small <55\n"
+             "- June: thin <35 PA, small <65\n"
+             "- July: thin <40 PA, small <70\n"
+             "- August: thin <45 PA, small <80\n"
+             "- September+: thin <50 PA, small <90"),
 
             ("HR Profile",
              "What this hitter's HRs look like physically.\n"
@@ -5247,10 +5254,12 @@ if all_hitters_for_picks:
                         "Sample-size warning on the vs-LHP/vs-RHP split that's "
                         "driving this projection. Small splits can produce "
                         "extreme rates that don't reflect true skill.\n\n"
-                        "⚠️ thin split = <40 PA in the relevant split — treat as "
-                        "highly speculative\n"
-                        "📊 small split = 40-69 PA — some confidence but watch out\n"
-                        "(empty) = ≥70 PA OR no split-based adjustment applied"
+                        "⚠️ thin split = sample too small for confidence\n"
+                        "📊 small split = meaningful but not bulletproof\n"
+                        "(empty) = sample size adequate for the calendar date\n\n"
+                        "Thresholds are SEASON-AWARE: lower in April (everyone "
+                        "is thin), higher in August (samples accumulate). "
+                        "Currently in June: thin <35 PA, small <65 PA."
                     ),
                 ),
                 "gb_flag": st.column_config.TextColumn(
