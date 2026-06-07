@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.07-il-detection-v39g"
+APP_VERSION = "2026.06.07-il-perteam-v39h"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -6351,63 +6351,121 @@ if all_hitters:
     combined_all = pd.concat(all_hitters, ignore_index=True)
 
     # ========================================================================
-    # HITTER IL DETECTION via ACTIVE ROSTER CROSS-CHECK (v39g)
+    # HITTER IL DETECTION via ACTIVE ROSTER CROSS-CHECK (v39h)
     # ========================================================================
-    # The MLB transactions API lags 12-24 hours when a player goes on IL.
-    # The active roster endpoint updates within minutes. Cross-reference
-    # every projected hitter against the active 26-man roster of their team:
-    # if they're NOT on it, they're either on IL, optioned, or DFA'd.
-    # All three states = "shouldn't play tonight."
+    # v39g had silent failure modes:
+    #   1. If active roster API failed for some teams, those teams' hitters
+    #      either ALL got flagged (false positives) or NONE did (silent skip)
+    #   2. Used global set instead of per-team — partial failures contaminate
+    #   3. Players with NaN player_id (Int64 dtype holds NA) silently returned
+    #      empty flag instead of being either flagged or shown as "no ID"
     #
-    # This catches the Murakami / Drake Baldwin / Francisco Alvarez cases
-    # that the transactions-API approach misses.
-    #
-    # The flag is informational (🏥 not on active roster) AND applies a
-    # -15 pick_score penalty so the player drops out of Top 10 contention.
-    # Empty active-roster set (API failure) is treated as "skip this filter"
-    # rather than penalizing everyone.
+    # v39h fixes:
+    #   - Per-team cross-reference (each hitter checked against own team's roster)
+    #   - Visible diagnostic of how many teams loaded successfully
+    #   - Falls back gracefully when a specific team's API call fails
+    #     (that team's hitters NEVER get flagged — fail-open per-team)
     # ========================================================================
     try:
         from data_fetcher import get_active_roster_ids
-        active_ids_all = set()
-        for col in ("away_team_id", "home_team_id"):
-            if col in slate.columns:
-                for tid in slate[col].dropna().unique():
+        team_active_ids: dict[int, set] = {}  # team_id -> set of player_ids
+        team_id_to_abbr: dict[int, str] = {}
+        # Build team_id -> abbr lookup and fetch each team's active roster
+        for col_id, col_abbr in (
+            ("away_team_id", "away_team_abbr"),
+            ("home_team_id", "home_team_abbr"),
+        ):
+            if col_id in slate.columns and col_abbr in slate.columns:
+                for _, _g in slate[[col_id, col_abbr]].dropna().iterrows():
                     try:
-                        active_ids_all.update(get_active_roster_ids(int(tid)))
-                    except Exception:
+                        tid = int(_g[col_id])
+                    except (TypeError, ValueError):
                         continue
+                    if tid in team_active_ids:
+                        continue
+                    team_id_to_abbr[tid] = _g[col_abbr]
+                    try:
+                        ids = get_active_roster_ids(tid)
+                    except Exception:
+                        ids = set()
+                    team_active_ids[tid] = ids
 
-        if active_ids_all and "player_id" in combined_all.columns:
-            def _il_flag(pid):
-                try:
-                    if int(pid) not in active_ids_all:
-                        return "🏥 not on active roster"
-                except (TypeError, ValueError):
-                    pass
+        # Build abbr -> active set lookup (skip teams where set is empty,
+        # meaning API failed — those teams won't trigger any flags)
+        abbr_active: dict[str, set] = {}
+        teams_loaded = 0
+        for tid, ids in team_active_ids.items():
+            abbr = team_id_to_abbr.get(tid)
+            if abbr and ids:  # non-empty set = API succeeded
+                abbr_active[abbr] = ids
+                teams_loaded += 1
+
+        teams_total = len(team_active_ids)
+        # Per-team IL flag: only fires when we successfully loaded that team's roster
+        def _il_flag_v2(row):
+            team_abbr = row.get("team")
+            pid = row.get("player_id")
+            if not team_abbr or team_abbr not in abbr_active:
+                # No active roster loaded for this team — fail-open, no flag
                 return ""
-            combined_all["il_flag"] = combined_all["player_id"].apply(_il_flag)
-            n_flagged = (combined_all["il_flag"] != "").sum()
+            # NaN player_id = can't cross-reference. Fail-open.
+            try:
+                pid_i = int(pid)
+            except (TypeError, ValueError):
+                return ""
+            if pd.isna(pid):
+                return ""
+            if pid_i not in abbr_active[team_abbr]:
+                return "🏥 not on active roster"
+            return ""
+
+        combined_all["il_flag"] = combined_all.apply(_il_flag_v2, axis=1)
+
+        # ALL flagged players still get the il_flag (for display) and the
+        # -15 pick_score penalty (later in pick_score finalization). But the
+        # BANNER only fires for players with meaningful relevance — defined as
+        # any player whose name appears in hitter_stats with non-trivial PA.
+        # This filters out AAA stashes / fresh call-ups that wouldn't have
+        # made picks anyway.
+        meaningful_mask = combined_all["il_flag"] != ""
+        if "pa" in combined_all.columns:
+            try:
+                meaningful_mask &= (
+                    combined_all["pa"].fillna(0).astype(float) >= 50
+                )
+            except Exception:
+                pass
+        n_flagged = int(meaningful_mask.sum())
+
+        # Diagnostic banner — ALWAYS show coverage so user knows when the
+        # check is partial vs comprehensive
+        if teams_total > 0:
+            if teams_loaded == teams_total:
+                coverage_msg = f"✅ active roster check: {teams_loaded}/{teams_total} teams loaded"
+            else:
+                coverage_msg = (
+                    f"⚠️ active roster check: only {teams_loaded}/{teams_total} "
+                    f"teams' rosters loaded (API failures on others). "
+                    f"Hitters from unloaded teams will NOT be flagged — "
+                    f"verify injuries manually for them."
+                )
+
             if n_flagged > 0:
-                # Diagnostic banner so user sees which players were flagged
                 flagged_names = combined_all.loc[
-                    combined_all["il_flag"] != "", "player_name"
+                    meaningful_mask, "player_name"
                 ].dropna().unique().tolist()
-                if flagged_names:
-                    st.info(
-                        f"🏥 **IL/Roster check:** {len(flagged_names)} hitter(s) "
-                        f"in tonight's data are NOT on their team's active roster "
-                        f"(likely on IL, optioned, or DFA'd within last 24h): "
-                        f"{', '.join(flagged_names[:8])}"
-                        + (f" +{len(flagged_names)-8} more" if len(flagged_names) > 8 else "")
-                        + ". They've been penalized -15 pick_score to drop out "
-                        f"of Top 10 contention. Verify via MLB.com if you plan "
-                        "to override."
-                    )
-        else:
-            combined_all["il_flag"] = ""
-    except Exception:
+                st.warning(
+                    f"🏥 **{n_flagged} hitter(s) NOT on active roster** "
+                    f"(IL'd, optioned, or DFA'd): "
+                    f"{', '.join(flagged_names[:10])}"
+                    + (f" +{len(flagged_names)-10} more" if len(flagged_names) > 10 else "")
+                    + f"\n\n{coverage_msg}"
+                )
+            else:
+                st.caption(coverage_msg)
+    except Exception as _e:
         combined_all["il_flag"] = ""
+        st.caption(f"Active roster check unavailable: {type(_e).__name__}")
 
     # Tag slate leaders with 🏆 in a new column. The slate_leader_pid_map was
     # built earlier (Slate Leaders section). Each leader gets a flag that
