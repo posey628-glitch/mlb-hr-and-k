@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.07-smash-fix-ip-shrink-v39j"
+APP_VERSION = "2026.06.07-grade-recalibrate-v39k"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -710,47 +710,51 @@ def hr_grade(hr_game_pct, sample_size=None, pa_threshold=80,
               same_side_platoon=False):
     """Letter grade (A+/A/B+/B/C/D/F) for HR Game% - more intuitive than %.
 
-    Calibrated to real-world MLB rates:
-      A+ : ≥22%  (elite matchup - top 5% of plays)
-      A  : 19-22% (very strong - top 15%)
-      B+ : 16-19% (strong matchup - top 25%)
-      B  : 12-16% (solid)
-      C+ : 9-12%  (modest)
-      C  : 6-9%   (below average)
-      D  : 3-6%   (poor)
-      F  : <3%    (avoid)
+    RECALIBRATED v39k (June 2026): Old thresholds (A+ ≥22%, A ≥19%) were
+    set when projections were more conservative. As the model gained
+    multipliers (park × hand × pull-side × wind × bullpen × lift × catcher
+    framing × day/night), aggregate HR Game% drifted upward systematically.
+    Result: A+ became common, A was just "above average," and grades stopped
+    differentiating elite from solid.
+    Math context (4.3 PA/game, 3.0% league avg HR/PA = 12.3% baseline):
+      - Top 3% of plays: ~25%+ HR Game%
+      - Top 10% of plays: ~21%+ HR Game%
+      - Top 25% of plays: ~17%+ HR Game%
+      - Average MLB plate appearance pool: ~12% HR Game%
+    Old thresholds put ~30% of qualified hitters at A/A+. New thresholds
+    put ~10-15% there, restoring the "A+ is rare elite" signal.
+
+    NEW CALIBRATION:
+      A+ : ≥25%  (rare elite, top 3-5% of plays)
+      A  : 21-25% (strong, top 10%)
+      B+ : 17-21% (above average, top 25%)
+      B  : 13-17% (solid)
+      C+ : 10-13% (modest)
+      C  : 7-10%  (below average)
+      D  : 4-7%   (poor)
+      F  : <4%    (avoid)
 
     SAME-SIDE PLATOON CAP (v38g): LvL and RvR matchups are inherently tougher
-    than the projected HR% suggests, even when hitter splits are decent. A
-    LHB facing a LHP is rarely a true A+ play even when the math projects
-    one because:
-      - Same-side breaking balls move AWAY from the hitter (harder pickup)
-      - Sample sizes for same-side splits tend to be smaller (less reliable)
-      - Real-world betting markets discount same-side props ~5-8%
-    Cap same-side matchups at A (one tier down from where math would put
-    them at A+ tier). Doesn't change the underlying HR% projection — just
-    the letter grade visibility.
+    than the projected HR% suggests. Cap same-side matchups one tier down:
+    A+ → A, A → B+.
     """
     if hr_game_pct is None or pd.isna(hr_game_pct):
         return "—"
-    # NaN PA = insufficient sample
     if sample_size is None or pd.isna(sample_size) or sample_size < pa_threshold:
         return "—"
-    if hr_game_pct >= 22:
-        # Same-side platoon: cap at A rather than A+
+    if hr_game_pct >= 25:
         return "A" if same_side_platoon else "A+"
-    if hr_game_pct >= 19:
-        # Same-side at A-tier: drop one notch to B+ to surface the platoon discount
+    if hr_game_pct >= 21:
         return "B+" if same_side_platoon else "A"
-    if hr_game_pct >= 16:
+    if hr_game_pct >= 17:
         return "B+"
-    if hr_game_pct >= 12:
+    if hr_game_pct >= 13:
         return "B"
-    if hr_game_pct >= 9:
+    if hr_game_pct >= 10:
         return "C+"
-    if hr_game_pct >= 6:
+    if hr_game_pct >= 7:
         return "C"
-    if hr_game_pct >= 3:
+    if hr_game_pct >= 4:
         return "D"
     return "F"
 
@@ -1230,11 +1234,14 @@ with st.sidebar:
              "- **—** — Insufficient data (Savant fetch failed; check ERA/HR9 fallback)."),
 
             ("Hitter Grade (HR Game%)",
-             "Letter grade for projected HR Game%.\n"
-             "- **A+** — ≥22% HR Game% (top 5% of plays). Capped at A for same-side platoon.\n"
-             "- **A** — 19-22%. Capped at B+ for same-side platoon.\n"
-             "- **B+** — 16-19%.\n"
-             "- **B / C+ / C / D / F** — descending tiers."),
+             "Letter grade for projected HR Game%. Recalibrated v39k so A+ "
+             "means genuinely rare/elite, not just 'good.'\n"
+             "- **A+** — ≥25% (rare elite, top 3-5% of plays). Capped at A for "
+             "same-side platoon (LvL or RvR).\n"
+             "- **A** — 21-25% (strong, top 10%). Capped at B+ for same-side platoon.\n"
+             "- **B+** — 17-21% (above average, top 25%).\n"
+             "- **B** — 13-17% (solid).\n"
+             "- **C+ / C / D / F** — descending tiers."),
 
             ("🎯 Arsenal Flag",
              "Hitter vs pitcher pitch mix (hand-aware).\n"
