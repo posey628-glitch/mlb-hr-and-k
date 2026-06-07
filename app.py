@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.07-era-cap-daynight-v39e"
+APP_VERSION = "2026.06.07-grade-fallback-v39f"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -797,9 +797,10 @@ def pitcher_grade(test_score, hr_suppress=None, sample_size=None, pa_threshold=8
     sample threshold (matches the IP gate used elsewhere). MLB Stats API
     returns IP reliably even when Savant data is missing.
     """
-    if test_score is None or pd.isna(test_score):
-        # v38 ERA/HR9 fallback — fires when both are present AND we have
-        # SOME sample data (either PA ≥ threshold OR IP ≥ 10)
+    # Helper: try the ERA/HR9 fallback grade. Returns a grade string if
+    # the inputs allow one, otherwise returns None.
+    def _era_hr9_fallback():
+        # Need a sample — either PA or IP
         has_sample = False
         if (sample_size is not None and not pd.isna(sample_size)
                 and sample_size >= pa_threshold):
@@ -810,36 +811,43 @@ def pitcher_grade(test_score, hr_suppress=None, sample_size=None, pa_threshold=8
                     has_sample = True
             except (TypeError, ValueError):
                 pass
+        if not has_sample:
+            return None
+        if era is None or pd.isna(era) or hr9 is None or pd.isna(hr9):
+            return None
+        try:
+            era_f = float(era)
+            hr9_f = float(hr9)
+        except (TypeError, ValueError):
+            return None
+        # Simple fallback grade from ERA + HR/9:
+        #   ELITE:    era < 2.75 AND hr9 < 0.80
+        #   TOUGH:    era < 3.50 AND hr9 < 1.00
+        #   EXPLOIT+: era >= 5.00 OR hr9 >= 1.80
+        #   EXPLOIT:  era >= 4.25 OR hr9 >= 1.40
+        #   MIXED:    everything else
+        if era_f < 2.75 and hr9_f < 0.80:
+            return "ELITE"
+        if era_f < 3.50 and hr9_f < 1.00:
+            return "TOUGH"
+        if era_f >= 5.00 or hr9_f >= 1.80:
+            return "EXPLOIT+"
+        if era_f >= 4.25 or hr9_f >= 1.40:
+            return "EXPLOIT"
+        return "MIXED"
 
-        if (era is not None and not pd.isna(era)
-                and hr9 is not None and not pd.isna(hr9)
-                and has_sample):
-            try:
-                era_f = float(era)
-                hr9_f = float(hr9)
-            except (TypeError, ValueError):
-                return "—"
-            # Simple fallback grade from ERA + HR/9:
-            #   ELITE:    era < 2.75 AND hr9 < 0.80
-            #   TOUGH:    era < 3.50 AND hr9 < 1.00
-            #   EXPLOIT+: era >= 5.00 OR hr9 >= 1.80
-            #   EXPLOIT:  era >= 4.25 OR hr9 >= 1.40
-            #   MIXED:    everything else
-            if era_f < 2.75 and hr9_f < 0.80:
-                return "ELITE"
-            if era_f < 3.50 and hr9_f < 1.00:
-                return "TOUGH"
-            if era_f >= 5.00 or hr9_f >= 1.80:
-                return "EXPLOIT+"
-            if era_f >= 4.25 or hr9_f >= 1.40:
-                return "EXPLOIT"
-            return "MIXED"
-        return "—"
+    if test_score is None or pd.isna(test_score):
+        # No Savant test_score → try ERA/HR9 fallback
+        fb = _era_hr9_fallback()
+        return fb if fb else "—"
     # NO sample (NaN/None) = insufficient. A pitcher with no PA faced shouldn't
-    # get a grade. Was previously skipping the check for NaN which let pitchers
-    # like Jordan Wicks (no data) get EXPLOIT+ grades.
+    # get a grade. v39f fix: but if Savant returned test_score on low PA AND
+    # we have ERA+HR9+IP from MLB Stats API, still grade from the fallback.
+    # This catches Gage Jump (test_score from Savant but PA<80; ERA 3.75,
+    # HR/9 0.00, IP 12 — fallback now grades him TOUGH instead of —).
     if sample_size is None or pd.isna(sample_size) or sample_size < pa_threshold:
-        return "—"
+        fb = _era_hr9_fallback()
+        return fb if fb else "—"
     hr_s = hr_suppress if (hr_suppress is not None and not pd.isna(hr_suppress)) else test_score
     # Combined indicator - higher = harder to score against
     combined_min = min(test_score, hr_s)
