@@ -918,6 +918,28 @@ def build_pitcher_slate(
         return df
 
     # ------------------------------------------------------------------
+    # UNIVERSAL ERA + HR/9 CAP (v39e)
+    # ------------------------------------------------------------------
+    # Previously the cap at 12.0 only applied to era_savant (the path
+    # where ERA is derived from earned_runs / ip_savant). When ERA flowed
+    # in directly from MLB Stats API (the normal path), extreme outliers
+    # like Kade Morris (ERA 20.25 in 4 IP) flowed through uncapped.
+    #
+    # That's OK for percentile-rank usage (pct_rank bounds outliers
+    # automatically), but it's NOT OK for:
+    #   - Threshold logic (era >= 5.00 → EXPLOIT+) — fine
+    #   - ERA-driven projections (era × multiplier) — uncapped ERA can compound
+    #   - Display sanity (ERA of 20+ looks broken to users)
+    #
+    # Cap at 12.0 matches the existing era_savant cap. Same logic for HR/9:
+    # extreme small-sample values get capped at 6.0.
+    if "era" in df.columns:
+        df["era"] = pd.to_numeric(df["era"], errors="coerce").clip(upper=12.0)
+    if "hr9" in df.columns:
+        df["hr9"] = pd.to_numeric(df["hr9"], errors="coerce").clip(upper=6.0)
+    # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
     # IP fallback - if MLB Stats API failed, estimate from Statcast PA
     # Statcast 'pa' is plate appearances faced by the pitcher
     # ~4.3 PA per inning is league average
