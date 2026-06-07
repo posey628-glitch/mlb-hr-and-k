@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.06-correlate-v39d"
+APP_VERSION = "2026.06.07-era-cap-daynight-v39e"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -1195,6 +1195,18 @@ with st.sidebar:
              "- ⬇️ **GB pitcher (50-54%)** — ~5% HR suppression.\n"
              "- ⬆️ **FB-prone (30-34%)** — ~5% HR boost.\n"
              "- ⬆️ **extreme FB pitcher (<30%)** — ~7.5% HR boost."),
+
+            ("🌞 🌙 Day/Night Flag",
+             "Fires when a hitter has a notable day-vs-night HR split that's "
+             "relevant to tonight's game. Hidden until ≥40 PA in the matching "
+             "split (sample threshold).\n"
+             "- 🌞 **day boost / drag** — for day games, hitter's day-game "
+             "HR rate is ≥40% higher (boost) or ≤40% lower (drag) than night.\n"
+             "- 🌙 **night boost / drag** — same logic, applied to night games.\n\n"
+             "Currently a UI-only signal (not a projection multiplier yet) — "
+             "validated at 0.652 night-rate correlation with HR Game% but held "
+             "from the math pending backtest confirmation it doesn't "
+             "double-count with platoon/park/weather effects."),
 
             ("🎯 Contact Flag",
              "Shows when hitter has elite contact quality (Brl% ≥ 12%, hard_hit ≥ 50%)."),
@@ -4008,6 +4020,61 @@ for _, game in slate.iterrows():
                 return f"⬆️ FB-prone ({gb_f:.0f}%)"
             return ""
         matchup_df["gb_flag"] = matchup_df.apply(_gb_flag, axis=1)
+
+        # DAY/NIGHT SPLIT FLAG (v39e)
+        # Reviewer found vs_day_hr_per_pa correlates 0.570 with HR Game%
+        # and vs_night_hr_per_pa correlates 0.652 — both strong signals
+        # currently computed but not surfaced as flags. Add a UI-only flag
+        # when a hitter has a notable day/night split that's relevant to
+        # tonight's game.
+        #
+        # Why UI-only (not yet a projection multiplier): adding day/night
+        # adjustment to hr_prob_per_pa compounds with platoon, park, weather,
+        # and pitch_match multipliers. Risk of double-counting if the
+        # underlying splits already reflect day/night context implicitly.
+        # Conservative: surface the signal for the user, validate via
+        # backtest, then bake into pick_score if it earns the weight.
+        #
+        # Triggers when:
+        #   - Game is day game AND hitter's vs_day rate is notably higher/lower
+        #     than vs_night (≥40% gap in either direction)
+        #   - Game is night game AND vs_night meaningfully diverges from vs_day
+        #   - Hitter has ≥40 PA in the relevant split for confidence
+        def _day_night_flag(row):
+            if game_type not in ("day", "night"):
+                return ""
+            if game_type == "day":
+                rel_pa = row.get("vs_day_pa")
+                rel_rate = row.get("vs_day_hr_per_pa")
+                other_rate = row.get("vs_night_hr_per_pa")
+                label_match = "🌞 day boost"
+                label_drag = "🌞 day drag"
+            else:
+                rel_pa = row.get("vs_night_pa")
+                rel_rate = row.get("vs_night_hr_per_pa")
+                other_rate = row.get("vs_day_hr_per_pa")
+                label_match = "🌙 night boost"
+                label_drag = "🌙 night drag"
+            # Need sample
+            try:
+                if rel_pa is None or pd.isna(rel_pa) or float(rel_pa) < 40:
+                    return ""
+                if rel_rate is None or pd.isna(rel_rate):
+                    return ""
+                if other_rate is None or pd.isna(other_rate) or float(other_rate) == 0:
+                    return ""
+                rel_f = float(rel_rate)
+                oth_f = float(other_rate)
+            except (TypeError, ValueError):
+                return ""
+            # Ratio of tonight's relevant rate vs the opposite split
+            ratio = rel_f / oth_f if oth_f > 0 else 1.0
+            if ratio >= 1.40:
+                return f"{label_match} ({rel_f*100:.1f}% vs {oth_f*100:.1f}%)"
+            if ratio <= 0.60:
+                return f"{label_drag} ({rel_f*100:.1f}% vs {oth_f*100:.1f}%)"
+            return ""
+        matchup_df["day_night_flag"] = matchup_df.apply(_day_night_flag, axis=1)
 
     if use_pitch_match and HAVE_PITCH_MATCH:
         try:
@@ -7387,7 +7454,8 @@ def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
         )
 
     cols_to_show = [c for c in [
-        "alert", "grade", "smash_spot", "arsenal_flag", "gb_flag", "contact_flag", "split_confidence", "slate_leader_flag",
+        "alert", "grade", "smash_spot", "arsenal_flag", "gb_flag", "day_night_flag",
+        "contact_flag", "split_confidence", "slate_leader_flag",
         "player_name", "lineup_pos", "bats", "position",
         "hr_profile_label",
         "power_score", "lift_score", "matchup_opp", "hr_game_pct", "hr_pa_pct", "matchup", "test_score",
