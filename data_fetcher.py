@@ -324,6 +324,34 @@ def get_team_roster(team_id: int) -> list[dict]:
     return out
 
 
+@st.cache_data(ttl=900)  # 15min refresh — catches IL moves within 15 min
+def get_active_roster_ids(team_id: int) -> set:
+    """
+    Return set of player_ids currently on the 26-man ACTIVE roster.
+
+    Used for hitter IL detection (v39g). The active roster updates within
+    minutes of any IL move — much faster than the MLB transactions API
+    which can lag 12-24 hours.
+
+    A hitter showing in our slate but NOT in get_active_roster_ids means
+    they're either on the IL, optioned, or DFA'd. All three states mean
+    they shouldn't play tonight regardless of why our pipeline pulled them.
+
+    Returns empty set on any failure (downstream treats empty as "skip
+    this filter" rather than penalizing everyone).
+    """
+    url = f"https://statsapi.mlb.com/api/v1/teams/{team_id}/roster/active"
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=10)
+        r.raise_for_status()
+        return {
+            p["person"]["id"] for p in r.json().get("roster", [])
+            if p.get("person", {}).get("id")
+        }
+    except Exception:
+        return set()
+
+
 @st.cache_data(ttl=3600)
 def get_all_team_rosters(slate: pd.DataFrame) -> dict:
     """
