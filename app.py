@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.07-grade-fallback-v39f"
+APP_VERSION = "2026.06.07-il-detection-v39g"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -1168,6 +1168,17 @@ with st.sidebar:
              "- **DO NOT parlay correlated picks** — joint probability is much "
              "lower than (P1 × P2) assumes\n"
              "- Bet them individually or pick the higher-confidence one"),
+
+            ("🏥 IL / Not on Active Roster",
+             "Hitter is in our data but NOT on their team's 26-man active roster.\n"
+             "Means one of: on IL, optioned to AAA, or DFA'd within last 24h.\n\n"
+             "Detection method: cross-references each projected hitter's "
+             "player_id against `/teams/{id}/roster/active` which updates within "
+             "minutes (transactions API can lag 12-24h).\n\n"
+             "Applies a **-15 pick_score penalty** to knock the player out of "
+             "Top 10 contention.\n\n"
+             "If you see this flag and disagree, verify via MLB.com — the "
+             "active roster is authoritative."),
 
             ("🏆 Slate Leader",
              "Player leads slate in ≥1 stat (Brl%, ISO, HR%, etc).\n"
@@ -4992,6 +5003,14 @@ if all_hitters_for_picks:
                     return 0
                 q["pick_score"] = q["pick_score"] + q.apply(_recent_hr_bonus, axis=1)
 
+            # IL PENALTY (v39g) — knock players not on active roster out of
+            # Top 10 contention. The il_flag column was set earlier from the
+            # active roster cross-check.
+            if "il_flag" in q.columns:
+                _il_mask = q["il_flag"].fillna("").astype(str) != ""
+                if _il_mask.any():
+                    q.loc[_il_mask, "pick_score"] = q.loc[_il_mask, "pick_score"] - 15.0
+
             q["pick_score"] = q["pick_score"].round(1)
         else:
             q["pick_score"] = q.get("hr_game_pct", 0)
@@ -5157,7 +5176,7 @@ if all_hitters_for_picks:
             honorable_mentions = pd.DataFrame()
 
         cols_to_show = [c for c in [
-            "rank", "slate_leader_flag", "convergence_label", "same_game_flag",
+            "rank", "il_flag", "slate_leader_flag", "convergence_label", "same_game_flag",
             "arsenal_flag", "gb_flag", "split_confidence",
             "player_name", "team", "game", "opp_pitcher",
             "pick_score", "hr_game_pct", "matchup", "barrel_pct", "lift_score",
@@ -6330,6 +6349,65 @@ for gpk, ctx in game_context_map.items():
 
 if all_hitters:
     combined_all = pd.concat(all_hitters, ignore_index=True)
+
+    # ========================================================================
+    # HITTER IL DETECTION via ACTIVE ROSTER CROSS-CHECK (v39g)
+    # ========================================================================
+    # The MLB transactions API lags 12-24 hours when a player goes on IL.
+    # The active roster endpoint updates within minutes. Cross-reference
+    # every projected hitter against the active 26-man roster of their team:
+    # if they're NOT on it, they're either on IL, optioned, or DFA'd.
+    # All three states = "shouldn't play tonight."
+    #
+    # This catches the Murakami / Drake Baldwin / Francisco Alvarez cases
+    # that the transactions-API approach misses.
+    #
+    # The flag is informational (🏥 not on active roster) AND applies a
+    # -15 pick_score penalty so the player drops out of Top 10 contention.
+    # Empty active-roster set (API failure) is treated as "skip this filter"
+    # rather than penalizing everyone.
+    # ========================================================================
+    try:
+        from data_fetcher import get_active_roster_ids
+        active_ids_all = set()
+        for col in ("away_team_id", "home_team_id"):
+            if col in slate.columns:
+                for tid in slate[col].dropna().unique():
+                    try:
+                        active_ids_all.update(get_active_roster_ids(int(tid)))
+                    except Exception:
+                        continue
+
+        if active_ids_all and "player_id" in combined_all.columns:
+            def _il_flag(pid):
+                try:
+                    if int(pid) not in active_ids_all:
+                        return "🏥 not on active roster"
+                except (TypeError, ValueError):
+                    pass
+                return ""
+            combined_all["il_flag"] = combined_all["player_id"].apply(_il_flag)
+            n_flagged = (combined_all["il_flag"] != "").sum()
+            if n_flagged > 0:
+                # Diagnostic banner so user sees which players were flagged
+                flagged_names = combined_all.loc[
+                    combined_all["il_flag"] != "", "player_name"
+                ].dropna().unique().tolist()
+                if flagged_names:
+                    st.info(
+                        f"🏥 **IL/Roster check:** {len(flagged_names)} hitter(s) "
+                        f"in tonight's data are NOT on their team's active roster "
+                        f"(likely on IL, optioned, or DFA'd within last 24h): "
+                        f"{', '.join(flagged_names[:8])}"
+                        + (f" +{len(flagged_names)-8} more" if len(flagged_names) > 8 else "")
+                        + ". They've been penalized -15 pick_score to drop out "
+                        f"of Top 10 contention. Verify via MLB.com if you plan "
+                        "to override."
+                    )
+        else:
+            combined_all["il_flag"] = ""
+    except Exception:
+        combined_all["il_flag"] = ""
 
     # Tag slate leaders with 🏆 in a new column. The slate_leader_pid_map was
     # built earlier (Slate Leaders section). Each leader gets a flag that
