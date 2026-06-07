@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.07-split-thresh-v39i"
+APP_VERSION = "2026.06.07-smash-fix-ip-shrink-v39j"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -827,14 +827,49 @@ def pitcher_grade(test_score, hr_suppress=None, sample_size=None, pa_threshold=8
         #   EXPLOIT:  era >= 4.25 OR hr9 >= 1.40
         #   MIXED:    everything else
         if era_f < 2.75 and hr9_f < 0.80:
-            return "ELITE"
-        if era_f < 3.50 and hr9_f < 1.00:
-            return "TOUGH"
-        if era_f >= 5.00 or hr9_f >= 1.80:
-            return "EXPLOIT+"
-        if era_f >= 4.25 or hr9_f >= 1.40:
-            return "EXPLOIT"
-        return "MIXED"
+            raw_grade = "ELITE"
+        elif era_f < 3.50 and hr9_f < 1.00:
+            raw_grade = "TOUGH"
+        elif era_f >= 5.00 or hr9_f >= 1.80:
+            raw_grade = "EXPLOIT+"
+        elif era_f >= 4.25 or hr9_f >= 1.40:
+            raw_grade = "EXPLOIT"
+        else:
+            raw_grade = "MIXED"
+
+        # SAMPLE-SIZE SHRINKAGE (v39j)
+        # ERA and HR/9 over <30 IP are too noisy to support extreme positive
+        # grades. The Gage Jump case: 18 IP, ERA 2.45, HR/9 0.00 → fallback
+        # says ELITE, but that's pure small-sample noise.
+        #
+        # ASYMMETRIC SHRINKAGE: We only shrink the "this pitcher looks good"
+        # tiers (ELITE/TOUGH), NOT the "this pitcher looks bad" tiers
+        # (EXPLOIT/EXPLOIT+). Reason: low ERA in small sample is often luck
+        # (BABIP regression, HR/FB regression), but high ERA in small sample
+        # tends to reflect real underlying issues (poor stuff, command).
+        # Feltner at 25 IP with ERA 4.85, HR/9 1.73 is genuinely exploitable
+        # — don't shrink him toward MIXED.
+        #
+        #   IP < 15:  force MIXED only if currently ELITE/TOUGH (the
+        #             optimistic tiers). EXPLOIT/EXPLOIT+ at <15 IP keep
+        #             their grade — small-sample bad pitchers are real.
+        #   IP 15-29: down-shift ELITE→TOUGH and TOUGH→MIXED. Leave
+        #             EXPLOIT/EXPLOIT+ alone.
+        #   IP ≥ 30:  no adjustment.
+        if ip is not None and not pd.isna(ip):
+            try:
+                ip_f = float(ip)
+                if ip_f < 15:
+                    if raw_grade in ("ELITE", "TOUGH"):
+                        return "MIXED"
+                elif ip_f < 30:
+                    if raw_grade == "ELITE":
+                        return "TOUGH"
+                    if raw_grade == "TOUGH":
+                        return "MIXED"
+            except (TypeError, ValueError):
+                pass
+        return raw_grade
 
     if test_score is None or pd.isna(test_score):
         # No Savant test_score → try ERA/HR9 fallback
@@ -4129,15 +4164,24 @@ for _, game in slate.iterrows():
         # This is the "all stars align" flag the user requested.
         opp_pitcher_grade = None
         opp_pitcher_id = opp_p_row.get("player_id") if opp_p_row else None
-        if opp_pitcher_id is not None and not p_slate.empty and "grade" in p_slate.columns:
+        if (opp_pitcher_id is not None
+                and not (hasattr(opp_pitcher_id, "is_na") or pd.isna(opp_pitcher_id))
+                and not p_slate.empty
+                and "grade" in p_slate.columns):
             try:
-                # Coerce both sides to int for reliable matching (pitcher_id can
-                # end up as Int64/float/object across different pandas operations)
-                opp_pid_int = int(opp_pitcher_id)
+                # v39j: Coerce through float to handle pandas Int64 (which raises
+                # TypeError on direct int() when the value is pd.NA). The previous
+                # `int(opp_pitcher_id)` path silently failed for any Int64-backed
+                # column, leaving opp_pitcher_grade=None and making smash_spots
+                # always empty. Going through float() handles Int64, float,
+                # numpy int64, and string IDs uniformly.
+                opp_pid_int = int(float(opp_pitcher_id))
                 _ids = pd.to_numeric(p_slate["pitcher_id"], errors="coerce")
                 _match = p_slate[_ids == opp_pid_int]
                 if not _match.empty:
                     opp_pitcher_grade = _match.iloc[0].get("grade")
+            except (TypeError, ValueError):
+                pass
             except Exception:
                 pass
 
