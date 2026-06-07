@@ -458,10 +458,14 @@ def build_matchup_table(
     # 22.77% HR Game% based on 35 PA vs LHP is much shakier than one based
     # on 300 PA. Flag them so speculative plays are visible.
     #
-    # Determine which split applies (based on pitcher hand) and the PA count:
-    #   < 40 PA  → ⚠️ thin split (highly speculative)
-    #   < 70 PA  → 📊 small split (some confidence)
-    #   >= 70 PA → (empty, normal)
+    # Thresholds are SEASON-AWARE (v39i fix). In April most hitters have
+    # tiny samples and flagging everything would be useless noise. In August
+    # most hitters have meaningful samples and the bar should be higher.
+    # See _season_thresholds() for the per-month calibration.
+    _thresh = _season_thresholds()
+    _split_thin = _thresh.get("split_thin", 40)
+    _split_small = _thresh.get("split_small", 70)
+
     p_throws_raw = None
     if pitcher_row is not None:
         try:
@@ -473,9 +477,6 @@ def build_matchup_table(
     def _split_confidence(row):
         if not p_throws_raw or p_throws_raw not in ("L", "R"):
             return ""
-        # Use the pitcher's hand directly to find the split. This matches
-        # the props.py split-adjustment logic — switch hitters' vs-LHP/vs-RHP
-        # stats already reflect them batting opposite the pitcher arm.
         split_key = "lhp" if p_throws_raw == "L" else "rhp"
         pa_val = row.get(f"vs_{split_key}_pa")
         if pa_val is None or pd.isna(pa_val):
@@ -484,9 +485,9 @@ def build_matchup_table(
             pa_f = float(pa_val)
         except (TypeError, ValueError):
             return ""
-        if pa_f < 40:
+        if pa_f < _split_thin:
             return "⚠️ thin split"
-        if pa_f < 70:
+        if pa_f < _split_small:
             return "📊 small split"
         return ""
     df["split_confidence"] = df.apply(_split_confidence, axis=1)
@@ -791,8 +792,12 @@ def add_lift_score(
 def _season_thresholds(slate_date=None):
     """
     Return season-aware thresholds. Earlier in season = lower bars.
-    Returns dict with: full_ip (IP for full reliability), reliever_ip (below = likely reliever),
-    full_gs (GS for full starter), swing_gs (below = swing).
+    Returns dict with:
+      full_ip / min_ip — pitcher IP reliability bars
+      full_gs / min_gs — pitcher games started bars
+      split_thin / split_small — split-sample PA thresholds for the
+        ⚠️ thin / 📊 small split flags. Lower in April, higher by August
+        when most players have accumulated meaningful platoon samples.
     """
     import datetime
     if slate_date is None:
@@ -800,30 +805,35 @@ def _season_thresholds(slate_date=None):
     try:
         month = slate_date.month
     except AttributeError:
-        # If slate_date is a string, try to parse
         try:
             slate_date = datetime.datetime.strptime(str(slate_date)[:10], "%Y-%m-%d").date()
             month = slate_date.month
         except Exception:
             month = 6  # default mid-season
-    # Map month to expected starter IP at that point in season
-    # Season runs roughly Apr-Oct (months 3-10)
     if month <= 4:        # April: ~5 starts in
-        return {"full_ip": 15, "min_ip": 5, "full_gs": 3, "min_gs": 1}
+        return {"full_ip": 15, "min_ip": 5, "full_gs": 3, "min_gs": 1,
+                "split_thin": 20, "split_small": 40}
     elif month == 5:      # May: ~9 starts in
-        return {"full_ip": 30, "min_ip": 10, "full_gs": 5, "min_gs": 2}
+        return {"full_ip": 30, "min_ip": 10, "full_gs": 5, "min_gs": 2,
+                "split_thin": 30, "split_small": 55}
     elif month == 6:      # June: ~13 starts in
-        return {"full_ip": 50, "min_ip": 15, "full_gs": 8, "min_gs": 3}
+        return {"full_ip": 50, "min_ip": 15, "full_gs": 8, "min_gs": 3,
+                "split_thin": 35, "split_small": 65}
     elif month == 7:      # July: ~17 starts in
-        return {"full_ip": 70, "min_ip": 20, "full_gs": 10, "min_gs": 4}
+        return {"full_ip": 70, "min_ip": 20, "full_gs": 10, "min_gs": 4,
+                "split_thin": 40, "split_small": 70}
     elif month == 8:      # August: ~22 starts in
-        return {"full_ip": 90, "min_ip": 25, "full_gs": 14, "min_gs": 5}
+        return {"full_ip": 90, "min_ip": 25, "full_gs": 14, "min_gs": 5,
+                "split_thin": 45, "split_small": 80}
     elif month == 9:      # September: ~28 starts in
-        return {"full_ip": 110, "min_ip": 30, "full_gs": 18, "min_gs": 6}
+        return {"full_ip": 110, "min_ip": 30, "full_gs": 18, "min_gs": 6,
+                "split_thin": 50, "split_small": 90}
     elif month == 10:     # October
-        return {"full_ip": 130, "min_ip": 30, "full_gs": 20, "min_gs": 6}
+        return {"full_ip": 130, "min_ip": 30, "full_gs": 20, "min_gs": 6,
+                "split_thin": 50, "split_small": 90}
     else:                 # Offseason / spring
-        return {"full_ip": 30, "min_ip": 10, "full_gs": 5, "min_gs": 2}
+        return {"full_ip": 30, "min_ip": 10, "full_gs": 5, "min_gs": 2,
+                "split_thin": 30, "split_small": 60}
 
 
 def build_pitcher_slate(
