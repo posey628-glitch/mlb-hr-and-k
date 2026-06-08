@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.09-tooltips-pull-air-screen-hrfb-v42b"
+APP_VERSION = "2026.06.09-last10-cache-bust-weather-diag-v42c"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -3731,31 +3731,40 @@ except Exception as _e:
     }
 
 # Diagnostic banner: surface weather fetch failures clearly so user knows WHY
+# v42c: always show weather status — even when working — so user can tell
+# at a glance whether wttr.in fallback is active or weather is truly down.
 _wbr = st.session_state.get("_weather_batch_result", {})
-if _wbr.get("error"):
+_wbr_source = _wbr.get("source", "")
+_wbr_note = str(_wbr.get("note", ""))
+_wbr_n_s = _wbr.get("n_success", 0)
+_wbr_n_l = _wbr.get("n_locations", 0)
+_wbr_error = _wbr.get("error", "")
+
+if _wbr_error and _wbr_n_s == 0:
+    # Both Open-Meteo and wttr.in failed (or wttr.in fallback not built in yet)
     st.error(
-        f"⚠️ **Weather batch fetch failed**: {_wbr['error']}\n\n"
-        f"Per-game fetch will be attempted as fallback (Open-Meteo single + "
-        f"wttr.in). If individual games also fail, you'll see 'Weather "
-        f"unavailable' — env_boost still uses park factors."
+        f"🌧️ **Weather completely unavailable** — both Open-Meteo and wttr.in failed.\n\n"
+        f"Last error: `{_wbr_error}`\n\n"
+        f"Impact: env_boost falls back to PARK-ONLY (no weather adjustment). "
+        f"Park factors still apply. Pull-side wind effects suppressed.\n\n"
+        f"This usually clears within an hour as Open-Meteo's per-IP daily "
+        f"limit resets. If you see this consistently, the wttr.in fallback "
+        f"may not be deployed yet — confirm version `v42a` or later in the "
+        f"caption near the top of the page."
     )
-elif _wbr.get("note") and "wttr.in" in str(_wbr.get("note", "")):
-    # v42a: wttr.in fallback fired — Open-Meteo failed but we got data anyway
-    n_s = _wbr.get("n_success", 0)
-    n_l = _wbr.get("n_locations", 0)
+elif "wttr.in" in _wbr_note or _wbr_source == "wttr.in":
     st.info(
-        f"ℹ️ **Weather source: wttr.in (fallback)** — Open-Meteo unavailable, "
-        f"got data for {n_s}/{n_l} venues via wttr.in. Slightly lower resolution "
-        f"(3-hour intervals vs hourly) but still accurate."
+        f"🌤️ **Weather source: wttr.in (fallback)** — Open-Meteo was rate-limited, "
+        f"got {_wbr_n_s}/{_wbr_n_l} venues via wttr.in. 3-hour interval resolution "
+        f"(vs Open-Meteo's hourly) but accurate enough for env_boost."
     )
-elif _wbr.get("n_success", 0) > 0 and _wbr.get("n_locations", 0) > 0:
-    n_s = _wbr["n_success"]
-    n_l = _wbr["n_locations"]
-    if n_s < n_l:
+elif _wbr_n_s > 0 and _wbr_n_l > 0:
+    if _wbr_n_s < _wbr_n_l:
         st.warning(
-            f"⚠️ Weather: got data for {n_s}/{n_l} venues "
-            f"(some may show as unavailable)"
+            f"⚠️ Weather: got data for {_wbr_n_s}/{_wbr_n_l} venues "
+            f"(some may show as unavailable). Open-Meteo partial result."
         )
+    # else: everything worked, no need to clutter UI
 
 for _, game in slate.iterrows():
     gpk = int(game["gamePk"])
