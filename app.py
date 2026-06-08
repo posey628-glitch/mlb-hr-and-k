@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.09-last10-cache-bust-weather-diag-v42c"
+APP_VERSION = "2026.06.09-pull-air-derive-weather-loud-v42d"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -3730,9 +3730,9 @@ except Exception as _e:
         "error": f"prefetch failed: {type(_e).__name__}: {str(_e)[:100]}"
     }
 
-# Diagnostic banner: surface weather fetch failures clearly so user knows WHY
-# v42c: always show weather status — even when working — so user can tell
-# at a glance whether wttr.in fallback is active or weather is truly down.
+# Diagnostic banner: ALWAYS show weather status so user can confirm v42d
+# is deployed and see what's happening. Includes version label so user can
+# verify they're on latest code.
 _wbr = st.session_state.get("_weather_batch_result", {})
 _wbr_source = _wbr.get("source", "")
 _wbr_note = str(_wbr.get("note", ""))
@@ -3740,31 +3740,43 @@ _wbr_n_s = _wbr.get("n_success", 0)
 _wbr_n_l = _wbr.get("n_locations", 0)
 _wbr_error = _wbr.get("error", "")
 
+# v42d: Always render a weather status row so user can confirm version + state
+_wx_status_emoji = "❓"
+_wx_status_label = "Unknown — no weather attempt yet"
+
 if _wbr_error and _wbr_n_s == 0:
-    # Both Open-Meteo and wttr.in failed (or wttr.in fallback not built in yet)
+    _wx_status_emoji = "🌧️"
+    _wx_status_label = f"FAILED — {_wbr_error[:200]}"
     st.error(
-        f"🌧️ **Weather completely unavailable** — both Open-Meteo and wttr.in failed.\n\n"
-        f"Last error: `{_wbr_error}`\n\n"
-        f"Impact: env_boost falls back to PARK-ONLY (no weather adjustment). "
-        f"Park factors still apply. Pull-side wind effects suppressed.\n\n"
-        f"This usually clears within an hour as Open-Meteo's per-IP daily "
-        f"limit resets. If you see this consistently, the wttr.in fallback "
-        f"may not be deployed yet — confirm version `v42a` or later in the "
-        f"caption near the top of the page."
+        f"🌧️ **Weather: COMPLETELY UNAVAILABLE** — both Open-Meteo and wttr.in failed.\n\n"
+        f"`{_wbr_error[:300]}`\n\n"
+        f"Impact: env_boost uses park-only (no weather adjustment). "
+        f"Pull-side wind effects suppressed. This is gracefully degraded — "
+        f"projections still work, just slightly less accurate."
     )
 elif "wttr.in" in _wbr_note or _wbr_source == "wttr.in":
+    _wx_status_emoji = "🌤️"
+    _wx_status_label = f"wttr.in fallback ({_wbr_n_s}/{_wbr_n_l} venues)"
     st.info(
-        f"🌤️ **Weather source: wttr.in (fallback)** — Open-Meteo was rate-limited, "
-        f"got {_wbr_n_s}/{_wbr_n_l} venues via wttr.in. 3-hour interval resolution "
-        f"(vs Open-Meteo's hourly) but accurate enough for env_boost."
+        f"🌤️ **Weather source: wttr.in (fallback)** — Open-Meteo was rate-limited; "
+        f"got {_wbr_n_s}/{_wbr_n_l} venues via wttr.in (3-hour resolution)."
     )
 elif _wbr_n_s > 0 and _wbr_n_l > 0:
+    _wx_status_emoji = "✅" if _wbr_n_s == _wbr_n_l else "⚠️"
+    _wx_status_label = f"Open-Meteo OK ({_wbr_n_s}/{_wbr_n_l} venues)"
     if _wbr_n_s < _wbr_n_l:
         st.warning(
-            f"⚠️ Weather: got data for {_wbr_n_s}/{_wbr_n_l} venues "
-            f"(some may show as unavailable). Open-Meteo partial result."
+            f"⚠️ Weather: got {_wbr_n_s}/{_wbr_n_l} venues (partial)."
         )
-    # else: everything worked, no need to clutter UI
+elif _wbr_n_l == 0:
+    _wx_status_emoji = "⚪"
+    _wx_status_label = "No games on slate (no batch attempted)"
+
+# Always show a small caption confirming weather status + version. Lets user
+# see at a glance: (1) which version is loaded, (2) whether weather is on.
+st.caption(
+    f"📦 v42d · {_wx_status_emoji} Weather: {_wx_status_label}"
+)
 
 for _, game in slate.iterrows():
     gpk = int(game["gamePk"])
@@ -4632,18 +4644,20 @@ for _, game in slate.iterrows():
         matchup_df["smash_spot"] = smash_spots
         matchup_df["pull_wind_mult"] = pull_mults_col
 
-        # IDEAL HR SCREEN FLAG (v42b) — community-sourced screening criteria
+        # IDEAL HR SCREEN FLAG (v42b/d) — community-sourced screening criteria.
         # Display-only flag (does NOT feed pick_score). Fires when ALL six
         # criteria align:
         #   Pitcher:  HR/9 ≥ 1.2 AND barrel_allowed ≥ 8% AND FB% ≥ 40%
-        #   Hitter:   barrel ≥ 12% AND pull_air ≥ 18% AND hard_hit ≥ 45%
-        # These thresholds are community-validated HR screening criteria. Treat
-        # as a confluence flag, not a probability bump.
+        #   Hitter:   barrel ≥ 12% AND pulled_brl_pct ≥ 6% AND hard_hit ≥ 45%
+        #
+        # v42d FIX: original community criteria asked for pull_air% ≥ 18% but
+        # Savant's leaderboard CSV returns pull_air_percent as 0% populated
+        # (confirmed by user's data coverage audit). Substituted pulled_brl_pct
+        # (≥6% = elite pulled-barrel rate, 0.737 corr with HR%) — captures the
+        # same "pulls hard contact in the air" signal that pull_air would.
+        # Pitcher FB% uses fb_allowed (correct column name from
+        # build_pitcher_slate, not fb_pct which doesn't exist on pitchers).
         try:
-            # Pitcher side — opp_p_row is the opposing pitcher in this loop iteration.
-            # Note: pitchers store fly ball % as `fb_allowed` (build_pitcher_slate
-            # line 905), NOT `fb_pct` — that's a hitter column. Using the wrong
-            # name would make this flag silently never fire.
             p_hr9 = opp_p_row.get("hr9") if opp_p_row is not None else None
             p_brl_allowed = opp_p_row.get("barrel_allowed") if opp_p_row is not None else None
             p_fb_pct = opp_p_row.get("fb_allowed") if opp_p_row is not None else None
@@ -4658,11 +4672,11 @@ for _, game in slate.iterrows():
             if pitcher_ok and not matchup_df.empty:
                 for _, row in matchup_df.iterrows():
                     h_brl = row.get("barrel_pct")
-                    h_pa = row.get("pull_air_pct")
+                    h_pbrl = row.get("pulled_brl_pct")  # v42d: substitute for missing pull_air
                     h_hh = row.get("hard_hit")
                     hitter_ok = (
                         h_brl is not None and not pd.isna(h_brl) and float(h_brl) >= 12.0
-                        and h_pa is not None and not pd.isna(h_pa) and float(h_pa) >= 18.0
+                        and h_pbrl is not None and not pd.isna(h_pbrl) and float(h_pbrl) >= 6.0
                         and h_hh is not None and not pd.isna(h_hh) and float(h_hh) >= 45.0
                     )
                     screen_flags.append("🔥 ideal screen" if hitter_ok else "")
