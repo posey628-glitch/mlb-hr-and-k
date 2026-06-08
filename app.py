@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.07-grade-recalibrate-v39k"
+APP_VERSION = "2026.06.08-data-quality-v40"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -4244,20 +4244,11 @@ for _, game in slate.iterrows():
             # pull-wind × pull-distance
             hitter_park_mult = hand_park * pull_mult * pull_dist_mult
 
-            # Pitch-type HR match multiplier
-            # NOTE: pitch_match_score is ALREADY applied inside hr_prob_per_pa
-            # via pm_mult. This is an ADDITIONAL fine adjustment using the
-            # barrel-based pitch_hr_score (vs the xwoba-based pitch_match_score).
-            # These two signals are correlated, so we use a NARROWER range here
-            # to avoid double-counting the "hitter mashes this pitcher" effect.
-            # Was 0.85-1.15 (too generous). Now 0.92-1.08 = max ±8% adjustment.
-            pitch_hr_score = row_dict.get("pitch_hr_score")
-            if pitch_hr_score is not None and not pd.isna(pitch_hr_score):
-                # Center on 50 -> 1.0, +/- 1 score = 0.0016 shift
-                pitch_hr_mult = 1.0 + (pitch_hr_score - 50) * 0.0016
-                pitch_hr_mult = max(0.92, min(1.08, pitch_hr_mult))
-            else:
-                pitch_hr_mult = 1.0
+            # v40: Pitch-arsenal effect is applied ONCE — inside hr_prob_per_pa
+            # via pitch_match_score → pm_mult. The old barrel-based pitch_hr_mult
+            # post-multiply here was double-counting that correlated signal.
+            # pitch_hr_score still feeds pick_score ranking separately (which
+            # is fine — that's not double-counting within the probability).
 
             try:
                 p_pa = hr_prob_per_pa(
@@ -4266,19 +4257,8 @@ for _, game in slate.iterrows():
                     pitch_match_score=row_dict.get("pitch_match_score"),
                     bullpen_hr9=opp_bullpen_hr9,
                 )
-                # Apply pitch_hr_score as an additional fine adjustment
-                # BUT re-apply the soft squash so we don't blow past the cap.
-                if p_pa is not None:
-                    raw = float(p_pa) * pitch_hr_mult
-                    # Soft squash: same logic as in props.py.
-                    # Theoretical asymptote 7% per PA, practical ceiling ~6.3%
-                    # (tanh never reaches 1.0).
-                    if raw <= 0.04:
-                        p_pa = raw
-                    else:
-                        excess = raw - 0.04
-                        p_pa = 0.04 + 0.032 * np.tanh(excess / 0.045)
-                    p_pa = max(0.001, p_pa)
+                # p_pa is already soft-squashed inside hr_prob_per_pa; no
+                # external adjustment needed now that pitch_hr_mult is gone.
             except TypeError:
                 try:
                     p_pa = hr_prob_per_pa(
@@ -6568,6 +6548,23 @@ if all_hitters:
                     combined_all["pa"].isna() | (combined_all["pa"] < 100),
                     "sleeper_score"
                 ] = np.nan
+            # v40: CONTACT-QUALITY FLOOR (ULX "Sneaky" profile). The sleeper
+            # differential rewards low season-HR totals, which surfaced
+            # weak-contact hitters (Taylor Walls .010 ISO, Williamson 1.0%
+            # barrel, Fortes, Palacios) as "sleepers" purely for facing soft
+            # pitchers with near-zero season HR counts. A real sleeper needs
+            # demonstrated HR-capable contact. Drop anyone we KNOW is below
+            # the floor; leave genuine data gaps alone (don't over-filter on
+            # NaN). Validated against actual export: barrel ≥ 6 AND iso ≥ 0.100
+            # removes all 7 junk picks while keeping all 13 legitimate ones
+            # (Roman Anthony, Mitchell, Ramos, Correa, Tatis, Cam Smith, etc.).
+            _bp = pd.to_numeric(combined_all.get("barrel_pct"), errors="coerce")
+            _iso = pd.to_numeric(combined_all.get("iso"), errors="coerce")
+            _below_floor = (
+                (_bp.notna() & (_bp < 6.0))
+                | (_iso.notna() & (_iso < 0.100))
+            )
+            combined_all.loc[_below_floor, "sleeper_score"] = np.nan
     except Exception:
         pass
 
