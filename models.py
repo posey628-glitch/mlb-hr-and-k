@@ -34,12 +34,13 @@ SCORING_WEIGHTS = {
         "pitcher_barrel_allowed": 0.07,
     },
     "hr_form": {
-        "barrel_pct": 0.30,
-        "iso": 0.25,
-        "hard_hit": 0.15,
+        "barrel_pct": 0.27,    # 0.30→0.27
+        "iso": 0.22,           # 0.25→0.22
+        "hard_hit": 0.13,      # 0.15→0.13
         "avg_ev": 0.10,
         "fb_pct": 0.10,
-        "pulled_brl_pct": 0.10,
+        "pulled_brl_pct": 0.08,  # 0.10→0.08
+        "recent_iso_10": 0.10,   # v42c: 10-game ISO (community ideal window)
     },
     "ceiling": {
         "iso": 0.25,
@@ -513,7 +514,10 @@ def build_matchup_table(
         # Counts
         "pa", "home_run", "recent_hr", "recent_iso", "recent_avg",
         "recent_hr_weighted_rate",
-        "streak_label", "hr_streak_games", "hr_last_5", "games_since_hr",
+        "streak_label", "hr_streak_games", "hr_last_5", "hr_last_10", "games_since_hr",
+        # v42c: 10-game window stats (community-validated ideal HR signal)
+        "recent_iso_10", "recent_avg_10", "recent_k_pct_10",
+        "recent_ab_10", "recent_h_10", "recent_hr_10",
         # Day/night splits (vs day games, vs night games)
         "vs_day_pa", "vs_day_avg", "vs_day_obp", "vs_day_slg", "vs_day_ops",
         "vs_day_hr_per_pa", "vs_day_k_percent",
