@@ -121,6 +121,119 @@ def _parse_om_response_for_hour(response: dict, target_dt: datetime) -> dict:
     }
 
 
+# ============================================================================
+# WTTR.IN FALLBACK (v42a) — second free weather provider for Open-Meteo 429s
+# ============================================================================
+# Streamlit Cloud's outbound IPs are shared across many apps. Open-Meteo's
+# free tier caps at 10,000 calls/day per IP, so we frequently hit 429 errors
+# not from our own usage but from neighbor apps on the same egress IP. wttr.in
+# is a separate provider (no API key, no per-IP daily cap published, accepts
+# lat/lon directly) — when Open-Meteo fails we try wttr.in to fill the gap.
+#
+# wttr.in JSON shape (?format=j1):
+#   data["weather"][N]["hourly"][H] gives forecast at 3-hour intervals
+#   data["weather"][N]["date"] is the day
+#   hourly fields: time (0/300/600/900/1200/1500/1800/2100), tempF,
+#                  windspeedMiles, winddirDegree, humidity, pressure,
+#                  chanceofrain
+#
+# This is a graceful-degrade fallback, not a primary replacement. wttr.in
+# only returns 3-hour intervals (vs Open-Meteo's hourly), so we match to
+# the nearest 3-hour slot.
+# ============================================================================
+def _parse_wttr_response_for_hour(response: dict, target_dt: datetime) -> dict:
+    """Extract weather at target hour from a wttr.in ?format=j1 response."""
+    weather_days = response.get("weather", [])
+    if not weather_days:
+        return {}
+
+    target_naive = target_dt.replace(tzinfo=None) if target_dt.tzinfo else target_dt
+    target_date_str = target_naive.strftime("%Y-%m-%d")
+
+    # Find the day matching our target date; fall back to first day
+    day = None
+    for d in weather_days:
+        if d.get("date") == target_date_str:
+            day = d
+            break
+    if day is None:
+        day = weather_days[0]
+
+    hourly = day.get("hourly", []) or []
+    if not hourly:
+        return {}
+
+    # wttr.in time strings are like "0", "300", "600", ..., "2100" (3-hour intervals)
+    target_minutes = target_naive.hour * 60 + target_naive.minute
+
+    def _time_to_minutes(t_str):
+        try:
+            t_int = int(t_str)
+            return (t_int // 100) * 60 + (t_int % 100)
+        except (TypeError, ValueError):
+            return 0
+
+    best_idx = 0
+    best_delta = float("inf")
+    for i, h in enumerate(hourly):
+        h_min = _time_to_minutes(h.get("time", "0"))
+        delta = abs(h_min - target_minutes)
+        if delta < best_delta:
+            best_delta = delta
+            best_idx = i
+
+    h = hourly[best_idx]
+
+    def _f(key):
+        v = h.get(key)
+        try:
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    return {
+        "temp_f": _f("tempF"),
+        "wind_mph": _f("windspeedMiles"),
+        "wind_dir_deg": _f("winddirDegree"),
+        "humidity": _f("humidity"),
+        # wttr.in pressure is in mb (hPa equivalent for our purposes)
+        "pressure_hpa": _f("pressure"),
+        "precip_prob": _f("chanceofrain"),
+        "_source": "wttr.in",
+    }
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _fetch_single_wttr(lat: float, lon: float, target_dt_str: str) -> dict:
+    """Cached wttr.in single-location fetch. Used as Open-Meteo fallback.
+
+    Returns same dict shape as _fetch_single_om() so callers can swap.
+    Empty dict on failure — caller falls back to neutral park-only weather.
+    """
+    global _LAST_ERROR, _LAST_SOURCE
+    target_dt = datetime.fromisoformat(target_dt_str)
+    url = f"https://wttr.in/{lat},{lon}?format=j1"
+    try:
+        r = requests.get(url, timeout=12)
+        if r.status_code != 200:
+            _LAST_ERROR = f"wttr.in HTTP {r.status_code}: {r.text[:120]}"
+            return {}
+        data = r.json()
+        result = _parse_wttr_response_for_hour(data, target_dt)
+        if result.get("temp_f") is None:
+            _LAST_ERROR = "wttr.in returned no hourly data for target time"
+            return {}
+        _LAST_ERROR = None
+        _LAST_SOURCE = "wttr.in-fallback"
+        return result
+    except requests.exceptions.Timeout:
+        _LAST_ERROR = "wttr.in request timed out (12s)"
+        return {}
+    except Exception as e:
+        _LAST_ERROR = f"wttr.in exception: {type(e).__name__}: {str(e)[:120]}"
+        return {}
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def _fetch_single_om(lat: float, lon: float, target_dt_str: str) -> dict:
     """
@@ -167,6 +280,10 @@ def fetch_weather(lat: float, lon: float, when) -> dict:
     """
     Return weather forecast nearest to `when` for the given coords.
 
+    v42a: tries Open-Meteo first; if it fails (429 rate limit, timeout, etc.)
+    falls back to wttr.in. Returns the first non-empty result. If BOTH fail,
+    returns {} (caller will use neutral park-only env_boost).
+
     `when` accepts datetime, pd.Timestamp, ISO string, or None.
     Cache key is normalized to (rounded lat/lon, hour-of-day).
     """
@@ -178,7 +295,39 @@ def fetch_weather(lat: float, lon: float, when) -> dict:
     except (TypeError, ValueError):
         return {}
     target_dt = _normalize_target_dt(when)
-    return _fetch_single_om(lat, lon, target_dt.isoformat())
+    target_iso = target_dt.isoformat()
+
+    # Try Open-Meteo first (primary source — better accuracy, hourly resolution)
+    result = _fetch_single_om(lat, lon, target_iso)
+    if result and result.get("temp_f") is not None:
+        return result
+
+    # Fallback: wttr.in (no API key, no daily quota — works when Open-Meteo 429s)
+    result = _fetch_single_wttr(lat, lon, target_iso)
+    if result and result.get("temp_f") is not None:
+        return result
+
+    # Both failed — return empty so caller uses neutral env
+    return {}
+
+
+def _batch_fallback_via_wttr(unique_keys: list) -> int:
+    """When Open-Meteo batch fails, try wttr.in per-venue to salvage data.
+
+    Iterates each (lat, lon, target_dt) tuple, calls _fetch_single_wttr,
+    and primes _BATCH_CACHE on success. Returns count of venues filled.
+    wttr.in handles ~16 calls fine since it's per-venue, no per-IP cap.
+    """
+    n_success = 0
+    for (lat_r, lon_r, target_dt) in unique_keys:
+        try:
+            result = _fetch_single_wttr(lat_r, lon_r, target_dt.isoformat())
+            if result and result.get("temp_f") is not None:
+                _BATCH_CACHE[(lat_r, lon_r, target_dt.isoformat())] = result
+                n_success += 1
+        except Exception:
+            continue
+    return n_success
 
 
 def prefetch_weather_batch(coords_when_list: list[tuple[float, float, object]]) -> dict:
@@ -240,13 +389,36 @@ def prefetch_weather_batch(coords_when_list: list[tuple[float, float, object]]) 
         r = requests.get(url, timeout=20)
         if r.status_code == 429:
             _LAST_ERROR = "Open-Meteo rate limited (429) on batch prefetch"
+            # v42a: try wttr.in per-location to salvage the slate
+            n_wttr = _batch_fallback_via_wttr(unique_keys)
+            if n_wttr > 0:
+                _LAST_SOURCE = "wttr.in-batch-fallback"
+                return {
+                    "n_locations": n_locations, "n_success": n_wttr,
+                    "source": "wttr.in", "note": "Open-Meteo 429, wttr.in fallback used",
+                }
             return {"n_locations": n_locations, "n_success": 0, "error": _LAST_ERROR}
         if r.status_code != 200:
             _LAST_ERROR = f"Open-Meteo batch HTTP {r.status_code}: {r.text[:120]}"
+            # v42a: try wttr.in per-location as fallback
+            n_wttr = _batch_fallback_via_wttr(unique_keys)
+            if n_wttr > 0:
+                _LAST_SOURCE = "wttr.in-batch-fallback"
+                return {
+                    "n_locations": n_locations, "n_success": n_wttr,
+                    "source": "wttr.in", "note": f"Open-Meteo HTTP {r.status_code}, wttr.in fallback used",
+                }
             return {"n_locations": n_locations, "n_success": 0, "error": _LAST_ERROR}
         data = r.json()
     except requests.exceptions.Timeout:
         _LAST_ERROR = "Open-Meteo batch request timed out (20s)"
+        n_wttr = _batch_fallback_via_wttr(unique_keys)
+        if n_wttr > 0:
+            _LAST_SOURCE = "wttr.in-batch-fallback"
+            return {
+                "n_locations": n_locations, "n_success": n_wttr,
+                "source": "wttr.in", "note": "Open-Meteo timeout, wttr.in fallback used",
+            }
         return {"n_locations": n_locations, "n_success": 0, "error": _LAST_ERROR}
     except Exception as e:
         _LAST_ERROR = f"Open-Meteo batch exception: {type(e).__name__}: {str(e)[:120]}"
