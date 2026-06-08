@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.08-review-mode-v40b"
+APP_VERSION = "2026.06.08-sleeper-and-legend-v40c"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -2545,14 +2545,14 @@ if show_legend:
                 "**HITTER Grade (HR Game% based)** — applies to the **batter facing this pitcher**.\n\n"
                 "| Grade | HR Game% | Meaning |\n"
                 "|---|---|---|\n"
-                "| **A+** | ≥22% | Elite — top-tier HR play |\n"
-                "| **A** | 19-22% | Very strong matchup |\n"
-                "| **B+** | 16-19% | Strong, above-average |\n"
-                "| **B** | 12-16% | Solid, league-good |\n"
-                "| **C+** | 9-12% | Modest, slight edge |\n"
-                "| **C** | 6-9% | Below average |\n"
-                "| **D** | 3-6% | Poor matchup |\n"
-                "| **F** | <3% | Avoid |\n"
+                "| **A+** | ≥25% | Rare elite — top 3-5% of plays |\n"
+                "| **A** | 21-25% | Strong — top 10% |\n"
+                "| **B+** | 17-21% | Above average — top 25% |\n"
+                "| **B** | 13-17% | Solid |\n"
+                "| **C+** | 10-13% | Modest |\n"
+                "| **C** | 7-10% | Below average |\n"
+                "| **D** | 4-7% | Poor matchup |\n"
+                "| **F** | <4% | Avoid |\n"
                 "| **—** | n/a | Insufficient sample |\n"
             )
         with gcol2:
@@ -6557,21 +6557,25 @@ if all_hitters:
                     combined_all["pa"].isna() | (combined_all["pa"] < 100),
                     "sleeper_score"
                 ] = np.nan
-            # v40: CONTACT-QUALITY FLOOR (ULX "Sneaky" profile). The sleeper
-            # differential rewards low season-HR totals, which surfaced
-            # weak-contact hitters (Taylor Walls .010 ISO, Williamson 1.0%
-            # barrel, Fortes, Palacios) as "sleepers" purely for facing soft
-            # pitchers with near-zero season HR counts. A real sleeper needs
-            # demonstrated HR-capable contact. Drop anyone we KNOW is below
-            # the floor; leave genuine data gaps alone (don't over-filter on
-            # NaN). Validated against actual export: barrel ≥ 6 AND iso ≥ 0.100
-            # removes all 7 junk picks while keeping all 13 legitimate ones
-            # (Roman Anthony, Mitchell, Ramos, Correa, Tatis, Cam Smith, etc.).
+            # v40c: CONTACT-QUALITY FLOOR (ULX "Sneaky" profile), AND logic.
+            # The sleeper differential rewards low season-HR totals, which
+            # surfaced weak-contact hitters (Taylor Walls .010 ISO, Williamson
+            # 1.0% barrel) as "sleepers" purely for facing soft pitchers.
+            #
+            # AND logic (revised from v40's OR): require BOTH barrel% < 6 AND
+            # iso < .100 to filter. A hitter who's weak on ONE dimension but
+            # legit on the other (Lawrence Butler: 5.7% barrel, .185 ISO) has
+            # real power signal somewhere — don't cut him. Only hitters weak
+            # on BOTH power dimensions are uncontroversially not sleepers.
+            #
+            # Validated: Walls (2.0/.010), Williamson (1.0/.068), Fortes
+            # (0.8/.080), Palacios (3.2/.063) all still cut. Butler (.185 ISO)
+            # spared. Roman Anthony, Cam Smith, Tatis all kept.
             _bp = pd.to_numeric(combined_all.get("barrel_pct"), errors="coerce")
             _iso = pd.to_numeric(combined_all.get("iso"), errors="coerce")
             _below_floor = (
-                (_bp.notna() & (_bp < 6.0))
-                | (_iso.notna() & (_iso < 0.100))
+                _bp.notna() & (_bp < 6.0)
+                & _iso.notna() & (_iso < 0.100)
             )
             combined_all.loc[_below_floor, "sleeper_score"] = np.nan
     except Exception:
@@ -7041,7 +7045,7 @@ if all_hitters:
             st.markdown("---")
             st.markdown(f"**🏆 A+/A Grade Hitters Today ({len(elite_grades)})**")
             st.caption(
-                "Every hitter rated A+ (HR Game% ≥22%) or A (19-22%). These are the "
+                "Every hitter rated A+ (HR Game% ≥25%) or A (21-25%). These are the "
                 "top-tier HR plays on the slate. Sort by HR% to see best plays first."
             )
             elite_sorted = elite_grades.sort_values("hr_game_pct", ascending=False)
@@ -7405,15 +7409,15 @@ def build_col_config():
         "grade": st.column_config.TextColumn(
             "Grade", width="small",
             help=(
-                "Letter grade equivalent of HR Game%:\n"
-                "A+ : ≥22% (elite - top tier)\n"
-                "A  : 19-22% (very strong)\n"
-                "B+ : 16-19% (strong)\n"
-                "B  : 12-16% (solid)\n"
-                "C+ : 9-12% (modest)\n"
-                "C  : 6-9% (below avg)\n"
-                "D  : 3-6% (poor)\n"
-                "F  : <3% (avoid)\n"
+                "Letter grade equivalent of HR Game% (recalibrated v39k):\n"
+                "A+ : ≥25% (rare elite — top 3-5%)\n"
+                "A  : 21-25% (strong — top 10%)\n"
+                "B+ : 17-21% (above avg — top 25%)\n"
+                "B  : 13-17% (solid)\n"
+                "C+ : 10-13% (modest)\n"
+                "C  : 7-10% (below avg)\n"
+                "D  : 4-7% (poor)\n"
+                "F  : <4% (avoid)\n"
                 "—  : insufficient sample"
             ),
         ),
