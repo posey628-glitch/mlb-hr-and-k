@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.08-data-quality-v40"
+APP_VERSION = "2026.06.08-review-mode-v40b"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -1423,12 +1423,21 @@ if slate.empty:
 # ============================================================================
 # When user is checking the slate mid-day, the 1pm games are already started
 # and the data is no longer actionable for HR props. Only show upcoming games.
+#
+# This filter is BET-ORIENTED — it strips games where you can no longer place
+# a bet. If you're reviewing the day's results or studying which players
+# homered (useful for next-day adjustment), uncheck this to see started/final
+# games and their lineup data.
 hide_started = st.sidebar.checkbox(
-    "Hide games already started/final",
+    "Hide games already started/final (bet-oriented view)",
     value=True,
     help=(
-        "Removes games whose first pitch was before 'now'. "
-        "Uncheck if you want to review every game on the schedule including in-progress ones."
+        "BET MODE (checked): Removes games whose first pitch was before 'now'. "
+        "Use when you're picking plays for tonight.\n\n"
+        "REVIEW MODE (unchecked): Shows every game on the schedule including "
+        "in-progress and final ones. Use when reviewing how the day played out, "
+        "auditing model performance, or studying which players homered in "
+        "afternoon games."
     ),
 )
 if hide_started and selected_date == datetime.now().date():
