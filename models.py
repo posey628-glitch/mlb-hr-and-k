@@ -318,6 +318,19 @@ def build_matchup_table(
             # negative in tiny samples where AVG > SLG due to all singles.
             df["iso"] = (df[slg_col] - df[avg_col]).clip(lower=0).round(3)
 
+    # v42d: Derive pull_air_pct when Savant doesn't populate it.
+    # User audit showed pull_air_percent comes back 0% populated from the
+    # Savant custom leaderboard endpoint. Best derivation: pull_percent × fb_pct.
+    # This is APPROXIMATE — it assumes pull rate on flies matches overall pull
+    # rate, which is roughly true for most hitters but pull-happy hitters tend
+    # to pull MORE on flies, so the derived value slightly under-estimates for
+    # extreme pull hitters. Still useful as a signal vs zero data.
+    if "pull_air_pct" not in df.columns or df["pull_air_pct"].isna().all():
+        if "pull_percent" in df.columns and "fb_pct" in df.columns:
+            df["pull_air_pct"] = (df["pull_percent"] * df["fb_pct"] / 100).round(2)
+        elif "pull_pct" in df.columns and "fb_pct" in df.columns:
+            df["pull_air_pct"] = (df["pull_pct"] * df["fb_pct"] / 100).round(2)
+
     # If LA is still missing entirely but we have any launch_speed_angle data,
     # leave it blank (no derivation - it's a real measurement, not an identity)
 
@@ -599,24 +612,24 @@ def add_power_score(
     # re-added at small 0.02 (noisy but non-zero signal).
     #
     # Total weights sum to exactly 1.00.
-    # v42b: pull_air_pct added (your "Tier 1" addition). Pulled fly balls and
-    # line drives are where most HRs happen. Weight 0.05, drawn from iso
-    # (-0.01, redundant with barrel/pulled_brl), la (-0.02, noisy), and
-    # sweet_spot_pct (-0.02, overweighted v38d). Thresholds: poor 10%,
-    # elite 22%. League-wide pull_air for HR hitters ranges 12-25%.
-    # Conceptually overlaps with pulled_brl_pct but not pure duplicate —
-    # pulled_brl is specifically barreled, pull_air is broader pulled fly/LD.
+    # v42d: ROLLED BACK pull_air_pct weighting. User's data coverage audit
+    # showed pull_air_percent is 0% populated from Savant's leaderboard
+    # endpoint — so the 5% weight slot we added in v42b was silently doing
+    # nothing for every hitter. Restored the original weights until we
+    # find a Savant endpoint that actually returns pull_air data.
+    # (Possible alternative: Savant Statcast Search detail-level export.
+    #  Held until we can test.)
     specs = [
         ("barrel_pct",     0.25, 4.0, 22.0),    # 0.749 corr — anchor
-        ("iso",            0.17, 0.100, 0.350), # 0.18→0.17 (trimmed for pull_air)
+        ("iso",            0.18, 0.100, 0.350), # restored from 0.17
         ("pulled_brl_pct", 0.11, 2.0, 18.0),    # 0.737 corr
         ("hard_hit",       0.13, 30.0, 60.0),   # 0.590 corr
         ("avg_ev",         0.12, 85.0, 95.0),   # 0.605 corr
         ("fb_pct",         0.10, 18.0, 50.0),   # 0.461 corr
         ("recent_iso",     0.06, 0.080, 0.380), # 0.465 corr
-        ("pull_air_pct",   0.05, 10.0, 22.0),   # v42b: where HRs happen
-        ("sweet_spot_pct", 0.01, 10.0, 40.0),   # 0.03→0.01 (trimmed for pull_air)
-        # la removed v42b — 0.02 noisy signal redirected to pull_air_pct
+        ("sweet_spot_pct", 0.03, 10.0, 40.0),   # restored from 0.01
+        ("la",             0.02, 4.0, 22.0),    # restored — was redirected
+        # pull_air_pct removed v42d (data is 0% populated)
     ]
 
     def absolute_score(val, poor, elite):
