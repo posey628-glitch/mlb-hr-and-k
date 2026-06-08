@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.08-gist-correlation-v41c"
+APP_VERSION = "2026.06.08-hourly-snapshots-breakout-v42"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -6441,6 +6441,11 @@ st.caption(
     "calibrated HR Game% regardless of name recognition."
 )
 
+# v42: 🌱 BREAKOUT CANDIDATES — low-PA hitters with elite contact quality.
+# Rendered AFTER combined_all is built so we can reference it. Logic block
+# below uses combined_all; here we just reserve the slot in the page flow
+# by placing it before Top Sleepers.
+
 all_hitters = []
 for gpk, ctx in game_context_map.items():
     game_rows = slate[slate["gamePk"] == gpk]
@@ -6756,6 +6761,96 @@ if all_hitters:
     except Exception:
         pass
 
+    # ====================================================================
+    # 🌱 BREAKOUT CANDIDATES (v42) — low-PA hitters with elite contact
+    # ====================================================================
+    # You asked: "a sleeper is someone under the PA threshold who people
+    # might miss." The traditional sleeper_score (above) is "established
+    # player with quiet season but good matchup tonight." That's a different
+    # kind of sleeper than fresh call-ups (McGonigle-tier).
+    #
+    # This section surfaces healthy hitters BELOW the PA threshold who have:
+    #   - Real contact-quality signal (barrel% ≥ 8 or hard_hit% ≥ 42)
+    #   - AND ISO ≥ .150 (so we're not surfacing low-power slap hitters)
+    #   - AND PA between 20 and INSUFFICIENT_PA_THRESHOLD (truly low-PA)
+    #
+    # We DO NOT score these — small samples can't support trustworthy
+    # probabilities. We just surface them so they're visible. Treat as
+    # watchlist, not as bet probabilities.
+    # ====================================================================
+    try:
+        if "pa" in combined_all.columns:
+            _pa = pd.to_numeric(combined_all["pa"], errors="coerce")
+            _bp = pd.to_numeric(combined_all.get("barrel_pct"), errors="coerce")
+            _hh = pd.to_numeric(combined_all.get("hard_hit"), errors="coerce")
+            _iso = pd.to_numeric(combined_all.get("iso"), errors="coerce")
+
+            # Sample range: 20 PA min (Statcast contact metrics start
+            # stabilizing) up to the season PA threshold (below which
+            # the main pipeline calls them insufficient).
+            sample_ok = _pa.notna() & (_pa >= 20) & (_pa < INSUFFICIENT_PA_THRESHOLD)
+
+            # Contact quality: ELITE on at least ONE dimension AND
+            # decent ISO (so we exclude slap hitters with high BABIP).
+            quality_ok = (
+                _bp.notna() & (_bp >= 8.0)
+            ) | (
+                _hh.notna() & (_hh >= 42.0)
+            )
+            iso_ok = _iso.notna() & (_iso >= 0.150)
+
+            # IL check — don't surface injured rookies
+            il_ok = ~combined_all.get(
+                "il_flag", pd.Series([""] * len(combined_all))
+            ).fillna("").astype(str).str.contains("🏥")
+
+            breakout_mask = sample_ok & quality_ok & iso_ok & il_ok
+            n_breakout = int(breakout_mask.sum())
+
+            if n_breakout > 0:
+                breakout_df = combined_all[breakout_mask].copy()
+                # Sort by a simple composite: barrel_pct + hard_hit/3 + iso*100
+                breakout_df["_bk_sort"] = (
+                    breakout_df["barrel_pct"].fillna(0)
+                    + breakout_df["hard_hit"].fillna(0) / 3
+                    + breakout_df["iso"].fillna(0) * 100
+                )
+                breakout_df = breakout_df.sort_values("_bk_sort", ascending=False).head(15)
+                st.markdown(
+                    "### 🌱 Breakout Candidates — Low-PA hitters with elite contact"
+                )
+                st.caption(
+                    f"**{n_breakout} healthy hitters below the {INSUFFICIENT_PA_THRESHOLD} "
+                    f"PA threshold with real contact-quality signal.** These are the "
+                    f"McGonigle-tier plays — established projection systems miss them "
+                    f"because they don't have HR Game% calculated. **Watchlist only — "
+                    f"sample sizes are too small for trustworthy probabilities.** "
+                    f"Required: barrel ≥ 8% OR hard_hit ≥ 42%, AND ISO ≥ .150, AND "
+                    f"PA between 20 and {INSUFFICIENT_PA_THRESHOLD}."
+                )
+                breakout_cols = [c for c in [
+                    "player_name", "team", "game", "opp_pitcher", "bats",
+                    "pa", "barrel_pct", "hard_hit", "iso", "avg_ev",
+                    "lift_score", "matchup_opp", "env_boost",
+                ] if c in breakout_df.columns]
+                st.dataframe(
+                    breakout_df[breakout_cols].reset_index(drop=True),
+                    hide_index=True, use_container_width=True,
+                    column_config={
+                        "player_name": st.column_config.TextColumn("Player"),
+                        "pa": st.column_config.NumberColumn("PA", format="%d"),
+                        "barrel_pct": st.column_config.NumberColumn("Brl%", format="%.1f"),
+                        "hard_hit": st.column_config.NumberColumn("HH%", format="%.1f"),
+                        "iso": st.column_config.NumberColumn("ISO", format="%.3f"),
+                        "avg_ev": st.column_config.NumberColumn("EV", format="%.1f"),
+                        "lift_score": st.column_config.NumberColumn("Lift", format="%.1f"),
+                        "matchup_opp": st.column_config.NumberColumn("Opp", format="%.1f"),
+                        "env_boost": st.column_config.NumberColumn("Env", format="%.3f"),
+                    },
+                )
+    except Exception:
+        pass
+
     # Enrich with the OPPOSING pitcher's grade so we can filter trap sleepers
     # (e.g. don't recommend a sleeper facing a TOUGH/ELITE pitcher).
     if (not p_slate.empty and "pitcher_name" in p_slate.columns
@@ -6889,42 +6984,51 @@ if all_hitters:
 
     auto_snap_status = ""
     try:
-        from backtest import save_snapshot, list_snapshots
+        from backtest import save_snapshot, list_snapshots, _snapshot_key_for_now
         existing_snaps = set(list_snapshots())
-        snap_key = str(selected_date)
-        if (snap_key not in existing_snaps
+        # v42: hourly snapshot key. Auto-saves once per hour, not once per day.
+        # Captures early-game lineups (1pm games need data from ~11am) AND
+        # late-game lineups (7pm games need data from ~5-6pm).
+        current_hour_key = _snapshot_key_for_now(selected_date)
+        if (current_hour_key not in existing_snaps
                 and selected_date == datetime.now().date()
                 and combined_all is not None and len(combined_all) >= 100):
             ok = save_snapshot(selected_date, combined_all, p_slate)
             if ok:
-                auto_snap_status = f"✅ Auto-snapshot saved for {selected_date}"
+                # Count how many hourly snapshots exist for today
+                today_count = sum(1 for k in existing_snaps
+                                  if k.startswith(str(selected_date)))
+                auto_snap_status = (
+                    f"✅ Auto-snapshot saved for {current_hour_key} "
+                    f"({today_count + 1} snapshot(s) today)"
+                )
             else:
                 auto_snap_status = f"⚠️ Auto-snapshot failed - click button to save manually"
-        elif snap_key in existing_snaps:
-            auto_snap_status = f"✅ Snapshot exists for {selected_date}"
+        elif current_hour_key in existing_snaps:
+            today_count = sum(1 for k in existing_snaps
+                              if k.startswith(str(selected_date)))
+            auto_snap_status = (
+                f"✅ Snapshot exists for current hour ({current_hour_key}). "
+                f"{today_count} snapshot(s) today total."
+            )
     except Exception:
         pass
 
     # Save-snapshot + full export buttons - always render
     snap_col1, snap_col2, snap_col3 = st.columns([1.2, 1.5, 3])
     with snap_col1:
-        if st.button("💾 Save snapshot", help="Manually save today's projections for backtest comparison. Note: auto-snapshot already happens on every load."):
+        if st.button("💾 Save snapshot", help="Manually save current projections. v42: each save creates a new hourly snapshot — so save once before each game's lineups lock to capture lineup data accurately."):
             try:
-                from backtest import save_snapshot, durable_storage_configured, save_snapshot_durable
+                from backtest import save_snapshot, durable_storage_configured, _snapshot_key_for_now
                 ok = save_snapshot(selected_date, combined_all, p_slate)
+                key = _snapshot_key_for_now(selected_date)
                 if ok:
-                    if durable_storage_configured() and save_snapshot_durable(selected_date):
-                        st.success(f"✅ Saved snapshot for {selected_date} (durable — Gist)")
-                    elif durable_storage_configured():
-                        st.warning(
-                            f"⚠️ Saved snapshot for {selected_date} locally — "
-                            f"Gist write may have failed. Check token/gist_id."
-                        )
+                    if durable_storage_configured():
+                        st.success(f"✅ Saved snapshot {key} (durable — Gist)")
                     else:
                         st.warning(
-                            f"⚠️ Saved snapshot for {selected_date} (THIS SESSION ONLY — "
-                            f"will be wiped on next redeploy). Set up Gist persistence "
-                            f"to make snapshots durable."
+                            f"⚠️ Saved snapshot {key} (THIS SESSION ONLY — "
+                            f"will be wiped on next redeploy). Set up Gist persistence."
                         )
                 else:
                     st.error("Snapshot save failed")
@@ -6933,7 +7037,7 @@ if all_hitters:
         if auto_snap_status:
             st.caption(auto_snap_status)
 
-        # v41c: Honest persistence status — replaces the old generic warning
+        # Honest persistence status
         try:
             from backtest import durable_storage_configured
             if durable_storage_configured():
@@ -6944,10 +7048,8 @@ if all_hitters:
             else:
                 st.caption(
                     "⚠️ **Snapshot storage: EPHEMERAL** — snapshots are wiped on "
-                    "every redeploy and when the app sleeps. To enable durable "
-                    "storage: set `gist_token` and `gist_id` in Streamlit Cloud "
-                    "Secrets (see chat for setup steps). For now, save the daily "
-                    "Excel export for permanent record."
+                    "every redeploy. Set `gist_token` and `gist_id` in Streamlit "
+                    "Secrets to enable durable storage."
                 )
         except Exception:
             pass
