@@ -748,14 +748,14 @@ def _fetch_pitcher_splits_single(pitcher_id: int, season: int) -> dict:
                     # 54 PA, .269 SLG, no HR field = should be 0% not NaN.
                     if hr is not None:
                         out[f"vs_{label}_hr_per_pa"] = round(hr / denom * 100, 3)
-                    elif pa and pa >= 20 and slg is not None:
-                        try:
-                            slg_f = float(slg)
-                            # Tightened to .320 (was .400) — see other site.
-                            if slg_f < 0.320:
-                                out[f"vs_{label}_hr_per_pa"] = 0.0
-                        except (TypeError, ValueError):
-                            pass
+                    # v40: If HR field is ABSENT, leave vs_*_hr_per_pa unset.
+                    # Previously fabricated 0.0 when slg<.320 — but a missing
+                    # field is an ambiguous API omission, and a fake 0%
+                    # propagates into _platoon_hr_flag (creating spurious 💥
+                    # vulnerability flags + +4 pick_score bonus to opposing
+                    # hitters) and the display. props.py separately derives
+                    # a real low rate from SLG for pitcher_mult, so this
+                    # doesn't hurt the projection path.
                     if k is not None:
                         out[f"vs_{label}_k_percent"] = round(k / denom * 100, 2)
                     if bb is not None:
@@ -1007,16 +1007,12 @@ def _parse_stat_split_response(data: dict, group: str = "hitting") -> dict:
             if denom and denom > 0:
                 if hr is not None:
                     out[f"vs_{label}_hr_per_pa"] = round(hr / denom * 100, 3)
-                elif pa and pa >= 20 and slg:
-                    try:
-                        # Tightened from .400 to .320: a pitcher with 1 HR in 25
-                        # PA could still post .380 SLG, so the old threshold
-                        # was occasionally inferring 0 HRs incorrectly.
-                        # .320 SLG is a strong signal that no HRs were hit.
-                        if float(slg) < 0.320:
-                            out[f"vs_{label}_hr_per_pa"] = 0.0
-                    except (TypeError, ValueError):
-                        pass
+                # v40: Absent HR field → leave unset (no fabricated 0.0). A
+                # manufactured 0% reads as elite suppression downstream and
+                # corrupts _platoon_hr_flag (which divides r_safe/l_safe with
+                # min 0.001) — producing 40× ratios that trigger spurious
+                # 💥 RHB-vulnerability flags and +4 pick_score bonuses.
+                # Missing stays missing.
                 if k is not None:
                     out[f"vs_{label}_k_percent"] = round(k / denom * 100, 2)
             if avg:
