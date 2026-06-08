@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.08-slate-percentile-decompose-v41"
+APP_VERSION = "2026.06.08-cold-ceiling-snapshot-bias-v41a"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -1457,12 +1457,16 @@ if hide_started and selected_date == datetime.now().date():
             mask = slate["gameTime"].apply(_is_upcoming)
             n_filtered = (~mask).sum()
             slate = slate[mask].reset_index(drop=True)
+            # Stash for snapshot bias warning downstream
+            st.session_state["_filter_dropped_games"] = int(n_filtered)
             if n_filtered > 0:
                 st.info(
                     f"⏱️ Hiding {n_filtered} game{'s' if n_filtered != 1 else ''} "
                     f"that already started. Uncheck 'Hide games already started/final' "
                     f"in sidebar to see them."
                 )
+        else:
+            st.session_state["_filter_dropped_games"] = 0
     except Exception as _e:
         # If filtering fails for any reason, don't block the user — show everything
         pass
@@ -6445,64 +6449,99 @@ if all_hitters:
             pass
 
     # ========================================================================
-    # SLATE-WIDE COMPOSITE RECOMPUTE (v41) — Patch 1 structural fix only
+    # SLATE-WIDE hr_form RECOMPUTE (v41a — fixes verification gaps)
     # ========================================================================
-    # models.py build_matchup_table computes matchup / hr_form / ceiling as
-    # percentile ranks WITHIN each 9-man lineup. That means a "B+" hitter on
-    # a stacked Yankees lineup and a "B+" hitter on a weak Marlins lineup get
-    # the same composite score even though they're on completely different
-    # absolute scales. The Marlins B+ might be objectively weak; the Yankees
-    # B+ might be objectively strong.
+    # models.py build_matchup_table computes hr_form as a percentile rank
+    # WITHIN each 9-man lineup. That means a "B+" hr_form on a stacked
+    # Yankees lineup and a "B+" hr_form on a weak Marlins lineup get the
+    # same score even though they're on completely different absolute
+    # scales. This breaks cross-game comparisons and contaminates snapshot
+    # data for backtest regression.
     #
-    # This breaks two things:
-    #   1. Cross-game comparisons (the whole point of the slate view)
-    #   2. Snapshot accumulation for backtest — same column means different
-    #      things across games, so regression against outcomes is biased
+    # v41a CORRECTIONS to v41:
     #
-    # FIX (parameter-free): re-rank the SAME columns slate-wide and overwrite
-    # the per-lineup ranks. No new thresholds, no scoring philosophy change,
-    # no untunable knobs. Just: rank against the full slate instead of within
-    # a 9-man window. Pitcher columns that flattened to ~50 because every
-    # hitter in a lineup faces the same pitcher (so percentile rank was 50
-    # for everyone) now vary across games as intended.
+    # 1. Only recompute hr_form (NOT matchup, NOT ceiling). The matchup
+    #    and ceiling composite weights include pitcher columns
+    #    (pitcher_xwoba, pitcher_k_inv, pitcher_barrel_allowed) that are
+    #    NOT in models.py display_cols whitelist — so they're dropped
+    #    before combined_all is built. Recomputing those composites slate-
+    #    wide would silently renormalize over only the hitter-quality
+    #    weights, eliminating the pitcher dimension entirely (worse than
+    #    leaving them as-is). Held until pitcher columns are added to
+    #    display_cols.
+    #
+    # 2. Re-apply the cold-streak ceiling AFTER recompute. The original
+    #    build_matchup_table applies _apply_cold_ceiling AFTER
+    #    _score_from_weights. v41 overwrote hr_form with raw slate-wide
+    #    ranks, bypassing the ceiling, which would re-inflate Carroll-tier
+    #    cold sluggers (the bug that ceiling was built to fix). Now
+    #    explicitly re-applied here.
+    #
+    # 3. Only hr_form actually FEEDS pick_score (12% weight). matchup
+    #    and ceiling are display-only. So the ranking impact of this
+    #    patch flows entirely through hr_form anyway — limiting it to
+    #    just hr_form has zero ranking downside.
     # ========================================================================
     try:
         from models import SCORING_WEIGHTS, _safe_pct_rank
 
-        def _slate_score(df_pool, weights, neg=()):
-            """Compute weighted slate-wide percentile composite. Mirrors
-            _score_from_weights but ranks across the entire pool, not per
-            lineup. Returns a Series aligned with df_pool's index."""
+        weights = SCORING_WEIGHTS.get("hr_form", {})
+        if weights:
             contributions = []
             for col, w in weights.items():
-                if col not in df_pool.columns:
+                if col not in combined_all.columns:
                     continue
-                ranked = _safe_pct_rank(df_pool[col])
-                if col in neg:
-                    ranked = 100 - ranked
+                ranked = _safe_pct_rank(combined_all[col])
                 weight_present = ranked.notna().astype(float) * w
                 contributions.append((weight_present, ranked.fillna(0)))
-            if not contributions:
-                return pd.Series([np.nan] * len(df_pool), index=df_pool.index)
-            total_weight = sum(wp for wp, _ in contributions)
-            weighted_sum = sum(wp * r for wp, r in contributions)
-            return (weighted_sum / total_weight.replace(0, np.nan)).round(2)
 
-        # Recompute the three composites slate-wide. Same column weights as
-        # build_matchup_table used per-lineup; same _safe_pct_rank logic.
-        for composite_name in ("matchup", "hr_form", "ceiling"):
-            weights = SCORING_WEIGHTS.get(composite_name, {})
-            if weights:
-                # Detect "lower is better" columns the same way models.py does
-                neg = tuple(c for c in weights if c.endswith("_pct")
-                              and any(k in c for k in ("k_pct", "whiff")))
-                slate_score = _slate_score(combined_all, weights, neg=neg)
-                if slate_score.notna().any():
-                    combined_all[composite_name] = slate_score
+            if contributions:
+                total_weight = sum(wp for wp, _ in contributions)
+                weighted_sum = sum(wp * r for wp, r in contributions)
+                hr_form_slate = (weighted_sum / total_weight.replace(0, np.nan)).round(2)
+
+                # Re-apply cold-streak ceiling (Carroll fix). The ceiling logic
+                # mirrors build_matchup_table's _apply_cold_ceiling exactly:
+                #   < 5 games:   no cap
+                #   5-6 games:   75 ceiling
+                #   7-9 games:   60 ceiling
+                #   10+ games:   40 ceiling
+                if "games_since_hr" in combined_all.columns:
+                    def _apply_cold_ceiling(idx):
+                        form = hr_form_slate.iloc[idx]
+                        if pd.isna(form):
+                            return form
+                        gsh = combined_all["games_since_hr"].iloc[idx]
+                        if gsh is None or pd.isna(gsh):
+                            return form
+                        try:
+                            gsh_n = float(gsh)
+                        except (TypeError, ValueError):
+                            return form
+                        if gsh_n >= 10:
+                            return min(float(form), 40.0)
+                        if gsh_n >= 7:
+                            return min(float(form), 60.0)
+                        if gsh_n >= 5:
+                            return min(float(form), 75.0)
+                        return form
+                    hr_form_slate = pd.Series(
+                        [_apply_cold_ceiling(i) for i in range(len(combined_all))],
+                        index=combined_all.index,
+                    )
+
+                if hr_form_slate.notna().any():
+                    combined_all["hr_form"] = hr_form_slate
     except Exception:
-        # If recompute fails for any reason, fall through to the per-lineup
-        # ranks already in combined_all. Don't break the app.
+        # Falls through to per-lineup hr_form already in combined_all. No crash.
         pass
+
+    # NOTE: matchup and ceiling composites NOT recomputed slate-wide because
+    # their weights include pitcher_xwoba / pitcher_k_inv / pitcher_barrel_allowed
+    # which aren't in models.py display_cols. Recomputing without those columns
+    # would silently eliminate the pitcher dimension from the score, which is
+    # worse than the per-lineup percentile ranks already in place. To fix
+    # later: add those pitcher columns to display_cols in build_matchup_table.
 
     # ========================================================================
     # HITTER IL DETECTION via ACTIVE ROSTER CROSS-CHECK (v39h)
@@ -6801,6 +6840,22 @@ if all_hitters:
     #   - we don't already have a snapshot for today
     # ...then automatically save a snapshot. This ensures we capture EVERY day,
     # not just days when the user remembers to click the button.
+    #
+    # SNAPSHOT BIAS WARNING (v41a): When the started-games filter is active,
+    # snapshot data is biased — afternoon games are systematically excluded.
+    # Detect and warn so the user knows to uncheck the filter if they're
+    # actively building backtest data.
+    n_dropped = st.session_state.get("_filter_dropped_games", 0)
+    if n_dropped > 0 and hide_started and selected_date == datetime.now().date():
+        st.warning(
+            f"⚠️ **Snapshot bias warning:** {n_dropped} game(s) already started "
+            f"and are EXCLUDED from any snapshot saved right now. "
+            f"For unbiased backtest data, uncheck '*Hide games already "
+            f"started/final*' in the sidebar and reload before saving snapshots. "
+            f"The current filter setting is fine for picking plays — "
+            f"this warning only matters when you're capturing data for backtest analysis."
+        )
+
     auto_snap_status = ""
     try:
         from backtest import save_snapshot, list_snapshots
