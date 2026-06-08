@@ -1488,14 +1488,14 @@ def get_pitcher_recent_form(pitcher_id: int, season: int = CURRENT_SEASON,
 @st.cache_data(ttl=1800)
 def get_hitter_recent_form_trad(player_id: int, season: int = CURRENT_SEASON,
                                   n_games: int = 15,
-                                  _cache_version: str = "v2") -> dict:
+                                  _cache_version: str = "v3") -> dict:
     """Last 15 games hitter form via game log - lightweight.
 
     Now also tracks HR streaks and hot/cold pattern indicators.
 
-    _cache_version: bumped to v2 when recent_hr_weighted_rate field was added.
-    Forces Streamlit cache to invalidate so old cached results (missing the
-    new field) don't override fresh fetches.
+    _cache_version: bumped to v3 for v42c when 10-game window stats were
+    added (recent_iso_10, recent_avg_10, etc). Forces Streamlit cache to
+    invalidate so old cached results don't override fresh fetches.
     """
     url = (
         f"https://statsapi.mlb.com/api/v1/people/{player_id}/stats"
@@ -1528,6 +1528,29 @@ def get_hitter_recent_form_trad(player_id: int, season: int = CURRENT_SEASON,
             t += int(st_.get("triples", 0) or 0)
         if ab == 0:
             return {}
+
+        # v42c: Also compute last-10 stats for "ideal window" recent form
+        # (community consensus: 10 days = signal sweet spot, 5 too noisy,
+        # 15 too smoothed). The 15-game stats above stay for backward
+        # compatibility and longer-window context; 10-game stats added below
+        # for ranking sensitivity.
+        last_10_splits = recent[-10:] if len(recent) > 10 else recent
+        ab_10, h_10, hr_10, d_10, t_10, k_10, bb_10 = 0, 0, 0, 0, 0, 0, 0
+        for s10 in last_10_splits:
+            st10 = s10.get("stat", {})
+            ab_10 += int(st10.get("atBats", 0) or 0)
+            h_10 += int(st10.get("hits", 0) or 0)
+            hr_10 += int(st10.get("homeRuns", 0) or 0)
+            d_10 += int(st10.get("doubles", 0) or 0)
+            t_10 += int(st10.get("triples", 0) or 0)
+            k_10 += int(st10.get("strikeOuts", 0) or 0)
+            bb_10 += int(st10.get("baseOnBalls", 0) or 0)
+        # ISO over 10 games
+        recent_iso_10 = round((d_10 + 2 * t_10 + 3 * hr_10) / ab_10, 3) if ab_10 else 0.0
+        # AVG over 10
+        recent_avg_10 = round(h_10 / ab_10, 3) if ab_10 else 0.0
+        # K% over 10
+        recent_k_pct_10 = round(k_10 / (ab_10 + bb_10) * 100, 1) if (ab_10 + bb_10) else 0.0
 
         # Streak metrics - reverse so most-recent game is first
         per_game_hr_rev = list(reversed(per_game_hr))
@@ -1599,6 +1622,13 @@ def get_hitter_recent_form_trad(player_id: int, season: int = CURRENT_SEASON,
             "games_since_hr": games_since_hr,
             "hr_last_5": hr_last_5,
             "hr_last_10": hr_last_10,
+            # v42c: 10-game window — community-validated as ideal HR signal
+            "recent_iso_10": recent_iso_10,
+            "recent_avg_10": recent_avg_10,
+            "recent_k_pct_10": recent_k_pct_10,
+            "recent_ab_10": ab_10,
+            "recent_h_10": h_10,
+            "recent_hr_10": hr_10,
             "multi_hr_games": multi_hr_games,
             "streak_label": streak_label,
         }
@@ -2129,7 +2159,8 @@ def fill_hitter_la_for_slate(hitter_stats: pd.DataFrame, slate: pd.DataFrame,
 # ----------------------------------------------------------------------------
 
 @st.cache_data(ttl=3600)
-def get_hitter_hr_profile(season: int = CURRENT_SEASON) -> pd.DataFrame:
+def get_hitter_hr_profile(season: int = CURRENT_SEASON,
+                           _cache_version: str = "v42c") -> pd.DataFrame:
     """
     Returns per-hitter HR profile metrics:
       - player_id
@@ -2137,6 +2168,10 @@ def get_hitter_hr_profile(season: int = CURRENT_SEASON) -> pd.DataFrame:
       - max_hit_speed    (max exit velo of any batted ball — proxy for top-end power)
       - hr_profile       (categorical: "moonshot" / "balanced" / "laser" / None)
       - hr_profile_label (display string with emoji)
+
+    _cache_version: bump to invalidate stale cached results. Bumped to v42c
+    when the fabricated-zero fix shipped (Savant returns 0 for hitters with
+    no HRs; we coerce ≤50 ft/mph to NaN).
     """
     url = (
         "https://baseballsavant.mlb.com/leaderboard/statcast"
