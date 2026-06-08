@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.08-sleeper-and-legend-v40c"
+APP_VERSION = "2026.06.08-slate-percentile-decompose-v41"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -4743,6 +4743,7 @@ honorable_mentions = pd.DataFrame()
 best_matchups_export = pd.DataFrame()
 top_picks_export = None
 two_leg_df = None
+pick_audit = None  # v41 Patch 2 — pick_score component breakdown for export
 # Slate-leader containers — populated below once combined_picks is built.
 # Pre-init so downstream references (per-game best HR caption, exports) are safe
 # even if all_hitters_for_picks ends up empty.
@@ -4941,104 +4942,107 @@ if all_hitters_for_picks:
         #   • Confirmed lineup +3 points (more certainty about PA)
         #   • Roster-fill -2 points (PA is league-avg estimate, more uncertain)
         #
-        # Then filter: must have sample size, pitch matchup data when available.
-        # Diversity rule remains: max 2 per game.
+        # v41 PATCH 2: alongside computing the final pick_score (math
+        # unchanged), store each component's weighted contribution as a
+        # `ps_*` column. This makes the score auditable — when Kurtz lands
+        # at #4, you can see literally which components drove it (e.g.
+        # ps_pitch_hr 8.2, ps_env 14.1, ps_platoon_bonus 4.0). Required for
+        # snapshot-based regression analysis: without per-component
+        # contributions stored, accumulating backtest data is un-tunable.
         score_parts = []
         weights = []
+        component_meta = []  # (output_col_name, raw_pct_series) for storage
 
         # === Today's matchup (40%) ===
-        # HR Game% is the highest-signal predictor we have
         if "hr_game_pct" in q.columns:
-            score_parts.append(_pct(q["hr_game_pct"]))
-            weights.append(0.25)
-        # matchup_opp captures pitcher quality + park factor against this hitter
+            _p = _pct(q["hr_game_pct"])
+            score_parts.append(_p); weights.append(0.25)
+            component_meta.append(("ps_hr_game", _p, 0.25))
         if "matchup_opp" in q.columns:
-            score_parts.append(_pct(q["matchup_opp"]))
-            weights.append(0.15)
+            _p = _pct(q["matchup_opp"])
+            score_parts.append(_p); weights.append(0.15)
+            component_meta.append(("ps_matchup_opp", _p, 0.15))
 
         # === Underlying power (25%) ===
-        # power_score is our composite — barrel + ISO + EV + hard-hit + FB%
         if "power_score" in q.columns:
-            score_parts.append(_pct(q["power_score"]))
-            weights.append(0.15)
-        # pitch_hr_score: hitter's barrel% vs THIS pitcher's specific pitches
+            _p = _pct(q["power_score"])
+            score_parts.append(_p); weights.append(0.15)
+            component_meta.append(("ps_power", _p, 0.15))
         if "pitch_hr_score" in q.columns and q["pitch_hr_score"].notna().any():
-            score_parts.append(_pct(q["pitch_hr_score"]))
-            weights.append(0.10)
+            _p = _pct(q["pitch_hr_score"])
+            score_parts.append(_p); weights.append(0.10)
+            component_meta.append(("ps_pitch_hr", _p, 0.10))
 
         # === Recent form + sleeper lift (20%) ===
-        # hr_form: hot/cold streak indicator
         if "hr_form" in q.columns:
-            score_parts.append(_pct(q["hr_form"]))
-            weights.append(0.12)
-        # sleeper_score: today's HR percentile MINUS season pace
-        # High positive sleeper = today's matchup is much better than season avg.
-        # Use percentile rank (same as other components) so we never lose
-        # differentiation at the high end. The previous fixed-scale formula
-        # `((score + 70) / 1.5).clip(0, 100)` mapped all scores above ~77 to
-        # ≈98-100, blurring rankings among the strongest sleepers (Julien 56,
-        # Acuña 44 OK, but Schwarber-tier 80+ all collapsed).
-        # v38: reduced 0.08 → 0.05 to free weight for lift_score.
+            _p = _pct(q["hr_form"])
+            score_parts.append(_p); weights.append(0.12)
+            component_meta.append(("ps_form", _p, 0.12))
         if "sleeper_score" in q.columns and q["sleeper_score"].notna().any():
-            score_parts.append(_pct(q["sleeper_score"]))
-            weights.append(0.05)
-        # lift_score (v38): contact-quality × air-ball × pitcher-FB tendency.
-        # Reviewer-validated correlation 0.672 with HR Game% — better than any
-        # individual component. Started at 0.03 in v38b; bumped to 0.06 in
-        # v38d after reviewer confirmed lift_score is producing real signal
-        # but undersurfaced in picks. At 0.06, Yordan-tier high-lift hitters
-        # move into Top 10 when they otherwise wouldn't.
+            _p = _pct(q["sleeper_score"])
+            score_parts.append(_p); weights.append(0.05)
+            component_meta.append(("ps_sleeper", _p, 0.05))
         if "lift_score" in q.columns and q["lift_score"].notna().any():
-            score_parts.append(_pct(q["lift_score"]))
-            weights.append(0.06)
+            _p = _pct(q["lift_score"])
+            score_parts.append(_p); weights.append(0.06)
+            component_meta.append(("ps_lift", _p, 0.06))
 
         # === Today's environment (15%) ===
-        # env_boost includes park × weather × pull-side wind
         if "env_boost" in q.columns:
-            score_parts.append(_pct(q["env_boost"]))
-            weights.append(0.15)
+            _p = _pct(q["env_boost"])
+            score_parts.append(_p); weights.append(0.15)
+            component_meta.append(("ps_env", _p, 0.15))
 
         if score_parts:
             total_w = sum(weights)
             weighted = sum(p * (w / total_w) for p, w in zip(score_parts, weights))
             q["pick_score"] = weighted
 
-            # Lineup confirmation bonus/penalty
-            if "is_roster_fill" in q.columns:
-                q["pick_score"] = q["pick_score"] - q["is_roster_fill"].fillna(False).astype(float) * 2.0
-                # Confirmed (non-fill) gets +3
-                q.loc[~q["is_roster_fill"].fillna(False).astype(bool), "pick_score"] += 3.0
+            # Store each component's contribution to the final base score.
+            # contribution = pct_rank * (weight / total_weight)
+            # Sum of all ps_* columns = the base pick_score (before bonuses/penalties).
+            for col_name, pct_series, w in component_meta:
+                q[col_name] = (pct_series * (w / total_w)).round(2)
 
-            # PLATOON HR BONUS — if hitter's handedness matches the side the
-            # opposing pitcher gives up the most HRs to, bump their score.
-            # 💥 = +4 (severe), 💢 = +2 (notable). Switch hitters (S) get the
-            # bonus regardless since they can pick the side.
+            # Lineup confirmation bonus/penalty — store as ps_bonus_lineup
+            if "is_roster_fill" in q.columns:
+                fill = q["is_roster_fill"].fillna(False).astype(bool)
+                # -2 for fill, +3 for confirmed (non-fill)
+                lineup_adj = np.where(fill, -2.0, 3.0)
+                q["pick_score"] = q["pick_score"] + lineup_adj
+                q["ps_bonus_lineup"] = lineup_adj
+            else:
+                q["ps_bonus_lineup"] = 0.0
+
+            # PLATOON HR BONUS
             if "opp_platoon_hr" in q.columns and "bats" in q.columns:
                 def _platoon_bonus(row):
-                    # NA-safe: pd.NA in `or` expression crashes. Extract first,
-                    # then check NA, then coerce.
                     _flag_raw = row.get("opp_platoon_hr")
                     _bats_raw = row.get("bats")
                     flag = "" if (_flag_raw is None or pd.isna(_flag_raw)) else str(_flag_raw)
                     bats = "" if (_bats_raw is None or pd.isna(_bats_raw)) else str(_bats_raw).upper()
                     if not flag or not bats:
-                        return 0
+                        return 0.0
                     is_severe = "💥" in flag
                     is_notable = "💢" in flag
                     target_side = "RHB" if "RHB" in flag else ("LHB" if "LHB" in flag else "")
                     if not target_side:
-                        return 0
+                        return 0.0
                     hitter_matches = (
                         bats == "S"
                         or (bats == "R" and target_side == "RHB")
                         or (bats == "L" and target_side == "LHB")
                     )
                     if hitter_matches:
-                        return 4.0 if is_severe else (2.0 if is_notable else 0)
-                    return 0
-                q["pick_score"] = q["pick_score"] + q.apply(_platoon_bonus, axis=1)
+                        return 4.0 if is_severe else (2.0 if is_notable else 0.0)
+                    return 0.0
+                platoon_bonus_series = q.apply(_platoon_bonus, axis=1).astype(float)
+                q["pick_score"] = q["pick_score"] + platoon_bonus_series
+                q["ps_bonus_platoon"] = platoon_bonus_series
+            else:
+                q["ps_bonus_platoon"] = 0.0
 
-            # RECENT HR ALLOWED BONUS — pitcher giving up HRs lately = ride the wave
+            # RECENT HR ALLOWED BONUS
             if "opp_recent_hr" in q.columns:
                 def _recent_hr_bonus(row):
                     _raw = row.get("opp_recent_hr")
@@ -5047,20 +5051,43 @@ if all_hitters_for_picks:
                         return 3.0
                     if "⚠️" in flag:
                         return 1.5
-                    return 0
-                q["pick_score"] = q["pick_score"] + q.apply(_recent_hr_bonus, axis=1)
+                    return 0.0
+                recent_hr_series = q.apply(_recent_hr_bonus, axis=1).astype(float)
+                q["pick_score"] = q["pick_score"] + recent_hr_series
+                q["ps_bonus_recent_hr"] = recent_hr_series
+            else:
+                q["ps_bonus_recent_hr"] = 0.0
 
-            # IL PENALTY (v39g) — knock players not on active roster out of
-            # Top 10 contention. The il_flag column was set earlier from the
-            # active roster cross-check.
+            # IL PENALTY
             if "il_flag" in q.columns:
                 _il_mask = q["il_flag"].fillna("").astype(str) != ""
-                if _il_mask.any():
-                    q.loc[_il_mask, "pick_score"] = q.loc[_il_mask, "pick_score"] - 15.0
+                il_pen = np.where(_il_mask, -15.0, 0.0)
+                q["pick_score"] = q["pick_score"] + il_pen
+                q["ps_penalty_il"] = il_pen
+            else:
+                q["ps_penalty_il"] = 0.0
 
             q["pick_score"] = q["pick_score"].round(1)
         else:
             q["pick_score"] = q.get("hr_game_pct", 0)
+            # Initialize ps_* columns to 0 for schema stability
+            for col_name in ("ps_hr_game", "ps_matchup_opp", "ps_power",
+                              "ps_pitch_hr", "ps_form", "ps_sleeper",
+                              "ps_lift", "ps_env", "ps_bonus_lineup",
+                              "ps_bonus_platoon", "ps_bonus_recent_hr",
+                              "ps_penalty_il"):
+                q[col_name] = 0.0
+
+        # Stash per-player audit so combined_all (Hitters export) carries it.
+        _ps_cols = [c for c in (
+            "player_id", "pick_score",
+            "ps_hr_game", "ps_matchup_opp", "ps_power", "ps_pitch_hr",
+            "ps_form", "ps_sleeper", "ps_lift", "ps_env",
+            "ps_bonus_lineup", "ps_bonus_platoon", "ps_bonus_recent_hr",
+            "ps_penalty_il",
+        ) if c in q.columns]
+        if "player_id" in q.columns:
+            pick_audit = q[_ps_cols].drop_duplicates(subset="player_id", keep="first").copy()
 
         # ====================================================================
         # CONVERGENCE SCORE (v39) — "how many independent systems agree?"
@@ -6398,6 +6425,84 @@ for gpk, ctx in game_context_map.items():
 
 if all_hitters:
     combined_all = pd.concat(all_hitters, ignore_index=True)
+
+    # v41 Patch 2: attach pick_score + its decomposition so the Hitters export
+    # is auditable. Without this, snapshot data is un-tunable for backtest
+    # regression — you can't fit component weights against HR outcomes if you
+    # never stored the component contributions.
+    if pick_audit is not None and not pick_audit.empty and "player_id" in combined_all.columns:
+        try:
+            # Coerce both sides to Int64 to avoid type-mismatch silent merge failures
+            combined_all["player_id"] = pd.to_numeric(
+                combined_all["player_id"], errors="coerce"
+            ).astype("Int64")
+            pick_audit["player_id"] = pd.to_numeric(
+                pick_audit["player_id"], errors="coerce"
+            ).astype("Int64")
+            combined_all = combined_all.merge(pick_audit, on="player_id", how="left")
+        except Exception:
+            # If merge fails, don't break the export — ps_* columns just won't appear
+            pass
+
+    # ========================================================================
+    # SLATE-WIDE COMPOSITE RECOMPUTE (v41) — Patch 1 structural fix only
+    # ========================================================================
+    # models.py build_matchup_table computes matchup / hr_form / ceiling as
+    # percentile ranks WITHIN each 9-man lineup. That means a "B+" hitter on
+    # a stacked Yankees lineup and a "B+" hitter on a weak Marlins lineup get
+    # the same composite score even though they're on completely different
+    # absolute scales. The Marlins B+ might be objectively weak; the Yankees
+    # B+ might be objectively strong.
+    #
+    # This breaks two things:
+    #   1. Cross-game comparisons (the whole point of the slate view)
+    #   2. Snapshot accumulation for backtest — same column means different
+    #      things across games, so regression against outcomes is biased
+    #
+    # FIX (parameter-free): re-rank the SAME columns slate-wide and overwrite
+    # the per-lineup ranks. No new thresholds, no scoring philosophy change,
+    # no untunable knobs. Just: rank against the full slate instead of within
+    # a 9-man window. Pitcher columns that flattened to ~50 because every
+    # hitter in a lineup faces the same pitcher (so percentile rank was 50
+    # for everyone) now vary across games as intended.
+    # ========================================================================
+    try:
+        from models import SCORING_WEIGHTS, _safe_pct_rank
+
+        def _slate_score(df_pool, weights, neg=()):
+            """Compute weighted slate-wide percentile composite. Mirrors
+            _score_from_weights but ranks across the entire pool, not per
+            lineup. Returns a Series aligned with df_pool's index."""
+            contributions = []
+            for col, w in weights.items():
+                if col not in df_pool.columns:
+                    continue
+                ranked = _safe_pct_rank(df_pool[col])
+                if col in neg:
+                    ranked = 100 - ranked
+                weight_present = ranked.notna().astype(float) * w
+                contributions.append((weight_present, ranked.fillna(0)))
+            if not contributions:
+                return pd.Series([np.nan] * len(df_pool), index=df_pool.index)
+            total_weight = sum(wp for wp, _ in contributions)
+            weighted_sum = sum(wp * r for wp, r in contributions)
+            return (weighted_sum / total_weight.replace(0, np.nan)).round(2)
+
+        # Recompute the three composites slate-wide. Same column weights as
+        # build_matchup_table used per-lineup; same _safe_pct_rank logic.
+        for composite_name in ("matchup", "hr_form", "ceiling"):
+            weights = SCORING_WEIGHTS.get(composite_name, {})
+            if weights:
+                # Detect "lower is better" columns the same way models.py does
+                neg = tuple(c for c in weights if c.endswith("_pct")
+                              and any(k in c for k in ("k_pct", "whiff")))
+                slate_score = _slate_score(combined_all, weights, neg=neg)
+                if slate_score.notna().any():
+                    combined_all[composite_name] = slate_score
+    except Exception:
+        # If recompute fails for any reason, fall through to the per-lineup
+        # ranks already in combined_all. Don't break the app.
+        pass
 
     # ========================================================================
     # HITTER IL DETECTION via ACTIVE ROSTER CROSS-CHECK (v39h)
