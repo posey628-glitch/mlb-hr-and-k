@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.08-cold-ceiling-snapshot-bias-v41a"
+APP_VERSION = "2026.06.08-platoon-unit-fix-v41b"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -3050,18 +3050,32 @@ if not p_slate.empty:
                 return ""
             l_hr_pa = float(l_hr_pa)
             r_hr_pa = float(r_hr_pa)
-            # Avoid div-by-zero — if a side is 0% HR allowed, use minimum 0.001
-            l_safe = max(l_hr_pa, 0.001)
-            r_safe = max(r_hr_pa, 0.001)
+            # v41b UNIT FIX: vs_*_hr_per_pa is stored as a PERCENT (data_fetcher.py
+            # line 750: `round(hr / denom * 100, 3)` — so 2.0 means 2.0%).
+            # The old guards used 0.035/0.030 in rate units, which against
+            # percent-valued data is `2.0 >= 0.035` = trivially true. The
+            # absolute-rate guard never fired, so the flag triggered on ratio
+            # alone — and the `max(x, 0.001)` floor (0.001% — essentially zero)
+            # let a near-zero side make the ratio explode (Logan Webb: 2.0% LHB
+            # vs 0.99% RHB → ratio 2.0× → 💥 LHB severe, despite BOTH sides
+            # being below league-average ~3%).
+            #
+            # Fix: compare guards in PERCENT (3.5%/3.0%, league-average+), and
+            # floor the denominator at 0.5% so a sample-noise near-zero can't
+            # auto-max the ratio. 3.5 and 3.0 are not new thresholds — they're
+            # the original 0.035/0.030 intent, just in the correct unit. League
+            # avg HR/PA is ~2.8-3.0%; "vulnerable side has HIGH absolute rate"
+            # requires the side rate to be at or above league avg.
+            l_safe = max(l_hr_pa, 0.5)
+            r_safe = max(r_hr_pa, 0.5)
             ratio_r_to_l = r_safe / l_safe  # >1 = more HR to RHB
-            # Require: large ratio AND vulnerable side has high absolute HR rate
-            if ratio_r_to_l >= 2.0 and r_hr_pa >= 0.035:
-                return "💥 RHB"  # Very vulnerable to RHB
-            if ratio_r_to_l >= 1.5 and r_hr_pa >= 0.030:
-                return "💢 RHB"  # Vulnerable to RHB
-            if ratio_r_to_l <= 0.5 and l_hr_pa >= 0.035:
+            if ratio_r_to_l >= 2.0 and r_hr_pa >= 3.5:
+                return "💥 RHB"
+            if ratio_r_to_l >= 1.5 and r_hr_pa >= 3.0:
+                return "💢 RHB"
+            if ratio_r_to_l <= 0.5 and l_hr_pa >= 3.5:
                 return "💥 LHB"
-            if ratio_r_to_l <= 0.67 and l_hr_pa >= 0.030:
+            if ratio_r_to_l <= 0.67 and l_hr_pa >= 3.0:
                 return "💢 LHB"
             return ""
         p_slate["platoon_hr_flag"] = p_slate.apply(_platoon_hr_flag, axis=1)
@@ -6889,6 +6903,20 @@ if all_hitters:
                 st.error(f"Backtest module error: {e}")
         if auto_snap_status:
             st.caption(auto_snap_status)
+        # Honest persistence-limit warning (v41b). The current save_snapshot
+        # path writes to local disk on Streamlit Cloud, which gets wiped on
+        # every container restart (every code redeploy, and every wake-from-
+        # sleep on the free tier). So "Saved" is technically true for the
+        # current session, but multi-day persistence requires either:
+        #   (a) Saving the export Excel files locally each day, OR
+        #   (b) A durable storage backend (GitHub Gist, S3, Supabase) — not
+        #       yet built into backtest.py.
+        # Surface this so users don't assume snapshots accumulate by themselves.
+        st.caption(
+            "⚠️ Snapshots are stored locally and may be wiped on redeploy. "
+            "Save the daily Excel export for permanent record. Durable cloud "
+            "storage (GitHub Gist persistence) is on the roadmap."
+        )
 
     with snap_col2:
         # Build combined export - try Excel, fall back to CSV-bundle
