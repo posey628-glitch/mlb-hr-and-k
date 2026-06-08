@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.08-platoon-unit-fix-v41b"
+APP_VERSION = "2026.06.08-gist-correlation-v41c"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -1199,14 +1199,19 @@ with st.sidebar:
              "- (empty) — 0-2 systems only.\n\n"
              "**Systems counted:** hr_game_pct, power_score, lift_score, matchup_opp, pitch_hr_score."),
 
-            ("🔗 Correlation Flag (same-game)",
-             "Warns when two Top 10 picks share a game (same pitcher matchup).\n"
-             "- 🔗 **+N** — N other Top 10 picks face the same pitcher\n"
-             "- Their outcomes are correlated: a pitcher meltdown or shutout "
-             "affects BOTH simultaneously\n"
+            ("🔗 Correlation Flag (same-pitcher)",
+             "Warns when two Top 10 picks face the SAME PITCHER (same team, "
+             "facing the same opposing starter).\n"
+             "- 🔗 **+N** — N other Top 10 picks are on the same team\n"
+             "- Their outcomes are correlated: a pitcher meltdown affects "
+             "BOTH simultaneously\n"
              "- **DO NOT parlay correlated picks** — joint probability is much "
              "lower than (P1 × P2) assumes\n"
-             "- Bet them individually or pick the higher-confidence one"),
+             "- Bet them individually or pick the higher-confidence one\n\n"
+             "Note: Hitters on OPPOSING teams in the same game face different "
+             "pitchers, so they don't trigger this flag. The parlay generator "
+             "is more conservative — it skips ALL same-game combos because "
+             "park + weather correlation exists even across opposing teams."),
 
             ("🏥 IL / Not on Active Roster",
              "Hitter is in our data but NOT on their team's 26-man active roster.\n"
@@ -5202,30 +5207,35 @@ if all_hitters_for_picks:
             top10 = q_sorted.head(10).reset_index(drop=True)
         top10["rank"] = range(1, len(top10) + 1)
 
-        # SAME-GAME CORRELATION FLAG (v39d)
-        # When two Top 10 picks face the same pitcher (same game, opposite teams),
-        # they're correlated bets — if the pitcher gets pulled early or has a
-        # great night, BOTH legs are affected the same way. Reviewer feedback:
-        # "Don't parlay Seager + Nimmo — same pitcher." The parlay GENERATOR
-        # already skips same-game combos, but Top 10 picks don't show the
-        # correlation explicitly. This flag surfaces it visually.
+        # SAME-PITCHER CORRELATION FLAG (v41c — bugfix)
+        # When two Top 10 picks face the SAME PITCHER — meaning they're on the
+        # SAME team batting against the same opposing starter — they're
+        # correlated bets. If that pitcher melts down or dominates, BOTH
+        # outcomes shift together.
         #
-        # Logic: for each pick, count how many OTHER picks share its game.
-        # 0 others = no correlation, empty flag.
-        # 1+ others = correlated. Label: "🔗 same game as: X" or "🔗 +2 same"
+        # v39d BUG: previously flagged any two picks in the same GAME, which
+        # includes hitters on OPPOSING teams. Opposing-team hitters face
+        # DIFFERENT pitchers (each side bats against the other team's starter),
+        # so their HR outcomes flow through independent pitcher quality. The
+        # old flag falsely flagged e.g. Kurtz (ATH) and Bauers (SEA) in the
+        # same ATH@SEA game even though Kurtz faces SEA's pitcher and Bauers
+        # faces ATH's pitcher.
+        #
+        # v41c: check `team` AND `opp_pitcher`. Two picks are correlated iff
+        # they're on the same team (so face the same pitcher).
         try:
-            if not top10.empty and "game" in top10.columns:
-                game_counts = top10["game"].value_counts()
+            if not top10.empty and "team" in top10.columns:
+                team_counts = top10["team"].value_counts()
                 def _same_game_flag(row):
-                    g = row.get("game", "")
-                    if not g or pd.isna(g):
+                    t = row.get("team", "")
+                    if not t or pd.isna(t):
                         return ""
-                    count = game_counts.get(g, 0)
+                    count = team_counts.get(t, 0)
                     if count < 2:
                         return ""
-                    # Find other picks in this game (exclude self by player_name)
+                    # Find other picks on this team (exclude self by player_name)
                     others = top10[
-                        (top10["game"] == g)
+                        (top10["team"] == t)
                         & (top10["player_name"] != row.get("player_name"))
                     ]
                     if others.empty:
@@ -5904,7 +5914,14 @@ if all_hitters_for_picks:
             two_leg_parlays = []
             for combo in combinations(parlay_pool.index, 2):
                 rows = [parlay_pool.loc[i] for i in combo]
-                # Skip if both legs from same game (correlated)
+                # v41c: parlay generator stays conservative — skip ALL same-game
+                # combos. Note this is INTENTIONALLY stricter than the visual
+                # correlation flag (which only flags same-TEAM in v41c). Even
+                # opposing-team hitters in the same game share park + weather
+                # + umpire correlation — a hitter-friendly park with wind out
+                # boosts both offenses simultaneously. Generator skips same-game
+                # to avoid overstating joint probabilities; visual flag tells
+                # the user when the correlation is strong (same pitcher).
                 if game_col and rows[0].get(game_col) == rows[1].get(game_col):
                     continue
                 # Joint probability (independent assumption since cross-game)
@@ -6893,30 +6910,47 @@ if all_hitters:
     with snap_col1:
         if st.button("💾 Save snapshot", help="Manually save today's projections for backtest comparison. Note: auto-snapshot already happens on every load."):
             try:
-                from backtest import save_snapshot
+                from backtest import save_snapshot, durable_storage_configured, save_snapshot_durable
                 ok = save_snapshot(selected_date, combined_all, p_slate)
                 if ok:
-                    st.success(f"Saved snapshot for {selected_date}")
+                    if durable_storage_configured() and save_snapshot_durable(selected_date):
+                        st.success(f"✅ Saved snapshot for {selected_date} (durable — Gist)")
+                    elif durable_storage_configured():
+                        st.warning(
+                            f"⚠️ Saved snapshot for {selected_date} locally — "
+                            f"Gist write may have failed. Check token/gist_id."
+                        )
+                    else:
+                        st.warning(
+                            f"⚠️ Saved snapshot for {selected_date} (THIS SESSION ONLY — "
+                            f"will be wiped on next redeploy). Set up Gist persistence "
+                            f"to make snapshots durable."
+                        )
                 else:
                     st.error("Snapshot save failed")
             except Exception as e:
                 st.error(f"Backtest module error: {e}")
         if auto_snap_status:
             st.caption(auto_snap_status)
-        # Honest persistence-limit warning (v41b). The current save_snapshot
-        # path writes to local disk on Streamlit Cloud, which gets wiped on
-        # every container restart (every code redeploy, and every wake-from-
-        # sleep on the free tier). So "Saved" is technically true for the
-        # current session, but multi-day persistence requires either:
-        #   (a) Saving the export Excel files locally each day, OR
-        #   (b) A durable storage backend (GitHub Gist, S3, Supabase) — not
-        #       yet built into backtest.py.
-        # Surface this so users don't assume snapshots accumulate by themselves.
-        st.caption(
-            "⚠️ Snapshots are stored locally and may be wiped on redeploy. "
-            "Save the daily Excel export for permanent record. Durable cloud "
-            "storage (GitHub Gist persistence) is on the roadmap."
-        )
+
+        # v41c: Honest persistence status — replaces the old generic warning
+        try:
+            from backtest import durable_storage_configured
+            if durable_storage_configured():
+                st.caption(
+                    "💾 **Snapshot storage: ✅ Durable** (GitHub Gist) — "
+                    "snapshots survive redeploys and sleep."
+                )
+            else:
+                st.caption(
+                    "⚠️ **Snapshot storage: EPHEMERAL** — snapshots are wiped on "
+                    "every redeploy and when the app sleeps. To enable durable "
+                    "storage: set `gist_token` and `gist_id` in Streamlit Cloud "
+                    "Secrets (see chat for setup steps). For now, save the daily "
+                    "Excel export for permanent record."
+                )
+        except Exception:
+            pass
 
     with snap_col2:
         # Build combined export - try Excel, fall back to CSV-bundle
