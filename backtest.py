@@ -209,10 +209,39 @@ def _list_snapshots_from_gist() -> list[str]:
         return []
 
 
+def _snapshot_key_for_now(snapshot_date) -> str:
+    """Generate a snapshot key keyed by date + ET HOUR.
+
+    v42: multiple snapshots per day, one per hour. This solves the early-game
+    problem — a 1 PM ET game needs lineup data captured BEFORE 1 PM. A
+    single end-of-day snapshot is too late for that game.
+
+    Key format: "2026-06-08T14" = 2 PM ET on June 8.
+    Saves within the same hour overwrite each other (good — you wouldn't
+    intentionally save twice in 30 minutes).
+
+    Backward-compat: load_snapshot/list_snapshots still recognize the old
+    "2026-06-08" format from snapshots saved before v42.
+    """
+    try:
+        import pytz
+        et_now = datetime.now(pytz.timezone("US/Eastern"))
+    except Exception:
+        # Fallback: assume ET is UTC-4 (EDT)
+        et_now = datetime.utcnow() - timedelta(hours=4)
+    return f"{snapshot_date}T{et_now.hour:02d}"
+
+
 def save_snapshot(snapshot_date, matchup_df: pd.DataFrame,
-                    pitcher_slate_df: pd.DataFrame) -> bool:
+                    pitcher_slate_df: pd.DataFrame,
+                    snapshot_key: str | None = None) -> bool:
     """
     Persist a slim version of today's projections.
+
+    v42: supports multiple snapshots per day. By default, the snapshot is
+    keyed by date + ET hour (so saves in different hours create new entries
+    instead of overwriting). Pass an explicit snapshot_key to override this
+    (e.g., for testing or manual labeling).
 
     v41c: writes to BOTH GitHub Gist (durable, survives redeploys) and local
     disk (fast read for current session). Returns True if EITHER succeeded.
@@ -220,7 +249,9 @@ def save_snapshot(snapshot_date, matchup_df: pd.DataFrame,
     disk gets wiped on every Streamlit Cloud container restart.
     """
     try:
-        path = SNAPSHOT_DIR / f"snapshot_{snapshot_date}.json"
+        # v42: key by date + ET hour. Lets a 1pm and 7pm snapshot coexist.
+        key = snapshot_key or _snapshot_key_for_now(snapshot_date)
+        path = SNAPSHOT_DIR / f"snapshot_{key}.json"
 
         # Slim hitter projections.
         # CRITICAL: do NOT fillna(0) here. NaN HR Game% means "insufficient
@@ -238,6 +269,7 @@ def save_snapshot(snapshot_date, matchup_df: pd.DataFrame,
         if matchup_df is not None and not matchup_df.empty:
             keep_cols = [c for c in [
                 "player_id", "player_name", "team", "opp", "lineup_pos",
+                "is_roster_fill",  # v42: track which snapshots had real lineups
                 "power_score", "hr_game_pct", "hr_pa_pct",
                 "matchup", "sleeper_score", "barrel_pct", "iso",
                 # v41 Patch 2: pick_score + per-component decomposition
@@ -260,6 +292,7 @@ def save_snapshot(snapshot_date, matchup_df: pd.DataFrame,
 
         payload = {
             "date": str(snapshot_date),
+            "key": key,
             "saved_at": datetime.utcnow().isoformat(),
             "hitters": hitter_records,
             "pitchers": pitcher_records,
@@ -276,10 +309,8 @@ def save_snapshot(snapshot_date, matchup_df: pd.DataFrame,
             local_ok = False
 
         if durable_storage_configured():
-            gist_ok = _save_snapshot_to_gist(snapshot_date, payload)
+            gist_ok = _save_snapshot_to_gist(key, payload)
 
-        # Return True if EITHER worked; UI distinguishes durable vs ephemeral
-        # via durable_storage_configured() + the save_snapshot_durable helper.
         return local_ok or gist_ok
     except Exception:
         return False
@@ -299,22 +330,40 @@ def save_snapshot_durable(snapshot_date) -> bool:
         return False
 
 
-def load_snapshot(snapshot_date) -> dict | None:
-    """Load a previously saved snapshot for the given date.
+def load_snapshot(snapshot_key) -> dict | None:
+    """Load a previously saved snapshot.
 
-    v41c: tries Gist first (durable across deploys), falls back to local disk.
+    v42: snapshot_key may be either:
+      - "2026-06-08T14"  (date + hour, new format)
+      - "2026-06-08"     (date only, legacy or "find best snapshot for date")
+
+    For date-only input, returns the LATEST snapshot saved for that date
+    (which is what most callers want for "what was our projection for
+    that day"). Use load_snapshot_at_hour() for explicit hour selection.
     """
+    key = str(snapshot_key)
+
+    # If key is a date-only format, find the latest hourly snapshot for it
+    if "T" not in key:
+        all_keys = list_snapshots()
+        # Filter to keys matching this date (either exact match or "DATE T HH")
+        matching = [k for k in all_keys if k == key or k.startswith(key + "T")]
+        if not matching:
+            return None
+        # Use the latest (highest hour for a given date)
+        key = sorted(matching)[-1]
+
     # Try Gist first — it's authoritative across container restarts
     if durable_storage_configured():
         try:
-            snap = _load_snapshot_from_gist(snapshot_date)
+            snap = _load_snapshot_from_gist(key)
             if snap:
                 return snap
         except Exception:
             pass
     # Fallback to local disk (may be missing post-redeploy)
     try:
-        path = SNAPSHOT_DIR / f"snapshot_{snapshot_date}.json"
+        path = SNAPSHOT_DIR / f"snapshot_{key}.json"
         if not path.exists():
             return None
         with open(path) as f:
@@ -323,28 +372,72 @@ def load_snapshot(snapshot_date) -> dict | None:
         return None
 
 
-def list_snapshots() -> list[str]:
-    """Return list of dates we have snapshots for.
+def load_snapshot_before_hour(snapshot_date, target_hour_et: int) -> dict | None:
+    """Load the snapshot taken closest to (but BEFORE) a given hour on a date.
 
-    v41c: merges Gist (durable) + local disk lists. Gist is the truth across
-    deploys but local may have a current-session save not yet in Gist.
+    v42: used by evaluate_hitter_projections to grade each game against the
+    snapshot that was current right before first pitch. A 1pm-game evaluation
+    uses a snapshot taken at 11am or 12pm if one exists. A 7pm-game evaluation
+    uses a 5pm or 6pm snapshot if available, falling back to the latest
+    available snapshot from earlier in the day.
+
+    Returns None if no snapshots before target_hour exist for this date.
     """
-    dates = set()
+    date_str = str(snapshot_date)
+    all_keys = list_snapshots()
+    eligible = []
+    for k in all_keys:
+        if k.startswith(date_str + "T"):
+            try:
+                hour = int(k.split("T")[1])
+                if hour < target_hour_et:
+                    eligible.append((hour, k))
+            except (ValueError, IndexError):
+                continue
+        elif k == date_str:
+            # Legacy format — assume late-night (best guess)
+            eligible.append((23, k))
+    if not eligible:
+        return None
+    # Take the latest snapshot that's still before target_hour
+    eligible.sort()
+    _, best_key = eligible[-1]
+    return load_snapshot(best_key)
+
+
+def list_snapshots() -> list[str]:
+    """Return list of snapshot keys we have (date-only and date+hour formats).
+
+    v42: keys may be "2026-06-08" (legacy) or "2026-06-08T14" (hour-keyed).
+    """
+    keys = set()
     # Gist tier — durable storage
     if durable_storage_configured():
         try:
-            dates.update(_list_snapshots_from_gist())
+            keys.update(_list_snapshots_from_gist())
         except Exception:
             pass
     # Local tier — fast access for current session
     try:
-        local_dates = [
+        local_keys = [
             p.stem.replace("snapshot_", "")
             for p in SNAPSHOT_DIR.glob("snapshot_*.json")
         ]
-        dates.update(local_dates)
+        keys.update(local_keys)
     except Exception:
         pass
+    return sorted(keys)
+
+
+def list_snapshot_dates() -> list[str]:
+    """Return list of unique DATES we have any snapshot for (collapses hours).
+
+    Useful for UI that wants to show 'we have snapshots for these days' rather
+    than the full hourly granularity.
+    """
+    dates = set()
+    for k in list_snapshots():
+        dates.add(k.split("T")[0])
     return sorted(dates)
 
 
