@@ -595,17 +595,24 @@ def add_power_score(
     # re-added at small 0.02 (noisy but non-zero signal).
     #
     # Total weights sum to exactly 1.00.
+    # v42b: pull_air_pct added (your "Tier 1" addition). Pulled fly balls and
+    # line drives are where most HRs happen. Weight 0.05, drawn from iso
+    # (-0.01, redundant with barrel/pulled_brl), la (-0.02, noisy), and
+    # sweet_spot_pct (-0.02, overweighted v38d). Thresholds: poor 10%,
+    # elite 22%. League-wide pull_air for HR hitters ranges 12-25%.
+    # Conceptually overlaps with pulled_brl_pct but not pure duplicate —
+    # pulled_brl is specifically barreled, pull_air is broader pulled fly/LD.
     specs = [
         ("barrel_pct",     0.25, 4.0, 22.0),    # 0.749 corr — anchor
-        ("iso",            0.18, 0.100, 0.350), # 0.20→0.18 slight trim (redundant w/ barrel)
-        ("pulled_brl_pct", 0.11, 2.0, 18.0),    # 0.737 corr — keeps top-tier weight when data available
-        ("hard_hit",       0.13, 30.0, 60.0),   # 0.10→0.13 (0.590 corr was underweighted)
-        ("avg_ev",         0.12, 85.0, 95.0),   # 0.10→0.12 (0.605 corr was underweighted)
-        ("fb_pct",         0.10, 18.0, 50.0),   # 0.461 corr — diversified from v38b's 0.13
-        ("recent_iso",     0.06, 0.080, 0.380), # 0.465 corr — slight bump
-        ("sweet_spot_pct", 0.03, 10.0, 40.0),   # 0.257 corr — 0.05→0.03 (overweighted)
-        ("la",             0.02, 4.0, 22.0),    # noisy but small non-zero signal
-        # slg removed v38b — redundant with iso + barrel_pct
+        ("iso",            0.17, 0.100, 0.350), # 0.18→0.17 (trimmed for pull_air)
+        ("pulled_brl_pct", 0.11, 2.0, 18.0),    # 0.737 corr
+        ("hard_hit",       0.13, 30.0, 60.0),   # 0.590 corr
+        ("avg_ev",         0.12, 85.0, 95.0),   # 0.605 corr
+        ("fb_pct",         0.10, 18.0, 50.0),   # 0.461 corr
+        ("recent_iso",     0.06, 0.080, 0.380), # 0.465 corr
+        ("pull_air_pct",   0.05, 10.0, 22.0),   # v42b: where HRs happen
+        ("sweet_spot_pct", 0.01, 10.0, 40.0),   # 0.03→0.01 (trimmed for pull_air)
+        # la removed v42b — 0.02 noisy signal redirected to pull_air_pct
     ]
 
     def absolute_score(val, poor, elite):
