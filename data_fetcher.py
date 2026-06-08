@@ -2176,9 +2176,19 @@ def get_hitter_hr_profile(season: int = CURRENT_SEASON) -> pd.DataFrame:
         out = pd.DataFrame()
         out["player_id"] = pd.to_numeric(df[id_col], errors="coerce").astype("Int64")
         if dist_col:
-            out["avg_hr_distance"] = pd.to_numeric(df[dist_col], errors="coerce").round(1)
+            _dist = pd.to_numeric(df[dist_col], errors="coerce")
+            # v42b: Savant returns 0 for hitters with no HRs (no distance to
+            # average). 0 ft is not a real measurement — coerce to NaN so
+            # downstream classifiers see "no data" instead of an absurd value.
+            # Any real HR is > 50 ft; 0 means missing.
+            _dist = _dist.mask(_dist <= 50)
+            out["avg_hr_distance"] = _dist.round(1)
         if ev_col:
-            out["max_hit_speed"] = pd.to_numeric(df[ev_col], errors="coerce").round(1)
+            _ev = pd.to_numeric(df[ev_col], errors="coerce")
+            # v42b: same fix — 0 mph max EV means "no batted balls tracked".
+            # Any real swing > 50 mph; 0 is missing.
+            _ev = _ev.mask(_ev <= 50)
+            out["max_hit_speed"] = _ev.round(1)
 
         # Classify HR profile:
         #   moonshot — high distance (>= 415 ft avg HR distance)
