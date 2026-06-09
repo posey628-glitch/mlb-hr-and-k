@@ -511,10 +511,16 @@ def wind_component_out(wind_dir_deg: float, cf_bearing_deg: float) -> float:
     return math.cos(angle_diff)
 
 
-def hr_multiplier(weather: dict, park: dict, skip_wind: bool = False) -> tuple[float, str]:
+def hr_multiplier(weather: dict, park: dict, skip_wind: bool = False,
+                    real_roof_closed: bool | None = None) -> tuple[float, str]:
     """
     Combine weather + park into a single HR multiplier (1.0 = neutral).
     Returns (multiplier, plain-English summary).
+
+    v42f: real_roof_closed parameter added. When the caller has MLB ground
+    truth about the retractable roof state, pass it. None = unknown (use the
+    temperature heuristic). True = closed → neutral. False = confirmed OPEN
+    → ignore the temperature heuristic and apply full weather effects.
 
     Heuristics calibrated to public HR/weather studies:
       - Each 10°F above 70°F:  +3% HR rate
@@ -538,19 +544,26 @@ def hr_multiplier(weather: dict, park: dict, skip_wind: bool = False) -> tuple[f
     summary = []
     mult = 1.0
 
-    # Determine roof_factor: 0 if retractable likely closed (cold/hot), else 1
-    # CHANGED (May 2026): replaced flat 50% with temperature-aware heuristic.
-    # MLB roofs are typically closed below 60°F or above 88°F → no weather effect.
-    # In comfortable range (60-88°F) → roof likely open → full weather effect.
+    # Determine roof_factor. v42f: MLB ground truth (real_roof_closed) overrides
+    # the temperature heuristic. Previous bug: when MLB confirmed the roof was
+    # OPEN but the day was cold (<60°F) or hot (>88°F), the heuristic guessed
+    # "likely closed" and returned neutral — wiping real wind/temp effects on
+    # confirmed-open games.
     _temp_check = weather.get("temp_f")
     if roof == "retractable":
-        if _temp_check is None:
-            roof_factor = 0.7  # unknown temp, modest dampener
+        if real_roof_closed is True:
+            # MLB says CLOSED — neutralize
+            return 1.0, "🏟️ Retractable roof CLOSED (MLB-confirmed) — indoor neutral"
+        elif real_roof_closed is False:
+            # MLB says OPEN — full weather effects, skip the temp heuristic
+            roof_factor = 1.0
+        elif _temp_check is None:
+            roof_factor = 0.7  # unknown temp + unknown roof, modest dampener
         elif _temp_check < 60 or _temp_check > 88:
-            # Roof likely CLOSED — return neutral immediately
+            # Roof likely CLOSED based on temp — return neutral
             return 1.0, f"🏟️ Retractable roof likely CLOSED ({_temp_check:.0f}°F) — indoor conditions"
         else:
-            roof_factor = 1.0  # roof likely open
+            roof_factor = 1.0  # roof likely open based on comfortable temp
     else:
         roof_factor = 1.0
 
