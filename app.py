@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.09-pull-air-derive-weather-loud-v42d"
+APP_VERSION = "2026.06.09-weather-column-tz-fix-v42e"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -3710,7 +3710,15 @@ try:
     from park_factors import get_park
     weather_batch_coords = []
     for _, _g in slate.iterrows():
-        venue = _g.get("venue_name") or _g.get("home_team_venue") or ""
+        # v42e BUGFIX: get_slate() produces columns "venue" and "gameTime" —
+        # previous code looked for venue_name/home_team_venue/game_datetime
+        # which DO NOT EXIST. `venue` was "" on every row, every iteration
+        # hit `continue`, weather_batch_coords stayed empty, and
+        # prefetch_weather_batch was NEVER called. That's why the diagnostic
+        # banner showed "no batch attempted" and weather was unavailable
+        # for all games. Per-game fallback fired but hit the 10-req/min
+        # Open-Meteo rate limit on cold cache.
+        venue = _g.get("venue") or ""
         if not venue:
             continue
         park = get_park(venue) or {}
@@ -3718,12 +3726,11 @@ try:
         lon = park.get("lon")
         if lat is None or lon is None:
             continue
-        # game time: prefer game_datetime, fall back to today at 7 PM
-        gdt = _g.get("game_datetime") or _g.get("gameDate")
+        # gameTime is the canonical column from get_slate (UTC-aware datetime)
+        gdt = _g.get("gameTime")
         weather_batch_coords.append((lat, lon, gdt))
     if weather_batch_coords:
         _batch_result = prefetch_weather_batch(weather_batch_coords)
-        # Stash for diagnostic display
         st.session_state["_weather_batch_result"] = _batch_result
 except Exception as _e:
     st.session_state["_weather_batch_result"] = {
@@ -3775,7 +3782,7 @@ elif _wbr_n_l == 0:
 # Always show a small caption confirming weather status + version. Lets user
 # see at a glance: (1) which version is loaded, (2) whether weather is on.
 st.caption(
-    f"📦 v42d · {_wx_status_emoji} Weather: {_wx_status_label}"
+    f"📦 v42e · {_wx_status_emoji} Weather: {_wx_status_label}"
 )
 
 for _, game in slate.iterrows():
