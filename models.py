@@ -528,6 +528,11 @@ def build_matchup_table(
         "barrel_pct", "pulled_brl_pct", "hard_hit", "sweet_spot_pct",
         "fb_pct", "gb_pct", "ld_pct",
         "la", "avg_ev",
+        # v42k: pull_air_pct (derived from pull_percent × fb_pct when Savant's
+        # native column is empty). Was being computed in _normalize_player_df
+        # but dropped here, so never reached combined_all — the H2H comparison
+        # tool and other consumers always saw it missing.
+        "pull_air_pct",
         # Plate discipline
         "k_pct", "bb_pct", "whiff_pct", "swing_percent",
         # Rates
