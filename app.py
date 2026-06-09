@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.09-auto-eval-date-strip-v42g"
+APP_VERSION = "2026.06.09-auto-eval-diagnostic-v42h"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -2121,6 +2121,7 @@ if not st.session_state["_auto_eval_done"]:
         from backtest import (
             list_snapshots, load_snapshot,
             fetch_hitter_outcomes, evaluate_hitter_projections,
+            durable_storage_configured, _list_snapshots_from_gist,
         )
         # Use Eastern Time for the "today" comparison since that's when MLB
         # games are played. A snapshot from "today" can't be evaluated yet
@@ -2130,25 +2131,46 @@ if not st.session_state["_auto_eval_done"]:
             _et_now = _dt.now(pytz.timezone("US/Eastern"))
             _today_et = _et_now.date()
         except Exception:
-            # Fallback: assume ET is UTC-4 (EDT) or UTC-5 (EST). Use UTC-4 conservatively.
             _today_et = (_dt.utcnow() - _td(hours=4)).date()
 
         _all_snaps = sorted(list_snapshots())
+
+        # v42h: enhanced diagnostic — show which storage tier the snapshots
+        # live in, so the user can tell if Gist is broken (token expired etc.)
+        _gist_snaps = []
+        _gist_status = "not configured"
+        try:
+            if durable_storage_configured():
+                _gist_snaps = _list_snapshots_from_gist()
+                _gist_status = f"configured, found {len(_gist_snaps)} snapshot(s) in Gist"
+        except Exception as _ge:
+            _gist_status = f"configured but READ FAILED: {type(_ge).__name__}: {str(_ge)[:120]}"
+
         # Find most recent snapshot before today
-        _eligible = [s for s in _all_snaps if s < str(_today_et)]
+        _eligible = [s for s in _all_snaps if s.split("T")[0] < str(_today_et)]
+
         if not _eligible:
+            _snap_list = ", ".join(_all_snaps[-5:]) if _all_snaps else "(none)"
             st.session_state["_auto_eval_error"] = (
                 "no_past_snapshots",
                 f"Found {len(_all_snaps)} snapshot(s) total but none before today "
-                f"({_today_et}). Snapshots from today can't be evaluated until games finish."
+                f"({_today_et}).\n\n"
+                f"Most recent snapshots: {_snap_list}\n"
+                f"Gist storage: {_gist_status}\n\n"
+                f"Snapshots from today can't be evaluated until games finish. "
+                f"If you expected to see past-day snapshots here, check that "
+                f"Gist storage is working (caption near top of page should say "
+                f"'✅ Durable Gist')."
             )
         else:
-            _eval_target = _eligible[-1]  # most recent past snapshot
+            _eval_target = _eligible[-1]
             _snapshot = load_snapshot(_eval_target)
             if not _snapshot:
                 st.session_state["_auto_eval_error"] = (
                     "load_failed",
-                    f"Failed to load snapshot {_eval_target} from disk."
+                    f"Failed to load snapshot {_eval_target}.\n\n"
+                    f"Gist status: {_gist_status}\n"
+                    f"Available keys: {_all_snaps[-10:]}"
                 )
             else:
                 _actuals = fetch_hitter_outcomes(_eval_target)
@@ -2156,7 +2178,9 @@ if not st.session_state["_auto_eval_done"]:
                     st.session_state["_auto_eval_error"] = (
                         "no_actuals",
                         f"No actual outcomes returned from MLB Stats API for "
-                        f"{_eval_target}. The API may be slow, or no games were played."
+                        f"{_eval_target} (date queried: {_eval_target.split('T')[0]}).\n\n"
+                        f"The API may be slow, or no games were played that day. "
+                        f"Try refreshing the page in a few minutes."
                     )
                 else:
                     _metrics = evaluate_hitter_projections(_snapshot, _actuals)
@@ -2171,8 +2195,11 @@ if not st.session_state["_auto_eval_done"]:
                         st.session_state["_auto_eval_error"] = None
         st.session_state["_auto_eval_done"] = True
     except Exception as _e:
+        import traceback
         st.session_state["_auto_eval_error"] = (
-            "exception", f"{type(_e).__name__}: {str(_e)[:200]}"
+            "exception",
+            f"{type(_e).__name__}: {str(_e)[:200]}\n\n"
+            f"Traceback (last 5 lines):\n{''.join(traceback.format_exc().splitlines()[-5:])}"
         )
         st.session_state["_auto_eval_done"] = True
 
@@ -3797,7 +3824,7 @@ elif _wbr_n_l == 0:
 # Always show a small caption confirming weather status + version. Lets user
 # see at a glance: (1) which version is loaded, (2) whether weather is on.
 st.caption(
-    f"📦 v42g · {_wx_status_emoji} Weather: {_wx_status_label}"
+    f"📦 v42h · {_wx_status_emoji} Weather: {_wx_status_label}"
 )
 
 for _, game in slate.iterrows():
