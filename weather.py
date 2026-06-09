@@ -573,7 +573,7 @@ def hr_multiplier(weather: dict, park: dict, skip_wind: bool = False,
     # weather and altitude effects. Adding a full temperature multiplier on
     # top of those park factors double-counts the temperature contribution.
     # Solution: halve the temperature effect at high-altitude parks.
-    HIGH_ALTITUDE_PARKS = {"Coors Field", "Sutter Health Park"}
+    HIGH_ALTITUDE_PARKS = {"Coors Field", "Sutter Health Park", "Las Vegas Ballpark"}
     altitude_dampener = 0.5 if park.get("name") in HIGH_ALTITUDE_PARKS else 1.0
     temp = weather.get("temp_f")
     if temp is not None:
