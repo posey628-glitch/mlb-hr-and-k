@@ -449,11 +449,19 @@ def fetch_hitter_outcomes(target_date) -> dict:
     """
     For a given date, fetch which hitters homered and their game line.
     Returns {player_id: {"hr": int, "ab": int, "h": int, "k": int, "bb": int, "rbi": int}}
+
+    v42g BUGFIX: accepts either a date-only key ("2026-06-08") OR an hourly
+    snapshot key ("2026-06-08T17"). The hour portion is stripped before
+    querying MLB Stats API. Without this fix, hourly snapshot keys were
+    sent to MLB with `?date=2026-06-08T17` which the API rejects, returning
+    no outcomes — explaining the "No actual outcomes returned" error.
     """
+    # Strip hour portion if present (v42 hourly snapshots use "DATE T HH" format)
+    target_date_str = str(target_date).split("T")[0]
     try:
         url = (
             f"https://statsapi.mlb.com/api/v1/schedule"
-            f"?sportId=1&date={target_date}&hydrate=team,probablePitcher"
+            f"?sportId=1&date={target_date_str}&hydrate=team,probablePitcher"
         )
         r = requests.get(url, headers=HEADERS, timeout=20)
         r.raise_for_status()
@@ -505,11 +513,15 @@ def fetch_pitcher_outcomes(target_date) -> dict:
     """
     For a given date, fetch what each starting pitcher actually did.
     Returns {player_id: {"ip": float, "k": int, "er": int, "bb": int, "hr": int, "h": int}}
+
+    v42g: same date-key fix as fetch_hitter_outcomes — strip the hour portion
+    so hourly snapshot keys work.
     """
+    target_date_str = str(target_date).split("T")[0]
     try:
         url = (
             f"https://statsapi.mlb.com/api/v1/schedule"
-            f"?sportId=1&date={target_date}&hydrate=team"
+            f"?sportId=1&date={target_date_str}&hydrate=team"
         )
         r = requests.get(url, headers=HEADERS, timeout=20)
         r.raise_for_status()
