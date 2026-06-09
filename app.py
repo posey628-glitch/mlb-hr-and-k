@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.09-auto-eval-diagnostic-v42h"
+APP_VERSION = "2026.06.09-gist-rescue-vegas-platoon-v42i"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -3823,8 +3823,25 @@ elif _wbr_n_l == 0:
 
 # Always show a small caption confirming weather status + version. Lets user
 # see at a glance: (1) which version is loaded, (2) whether weather is on.
+# Combined always-visible status line — version + weather + snapshot storage.
+# Helps the user verify deploy AND tells them at a glance whether their
+# data is durable.
+try:
+    from backtest import durable_storage_configured, list_snapshots
+    _storage_emoji = "✅" if durable_storage_configured() else "⚠️"
+    _storage_label = "Durable Gist" if durable_storage_configured() else "EPHEMERAL (no Gist)"
+    try:
+        _n_snaps = len(list_snapshots())
+        _storage_label += f" · {_n_snaps} snapshots"
+    except Exception:
+        pass
+except Exception:
+    _storage_emoji = "❓"
+    _storage_label = "unknown"
+
 st.caption(
-    f"📦 v42h · {_wx_status_emoji} Weather: {_wx_status_label}"
+    f"📦 v42i · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"{_storage_emoji} Storage: {_storage_label}"
 )
 
 for _, game in slate.iterrows():
@@ -4744,6 +4761,52 @@ for _, game in slate.iterrows():
             matchup_df["ideal_hr_screen"] = screen_flags
         except Exception:
             matchup_df["ideal_hr_screen"] = [""] * len(matchup_df)
+
+        # EXTREME PLATOON HITTER FLAG (v42i) — Refsnyder type.
+        # Some hitters hammer one side and are weak vs the other (Rob Refsnyder
+        # being the archetype: career ~.270/.380/.480 vs LHP, ~.200/.290/.330
+        # vs RHP). When such a hitter faces their PREFERRED side, the model
+        # may underestimate them because their overall stats are pulled down
+        # by their bad side. Flag them so the user can spot it.
+        #
+        # Criteria (need both samples ≥ 60 PA to avoid noise):
+        #   ISO differential ≥ 0.080 between vs-LHP and vs-RHP
+        #   OR HR/PA differential ≥ 1.5% between sides
+        # Direction matches today's pitcher hand:
+        #   🎯 LHP-MASHER — hitter excels vs LHP, faces LHP today
+        #   🎯 RHP-MASHER — hitter excels vs RHP, faces RHP today
+        #   ⚠️ REVERSE      — hitter facing their bad side
+        try:
+            opp_throws = opp_p_row.get("p_throws") if opp_p_row is not None else None
+            platoon_flags = []
+            for _, row in matchup_df.iterrows():
+                flag = ""
+                try:
+                    l_iso = row.get("vs_lhp_iso")
+                    r_iso = row.get("vs_rhp_iso")
+                    l_pa = row.get("vs_lhp_pa")
+                    r_pa = row.get("vs_rhp_pa")
+                    if (l_iso is not None and not pd.isna(l_iso)
+                        and r_iso is not None and not pd.isna(r_iso)
+                        and l_pa is not None and not pd.isna(l_pa) and float(l_pa) >= 60
+                        and r_pa is not None and not pd.isna(r_pa) and float(r_pa) >= 60):
+                        iso_diff = float(l_iso) - float(r_iso)
+                        if abs(iso_diff) >= 0.080:
+                            prefers_lhp = iso_diff > 0  # better vs LHP
+                            if opp_throws == "L":
+                                flag = "🎯 LHP-masher" if prefers_lhp else "⚠️ reverse (weak vs LHP)"
+                            elif opp_throws == "R":
+                                flag = "🎯 RHP-masher" if not prefers_lhp else "⚠️ reverse (weak vs RHP)"
+                            else:
+                                # Unknown pitcher hand — just label the tendency
+                                flag = ("🎯 LHP-masher" if prefers_lhp
+                                        else "🎯 RHP-masher")
+                except Exception:
+                    pass
+                platoon_flags.append(flag)
+            matchup_df["platoon_hitter_flag"] = platoon_flags
+        except Exception:
+            matchup_df["platoon_hitter_flag"] = [""] * len(matchup_df)
 
     # Sleeper score - uses sleepers.py functions correctly
     try:
