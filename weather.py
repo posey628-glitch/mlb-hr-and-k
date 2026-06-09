@@ -250,7 +250,13 @@ def _fetch_single_om(lat: float, lon: float, target_dt_str: str) -> dict:
         "&hourly=temperature_2m,relative_humidity_2m,precipitation_probability,"
         "wind_speed_10m,wind_direction_10m,surface_pressure"
         f"&start_date={iso}&end_date={iso}"
-        "&temperature_unit=fahrenheit&wind_speed_unit=mph&timezone=auto"
+        # v42e: timezone=GMT (was =auto). _normalize_target_dt produces a
+        # UTC-naive datetime; matching it against a venue-local hourly array
+        # was systematically off by 4 hours (East Coast) to 7 hours (West
+        # Coast). For late West Coast games the local-time array can also
+        # fall OUTSIDE the requested start_date/end_date entirely → empty
+        # weather. With timezone=GMT both sides are now in UTC.
+        "&temperature_unit=fahrenheit&wind_speed_unit=mph&timezone=GMT"
     )
     try:
         r = requests.get(url, timeout=10)
@@ -382,7 +388,11 @@ def prefetch_weather_batch(coords_when_list: list[tuple[float, float, object]]) 
         "&hourly=temperature_2m,relative_humidity_2m,precipitation_probability,"
         "wind_speed_10m,wind_direction_10m,surface_pressure"
         f"&start_date={start_date}&end_date={end_date}"
-        "&temperature_unit=fahrenheit&wind_speed_unit=mph&timezone=auto"
+        # v42e: timezone=GMT (was =auto). Match the UTC-naive target_dt
+        # produced by _normalize_target_dt. See _fetch_single_om for full
+        # explanation. Without this, batch results were systematically off
+        # by 4-7 hours per venue.
+        "&temperature_unit=fahrenheit&wind_speed_unit=mph&timezone=GMT"
     )
 
     try:
