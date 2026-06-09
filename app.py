@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.09-weather-column-tz-fix-v42e"
+APP_VERSION = "2026.06.09-split-prior-roof-vegas-v42f"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -211,16 +211,31 @@ try:
             return get_catcher_framing()
         except Exception:
             return {}
-    def get_vegas_for_game(game_pk, *a, **k):
+    def get_vegas_for_game(*args, **kwargs):
+        """v42f: tolerate either calling style.
+        Callers may pass (game_pk, ...) or (away_team, home_team).
+        Returns None on any mismatch — vegas is a soft dependency."""
         try:
             from datetime import date
             totals = get_vegas_totals(date.today().isoformat())
             if totals is None or (hasattr(totals, "empty") and totals.empty):
                 return None
-            # Try to find a row matching this game
-            if "gamePk" in totals.columns:
-                m = totals[totals["gamePk"] == game_pk]
-                return m.iloc[0].to_dict() if len(m) else None
+            # Try (away_team, home_team) form first
+            if len(args) >= 2 and isinstance(args[0], str) and isinstance(args[1], str):
+                away_team, home_team = args[0], args[1]
+                if "away_team" in totals.columns and "home_team" in totals.columns:
+                    m = totals[
+                        (totals["away_team"] == away_team)
+                        & (totals["home_team"] == home_team)
+                    ]
+                    return m.iloc[0].to_dict() if len(m) else None
+                return None
+            # Fall back to game_pk style
+            if len(args) >= 1:
+                game_pk = args[0]
+                if "gamePk" in totals.columns:
+                    m = totals[totals["gamePk"] == game_pk]
+                    return m.iloc[0].to_dict() if len(m) else None
             return None
         except Exception:
             return None
@@ -3782,7 +3797,7 @@ elif _wbr_n_l == 0:
 # Always show a small caption confirming weather status + version. Lets user
 # see at a glance: (1) which version is loaded, (2) whether weather is on.
 st.caption(
-    f"📦 v42e · {_wx_status_emoji} Weather: {_wx_status_label}"
+    f"📦 v42f · {_wx_status_emoji} Weather: {_wx_status_label}"
 )
 
 for _, game in slate.iterrows():
@@ -3861,11 +3876,21 @@ for _, game in slate.iterrows():
                     cond_label = roof_status.get("condition") or "Roof Closed"
                     wx_summary = f"🏟️ {cond_label} (MLB-confirmed) — indoor neutral"
                 else:
-                    wx_mult, _summary = hr_multiplier(weather, park_info)
+                    # v42f: pass real_roof_closed so hr_multiplier respects
+                    # MLB ground truth. Without this, a confirmed-OPEN roof
+                    # with extreme temp (<60 or >88) was being wrongly
+                    # neutralized by hr_multiplier's internal heuristic.
+                    wx_mult, _summary = hr_multiplier(
+                        weather, park_info,
+                        real_roof_closed=real_roof_closed,
+                    )
                     # ALSO compute a wind-stripped multiplier for per-hitter
                     # HR calc, since wind is applied per-handedness via
                     # wind_pull_side_multiplier (avoids double-counting).
-                    wx_mult_nowind, _ = hr_multiplier(weather, park_info, skip_wind=True)
+                    wx_mult_nowind, _ = hr_multiplier(
+                        weather, park_info, skip_wind=True,
+                        real_roof_closed=real_roof_closed,
+                    )
                     wx_summary = _summary or "Neutral"
                     # Hard rain warning - >80% chance suggests likely delay/postponement
                     pp = weather.get("precip_prob")
