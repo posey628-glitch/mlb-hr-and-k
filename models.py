@@ -318,14 +318,22 @@ def build_matchup_table(
             # negative in tiny samples where AVG > SLG due to all singles.
             df["iso"] = (df[slg_col] - df[avg_col]).clip(lower=0).round(3)
 
-    # v42d: Derive pull_air_pct when Savant doesn't populate it.
-    # User audit showed pull_air_percent comes back 0% populated from the
-    # Savant custom leaderboard endpoint. Best derivation: pull_percent × fb_pct.
-    # This is APPROXIMATE — it assumes pull rate on flies matches overall pull
-    # rate, which is roughly true for most hitters but pull-happy hitters tend
-    # to pull MORE on flies, so the derived value slightly under-estimates for
-    # extreme pull hitters. Still useful as a signal vs zero data.
-    if "pull_air_pct" not in df.columns or df["pull_air_pct"].isna().all():
+    # v42d/e: Derive pull_air_pct when Savant doesn't populate it.
+    # User's data coverage audit showed pull_air_percent comes back 0%
+    # populated from Savant's custom leaderboard endpoint. Best derivation:
+    # pull_percent × fb_pct. This is APPROXIMATE — assumes pull rate on flies
+    # matches overall pull rate (slightly under-estimates extreme pull
+    # hitters) but the relative ordering is preserved.
+    #
+    # v42e: derive when MORE THAN 50% missing, not just all-missing. Savant
+    # may return the column present with a few populated rows but mostly
+    # NaN — in that case we still want the derivation to fire so the
+    # column has data for everyone.
+    _need_derive = (
+        "pull_air_pct" not in df.columns
+        or df["pull_air_pct"].isna().mean() > 0.5
+    )
+    if _need_derive:
         if "pull_percent" in df.columns and "fb_pct" in df.columns:
             df["pull_air_pct"] = (df["pull_percent"] * df["fb_pct"] / 100).round(2)
         elif "pull_pct" in df.columns and "fb_pct" in df.columns:
