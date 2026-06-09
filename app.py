@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.09-split-prior-roof-vegas-v42f"
+APP_VERSION = "2026.06.09-auto-eval-date-strip-v42g"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -3797,7 +3797,7 @@ elif _wbr_n_l == 0:
 # Always show a small caption confirming weather status + version. Lets user
 # see at a glance: (1) which version is loaded, (2) whether weather is on.
 st.caption(
-    f"📦 v42f · {_wx_status_emoji} Weather: {_wx_status_label}"
+    f"📦 v42g · {_wx_status_emoji} Weather: {_wx_status_label}"
 )
 
 for _, game in slate.iterrows():
