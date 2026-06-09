@@ -64,6 +64,12 @@ PARKS = {
     "Petco Park":            {"hr_factor": 94,  "hr_factor_L": 95,  "hr_factor_R": 93,  "runs_factor": 95,  "cf_bearing": 14,  "lat": 32.707, "lon": -117.157, "roof": "open"},  # Deep LF
     "T-Mobile Park":         {"hr_factor": 93,  "hr_factor_L": 93,  "hr_factor_R": 93,  "runs_factor": 94,  "cf_bearing": 30,  "lat": 47.591, "lon": -122.332, "roof": "retractable"},
     "Sutter Health Park":    {"hr_factor": 95,  "hr_factor_L": 95,  "hr_factor_R": 95,  "runs_factor": 98,  "cf_bearing": 75,  "lat": 38.580, "lon": -121.513, "roof": "open"},
+    # v42i: Las Vegas Ballpark added — Athletics' temporary venue for the
+    # 6-game homestand June 8-14, 2026 (vs Brewers and Rockies). Triple-A
+    # park in Summerlin, NV at ~2,030 ft elevation. June 8 debut game went
+    # 15-14 with 11 HRs — desert air + 2k ft elevation = extreme HR park.
+    # HR factor 115 (between average and Coors-tier 121).
+    "Las Vegas Ballpark":    {"hr_factor": 115, "hr_factor_L": 115, "hr_factor_R": 115, "runs_factor": 115, "cf_bearing": 45,  "lat": 36.223, "lon": -115.310, "roof": "open"},
     "Oakland Coliseum":      {"hr_factor": 92,  "hr_factor_L": 92,  "hr_factor_R": 92,  "runs_factor": 93,  "cf_bearing": 60,  "lat": 37.752, "lon": -122.201, "roof": "open"},
     "Oracle Park":           {"hr_factor": 88,  "hr_factor_L": 82,  "hr_factor_R": 92,  "runs_factor": 92,  "cf_bearing": 99,  "lat": 37.779, "lon": -122.389, "roof": "open"},  # Triples Alley kills LHB
     "Tropicana Field":       {"hr_factor": 96,  "hr_factor_L": 96,  "hr_factor_R": 96,  "runs_factor": 96,  "cf_bearing": 45,  "lat": 27.768, "lon": -82.653,  "roof": "dome"},
@@ -229,7 +235,7 @@ def wind_pull_side_multiplier(venue_name: str, bats: str,
     # Coors/Sutter park HR factors (1.21, 1.13) already embed historical
     # out-blowing wind effects, so layering full real-time wind on top
     # double-counts. The dampener attenuates but doesn't eliminate.
-    HIGH_ALTITUDE_PARKS = {"Coors Field", "Sutter Health Park"}
+    HIGH_ALTITUDE_PARKS = {"Coors Field", "Sutter Health Park", "Las Vegas Ballpark"}
     if venue_name in HIGH_ALTITUDE_PARKS:
         roof_factor = roof_factor * 0.6
 
@@ -322,6 +328,7 @@ PARK_DIMENSIONS = {
     "Guaranteed Rate Field":   {"lf_ft": 330, "rf_ft": 335},
     "George M. Steinbrenner Field": {"lf_ft": 318, "rf_ft": 314},  # Yankees spring/temp facility
     "Sutter Health Park":      {"lf_ft": 330, "rf_ft": 320},  # A's temp park
+    "Las Vegas Ballpark":      {"lf_ft": 340, "rf_ft": 340},  # A's June 2026 homestand
     "Tropicana Field":         {"lf_ft": 315, "rf_ft": 322},
 }
 
