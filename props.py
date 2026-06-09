@@ -129,11 +129,23 @@ def hr_prob_per_pa(
                 overall_rate = h_observed_raw if h_observed_raw > 0.005 else 0.025
                 split_mult_raw = split_hr_pa / overall_rate
                 # Shrink the multiplier toward 1.0 based on split sample size.
-                # 30 PA: very heavy shrink (most weight to overall);
-                # 150 PA: ~50% confidence;
-                # 400 PA: ~75% confidence in split.
+                # v42f BUGFIX: raised prior from 100 → 150 PA. With the old
+                # 100-PA prior, mid-sample splits (~150 PA) earned 60% trust
+                # — enough that a weak-contact hitter's lucky platoon split
+                # inflated his HR Game% out of proportion. Mauricio Dubón
+                # case (149 PA vs RHP, 5.9% barrel, .130 ISO) projected at
+                # 21.9% HR Game% because his split rate happened to be hot.
+                # 150-PA prior drops that trust to ~50% → Dubón projects ~19%,
+                # while genuine reverse-platoon hitters with 400+ PA splits
+                # (Adell-tier) barely change (73% trust). Targets the noisy
+                # mid-sample band specifically.
+                # Trust curves:
+                #   30 PA:  ~17% (heavy shrink)
+                #   100 PA: ~40% (moderate shrink)
+                #   150 PA: ~50% (was 60% under 100-prior)
+                #   400 PA: ~73% (was 80%)
                 split_pa_f = float(split_pa)
-                split_w = split_pa_f / (split_pa_f + 100)  # 100 PA prior
+                split_w = split_pa_f / (split_pa_f + 150)  # v42f: was +100
                 # Cap shrunk multiplier in [0.5, 2.0] to prevent extreme outliers
                 split_mult_shrunk = 1.0 + (split_mult_raw - 1.0) * split_w
                 split_mult_shrunk = max(0.5, min(2.0, split_mult_shrunk))
