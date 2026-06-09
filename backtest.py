@@ -113,16 +113,26 @@ def durable_storage_configured() -> bool:
     return bool(_gist_token()) and bool(_gist_id())
 
 
-def _gist_read_all() -> dict:
+def _gist_read_all() -> dict | None:
     """Fetch the gist contents and return the parsed snapshot dict.
-    Returns empty dict on any error (e.g. token missing, network issue).
-    Cached at the requests level — we re-fetch on every save/load to avoid
-    stale-write races (Streamlit can have multiple sessions; we're not
-    coordinating concurrent writes, but we minimize the window)."""
+
+    Returns:
+      dict (possibly empty) on success
+      None on failure (network error, auth error, malformed JSON)
+
+    v42i CRITICAL FIX: previously returned {} on ANY exception, which
+    caused catastrophic data loss — _save_snapshot_to_gist would do:
+        all_snaps = _gist_read_all()  # {} on transient failure
+        all_snaps[key] = payload      # only the new snapshot remains
+        _gist_write_all(all_snaps)    # writes {key: payload} → WIPES ALL PRIOR
+    A single transient GitHub API hiccup could destroy weeks of accumulated
+    backtest data. Now we return None on failure so callers can abort the
+    write instead of silently wiping the gist.
+    """
     token = _gist_token()
     gist_id = _gist_id()
     if not token or not gist_id:
-        return {}
+        return None
     try:
         r = requests.get(
             f"{GIST_API}/{gist_id}",
@@ -136,13 +146,18 @@ def _gist_read_all() -> dict:
         files = r.json().get("files", {})
         target = files.get(GIST_FILENAME)
         if not target:
+            # Gist exists but doesn't have our file — first save scenario.
+            # This is a legitimate "empty" state, not a read failure.
             return {}
         content = target.get("content", "")
         if not content.strip():
             return {}
         return json.loads(content)
     except Exception:
-        return {}
+        # Network error, JSON parse error, auth failure, rate limit — any of
+        # these means we DON'T know what's in the gist. Return None so the
+        # caller can refuse to write and avoid data loss.
+        return None
 
 
 def _gist_write_all(snapshots: dict) -> bool:
@@ -177,11 +192,18 @@ def _gist_write_all(snapshots: dict) -> bool:
 
 def _save_snapshot_to_gist(snapshot_date, payload: dict) -> bool:
     """Upsert one snapshot into the gist. Read-modify-write the dict.
-    Best-effort: if Gist write fails, the caller's local save still succeeded."""
+
+    v42i: CRITICAL — if the read fails (returns None), ABORT the write
+    rather than wipe existing data. Better to skip this save and try again
+    next time than to nuke accumulated history."""
     if not durable_storage_configured():
         return False
     try:
         all_snaps = _gist_read_all()
+        if all_snaps is None:
+            # Read failed — DO NOT WRITE. Existing data may still be intact;
+            # wiping it would be worse than skipping this save.
+            return False
         all_snaps[str(snapshot_date)] = payload
         return _gist_write_all(all_snaps)
     except Exception:
@@ -194,17 +216,24 @@ def _load_snapshot_from_gist(snapshot_date) -> dict | None:
         return None
     try:
         all_snaps = _gist_read_all()
+        if all_snaps is None:
+            return None
         return all_snaps.get(str(snapshot_date))
     except Exception:
         return None
 
 
 def _list_snapshots_from_gist() -> list[str]:
-    """Return list of dates in the gist. Empty list if Gist not configured."""
+    """Return list of dates in the gist. Empty list if Gist not configured
+    OR if the read failed (so caller doesn't mistake a network blip for
+    'no snapshots exist')."""
     if not durable_storage_configured():
         return []
     try:
-        return sorted(_gist_read_all().keys())
+        result = _gist_read_all()
+        if result is None:
+            return []  # Read failed — pretend no data; do NOT touch gist
+        return sorted(result.keys())
     except Exception:
         return []
 
