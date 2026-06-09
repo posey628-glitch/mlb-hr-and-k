@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.09-gist-rescue-vegas-platoon-v42i"
+APP_VERSION = "2026.06.09-h2h-comparison-v42j"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -3840,7 +3840,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v42i · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v42j · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label}"
 )
 
@@ -6835,6 +6835,172 @@ if all_hitters_for_picks:
         st.caption("Not enough qualified hitters with HR projections yet.")
 else:
     st.caption("Waiting for matchup data to populate.")
+
+st.divider()
+# ============================================================================
+# 🆚 HEAD-TO-HEAD COMPARISON (v42j)
+# ============================================================================
+# Pick 2-4 hitters, see their key stats side-by-side with the leader in each
+# category marked 🏆. Display-only — does not affect scoring. Useful when
+# you're deciding between two HR plays for a parlay or want to understand
+# why one is ranked higher than another.
+st.subheader("🆚 Head-to-Head Comparison")
+st.caption(
+    "Pick 2-4 hitters to compare side-by-side. The leader in each category "
+    "is marked 🏆. Helpful for deciding between picks or auditing why one "
+    "hitter ranks higher than another."
+)
+
+try:
+    if combined_all is not None and not combined_all.empty:
+        # Build the selector — only hitters with player_id and a name
+        _hh_pool = combined_all[
+            combined_all["player_id"].notna()
+            & combined_all["player_name"].notna()
+        ][["player_id", "player_name", "team"]].drop_duplicates(subset="player_id").copy()
+        # Display label: "Name (TEAM)" with team if available
+        _hh_pool["__display"] = _hh_pool.apply(
+            lambda r: f"{r['player_name']}" + (
+                f" ({r['team']})" if pd.notna(r.get("team")) and r.get("team") else ""
+            ),
+            axis=1,
+        )
+        _display_to_pid = dict(zip(_hh_pool["__display"], _hh_pool["player_id"]))
+        _hh_options = sorted(_hh_pool["__display"].tolist())
+
+        _hh_selected = st.multiselect(
+            "Pick hitters (2-4):",
+            options=_hh_options,
+            max_selections=4,
+            key="_h2h_compare_selector",
+            help="Type to search. Picks limited to 4 for readability.",
+        )
+
+        if len(_hh_selected) >= 2:
+            _hh_ids = [_display_to_pid[d] for d in _hh_selected]
+            _hh_rows = combined_all[
+                combined_all["player_id"].isin(_hh_ids)
+            ].drop_duplicates(subset="player_id").copy()
+            # Sort to match the selection order
+            _hh_rows["__order"] = _hh_rows["player_id"].apply(_hh_ids.index)
+            _hh_rows = _hh_rows.sort_values("__order")
+
+            # Categories to compare: (col, display_label, direction)
+            # direction: True = higher better, False = lower better, None = no winner
+            _h2h_categories = [
+                ("hr_game_pct",    "HR Game%",         True,  "pct"),
+                ("pick_score",     "Pick Score",       True,  "num1"),
+                ("convergence_score", "Convergence",   True,  "int"),
+                ("hr_grade",       "Grade",            None,  "text"),
+                ("matchup_opp",    "Matchup",          True,  "num1"),
+                ("env_boost",      "Env Boost",        True,  "mult"),
+                ("power_score",    "Power",            True,  "num1"),
+                ("hr_form",        "Form",             True,  "num0"),
+                ("lift_score",     "Lift",             True,  "num1"),
+                ("barrel_pct",     "Barrel %",         True,  "pct1"),
+                ("hard_hit",       "Hard Hit %",       True,  "pct1"),
+                ("iso",            "ISO",              True,  "iso"),
+                ("avg_ev",         "Avg EV",           True,  "num1"),
+                ("pulled_brl_pct", "Pull Brl %",       True,  "pct1"),
+                ("pull_air_pct",   "Pull Air %",       True,  "pct1"),
+                ("recent_iso_10",  "ISO L10",          True,  "iso"),
+                ("hr_last_10",     "HR L10",           True,  "int"),
+                ("games_since_hr", "Games no HR",      False, "int"),
+                ("smash_spot",     "Smash",            None,  "text"),
+                ("hr_profile_label", "Profile",        None,  "text"),
+                ("ideal_hr_screen", "Ideal Screen",    None,  "text"),
+                ("platoon_hitter_flag", "Platoon Tag", None,  "text"),
+            ]
+
+            def _fmt(val, fmt):
+                if pd.isna(val) or val is None or (isinstance(val, str) and val == ""):
+                    return "—"
+                try:
+                    if fmt == "pct":
+                        return f"{float(val):.1f}%"
+                    if fmt == "pct1":
+                        return f"{float(val):.1f}%"
+                    if fmt == "num1":
+                        return f"{float(val):.1f}"
+                    if fmt == "num0":
+                        return f"{int(round(float(val)))}"
+                    if fmt == "int":
+                        return f"{int(round(float(val)))}"
+                    if fmt == "iso":
+                        return f"{float(val):.3f}"
+                    if fmt == "mult":
+                        return f"{float(val):.2f}×"
+                    return str(val)
+                except (TypeError, ValueError):
+                    return str(val)
+
+            # Build the rows
+            _table_rows = []
+            for col, label, direction, fmt in _h2h_categories:
+                if col not in _hh_rows.columns:
+                    continue
+                raw_values = []
+                for _, r in _hh_rows.iterrows():
+                    v = r.get(col)
+                    if pd.isna(v) or v is None or (isinstance(v, str) and v == ""):
+                        raw_values.append(None)
+                    else:
+                        raw_values.append(v)
+                # Skip the row entirely if all values are missing
+                if all(v is None for v in raw_values):
+                    continue
+                # Determine winner index if direction is set
+                winner_idx = None
+                if direction is True:
+                    numeric_pairs = [
+                        (i, float(v)) for i, v in enumerate(raw_values)
+                        if v is not None and not isinstance(v, str)
+                    ]
+                    if numeric_pairs:
+                        winner_idx = max(numeric_pairs, key=lambda x: x[1])[0]
+                elif direction is False:
+                    numeric_pairs = [
+                        (i, float(v)) for i, v in enumerate(raw_values)
+                        if v is not None and not isinstance(v, str)
+                    ]
+                    if numeric_pairs:
+                        winner_idx = min(numeric_pairs, key=lambda x: x[1])[0]
+
+                # Format and inject 🏆 on the leader
+                row_dict = {"Stat": label}
+                for i, (display, raw_val) in enumerate(zip(_hh_selected, raw_values)):
+                    s = _fmt(raw_val, fmt)
+                    if i == winner_idx and s != "—":
+                        s = f"🏆 {s}"
+                    row_dict[display] = s
+                _table_rows.append(row_dict)
+
+            if _table_rows:
+                _comp_df = pd.DataFrame(_table_rows)
+                st.dataframe(_comp_df, hide_index=True, use_container_width=True)
+
+                # Quick summary: total category wins per player
+                _wins = {d: 0 for d in _hh_selected}
+                for row in _table_rows:
+                    for d in _hh_selected:
+                        if str(row.get(d, "")).startswith("🏆"):
+                            _wins[d] += 1
+                _wins_str = " · ".join(
+                    f"**{d}**: {w} category win{'s' if w != 1 else ''}"
+                    for d, w in _wins.items()
+                )
+                st.caption(f"Tally: {_wins_str}")
+            else:
+                st.info(
+                    "These players don't have enough comparable data populated "
+                    "yet. Try other selections or check that lineups have posted."
+                )
+        elif len(_hh_selected) == 1:
+            st.info("Pick at least 2 hitters to compare.")
+    else:
+        st.caption("Waiting for hitter data to populate.")
+except Exception as _h2h_e:
+    st.caption(f"Comparison tool error: {type(_h2h_e).__name__}: {str(_h2h_e)[:120]}")
 
 st.divider()
 # ============================================================================
