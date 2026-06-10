@@ -368,6 +368,79 @@ def get_all_team_rosters(slate: pd.DataFrame) -> dict:
     return rosters
 
 
+@st.cache_data(ttl=3600)  # 1hr — schedule/lineups don't change for past games
+def get_team_recent_starts(team_id: int, lookback_days: int = 14,
+                            _cache_version: str = "v1") -> dict:
+    """
+    v42n: Returns {player_id: starts_count} for a team's recent games.
+
+    Counts how many times each player appeared in the starting lineup over
+    the past `lookback_days` days. Used by _fill_to_nine to detect real
+    regular starters whose season PA is artificially low due to recent IL
+    time (CJ Abrams, Willy Adames archetype) — they'd otherwise be
+    demoted to the bench by the naive PA-sort.
+
+    Implementation: single MLB Stats API call per team with
+    `?hydrate=lineups` to get every game's lineup in one shot. Cached 1hr
+    so repeat slates are free.
+
+    Returns {} on any failure — caller treats empty dict as "no recent
+    data, fall back to PA sort."
+
+    Args:
+      team_id: MLB team ID
+      lookback_days: how far back to count (default 14)
+      _cache_version: bump to force cache invalidation
+    """
+    from datetime import date as _date, timedelta as _td
+    today = _date.today()
+    start = today - _td(days=lookback_days)
+    url = (
+        f"https://statsapi.mlb.com/api/v1/schedule"
+        f"?sportId=1&teamId={team_id}"
+        f"&startDate={start.isoformat()}&endDate={today.isoformat()}"
+        f"&hydrate=lineups"
+    )
+    starts = {}
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=15)
+        r.raise_for_status()
+        data = r.json()
+    except Exception:
+        return {}
+
+    for date_block in data.get("dates", []):
+        for game in date_block.get("games", []):
+            status = (game.get("status", {}) or {}).get("abstractGameState", "")
+            # Only count completed games — in-progress / scheduled games
+            # haven't generated meaningful starting-lineup data yet
+            if status not in ("Final", "Live", "In Progress"):
+                continue
+
+            # Determine which side this team was on
+            away_id = (game.get("teams", {}).get("away", {})
+                            .get("team", {}).get("id"))
+            home_id = (game.get("teams", {}).get("home", {})
+                            .get("team", {}).get("id"))
+            if away_id == team_id:
+                side_key = "awayPlayers"
+            elif home_id == team_id:
+                side_key = "homePlayers"
+            else:
+                continue
+
+            lineups = game.get("lineups", {}) or {}
+            players = lineups.get(side_key, []) or []
+            # Lineup hydration returns position players in batting order.
+            # Each entry is a person dict — count this as a "start" for them.
+            for p in players:
+                pid = (p or {}).get("id")
+                if pid is None:
+                    continue
+                starts[pid] = starts.get(pid, 0) + 1
+    return starts
+
+
 # ----------------------------------------------------------------------------
 # Hitter season stats (Baseball Savant custom leaderboard)
 # ----------------------------------------------------------------------------
