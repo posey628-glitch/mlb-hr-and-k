@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-tie-detect-grade-context-v42l"
+APP_VERSION = "2026.06.10-recent-starts-sort-v42n"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -3840,7 +3840,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v42l · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v42n · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label}"
 )
 
@@ -4029,9 +4029,21 @@ for _, game in slate.iterrows():
                 ("P", "SP", "RP")
             and p.get("id") not in existing_ids
         ]
-        # SORT by season PA so likely starters come first.
-        # This makes the roster-fill "lineup" produce sensible expected_PA
-        # estimates instead of alphabetical noise.
+        # SORT priority (v42n): regular starters come first regardless of
+        # their season PA. Some real starters (CJ Abrams, Willy Adames, anyone
+        # returning from IL) have low season PA simply because they missed
+        # games — but they're the actual everyday starter and need to appear
+        # in the projected 9 when MLB hasn't yet posted the day's lineup.
+        #
+        # Algorithm: sort by tuple (is_regular_starter, season_pa) descending.
+        #   - is_regular_starter: True if the player started in ≥5 of the
+        #     team's last 14 games (catches platoons too — pure platoon guys
+        #     usually start 4-7 of 14 vs the right hand, so 5 is the sweet
+        #     spot). False otherwise.
+        #   - season_pa: tie-breaker within each group
+        #
+        # If get_team_recent_starts returns {} (API failure), fall back to
+        # pure PA sort — old behavior, no regression.
         pa_lookup = {}
         try:
             if not hitter_stats.empty and "player_id" in hitter_stats.columns:
@@ -4045,10 +4057,32 @@ for _, game in slate.iterrows():
                             continue
         except Exception:
             pass
-        position_players.sort(
-            key=lambda p: pa_lookup.get(int(p.get("id", 0)) if p.get("id") else 0, 0),
-            reverse=True,
-        )
+
+        # v42n: fetch recent starts for this team
+        try:
+            from data_fetcher import get_team_recent_starts
+            recent_starts_lookup = (
+                get_team_recent_starts(int(team_id)) if team_id is not None else {}
+            )
+        except Exception:
+            recent_starts_lookup = {}
+
+        REGULAR_STARTER_THRESHOLD = 5  # started in ≥5 of last 14 games
+
+        def _sort_key(p):
+            pid = None
+            try:
+                pid = int(p.get("id", 0)) if p.get("id") else 0
+            except (ValueError, TypeError):
+                pid = 0
+            recent_count = recent_starts_lookup.get(pid, 0)
+            is_regular = recent_count >= REGULAR_STARTER_THRESHOLD
+            season_pa = pa_lookup.get(pid, 0)
+            # Within regulars, also rank by recent_count (more recent starts
+            # = more likely the lineup-card guy)
+            return (is_regular, recent_count, season_pa)
+
+        position_players.sort(key=_sort_key, reverse=True)
         # Pad up to 9 total when lineup isn't fully posted
         needed = max(0, 9 - len(existing_lineup))
         for p in position_players[:needed]:
@@ -4254,6 +4288,21 @@ for _, game in slate.iterrows():
             pitcher_hr9=away_p_row.get("hr9") if away_p_row else None,
             pitcher_barrel_allowed=away_p_row.get("barrel_batted_rate") if away_p_row else None,
         )
+        # v42m: bench gets power_score too
+        if not away_bench_matchup.empty:
+            away_bench_matchup = add_power_score(
+                away_bench_matchup,
+                park_mult=park_mult, weather_mult=wx_mult,
+                pitcher_hr9=home_p_row.get("hr9") if home_p_row else None,
+                pitcher_barrel_allowed=home_p_row.get("barrel_batted_rate") if home_p_row else None,
+            )
+        if not home_bench_matchup.empty:
+            home_bench_matchup = add_power_score(
+                home_bench_matchup,
+                park_mult=park_mult, weather_mult=wx_mult,
+                pitcher_hr9=away_p_row.get("hr9") if away_p_row else None,
+                pitcher_barrel_allowed=away_p_row.get("barrel_batted_rate") if away_p_row else None,
+            )
     except Exception:
         pass
 
@@ -4274,6 +4323,17 @@ for _, game in slate.iterrows():
             home_matchup,
             pitcher_gb_pct=(away_p_row.get("gb_pct") if away_p_row else None),
         )
+        # v42m: bench gets lift_score too
+        if not away_bench_matchup.empty:
+            away_bench_matchup = add_lift_score(
+                away_bench_matchup,
+                pitcher_gb_pct=(home_p_row.get("gb_pct") if home_p_row else None),
+            )
+        if not home_bench_matchup.empty:
+            home_bench_matchup = add_lift_score(
+                home_bench_matchup,
+                pitcher_gb_pct=(away_p_row.get("gb_pct") if away_p_row else None),
+            )
     except Exception:
         pass
 
@@ -4456,6 +4516,14 @@ for _, game in slate.iterrows():
         try:
             _apply_pitch_match(away_matchup, home_p_row)
             _apply_pitch_match(home_matchup, away_p_row)
+            # v42m: bench players go through same pitch_match enrichment so
+            # they get pitch_hr_score, arsenal_flag, etc. Critical because
+            # PA-based roster-fill sometimes demotes real starters (e.g.,
+            # CJ Abrams returning from IL has lower season PA than 9 reserves
+            # who played more games) — but the user still needs to see their
+            # grade and matchup data.
+            _apply_pitch_match(away_bench_matchup, home_p_row)
+            _apply_pitch_match(home_bench_matchup, away_p_row)
         except Exception:
             pass
 
@@ -4470,6 +4538,13 @@ for _, game in slate.iterrows():
     for matchup_df, opp_p_row, opp_bullpen_hr9 in [
         (away_matchup, home_p_row, home_bullpen_hr9),
         (home_matchup, away_p_row, away_bullpen_hr9),
+        # v42m: bench players get the SAME enrichment as the starting 9 so
+        # they have grades, pick_score, platoon flags etc. populated. This
+        # fixes the "CJ Abrams on bench with no grade" problem — if a real
+        # starter gets demoted to bench by PA-sort, they still have all the
+        # data the user needs to evaluate them as a late-swap candidate.
+        (away_bench_matchup, home_p_row, home_bullpen_hr9),
+        (home_bench_matchup, away_p_row, away_bullpen_hr9),
     ]:
         if matchup_df is None or matchup_df.empty:
             continue
@@ -4882,6 +4957,24 @@ for _, game in slate.iterrows():
                 hr_mult=full_hr_mult,
             )
             home_matchup = find_sleepers(home_matchup, season_hr_col="home_run")
+        # v42m: bench gets hr_probability + sleeper detection too. This is
+        # what generates the actual hr_game_pct and pick_score columns for
+        # each hitter, so without it the bench matchup_df has no projection
+        # data even though it has barrel%/ISO/etc. via build_matchup_table.
+        if not away_bench_matchup.empty:
+            away_bench_matchup = hr_probability(
+                away_bench_matchup,
+                pd.Series(home_p_row) if home_p_row else None,
+                hr_mult=full_hr_mult,
+            )
+            away_bench_matchup = find_sleepers(away_bench_matchup, season_hr_col="home_run")
+        if not home_bench_matchup.empty:
+            home_bench_matchup = hr_probability(
+                home_bench_matchup,
+                pd.Series(away_p_row) if away_p_row else None,
+                hr_mult=full_hr_mult,
+            )
+            home_bench_matchup = find_sleepers(home_bench_matchup, season_hr_col="home_run")
     except Exception:
         # Fallback: compute sleeper score directly if helpers fail
         for matchup_df in [away_matchup, home_matchup]:
