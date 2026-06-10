@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.09-h2h-fixes-vegas-altitude-v42k"
+APP_VERSION = "2026.06.10-tie-detect-grade-context-v42l"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -3840,7 +3840,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v42k · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v42l · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label}"
 )
 
@@ -4778,6 +4778,9 @@ for _, game in slate.iterrows():
         #   ⚠️ REVERSE      — hitter facing their bad side
         try:
             opp_throws = opp_p_row.get("p_throws") if opp_p_row is not None else None
+            # v42l: also stash on the dataframe so grade_context (computed below)
+            # can read it without re-fetching opp_p_row
+            matchup_df["opp_pitcher_throws"] = opp_throws if opp_throws else ""
             platoon_flags = []
             for _, row in matchup_df.iterrows():
                 flag = ""
@@ -4807,6 +4810,61 @@ for _, game in slate.iterrows():
             matchup_df["platoon_hitter_flag"] = platoon_flags
         except Exception:
             matchup_df["platoon_hitter_flag"] = [""] * len(matchup_df)
+
+        # GRADE WITH PLATOON CONTEXT (v42l) — combines the HR-Game%-based grade
+        # with the platoon situation so a casual user can't be misled by the
+        # letter grade alone.
+        #
+        # Original `grade` is purely HR Game%-based:
+        #   A+ ≥25%, A 21-25, B+ 17-21, B 13-17, C+ 10-13, C 7-10, D 4-7, F <4
+        # Problem: a hitter facing their preferred side AND a hitter facing
+        # their bad side can both project to 18% HR Game% and both grade B+,
+        # but the conviction behind each is wildly different.
+        #
+        # `grade_context` annotates this:
+        #   B+ 💪 = B+ with a platoon edge in your favor (LHP-masher vs LHP, etc.)
+        #   B+ ⚠️ = B+ but the hitter is on their weak side
+        #   B+ ⚡ = B+ same-side platoon (capped — see v40 logic)
+        #   B+    = B+ neutral (no strong platoon signal either direction)
+        try:
+            grade_context = []
+            for _, row in matchup_df.iterrows():
+                base_grade = row.get("grade", "")
+                platoon = str(row.get("platoon_hitter_flag", "") or "")
+                bats = str(row.get("bats", "") or "").upper()
+
+                # Determine pitcher hand from row (set on the matchup_df construction)
+                pitcher_throws = row.get("opp_pitcher_throws") or row.get("p_throws")
+                if pitcher_throws is None or pd.isna(pitcher_throws):
+                    pitcher_throws = ""
+                pitcher_throws = str(pitcher_throws).upper()
+
+                if not base_grade or base_grade in ("—", "F"):
+                    grade_context.append(base_grade)
+                    continue
+
+                # Modifier from platoon_hitter_flag (already computed earlier)
+                if "🎯" in platoon:
+                    # LHP/RHP-masher facing their preferred side
+                    annotation = "💪"  # platoon edge in our favor
+                elif "⚠️ reverse" in platoon:
+                    # Facing their bad side — caution
+                    annotation = "⚠️"
+                else:
+                    # No extreme platoon split known. Check same-side handedness:
+                    # L-vs-LHP or R-vs-RHP gets ⚡ (capped per v40 logic)
+                    same_side = (
+                        (bats == "L" and pitcher_throws == "L")
+                        or (bats == "R" and pitcher_throws == "R")
+                    )
+                    annotation = "⚡" if same_side else ""
+
+                grade_context.append(
+                    f"{base_grade} {annotation}".strip() if annotation else base_grade
+                )
+            matchup_df["grade_context"] = grade_context
+        except Exception:
+            matchup_df["grade_context"] = matchup_df.get("grade", [""] * len(matchup_df))
 
     # Sleeper score - uses sleepers.py functions correctly
     try:
@@ -8130,7 +8188,7 @@ try:
             _h2h_categories = [
                 ("hr_game_pct",    "HR Game%",         True,  "pct"),
                 ("pick_score",     "Pick Score",       True,  "num1"),
-                ("grade",          "Grade",            None,  "text"),
+                ("grade_context",  "Grade (w/platoon)", None, "text"),
                 ("matchup_opp",    "Matchup",          True,  "num1"),
                 ("env_boost",      "Env Boost",        True,  "mult"),
                 ("power_score",    "Power",            True,  "num1"),
@@ -8182,21 +8240,40 @@ try:
                         raw_values.append(v)
                 if all(v is None for v in raw_values):
                     continue
+                # v42l: compute winner based on DISPLAYED values (post-rounding)
+                # so two values that round to the same display string are
+                # correctly tied with no 🏆. Previously a 0.9612 vs 0.9608 both
+                # displayed as "0.96" but the raw 0.9612 got the trophy,
+                # which looks like a bug from the user perspective.
+                #
+                # Two-step: (1) compute raw winner candidate, (2) verify the
+                # displayed string for that candidate differs from all others;
+                # if it doesn't, it's a tie, no winner.
                 winner_idx = None
-                if direction is True:
-                    numeric_pairs = [
-                        (i, float(v)) for i, v in enumerate(raw_values)
-                        if v is not None and not isinstance(v, str)
+                numeric_pairs = [
+                    (i, float(v)) for i, v in enumerate(raw_values)
+                    if v is not None and not isinstance(v, str)
+                ]
+                if direction is True and numeric_pairs:
+                    candidate_idx = max(numeric_pairs, key=lambda x: x[1])[0]
+                elif direction is False and numeric_pairs:
+                    candidate_idx = min(numeric_pairs, key=lambda x: x[1])[0]
+                else:
+                    candidate_idx = None
+
+                if candidate_idx is not None:
+                    # Build the displayed strings for ALL candidates to check
+                    # for true ties at the display level.
+                    candidate_display = _fmt(raw_values[candidate_idx], fmt)
+                    other_displays = [
+                        _fmt(raw_values[i], fmt)
+                        for i, v in enumerate(raw_values)
+                        if i != candidate_idx and v is not None
                     ]
-                    if numeric_pairs:
-                        winner_idx = max(numeric_pairs, key=lambda x: x[1])[0]
-                elif direction is False:
-                    numeric_pairs = [
-                        (i, float(v)) for i, v in enumerate(raw_values)
-                        if v is not None and not isinstance(v, str)
-                    ]
-                    if numeric_pairs:
-                        winner_idx = min(numeric_pairs, key=lambda x: x[1])[0]
+                    # Only award the trophy if no other candidate ties at display
+                    if candidate_display not in other_displays:
+                        winner_idx = candidate_idx
+                    # else: tie at display level, no winner
                 row_dict = {"Stat": label}
                 for i, (display, raw_val) in enumerate(zip(_hh_selected, raw_values)):
                     s = _fmt(raw_val, fmt)
