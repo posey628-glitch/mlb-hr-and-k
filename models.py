@@ -250,10 +250,13 @@ def build_matchup_table(
         df["pitcher_barrel_allowed"] = pitcher_row.get("barrel_batted_rate", np.nan)
         df["pitcher_hr"] = pitcher_row.get("home_run", np.nan)
         df["pitcher_whiff"] = pitcher_row.get("whiff_percent", np.nan)
+        # v43: pitcher zone% — needed for plate_discipline_flag
+        df["pitcher_zone_pct"] = pitcher_row.get("zone_percent", np.nan)
     else:
         df["pitcher_xwoba"] = np.nan
         df["pitcher_k_inv"] = np.nan
         df["pitcher_barrel_allowed"] = np.nan
+        df["pitcher_zone_pct"] = np.nan
 
     # Normalize column names to consistent shorts
     # COALESCE LA SOURCES BEFORE RENAME
@@ -502,6 +505,151 @@ def build_matchup_table(
         return ""
     df["gb_type_flag"] = df.apply(_gb_type_flag, axis=1)
 
+    # 5-GAME FORM TREND FLAG (v42t)
+    # User-requested: compare 5-game ISO/SLG to season baseline to answer
+    # "is this hitter's HR form better or worse than their season pace?"
+    # Display-only flag; does NOT feed into scoring.
+    #
+    # Tiers:
+    #   🔥 hot streak    — recent_iso_5 ≥ season iso × 1.40 AND meaningful AB
+    #   📈 trending up   — recent_iso_5 ≥ season iso × 1.15 AND meaningful AB
+    #   ❄️ cold streak   — recent_iso_5 ≤ season iso × 0.50 AND meaningful AB
+    #   📉 trending down — recent_iso_5 ≤ season iso × 0.75 AND meaningful AB
+    #   (empty)          — within ±25% of baseline, normal variance
+    #
+    # Requires at least 10 ABs in the 5-game window to avoid noise from
+    # platoon/injury players who barely played.
+    def _form_trend_flag(row):
+        try:
+            iso5 = row.get("recent_iso_5")
+            ab5 = row.get("recent_ab_5")
+            iso_season = row.get("iso")
+            if (iso5 is None or pd.isna(iso5) or ab5 is None or pd.isna(ab5)
+                or iso_season is None or pd.isna(iso_season)):
+                return ""
+            iso5 = float(iso5); ab5 = float(ab5); iso_season = float(iso_season)
+            if ab5 < 10 or iso_season <= 0.05:
+                return ""  # not enough recent AB, or weak-baseline hitter (avoid divide-by-tiny)
+            ratio = iso5 / iso_season
+            if ratio >= 1.40:
+                return f"🔥 hot ({iso5:.3f} vs {iso_season:.3f})"
+            if ratio >= 1.15:
+                return f"📈 trending up ({iso5:.3f} vs {iso_season:.3f})"
+            if ratio <= 0.50:
+                return f"❄️ cold ({iso5:.3f} vs {iso_season:.3f})"
+            if ratio <= 0.75:
+                return f"📉 trending down ({iso5:.3f} vs {iso_season:.3f})"
+            return ""
+        except (TypeError, ValueError):
+            return ""
+    df["form_trend_flag"] = df.apply(_form_trend_flag, axis=1)
+
+    # PLATE DISCIPLINE MISMATCH FLAG (v43)
+    # User-requested signal: compare batter zone approach to pitcher zone approach.
+    # Uses data we already pull — pitcher zone% (how often they throw strikes)
+    # vs hitter z_swing% (swings on in-zone pitches) and oz_swing% (chase rate).
+    #
+    # This is NOT the literal "per-zone HR rate" zone fit (which requires Savant
+    # heart/shadow/chase/waste tier data we don't yet fetch). It IS the
+    # high-value subset of that signal: who's likely to put bat on ball in
+    # exploitable spots.
+    #
+    # Categories:
+    #   💥 ATTACK + AGGRESSIVE — pitcher attacks zone AND hitter swings at zone:
+    #         pitcher_zone_pct >= 50 AND z_swing_pct >= 70 = HR risk for pitcher
+    #         (lots of bat-on-ball in the heart of the plate)
+    #   🎯 ATTACK + PATIENT — pitcher attacks zone, hitter waits on it:
+    #         pitcher_zone_pct >= 50 AND z_swing_pct < 60 = neutral
+    #         (pitcher gets ahead but hitter is selective)
+    #   🆓 WILD + CHASER — wild pitcher meets free swinger:
+    #         pitcher_zone_pct < 45 AND oz_swing_pct >= 32 = HR risk
+    #         (pitcher misses zone, hitter expands → mistakes get punished)
+    #   ⚠️ WILD + DISCIPLINED — wild pitcher meets patient hitter:
+    #         pitcher_zone_pct < 45 AND oz_swing_pct < 25 = walks not HRs
+    #         (pitcher can't find zone, hitter takes the BB)
+    #   (empty) — no notable mismatch
+    #
+    # Display-only flag. Does NOT feed into pick_score (preserving the
+    # +25.9pp calibration we already measured).
+    def _plate_discipline_flag(row):
+        try:
+            p_zone = row.get("pitcher_zone_pct")
+            h_zswing = row.get("z_swing_percent")
+            h_ozswing = row.get("oz_swing_percent")
+            if p_zone is None or pd.isna(p_zone):
+                return ""
+            p_zone = float(p_zone)
+            # ATTACK pitcher (≥50% in zone) cases
+            if p_zone >= 50.0:
+                if h_zswing is not None and not pd.isna(h_zswing):
+                    z = float(h_zswing)
+                    if z >= 70.0:
+                        return "💥 attack × aggressive"
+                    if z < 60.0:
+                        return "🎯 attack × patient"
+            # WILD pitcher (<45% in zone) cases
+            if p_zone < 45.0:
+                if h_ozswing is not None and not pd.isna(h_ozswing):
+                    o = float(h_ozswing)
+                    if o >= 32.0:
+                        return "🆓 wild × chaser"
+                    if o < 25.0:
+                        return "⚠️ wild × disciplined"
+            return ""
+        except (TypeError, ValueError):
+            return ""
+    df["plate_discipline_flag"] = df.apply(_plate_discipline_flag, axis=1)
+
+    # ZONE FIT FLAG (v43 experimental)
+    # Uses Savant heart/shadow/chase/waste tier data IF the fetchers
+    # successfully returned data. If empty (URL pattern wrong, schema
+    # mismatch, etc.), this flag stays blank for everyone and
+    # plate_discipline_flag carries the workload.
+    #
+    # Logic: weighted sum of (pitcher's tier distribution × hitter's wOBA in tier).
+    # A pitcher who throws lots of heart-of-plate pitches vs a hitter who
+    # crushes heart-of-plate = HR risk.
+    #
+    # Thresholds will be CALIBRATED FROM REAL DATA before going to scoring.
+    # For now it's a labeled display with the raw composite value so the
+    # user can verify the signal looks sensible.
+    def _zone_fit_flag(row):
+        try:
+            # Need both pitcher tier % and hitter tier wOBA
+            p_heart = row.get("pitcher_heart_pct")
+            h_heart = row.get("hitter_heart_woba")
+            if p_heart is None or pd.isna(p_heart):
+                return ""
+            if h_heart is None or pd.isna(h_heart):
+                return ""
+            # Compute weighted xwOBA = sum(pitcher_tier_pct × hitter_tier_woba)
+            tiers = ("heart", "shadow", "chase", "waste")
+            total_pct = 0.0
+            weighted = 0.0
+            for t in tiers:
+                p_pct = row.get(f"pitcher_{t}_pct")
+                h_woba = row.get(f"hitter_{t}_woba")
+                if (p_pct is None or pd.isna(p_pct)
+                    or h_woba is None or pd.isna(h_woba)):
+                    continue
+                p_pct = float(p_pct); h_woba = float(h_woba)
+                weighted += p_pct * h_woba
+                total_pct += p_pct
+            if total_pct < 80.0:  # need ≥80% coverage of pitch distribution
+                return ""
+            avg_woba = weighted / total_pct
+            # League avg wOBA ~0.320. Hitters above 0.380 vs pitcher's mix = elite.
+            if avg_woba >= 0.420:
+                return f"💣 elite zone fit ({avg_woba:.3f})"
+            if avg_woba >= 0.380:
+                return f"🎯 strong zone fit ({avg_woba:.3f})"
+            if avg_woba <= 0.260:
+                return f"🛡️ poor zone fit ({avg_woba:.3f})"
+            return ""
+        except (TypeError, ValueError):
+            return ""
+    df["zone_fit_flag"] = df.apply(_zone_fit_flag, axis=1)
+
     # SPLIT CONFIDENCE FLAG (June 2026)
     # When a hitter's projection is being driven by a vs-LHP or vs-RHP split
     # with a small PA sample, the user has no way to know that. A hitter with
@@ -547,6 +695,10 @@ def build_matchup_table(
         "is_roster_fill",  # CRITICAL: flag for whether lineup_pos is real or fill
         "contact_flag",  # 🎯 contact profile (set expectations)
         "gb_type_flag",  # 🦗 GB-leaning / extreme GB (structural HR floor)
+        "form_trend_flag",  # 🔥/📈/❄️/📉 5-game ISO vs season baseline
+        "plate_discipline_flag",  # 💥/🎯/🆓/⚠️ pitcher zone% × hitter z/oz swing%
+        "zone_fit_flag",  # 💣/🎯/🛡️ Savant heart/shadow/chase/waste tier fit (v43, experimental)
+        "pitcher_zone_pct",  # surfaced for the plate_discipline flag context
         "split_confidence",  # ⚠️ thin split / 📊 small split (caution flag)
         # Composites (matching screenshot order)
         "matchup", "test_score", "ceiling", "zone_fit",
@@ -573,6 +725,9 @@ def build_matchup_table(
         # v42c: 10-game window stats (community-validated ideal HR signal)
         "recent_iso_10", "recent_avg_10", "recent_k_pct_10",
         "recent_ab_10", "recent_h_10", "recent_hr_10",
+        # v42t: 5-game window — hot/cold streak detection
+        "recent_iso_5", "recent_slg_5", "recent_avg_5",
+        "recent_hr_5", "recent_ab_5",
         # Day/night splits (vs day games, vs night games)
         "vs_day_pa", "vs_day_avg", "vs_day_obp", "vs_day_slg", "vs_day_ops",
         "vs_day_hr_per_pa", "vs_day_k_percent",
