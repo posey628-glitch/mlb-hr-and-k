@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-recent-starts-sort-v42n"
+APP_VERSION = "2026.06.10-gb-flag-v42o"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -3840,7 +3840,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v42n · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v42o · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label}"
 )
 
@@ -8298,6 +8298,7 @@ try:
                 ("games_since_hr", "Games no HR",      False, "int"),
                 ("smash_spot",     "Smash",            None,  "text"),
                 ("hr_profile_label", "Profile",        None,  "text"),
+                ("gb_type_flag",   "GB Profile",       None,  "text"),
                 ("ideal_hr_screen", "Ideal Screen",    None,  "text"),
                 ("platoon_hitter_flag", "Platoon Tag", None,  "text"),
             ]
