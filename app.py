@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-env-reweight-reviewer-fixes-v42r"
+APP_VERSION = "2026.06.10-v42s-helpers-pitch-flags"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -3900,7 +3900,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v42r · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v42s · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label}"
 )
 
