@@ -663,15 +663,21 @@ def add_power_score(
     #  Held until we can test.)
     specs = [
         ("barrel_pct",     0.25, 4.0, 22.0),    # 0.749 corr — anchor
-        ("iso",            0.18, 0.100, 0.350), # restored from 0.17
+        ("iso",            0.18, 0.100, 0.350),
         ("pulled_brl_pct", 0.11, 2.0, 18.0),    # 0.737 corr
         ("hard_hit",       0.13, 30.0, 60.0),   # 0.590 corr
         ("avg_ev",         0.12, 85.0, 95.0),   # 0.605 corr
         ("fb_pct",         0.10, 18.0, 50.0),   # 0.461 corr
         ("recent_iso",     0.06, 0.080, 0.380), # 0.465 corr
-        ("sweet_spot_pct", 0.03, 10.0, 40.0),   # restored from 0.01
-        ("la",             0.02, 4.0, 22.0),    # restored — was redirected
-        # pull_air_pct removed v42d (data is 0% populated)
+        ("sweet_spot_pct", 0.03, 10.0, 40.0),
+        # v42q BUGFIX: removed `("la", 0.02, 4.0, 22.0)` — it was being
+        # double-counted alongside the dedicated target-16° block at line ~707.
+        # The two scoring models actively disagreed: specs treated higher LA
+        # as monotonically better (cap at 22°), while the dedicated block
+        # penalized LA > 16°. Net effect was a 0.06 muddled weight pulling
+        # in two directions. The dedicated target-16° model is correct
+        # (peak HR LA is ~16-18°) and remains at 0.04 weight.
+        # pull_air_pct removed v42d (data 0% populated)
     ]
 
     def absolute_score(val, poor, elite):
