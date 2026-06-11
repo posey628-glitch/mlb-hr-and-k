@@ -65,6 +65,79 @@ CURRENT_SEASON = datetime.now().year
 
 
 # ----------------------------------------------------------------------------
+# Defensive helpers (v42s — reviewer-validated reliability/safety wins)
+# ----------------------------------------------------------------------------
+
+def enforce_numeric(df: pd.DataFrame, cols: list) -> pd.DataFrame:
+    """Force a list of columns to numeric dtype, coercing invalid values to NaN.
+
+    Catches the silent corruption case where Savant/MLB Stats API occasionally
+    returns string values like "-.--" or "" in numeric fields. Without this,
+    downstream math operations silently fail or produce nonsensical results.
+    Modifies df in place (and also returns it for chaining).
+    """
+    for c in cols:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+    return df
+
+
+def clip_outliers(df: pd.DataFrame, caps: dict | None = None) -> pd.DataFrame:
+    """Clamp Statcast/MLB stats to physically-plausible ranges.
+
+    Savant occasionally returns extreme outlier values (e.g., a 90 mph average
+    exit velo for a pitcher with 1 batted ball event). These pollute downstream
+    ranking and modeling. Caps are calibrated to the realistic envelope of MLB
+    performance — values outside these ranges are not skill, they're data noise.
+    Modifies df in place (and also returns it for chaining).
+    """
+    if caps is None:
+        caps = {
+            "barrel_pct": (0, 30),         # league max ~25%, allow buffer
+            "hard_hit": (0, 75),           # league max ~65%
+            "iso": (0, 0.500),             # league max ~.400
+            "la": (-10, 50),               # avg launch angle realistic range
+            "avg_ev": (70, 120),           # exit velocity realistic range
+            "hr9": (0, 6),                 # already capped in models, belt-and-suspenders
+            "barrel_batted_rate": (0, 30),
+            "hard_hit_percent": (0, 75),
+            "avg_best_speed": (70, 120),
+            "launch_speed": (70, 120),
+            "launch_angle": (-10, 50),
+        }
+    for col, (low, high) in caps.items():
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").clip(low, high)
+    return df
+
+
+def safe_request(url: str, timeout: int = 20, max_retries: int = 3,
+                  **kwargs) -> requests.Response | None:
+    """HTTP GET with exponential backoff retry. Returns None on final failure.
+
+    Replaces patterns like `requests.get(url, headers=HEADERS, timeout=20)` that
+    fail hard on the first transient error. Backoff schedule: 1.5s, 3s, 6s.
+    Returns None instead of raising so callers can decide whether to fall back
+    to a cached value, skip the source, or surface an error. The returned
+    Response (if any) is already .raise_for_status()-cleared.
+
+    Existing fetch functions in this file have their own try/except blocks and
+    don't need to be retrofitted unless they're observed to fail transiently.
+    Use this helper for new fetches or specifically-fragile endpoints.
+    """
+    import time
+    for attempt in range(max_retries):
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=timeout, **kwargs)
+            r.raise_for_status()
+            return r
+        except Exception:
+            if attempt < max_retries - 1:
+                time.sleep(1.5 * (2 ** attempt))
+    return None
+
+
+# ----------------------------------------------------------------------------
 # Safe parsers - handle MLB Stats API "-.--" and other junk values
 # ----------------------------------------------------------------------------
 
@@ -640,6 +713,17 @@ def get_hitter_stats(season: int = CURRENT_SEASON, _stats_day: str = "") -> pd.D
         for c in cols:
             if c in df.columns:
                 df[c] = pd.to_numeric(df[c], errors="coerce").round(digits)
+
+    # v42s: defensive numeric coercion + outlier clipping
+    # Catches Savant edge cases where columns occasionally contain string
+    # junk values or extreme outliers from tiny-sample players.
+    df = enforce_numeric(df, [
+        "barrel_batted_rate", "hard_hit_percent", "iso", "xwoba", "xwobacon",
+        "launch_angle", "launch_speed", "pull_percent",
+        "flyballs_percent", "groundballs_percent", "linedrives_percent",
+        "k_percent", "bb_percent", "avg_best_speed",
+    ])
+    df = clip_outliers(df)
     return df
 
 
@@ -739,6 +823,14 @@ def get_pitcher_stats(season: int = CURRENT_SEASON, _stats_day: str = "") -> pd.
         df["hr9_savant"] = hr9_raw.clip(upper=6.0).round(2)
         df["hr9"] = df["hr9_savant"]
 
+    # v42s: defensive numeric coercion + outlier clipping (same pattern as hitter side)
+    df = enforce_numeric(df, [
+        "era", "whip", "hr9", "k9", "bb9",
+        "barrel_batted_rate", "hard_hit_percent",
+        "launch_angle", "launch_speed", "avg_best_speed", "xera",
+        "k_percent", "bb_percent",
+    ])
+    df = clip_outliers(df)
     return df
 
 
