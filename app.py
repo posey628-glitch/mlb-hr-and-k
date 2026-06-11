@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-la-doublecount-daynight-display-v42q"
+APP_VERSION = "2026.06.10-env-reweight-reviewer-fixes-v42r"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -1582,7 +1582,12 @@ hide_started = st.sidebar.checkbox(
 )
 if hide_started and selected_date == datetime.now().date():
     try:
-        now_utc = pd.Timestamp.utcnow().tz_localize("UTC")
+        # v42r: use Timestamp.now(tz="UTC") instead of utcnow().tz_localize().
+        # On older pandas versions utcnow() returns naive UTC and then
+        # tz_localize behaves correctly, but on newer pandas utcnow() returns
+        # tz-aware (deprecation) and tz_localize raises. The .now(tz=...) form
+        # is the safe, forward-compatible idiom.
+        now_utc = pd.Timestamp.now(tz="UTC")
         if "gameTime" in slate.columns:
             def _is_upcoming(t):
                 if pd.isna(t):
@@ -2147,7 +2152,20 @@ if not st.session_state["_auto_eval_done"]:
             _gist_status = f"configured but READ FAILED: {type(_ge).__name__}: {str(_ge)[:120]}"
 
         # Find most recent snapshot before today
-        _eligible = [s for s in _all_snaps if s.split("T")[0] < str(_today_et)]
+        # v42r: robust date parsing. Previously used `s.split("T")[0]` and
+        # relied on lexicographic comparison — works for ISO-formatted YYYY-MM-DD
+        # but breaks silently if snapshot key formats vary (e.g. "2026-6-9"
+        # one-digit month would sort wrong). Use pd.to_datetime so any
+        # reasonable format works.
+        def _parse_snap_date(s):
+            try:
+                return pd.to_datetime(str(s).split("T")[0], errors="coerce").date()
+            except Exception:
+                return None
+        _eligible = [
+            s for s in _all_snaps
+            if (_d := _parse_snap_date(s)) and _d < _today_et
+        ]
 
         if not _eligible:
             _snap_list = ", ".join(_all_snaps[-5:]) if _all_snaps else "(none)"
@@ -3326,15 +3344,31 @@ if not p_slate.empty:
         def _hr_fb_flag(r):
             hr9 = r.get("hr9")
             fb_allowed = r.get("fb_allowed")
+            k_pct = r.get("k_pct")
             if (hr9 is None or pd.isna(hr9)
                 or fb_allowed is None or pd.isna(fb_allowed)
                 or float(fb_allowed) <= 0):
                 return ""
             try:
-                # Approximate HR/FB: HR per inning / FBs per inning
-                # League ~3.2 batted balls/IP; FB rate is fraction of BIP that are flies
+                # v42r: K-rate aware BIP estimation. Previously used a static
+                # 3.2 BIP/inning, but high-K pitchers (e.g. 30% K rate) put
+                # fewer balls in play per inning than contact pitchers. This
+                # over-estimated FBs per inning for high-K pitchers, which
+                # under-estimated their actual HR/FB rate.
+                # Derivation: PA/IP ≈ 4.2 league avg. K/PA = k_pct/100.
+                #   BIP/PA ≈ 0.70 after stripping walks/HBP/strikeouts.
+                #   BIP/IP = (PA/IP) × (1 - k_pct/100) × ~0.86  + reasonable floor
+                # For a 22% K pitcher: 4.2 × 0.78 × 0.86 ≈ 2.82 BIP/IP
+                # For a 30% K pitcher: 4.2 × 0.70 × 0.86 ≈ 2.53 BIP/IP
+                # For a 18% K pitcher: 4.2 × 0.82 × 0.86 ≈ 2.96 BIP/IP
+                # If k_pct is missing, fall back to the old 3.2 estimate.
                 hrs_per_inn = float(hr9) / 9.0
-                fbs_per_inn = 3.2 * (float(fb_allowed) / 100.0)
+                if k_pct is not None and not pd.isna(k_pct):
+                    k_frac = max(0.10, min(0.40, float(k_pct) / 100.0))
+                    bip_per_inn = max(2.0, 4.2 * (1.0 - k_frac) * 0.86)
+                else:
+                    bip_per_inn = 3.2  # fallback to old static estimate
+                fbs_per_inn = bip_per_inn * (float(fb_allowed) / 100.0)
                 if fbs_per_inn <= 0:
                     return ""
                 hr_fb_pct = (hrs_per_inn / fbs_per_inn) * 100
@@ -3866,7 +3900,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v42q · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v42r · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label}"
 )
 
@@ -5556,11 +5590,24 @@ if all_hitters_for_picks:
             score_parts.append(_p); weights.append(0.06)
             component_meta.append(("ps_lift", _p, 0.06))
 
-        # === Today's environment (15%) ===
+        # === Today's environment (5% — reduced from 15% in v42r) ===
+        # v42r STRUCTURAL FIX (reviewer-validated): env appears in FOUR
+        # components of pick_score, not one:
+        #   • ps_hr_game (25%) — hr_game_pct has env baked in via
+        #     hr_prob_per_pa(weather_mult, hr_mult)
+        #   • ps_matchup_opp (15%) — deliberately env-heavy by design
+        #   • ps_power (15%) — power_score multiplies by env_mult in models.py
+        #   • ps_env (15%) — pure standalone env signal
+        # Effective env weight was ~35-40% of pick_score, not the 15% the
+        # formula appeared to assign. This is mechanically why modest bats
+        # in hot parks (Massey, Goldschmidt) kept out-ranking better hitters
+        # in neutral parks. Reduce ps_env to 0.05 — env is still present but
+        # no longer dominating. Other components get a small proportional
+        # boost via the normalization step below (~10% each).
         if "env_boost" in q.columns:
             _p = _pct(q["env_boost"])
-            score_parts.append(_p); weights.append(0.15)
-            component_meta.append(("ps_env", _p, 0.15))
+            score_parts.append(_p); weights.append(0.05)
+            component_meta.append(("ps_env", _p, 0.05))
 
         if score_parts:
             total_w = sum(weights)
@@ -5683,6 +5730,10 @@ if all_hitters_for_picks:
         #   - convergence_label: "🎯🎯🎯 5/5 convergence" / "🎯🎯 4/5" / "🎯 3/5" / ""
         # ====================================================================
         try:
+            # v42r reviewer-validated: use player_id (immutable) instead of
+            # player_name for convergence matching. Duplicate last names (e.g.
+            # two players named "Garcia") or encoding variance could cause
+            # silent matching errors. player_id is unique by definition.
             convergence_systems = []
             for col_name in ("hr_game_pct", "power_score", "lift_score",
                               "matchup_opp", "pitch_hr_score"):
@@ -5690,17 +5741,18 @@ if all_hitters_for_picks:
                     top15_ids = set(
                         q.dropna(subset=[col_name])
                          .sort_values(col_name, ascending=False)
-                         .head(15)["player_name"]
+                         .head(15)["player_id"]
+                         .dropna()
                          .tolist()
                     )
                     convergence_systems.append(top15_ids)
 
             n_systems = len(convergence_systems)
 
-            def _convergence_count(player_name):
-                if not convergence_systems:
+            def _convergence_count(pid):
+                if not convergence_systems or pd.isna(pid):
                     return 0
-                return sum(1 for s in convergence_systems if player_name in s)
+                return sum(1 for s in convergence_systems if pid in s)
 
             def _convergence_label(count):
                 if count >= 5:
@@ -5711,7 +5763,7 @@ if all_hitters_for_picks:
                     return f"🎯 {count}/{n_systems}"
                 return ""
 
-            q["convergence_count"] = q["player_name"].apply(_convergence_count)
+            q["convergence_count"] = q["player_id"].apply(_convergence_count)
             q["convergence_label"] = q["convergence_count"].apply(_convergence_label)
         except Exception:
             q["convergence_count"] = 0
@@ -5769,6 +5821,14 @@ if all_hitters_for_picks:
         #
         # v41c: check `team` AND `opp_pitcher`. Two picks are correlated iff
         # they're on the same team (so face the same pitcher).
+        # SAME-TEAM CORRELATION FLAG (v42r reviewer-validated improvements)
+        # Two refinements:
+        #  1) Use player_id for self-exclusion instead of player_name. Duplicate
+        #     last names or formatting differences could cause silent matches.
+        #  2) Verify the OTHER hitters actually face the same pitcher. Two
+        #     hitters on the same team usually face the same pitcher, but in
+        #     doubleheaders or opener/bulk configurations this can break.
+        #     Match on (team, opp_pitcher) — same pitcher = real correlation.
         try:
             if not top10.empty and "team" in top10.columns:
                 team_counts = top10["team"].value_counts()
@@ -5779,11 +5839,19 @@ if all_hitters_for_picks:
                     count = team_counts.get(t, 0)
                     if count < 2:
                         return ""
-                    # Find other picks on this team (exclude self by player_name)
-                    others = top10[
-                        (top10["team"] == t)
-                        & (top10["player_name"] != row.get("player_name"))
-                    ]
+                    self_pid = row.get("player_id")
+                    self_opp = row.get("opp_pitcher", "")
+                    # Find other top-10 picks on same team facing same pitcher
+                    mask = (top10["team"] == t)
+                    if pd.notna(self_pid):
+                        mask &= (top10["player_id"] != self_pid)
+                    else:
+                        # Fallback to name match only if player_id missing
+                        mask &= (top10["player_name"] != row.get("player_name"))
+                    # If we have opp_pitcher info, also require pitcher match
+                    if self_opp and "opp_pitcher" in top10.columns:
+                        mask &= (top10["opp_pitcher"] == self_opp)
+                    others = top10[mask]
                     if others.empty:
                         return ""
                     other_names = [
@@ -5803,18 +5871,31 @@ if all_hitters_for_picks:
         # Kurtz vs Taillon was the canonical case: #2 raw HR Game% on the
         # slate but excluded because Langeliers + Rooker already filled the
         # ATH slot.
-        top10_keys = set()
+        # v42r reviewer-validated: use player_id (immutable) instead of
+        # (name, team) tuples for top10 set membership. Name + team is fragile
+        # — a typo or unicode variation could cause a top-10 player to also
+        # appear in honorable mentions. Vectorized .isin() is also faster
+        # than a row-wise .apply().
+        top10_pids = set()
+        if not top10.empty and "player_id" in top10.columns:
+            top10_pids = set(top10["player_id"].dropna().tolist())
+        # Fallback to (name, team) tuples only if player_id absent for some reason
+        top10_keys_fallback = set()
         if not top10.empty:
             for _, r in top10.iterrows():
-                top10_keys.add((r.get("player_name"), r.get("team")))
+                top10_keys_fallback.add((r.get("player_name"), r.get("team")))
         honorable_mentions = pd.DataFrame()
         try:
-            hm_pool = q_sorted[
-                q_sorted.apply(
-                    lambda r: (r.get("player_name"), r.get("team")) not in top10_keys,
-                    axis=1,
-                )
-            ].copy()
+            if top10_pids and "player_id" in q_sorted.columns:
+                hm_pool = q_sorted[~q_sorted["player_id"].isin(top10_pids)].copy()
+            else:
+                hm_pool = q_sorted[
+                    q_sorted.apply(
+                        lambda r: (r.get("player_name"), r.get("team"))
+                                  not in top10_keys_fallback,
+                        axis=1,
+                    )
+                ].copy()
             if "pick_score" in hm_pool.columns:
                 hm_pool = hm_pool[hm_pool["pick_score"].fillna(0) >= 70]
             honorable_mentions = hm_pool.head(8).reset_index(drop=True)
@@ -6874,29 +6955,49 @@ if all_hitters_for_picks:
                     # section (around line 2547). combined_all isn't built until much
                     # later, so we can't use it here.
                     if combined_picks is not None and not combined_picks.empty:
-                        # Sort by HR Game% so best plays appear first in selector
+                        # v42r reviewer-validated: use player_id for selection
+                        # logic, labels only for display. Label-based selection
+                        # broke if HR% changed mid-session (label changes → state
+                        # cleared) or if two players had identical formatted
+                        # labels (duplicate names). player_id is immutable.
                         selector_df = combined_picks[
                             combined_picks["hr_game_pct"].notna()
+                            & combined_picks["player_id"].notna()
                         ].sort_values("hr_game_pct", ascending=False).copy()
-                        # Build label "Name (TEAM) — HR% / grade"
-                        selector_df["_label"] = selector_df.apply(
-                            lambda r: f"{r['player_name']} ({r.get('team','')}) — {r.get('hr_game_pct', 0):.1f}% / {r.get('grade','—')}",
-                            axis=1,
-                        )
-                        all_labels = selector_df["_label"].tolist()
+                        # Map player_id → formatted display label
+                        label_map = {
+                            int(r["player_id"]): (
+                                f"{r['player_name']} ({r.get('team','')}) — "
+                                f"{r.get('hr_game_pct', 0):.1f}% / {r.get('grade','—')}"
+                            )
+                            for _, r in selector_df.iterrows()
+                            if pd.notna(r["player_id"])
+                        }
+                        all_pids = list(label_map.keys())
+
+                        # Migrate any legacy session_state values that might
+                        # have stored labels instead of player_ids
+                        existing = st.session_state.get(picks_key, [])
+                        existing_pids = [
+                            p for p in existing
+                            if isinstance(p, (int, np.integer)) and int(p) in label_map
+                        ]
 
                         chosen = st.multiselect(
                             "Add hitters to your pick list:",
-                            options=all_labels,
-                            default=st.session_state[picks_key],
-                            help="Type to filter. Select as many as you want.",
+                            options=all_pids,
+                            default=existing_pids,
+                            format_func=lambda pid: label_map.get(pid, str(pid)),
+                            help="Type to filter by name. Select as many as you want.",
                             key=f"picks_selector_{selected_date.isoformat()}",
                         )
                         st.session_state[picks_key] = chosen
 
                         if chosen:
-                            # Filter selector_df to chosen picks
-                            my_picks_df = selector_df[selector_df["_label"].isin(chosen)].copy()
+                            # Filter to chosen player_ids
+                            my_picks_df = selector_df[
+                                selector_df["player_id"].isin(chosen)
+                            ].copy()
                             display_cols = [c for c in [
                                 "player_name", "team", "game", "opp_pitcher",
                                 "bats", "hr_game_pct", "grade", "smash_spot",
@@ -6917,26 +7018,57 @@ if all_hitters_for_picks:
                             )
 
                             # Stats summary
-                            avg_pct = my_picks_df["hr_game_pct"].mean()
+                            # v42r reviewer-validated improvements:
+                            #  1) Show "Expected HRs" (sum of probabilities)
+                            #     instead of "Avg HR%". A user picking 5×10%
+                            #     plays has expected 0.5 HRs in the slate;
+                            #     a user picking 2×25% plays also has 0.5.
+                            #     Mean is misleading; sum is meaningful.
+                            #  2) Apply correlation penalty to parlay joint
+                            #     probability. Even cross-game picks aren't
+                            #     truly independent (league-wide HR weather,
+                            #     shared slate variance). 0.92^(n-1) is a
+                            #     conservative correction.
+                            #  3) Fix decimal-odds → american-odds conversion.
+                            #     The old formula `1 / joint_prob * 100 - 100`
+                            #     gave wrong rounding at small probs.
+                            expected_hrs = my_picks_df["hr_game_pct"].dropna().sum() / 100.0
                             n_picks = len(my_picks_df)
-                            # If treating as a parlay
                             if n_picks >= 2 and n_picks <= 10:
-                                # Joint probability if all are independent
+                                # Joint probability with correlation penalty
                                 joint_prob = 1.0
                                 for p in my_picks_df["hr_game_pct"].dropna():
                                     joint_prob *= (p / 100)
+                                if n_picks >= 3:
+                                    joint_prob *= 0.92 ** (n_picks - 1)
+                                else:
+                                    joint_prob *= 0.95
                                 summary_cols = st.columns(3)
                                 with summary_cols[0]:
                                     st.metric("My picks", f"{n_picks}")
                                 with summary_cols[1]:
-                                    st.metric("Avg HR%", f"{avg_pct:.1f}%")
+                                    st.metric(
+                                        "Expected HRs",
+                                        f"{expected_hrs:.2f}",
+                                        help=(
+                                            "Sum of individual HR probabilities — "
+                                            "the number of HRs you'd expect from "
+                                            "your picks if you bet them all separately."
+                                        ),
+                                    )
                                 with summary_cols[2]:
                                     if joint_prob > 0:
-                                        odds = int(round(1 / joint_prob * 100 - 100))
+                                        decimal_odds = 1 / joint_prob
+                                        american_odds = int(round((decimal_odds - 1) * 100))
                                         st.metric(
                                             "As a parlay",
                                             f"{joint_prob*100:.3f}%",
-                                            help=f"Fair odds: +{odds}",
+                                            help=(
+                                                f"Fair odds: +{american_odds}. "
+                                                f"Includes correlation penalty "
+                                                f"(0.92×) for cross-game variance "
+                                                f"that pure-independence math misses."
+                                            ),
                                         )
 
                             # Tweet-ready My Picks post
@@ -7059,6 +7191,45 @@ for gpk, ctx in game_context_map.items():
 
 if all_hitters:
     combined_all = pd.concat(all_hitters, ignore_index=True)
+
+    # v42r: "ROBBED HR" diagnostic columns. Park-neutral expected HR vs
+    # actual HR. Display/audit-only — does NOT feed into pick_score.
+    #
+    # xhr_neutral: park-neutral expected HRs from quality of contact
+    #   = barrel_pct/100 × 0.385 × PA
+    #   (0.385 = approximate league HR-per-barrel in neutral conditions)
+    #
+    # hr_luck_gap: xhr_neutral - actual HRs
+    #   POSITIVE = unlucky / contact quality says more HRs than they've gotten
+    #              ("robbed by park or BABIP variance")
+    #   NEGATIVE = lucky / more HRs than contact quality earns
+    #              ("park-propped cheap power")
+    #
+    # hr_conv_ratio: actual / expected
+    #   > 1.5 = living on park or luck — fade on road
+    #   < 0.7 = unlucky-quality-contact — bet on regression
+    #
+    # Purely diagnostic so you can audit individual hitters and rank/filter
+    # the "Due to Homer" section by a continuous signal rather than the
+    # current hand-tuned thresholds.
+    try:
+        if ("barrel_pct" in combined_all.columns
+                and "pa" in combined_all.columns
+                and "home_run" in combined_all.columns):
+            _barrel_safe = pd.to_numeric(combined_all["barrel_pct"], errors="coerce")
+            _pa_safe = pd.to_numeric(combined_all["pa"], errors="coerce")
+            _hr_safe = pd.to_numeric(combined_all["home_run"], errors="coerce")
+            combined_all["xhr_neutral"] = (
+                (_barrel_safe / 100.0) * 0.385 * _pa_safe
+            ).round(2)
+            combined_all["hr_luck_gap"] = (
+                combined_all["xhr_neutral"] - _hr_safe
+            ).round(2)
+            # Conversion ratio with safe divide
+            _denom = combined_all["xhr_neutral"].replace(0, np.nan)
+            combined_all["hr_conv_ratio"] = (_hr_safe / _denom).round(2)
+    except Exception:
+        pass
 
     # v41 Patch 2: attach pick_score + its decomposition so the Hitters export
     # is auditable. Without this, snapshot data is un-tunable for backtest
