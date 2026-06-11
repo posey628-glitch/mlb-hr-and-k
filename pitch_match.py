@@ -231,6 +231,39 @@ def pitch_match_score(
     best = breakdown_sorted[0] if breakdown_sorted else None
     worst = breakdown_sorted[-1] if breakdown_sorted else None
 
+    # v42s: PITCH EXPOSURE EDGE (reviewer-validated display signal)
+    # Counts how well a hitter's strengths align with what the pitcher
+    # actually throws a lot of. A hitter who crushes sliders is only useful
+    # if the pitcher throws sliders >25% of the time.
+    #   +1 for each high-usage pitch (>25%) where hitter is elite (xwOBA > .360)
+    #   -1 for each high-usage pitch (>25%) where hitter is bad (xwOBA < .260)
+    # Range: typically -3 to +3. Display-only, NOT used in scoring (the
+    # weighted xwOBA composite above already captures this; this is just a
+    # cleaner at-a-glance signal).
+    exposure_edge = 0
+    for row in breakdown:
+        if row["pitcher_usage_raw"] > 25.0:
+            if row["hitter_xwoba_vs"] > 0.360:
+                exposure_edge += 1
+            elif row["hitter_xwoba_vs"] < 0.260:
+                exposure_edge -= 1
+
+    # v42s: PITCH MIX VOLATILITY (reviewer-validated display signal)
+    # Standard deviation of pitcher's pitch usage percentages.
+    # High std (>20) = predictable pitcher who relies heavily on 1-2 pitches.
+    # Low std (<10) = balanced 4-5 pitch mix, harder to sit on any one pitch.
+    # Display-only — gives the user context about how reliable the matchup
+    # projection is. A predictable pitcher matchup is more "knowable."
+    try:
+        usages = [b.get("pitcher_usage_raw", 0) for b in breakdown]
+        if usages:
+            import numpy as _np
+            pitch_volatility = round(float(_np.std(usages)), 1)
+        else:
+            pitch_volatility = None
+    except Exception:
+        pitch_volatility = None
+
     return {
         "pitch_match_score": round(score, 1),
         "pitch_hr_score": pitch_hr_score,
@@ -242,6 +275,8 @@ def pitch_match_score(
         "best_pitch_usage": best.get("pitcher_usage_adjusted", best.get("pitcher_usage_raw", 0)) if best else None,
         "worst_pitch": worst["pitch"] if worst else None,
         "worst_pitch_xwoba": worst["hitter_xwoba_vs"] if worst else None,
+        "pitch_exposure_edge": exposure_edge,
+        "pitch_volatility": pitch_volatility,
         "breakdown": breakdown,
     }
 
