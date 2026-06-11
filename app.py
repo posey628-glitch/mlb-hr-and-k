@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-brier-thresholds-v42p"
+APP_VERSION = "2026.06.10-la-doublecount-daynight-display-v42q"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -3866,7 +3866,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v42p · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v42q · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label}"
 )
 
@@ -4531,10 +4531,15 @@ for _, game in slate.iterrows():
                 return ""
             # Ratio of tonight's relevant rate vs the opposite split
             ratio = rel_f / oth_f if oth_f > 0 else 1.0
+            # v42q BUGFIX: vs_day_hr_per_pa is already stored as a PERCENT
+            # (e.g., 3.5 means 3.5%, NOT 0.035). The display previously did
+            # `{rel_f*100:.1f}%` which produced "350.0%" instead of "3.5%".
+            # The ratio comparison above is unaffected because both sides
+            # use the same units. props.py math is also correct (/100 there).
             if ratio >= 1.40:
-                return f"{label_match} ({rel_f*100:.1f}% vs {oth_f*100:.1f}%)"
+                return f"{label_match} ({rel_f:.1f}% vs {oth_f:.1f}%)"
             if ratio <= 0.60:
-                return f"{label_drag} ({rel_f*100:.1f}% vs {oth_f*100:.1f}%)"
+                return f"{label_drag} ({rel_f:.1f}% vs {oth_f:.1f}%)"
             return ""
         matchup_df["day_night_flag"] = matchup_df.apply(_day_night_flag, axis=1)
 
