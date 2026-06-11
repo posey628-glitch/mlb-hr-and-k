@@ -138,6 +138,139 @@ def safe_request(url: str, timeout: int = 20, max_retries: int = 3,
 
 
 # ----------------------------------------------------------------------------
+# Zone tier fetchers (v43 — experimental, defensive)
+# ----------------------------------------------------------------------------
+# Savant's swing/take leaderboard categorizes every pitch into one of four
+# zone tiers: Heart, Shadow, Chase, Waste. These fetchers pull each pitcher's
+# % of pitches by tier and each hitter's run value by tier.
+#
+# IMPORTANT: I could not validate the exact endpoint URL/schema from my dev
+# environment (baseballsavant.mlb.com not in allowlist). These fetchers are
+# best-effort based on documented Savant patterns. They return EMPTY DataFrame
+# on any failure so the app falls back to the plate_discipline_flag signal
+# without crashing.
+#
+# If the fetch returns data: zone_fit_flag will populate in matchup tables.
+# If the fetch fails: the field will be empty, plate_discipline_flag still works,
+# and the user can flag the issue for proper investigation.
+
+@st.cache_data(ttl=21600)  # 6hr — zone data updates daily
+def get_pitcher_zone_tiers(season: int = CURRENT_SEASON, _stats_day: str = "") -> pd.DataFrame:
+    """Pitcher % of pitches by zone tier (heart, shadow, chase, waste).
+
+    Returns DataFrame with columns:
+      player_id, pitcher_heart_pct, pitcher_shadow_pct,
+      pitcher_chase_pct, pitcher_waste_pct
+    Empty on failure — caller treats empty as "no zone data available."
+    """
+    # Try a few candidate URL patterns. The first that returns parseable CSV wins.
+    candidate_urls = [
+        # Custom leaderboard with zone selections
+        f"https://baseballsavant.mlb.com/leaderboard/custom"
+        f"?year={season}&type=pitcher&filter=&min=50"
+        f"&selections=player_id,player_name,heart_zone_percent,shadow_zone_percent,"
+        f"chase_zone_percent,waste_zone_percent"
+        f"&chart=false&x=heart_zone_percent&y=shadow_zone_percent&r=no&csv=true",
+        # Swing/take leaderboard
+        f"https://baseballsavant.mlb.com/leaderboard/swing-take"
+        f"?year={season}&type=pitcher&min=100&csv=true",
+    ]
+    for url in candidate_urls:
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=20)
+            r.raise_for_status()
+            if not r.text or len(r.text) < 100:
+                continue
+            df = pd.read_csv(io.StringIO(r.text))
+            if df.empty:
+                continue
+            # Try to identify columns flexibly — Savant uses various names
+            col_map = {}
+            for c in df.columns:
+                cl = c.lower()
+                if "player_id" in cl or cl == "id":
+                    col_map["player_id"] = c
+                elif "heart" in cl and "pct" in cl or "heart" in cl and "percent" in cl:
+                    col_map["heart"] = c
+                elif "shadow" in cl and ("pct" in cl or "percent" in cl):
+                    col_map["shadow"] = c
+                elif "chase" in cl and ("pct" in cl or "percent" in cl):
+                    col_map["chase"] = c
+                elif "waste" in cl and ("pct" in cl or "percent" in cl):
+                    col_map["waste"] = c
+            # Need at least player_id + heart to be useful
+            if "player_id" not in col_map or "heart" not in col_map:
+                continue
+            out = pd.DataFrame()
+            out["player_id"] = pd.to_numeric(df[col_map["player_id"]], errors="coerce").astype("Int64")
+            out["pitcher_heart_pct"] = pd.to_numeric(df[col_map["heart"]], errors="coerce")
+            for tier in ("shadow", "chase", "waste"):
+                if tier in col_map:
+                    out[f"pitcher_{tier}_pct"] = pd.to_numeric(df[col_map[tier]], errors="coerce")
+                else:
+                    out[f"pitcher_{tier}_pct"] = pd.NA
+            return out.dropna(subset=["player_id"])
+        except Exception:
+            continue
+    return pd.DataFrame()
+
+
+@st.cache_data(ttl=21600)
+def get_hitter_zone_tiers(season: int = CURRENT_SEASON, _stats_day: str = "") -> pd.DataFrame:
+    """Hitter wOBA or run value by zone tier.
+
+    Returns DataFrame with columns:
+      player_id, hitter_heart_woba, hitter_shadow_woba,
+      hitter_chase_woba, hitter_waste_woba (or barrel% equivalents)
+    Empty on failure.
+    """
+    candidate_urls = [
+        f"https://baseballsavant.mlb.com/leaderboard/swing-take"
+        f"?year={season}&type=batter&min=100&csv=true",
+        f"https://baseballsavant.mlb.com/leaderboard/custom"
+        f"?year={season}&type=batter&filter=&min=50"
+        f"&selections=player_id,player_name,heart_woba,shadow_woba,chase_woba,waste_woba"
+        f"&chart=false&x=heart_woba&y=shadow_woba&r=no&csv=true",
+    ]
+    for url in candidate_urls:
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=20)
+            r.raise_for_status()
+            if not r.text or len(r.text) < 100:
+                continue
+            df = pd.read_csv(io.StringIO(r.text))
+            if df.empty:
+                continue
+            col_map = {}
+            for c in df.columns:
+                cl = c.lower()
+                if "player_id" in cl or cl == "id":
+                    col_map["player_id"] = c
+                elif "heart" in cl and ("woba" in cl or "wOBA" in c or "run_value" in cl):
+                    col_map["heart"] = c
+                elif "shadow" in cl and ("woba" in cl or "run_value" in cl):
+                    col_map["shadow"] = c
+                elif "chase" in cl and ("woba" in cl or "run_value" in cl):
+                    col_map["chase"] = c
+                elif "waste" in cl and ("woba" in cl or "run_value" in cl):
+                    col_map["waste"] = c
+            if "player_id" not in col_map or "heart" not in col_map:
+                continue
+            out = pd.DataFrame()
+            out["player_id"] = pd.to_numeric(df[col_map["player_id"]], errors="coerce").astype("Int64")
+            out["hitter_heart_woba"] = pd.to_numeric(df[col_map["heart"]], errors="coerce")
+            for tier in ("shadow", "chase", "waste"):
+                if tier in col_map:
+                    out[f"hitter_{tier}_woba"] = pd.to_numeric(df[col_map[tier]], errors="coerce")
+                else:
+                    out[f"hitter_{tier}_woba"] = pd.NA
+            return out.dropna(subset=["player_id"])
+        except Exception:
+            continue
+    return pd.DataFrame()
+
+
+# ----------------------------------------------------------------------------
 # Safe parsers - handle MLB Stats API "-.--" and other junk values
 # ----------------------------------------------------------------------------
 
@@ -393,6 +526,54 @@ def get_team_roster(team_id: int) -> list[dict]:
                 "position": pos,
                 "bats": bats,
                 "roster_type": roster_type,  # diagnostic — "active" or "40Man"
+            })
+    return out
+
+
+@st.cache_data(ttl=900)
+def get_team_pitchers(team_id: int) -> list[dict]:
+    """v42v: Active + 40-man pitcher roster for a team.
+
+    Used by the Pitcher Lookup utility so users can scout any pitcher,
+    not just today's probable starter. Mirrors get_team_roster's logic but
+    INCLUDES pitchers (which get_team_roster excludes for the hitter
+    fallback flow). Returns dicts with id, name, position (P/SP/RP),
+    throws (R/L/?), and roster_type ("active" or "40Man").
+    """
+    seen_ids = set()
+    out = []
+
+    def _fetch(roster_type):
+        url = (
+            f"https://statsapi.mlb.com/api/v1/teams/{team_id}/roster/{roster_type}"
+            "?hydrate=person"
+        )
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=15)
+            r.raise_for_status()
+            return r.json().get("roster", [])
+        except Exception:
+            return []
+
+    for roster_type in ("active", "40Man"):
+        roster_data = _fetch(roster_type)
+        for p in roster_data:
+            pos = p.get("position", {}).get("abbreviation", "")
+            if pos not in ("P", "SP", "RP"):
+                continue
+            person = p.get("person", {}) or {}
+            pid = person.get("id") or p.get("person", {}).get("id")
+            if not pid or pid in seen_ids:
+                continue
+            seen_ids.add(pid)
+            throws = ((person.get("pitchHand") or {}).get("code")
+                      or (p.get("pitchHand") or {}).get("code") or "?")
+            out.append({
+                "id": pid,
+                "name": person.get("fullName") or p["person"]["fullName"],
+                "position": pos,
+                "throws": throws,
+                "roster_type": roster_type,
             })
     return out
 
@@ -1717,6 +1898,33 @@ def get_hitter_recent_form_trad(player_id: int, season: int = CURRENT_SEASON,
         # K% over 10
         recent_k_pct_10 = round(k_10 / (ab_10 + bb_10) * 100, 1) if (ab_10 + bb_10) else 0.0
 
+        # v42t: 5-game window — captures very recent hot/cold streaks.
+        # User-requested signal: "hitting the ball hard and in the air over
+        # past 5 games to determine if HR form is better/worse than baseline."
+        # ISO captures extra-base output (the cleanest power proxy from MLB
+        # Stats API game logs — Savant batted-ball stats aren't game-by-game).
+        # SLG captures total bases per AB, similar but includes singles.
+        # 5-game window is noisy (1 multi-HR game = huge swing) but is
+        # exactly what the user wants for catching hot streaks early.
+        last_5_splits = recent[-5:] if len(recent) > 5 else recent
+        ab_5, h_5, hr_5, d_5, t_5, k_5, bb_5 = 0, 0, 0, 0, 0, 0, 0
+        for s5 in last_5_splits:
+            st5 = s5.get("stat", {})
+            ab_5 += int(st5.get("atBats", 0) or 0)
+            h_5 += int(st5.get("hits", 0) or 0)
+            hr_5 += int(st5.get("homeRuns", 0) or 0)
+            d_5 += int(st5.get("doubles", 0) or 0)
+            t_5 += int(st5.get("triples", 0) or 0)
+            k_5 += int(st5.get("strikeOuts", 0) or 0)
+            bb_5 += int(st5.get("baseOnBalls", 0) or 0)
+        # ISO over 5 games
+        recent_iso_5 = round((d_5 + 2 * t_5 + 3 * hr_5) / ab_5, 3) if ab_5 else 0.0
+        # SLG over 5 games (total bases / AB)
+        tb_5 = h_5 + d_5 + 2 * t_5 + 3 * hr_5  # total bases
+        recent_slg_5 = round(tb_5 / ab_5, 3) if ab_5 else 0.0
+        # AVG over 5 (less HR-relevant but useful for display)
+        recent_avg_5 = round(h_5 / ab_5, 3) if ab_5 else 0.0
+
         # Streak metrics - reverse so most-recent game is first
         per_game_hr_rev = list(reversed(per_game_hr))
         # Count games since last HR (None = never homered in window)
@@ -1794,6 +2002,16 @@ def get_hitter_recent_form_trad(player_id: int, season: int = CURRENT_SEASON,
             "recent_ab_10": ab_10,
             "recent_h_10": h_10,
             "recent_hr_10": hr_10,
+            # v42t: 5-game window — user-requested for catching hot streaks
+            # earlier than the 10-game signal. Display-only (does NOT feed
+            # into hr_form scoring — that would be re-weighting a calibration
+            # we have +25.9pp evidence is working). Useful for the user to
+            # visually identify trending hitters.
+            "recent_iso_5": recent_iso_5,
+            "recent_slg_5": recent_slg_5,
+            "recent_avg_5": recent_avg_5,
+            "recent_hr_5": hr_5,
+            "recent_ab_5": ab_5,
             "multi_hr_games": multi_hr_games,
             "streak_label": streak_label,
         }
