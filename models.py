@@ -474,6 +474,34 @@ def build_matchup_table(
         return ""
     df["contact_flag"] = df.apply(_contact_flag, axis=1)
 
+    # GROUND BALL TYPE FLAG (v42o) — at-a-glance identification of hitters
+    # whose batted-ball profile makes HRs structurally unlikely. Display-only,
+    # does NOT change scoring (barrel% already filters for HR-relevant contact).
+    #
+    # Three tiers:
+    #   🦗 EXTREME GB — gb_pct >= 55 (top ~10% of GB rate; HRs structurally rare)
+    #   🦗 GB-leaning — gb_pct >= 48 AND pull_pct < 38 (high-GB AND oppo-prone)
+    #   (empty)       — everyone else
+    #
+    # Note: A high-GB hitter with high barrel% (rare but possible — Bregman
+    # at times) won't fire the EXTREME flag because barrel% is still doing
+    # the right thing. The flag fires for the structural profile, not the
+    # absolute HR projection.
+    def _gb_type_flag(row):
+        try:
+            gb = float(row.get("gb_pct")) if not pd.isna(row.get("gb_pct")) else None
+            pull = float(row.get("pull_percent")) if not pd.isna(row.get("pull_percent")) else None
+        except (TypeError, ValueError):
+            return ""
+        if gb is None:
+            return ""
+        if gb >= 55.0:
+            return "🦗 extreme GB"
+        if gb >= 48.0 and pull is not None and pull < 38.0:
+            return "🦗 GB-leaning"
+        return ""
+    df["gb_type_flag"] = df.apply(_gb_type_flag, axis=1)
+
     # SPLIT CONFIDENCE FLAG (June 2026)
     # When a hitter's projection is being driven by a vs-LHP or vs-RHP split
     # with a small PA sample, the user has no way to know that. A hitter with
@@ -518,6 +546,7 @@ def build_matchup_table(
         "player_id", "player_name", "lineup_pos", "position", "bats",
         "is_roster_fill",  # CRITICAL: flag for whether lineup_pos is real or fill
         "contact_flag",  # 🎯 contact profile (set expectations)
+        "gb_type_flag",  # 🦗 GB-leaning / extreme GB (structural HR floor)
         "split_confidence",  # ⚠️ thin split / 📊 small split (caution flag)
         # Composites (matching screenshot order)
         "matchup", "test_score", "ceiling", "zone_fit",
