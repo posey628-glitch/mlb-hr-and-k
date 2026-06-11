@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v42s-helpers-pitch-flags"
+APP_VERSION = "2026.06.10-v43-zone-fit-plate-discipline"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -1650,6 +1650,34 @@ try:
 except Exception:
     # Arsenal is non-critical; fall back to empty
     pitcher_arsenal_all = pd.DataFrame()
+
+# v43 EXPERIMENTAL: Zone tier fetchers (Savant heart/shadow/chase/waste).
+# Could not validate endpoints from dev env — these are best-effort. Empty
+# DataFrame on failure means the zone_fit_flag will be empty for everyone
+# (plate_discipline_flag remains as the primary working zone signal).
+try:
+    from data_fetcher import get_pitcher_zone_tiers, get_hitter_zone_tiers
+    pitcher_zone_tiers = get_pitcher_zone_tiers(_stats_day=_stats_day_key()) if not slate.empty else pd.DataFrame()
+    hitter_zone_tiers = get_hitter_zone_tiers(_stats_day=_stats_day_key()) if not slate.empty else pd.DataFrame()
+    _zone_fetch_status = (
+        "✅ working" if (not pitcher_zone_tiers.empty and not hitter_zone_tiers.empty)
+        else "⚠️ partial" if (not pitcher_zone_tiers.empty or not hitter_zone_tiers.empty)
+        else "❌ unavailable (plate_discipline_flag still active)"
+    )
+except Exception as _zone_err:
+    pitcher_zone_tiers = pd.DataFrame()
+    hitter_zone_tiers = pd.DataFrame()
+    _zone_fetch_status = f"❌ error: {type(_zone_err).__name__}"
+
+# Merge zone tier data into hitter_stats and pitcher_stats if available
+if not pitcher_zone_tiers.empty and "player_id" in pitcher_stats.columns:
+    pitcher_stats = pitcher_stats.merge(
+        pitcher_zone_tiers, on="player_id", how="left", suffixes=("", "_zt"),
+    )
+if not hitter_zone_tiers.empty and "player_id" in hitter_stats.columns:
+    hitter_stats = hitter_stats.merge(
+        hitter_zone_tiers, on="player_id", how="left", suffixes=("", "_zt"),
+    )
 
 # HAND-SPLIT ARSENALS (June 2026)
 # Pitchers throw very different pitch mixes vs LHB vs RHB. A RHP might throw
@@ -3900,8 +3928,9 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v42s · {_wx_status_emoji} Weather: {_wx_status_label} · "
-    f"{_storage_emoji} Storage: {_storage_label}"
+    f"📦 v43 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"{_storage_emoji} Storage: {_storage_label} · "
+    f"🎯 Zone tiers: {_zone_fetch_status}"
 )
 
 for _, game in slate.iterrows():
@@ -5908,8 +5937,14 @@ if all_hitters_for_picks:
             "rank", "il_flag", "slate_leader_flag", "convergence_label", "same_game_flag",
             "arsenal_flag", "gb_flag", "split_confidence",
             "player_name", "team", "game", "opp_pitcher",
-            "pick_score", "hr_game_pct", "matchup", "barrel_pct", "lift_score",
+            "pick_score", "hr_game_pct", "matchup",
+            # v42u: pulled_brl_pct surfaced alongside barrel_pct so user can
+            # see pull-power separately from raw barrel rate (different signal —
+            # raw barrel can come from oppo, pull barrel is the HR-specific one).
+            "barrel_pct", "pulled_brl_pct", "lift_score",
             "hr_profile_label",
+            # v42t: 5-game form trend (hot/cold streak relative to baseline)
+            "form_trend_flag",
             "hr_form", "env_boost",
         ] if c in top10.columns]
         disp = top10[cols_to_show].copy()
@@ -8495,12 +8530,16 @@ try:
                 ("avg_ev",         "Avg EV",           True,  "num1"),
                 ("pulled_brl_pct", "Pull Brl %",       True,  "pct1"),
                 ("pull_air_pct",   "Pull Air %",       True,  "pct1"),
+                ("recent_iso_5",   "ISO L5",           True,  "iso"),
                 ("recent_iso_10",  "ISO L10",          True,  "iso"),
+                ("form_trend_flag","Form Trend",       None,  "text"),
                 ("hr_last_10",     "HR L10",           True,  "int"),
                 ("games_since_hr", "Games no HR",      False, "int"),
                 ("smash_spot",     "Smash",            None,  "text"),
                 ("hr_profile_label", "Profile",        None,  "text"),
                 ("gb_type_flag",   "GB Profile",       None,  "text"),
+                ("plate_discipline_flag", "Zone Match", None,  "text"),
+                ("zone_fit_flag",  "Zone Fit",         None,  "text"),
                 ("ideal_hr_screen", "Ideal Screen",    None,  "text"),
                 ("platoon_hitter_flag", "Platoon Tag", None,  "text"),
             ]
@@ -9040,6 +9079,160 @@ def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
                 hide_index=True, use_container_width=True,
                 column_config=build_col_config(),
             )
+
+
+# ============================================================================
+# v42v: PITCHER LOOKUP UTILITY (user-requested)
+# ----------------------------------------------------------------------------
+# Use case: if you see a pitcher announced that the app hasn't updated yet,
+# or you want to scout an alternative starter, this expander lets you pick
+# any pitcher from any team's active roster and view their full grade card +
+# stats inline. Does NOT replace the auto-detected matchup pitcher — the
+# game cards below continue to use whatever MLB Stats API reports as the
+# probable starter. This is a separate scouting tool.
+#
+# If/when MLB confirms a different pitcher than what was previously projected,
+# the auto-detection in the game cards below will reflect that automatically
+# without you needing to clear or change anything here.
+# ============================================================================
+with st.expander("🔍 Pitcher Lookup — scout any team's pitcher", expanded=False):
+    st.caption(
+        "Select any team to see all their pitchers (active roster). "
+        "Pick a pitcher to view their full stat line + grade. This is a "
+        "lookup utility — it does not change the auto-detected matchup "
+        "pitcher in the game cards below."
+    )
+    try:
+        # Build team list from the slate (only show teams playing today
+        # so the dropdown is short and relevant)
+        team_options = {}
+        for _, _g in slate.iterrows():
+            for side in ("away", "home"):
+                tid = _g.get(f"{side}_team_id")
+                tname = _g.get(f"{side}_team")
+                if tid is not None and not pd.isna(tid) and tname:
+                    team_options[str(tname)] = int(tid)
+        if not team_options:
+            st.info("No teams available — slate is empty.")
+        else:
+            sorted_team_names = sorted(team_options.keys())
+            sel_team_name = st.selectbox(
+                "Team",
+                options=sorted_team_names,
+                key="pitcher_lookup_team",
+            )
+            sel_team_id = team_options[sel_team_name]
+
+            # Fetch this team's pitcher roster (active + 40-man, includes
+            # AAA stashes). Cached 15min so the dropdown is fast.
+            try:
+                from data_fetcher import get_team_pitchers
+                pitchers_on_team = get_team_pitchers(sel_team_id)
+            except Exception:
+                pitchers_on_team = []
+
+            if not pitchers_on_team:
+                st.warning(
+                    f"No pitchers found on {sel_team_name}'s active roster. "
+                    "Roster fetch may have failed — try again in a moment."
+                )
+            else:
+                # Build display labels: "Last, First (R)"
+                pitcher_label_map = {
+                    p["id"]: f"{p['name']} ({p.get('throws', '?')}HP)"
+                    for p in pitchers_on_team
+                }
+                sorted_pids = sorted(
+                    pitcher_label_map.keys(),
+                    key=lambda x: pitcher_label_map[x],
+                )
+                sel_pid = st.selectbox(
+                    "Pitcher",
+                    options=sorted_pids,
+                    format_func=lambda pid: pitcher_label_map.get(pid, str(pid)),
+                    key="pitcher_lookup_pid",
+                )
+
+                # Pull this pitcher's stat row
+                p_row = pd.DataFrame()
+                if not pitcher_stats.empty and sel_pid in pitcher_stats["player_id"].values:
+                    p_row = pitcher_stats[pitcher_stats["player_id"] == sel_pid]
+
+                if p_row.empty:
+                    st.warning(
+                        f"{pitcher_label_map.get(sel_pid)} has no Statcast data this "
+                        "season. They may be a minor-league call-up, recently injured, "
+                        "or haven't made enough appearances. Check MLB Stats API "
+                        "leaderboard for current status."
+                    )
+                else:
+                    pr = p_row.iloc[0].to_dict()
+                    # Compact stat row display
+                    c1, c2, c3, c4, c5 = st.columns(5)
+                    with c1:
+                        st.metric("ERA", f"{pr.get('era', 0):.2f}"
+                                  if pd.notna(pr.get('era')) else "—")
+                    with c2:
+                        st.metric("HR/9", f"{pr.get('hr9', 0):.2f}"
+                                  if pd.notna(pr.get('hr9')) else "—")
+                    with c3:
+                        st.metric("K%", f"{pr.get('k_percent', 0):.1f}%"
+                                  if pd.notna(pr.get('k_percent')) else "—")
+                    with c4:
+                        st.metric("Whiff%", f"{pr.get('whiff_percent', 0):.1f}%"
+                                  if pd.notna(pr.get('whiff_percent')) else "—")
+                    with c5:
+                        st.metric(
+                            "Barrel% Allowed",
+                            f"{pr.get('barrel_batted_rate', 0):.1f}%"
+                            if pd.notna(pr.get('barrel_batted_rate')) else "—",
+                        )
+
+                    # Second row: more stats
+                    c1, c2, c3, c4, c5 = st.columns(5)
+                    with c1:
+                        st.metric("IP", f"{pr.get('ip', 0):.1f}"
+                                  if pd.notna(pr.get('ip')) else "—")
+                    with c2:
+                        st.metric("WHIP", f"{pr.get('whip', 0):.2f}"
+                                  if pd.notna(pr.get('whip')) else "—")
+                    with c3:
+                        st.metric(
+                            "Hard Hit% Allowed",
+                            f"{pr.get('hard_hit_percent', 0):.1f}%"
+                            if pd.notna(pr.get('hard_hit_percent')) else "—",
+                        )
+                    with c4:
+                        st.metric("xERA", f"{pr.get('xera', 0):.2f}"
+                                  if pd.notna(pr.get('xera')) else "—")
+                    with c5:
+                        gb_p = pr.get("groundballs_percent")
+                        st.metric("GB%", f"{gb_p:.1f}%"
+                                  if pd.notna(gb_p) else "—")
+
+                    # Show arsenal if available
+                    try:
+                        from data_fetcher import get_pitcher_arsenal
+                        arsenals = get_pitcher_arsenal()
+                        if not arsenals.empty:
+                            p_arsenal = arsenals[arsenals["player_id"] == sel_pid]
+                            if not p_arsenal.empty:
+                                st.markdown("**Arsenal**:")
+                                arsenal_disp = p_arsenal[[
+                                    c for c in [
+                                        "pitch_type", "pitch_name", "pitch_usage",
+                                        "ba", "slg", "woba", "whiff_percent",
+                                    ] if c in p_arsenal.columns
+                                ]].copy()
+                                st.dataframe(
+                                    arsenal_disp,
+                                    hide_index=True,
+                                    use_container_width=True,
+                                )
+                    except Exception:
+                        pass
+    except Exception as _lookup_err:
+        st.warning(f"Pitcher lookup failed: {type(_lookup_err).__name__}: {_lookup_err}")
 
 
 for _, game in slate.iterrows():
