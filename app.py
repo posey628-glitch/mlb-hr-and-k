@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-gb-flag-v42o"
+APP_VERSION = "2026.06.10-brier-thresholds-v42p"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -2379,18 +2379,29 @@ if show_backtest:
                                 t10_hr = h_metrics.get("top10_hr_hit_rate", 0)
                                 m4.metric("Top-10 HR pick hit rate", f"{t10_hr}%")
 
-                                # Brier score — the single best calibration metric.
-                                # Lower = better. For HRs, ~0.04-0.06 is good,
-                                # <0.03 is excellent, >0.08 = systematic miscalibration.
+                                # Brier score — single best calibration metric.
+                                # Lower = better. v42p: thresholds RECALIBRATED
+                                # for HR-prediction base rate (~14% league HR/PA
+                                # per game = base-rate Brier ~0.12). Old
+                                # thresholds (<0.04 = Excellent) were for
+                                # 50%-event predictions and made the label
+                                # incorrectly flag good models as "Needs tuning".
+                                # Reference: a Brier just below 0.12 means
+                                # we're matching the base-rate predictor; below
+                                # 0.10 means meaningfully better; 0.13+ means
+                                # our absolute probabilities are over-confident
+                                # (which can still coexist with great ranking).
                                 brier = h_metrics.get("brier_score")
                                 if brier is not None:
                                     b_col, _ = st.columns([1, 3])
-                                    if brier < 0.04:
+                                    if brier < 0.09:
                                         b_label = "Excellent"
-                                    elif brier < 0.06:
+                                    elif brier < 0.11:
                                         b_label = "Good"
-                                    elif brier < 0.08:
-                                        b_label = "OK"
+                                    elif brier < 0.13:
+                                        b_label = "Decent (good ranking, slight over-confidence)"
+                                    elif brier < 0.15:
+                                        b_label = "OK (calibration drifting)"
                                     else:
                                         b_label = "Needs tuning"
                                     b_col.metric(
@@ -2401,9 +2412,14 @@ if show_backtest:
                                         help=(
                                             "Mean squared error between predicted "
                                             "HR probability and actual outcome (0/1). "
-                                            "Lower = better. Rare-event reference: "
-                                            "<0.03 excellent · 0.04-0.06 good · "
-                                            ">0.08 systematic over-prediction."
+                                            "Lower = better. For HR (base rate ~14%): "
+                                            "<0.09 excellent · <0.11 good · "
+                                            "<0.13 decent (ranking strong, probs "
+                                            "slightly inflated) · 0.13+ tuning needed. "
+                                            "Brier measures ABSOLUTE probability "
+                                            "calibration, NOT ranking quality — "
+                                            "check Top-10 hit rate vs slate baseline "
+                                            "for ranking signal."
                                         ),
                                     )
 
@@ -2548,7 +2564,17 @@ if show_backtest:
                         )
                         if agg.get("brier_mean") is not None:
                             brier_m = agg["brier_mean"]
-                            quality = "Excellent" if brier_m < 0.04 else "Good" if brier_m < 0.06 else "OK" if brier_m < 0.08 else "Needs tuning"
+                            # v42p: HR-base-rate-calibrated thresholds
+                            if brier_m < 0.09:
+                                quality = "Excellent"
+                            elif brier_m < 0.11:
+                                quality = "Good"
+                            elif brier_m < 0.13:
+                                quality = "Decent (ranking strong, probs slightly inflated)"
+                            elif brier_m < 0.15:
+                                quality = "OK"
+                            else:
+                                quality = "Needs tuning"
                             st.markdown(f"**Mean Brier score**: {brier_m:.4f} — {quality}")
 
                         # Per-day table
@@ -3840,7 +3866,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v42o · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v42p · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label}"
 )
 
