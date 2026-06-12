@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.2-ttop-umpire-catcher-hr-wiring"
+APP_VERSION = "2026.06.10-v43.3-backtest-pickscore-sleeper-slatewide"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -3928,7 +3928,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.2 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.3 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status}"
 )
@@ -4684,39 +4684,15 @@ for _, game in slate.iterrows():
     wind_dir = (weather or {}).get("wind_dir_deg")
     pull_summaries = {}  # for displaying in game header
 
-    # v43.2: pre-compute umpire and catcher HR multipliers before the HR loop.
-    # These are derived from EXISTING K factors via inverse relationship:
-    # tight zone (low k_factor) = more balls in play = more HR opportunity.
-    # Small effects (typically 0.97-1.03) but real signals we built data for.
+    # v43.3: TTop multiplier wired (third-time-through-order is a well-
+    # documented HR effect, 10-12% boost when starter goes 7 IP). Derived
+    # from opposing pitcher's expected IP. Per-game scalar.
     #
-    # ump_hr = 1 + (1 - ump_k) * 0.25   — quarter-strength inverse of K effect
-    # catcher_hr = 1 + (1 - catcher_kf) * 0.15  — smaller, framing has weaker HR link
-    ump_k = 1.0
-    try:
-        if ump:
-            ump_k = float(ump.get("k_factor", 1.0)) if ump.get("k_factor") is not None else 1.0
-    except Exception:
-        ump_k = 1.0
-    ump_hr_mult = 1.0 + (1.0 - ump_k) * 0.25
-
-    away_catcher_hr_mult = 1.0
-    home_catcher_hr_mult = 1.0
-    try:
-        from game_context import get_starting_catcher
-        _catcher_info = get_starting_catcher(gpk) or {}
-        _away_kf = float(_catcher_info.get("away_k_factor", 1.0))
-        _home_kf = float(_catcher_info.get("home_k_factor", 1.0))
-        # Home pitcher uses home catcher; away pitcher uses away catcher.
-        # When projecting AWAY hitters facing HOME pitcher, the relevant catcher
-        # is the HOME catcher (catching the home pitcher).
-        home_catcher_hr_mult = 1.0 + (1.0 - _home_kf) * 0.15  # affects away hitters
-        away_catcher_hr_mult = 1.0 + (1.0 - _away_kf) * 0.15  # affects home hitters
-    except Exception:
-        pass
-
-    # v43.2: TTop multiplier — derived from opposing pitcher's expected IP.
-    # If a starter goes 7 IP, the lineup sees him 3+ times → ~12% HR boost
-    # in 3rd-time-through PAs. Per-game scalar (not per-hitter).
+    # v43.3 REVERSAL: ump_hr_mult and catcher_hr_mult from v43.2 backed out.
+    # On reviewer's analysis: those signals are K-side (game_context.py
+    # computes their K factors only), and applying their inverse to HR with
+    # guessed coefficients (0.25, 0.15) introduces noise without measured
+    # validation. TTop remains because it has direct HR research support.
     def _ttop_for_pitcher(p_row):
         try:
             if p_row is None:
@@ -4737,12 +4713,11 @@ for _, game in slate.iterrows():
     home_p_ttop = _ttop_for_pitcher(home_p_row)  # away hitters face home pitcher
     away_p_ttop = _ttop_for_pitcher(away_p_row)  # home hitters face away pitcher
 
-    for matchup_df, opp_p_row, opp_bullpen_hr9, opp_catcher_hr, opp_ttop in [
-        # (matchup, opposing_pitcher, opposing_bullpen, catcher_for_that_pitcher, ttop_for_that_pitcher)
-        (away_matchup, home_p_row, home_bullpen_hr9, home_catcher_hr_mult, home_p_ttop),
-        (home_matchup, away_p_row, away_bullpen_hr9, away_catcher_hr_mult, away_p_ttop),
-        (away_bench_matchup, home_p_row, home_bullpen_hr9, home_catcher_hr_mult, home_p_ttop),
-        (home_bench_matchup, away_p_row, away_bullpen_hr9, away_catcher_hr_mult, away_p_ttop),
+    for matchup_df, opp_p_row, opp_bullpen_hr9, opp_ttop in [
+        (away_matchup, home_p_row, home_bullpen_hr9, home_p_ttop),
+        (home_matchup, away_p_row, away_bullpen_hr9, away_p_ttop),
+        (away_bench_matchup, home_p_row, home_bullpen_hr9, home_p_ttop),
+        (home_bench_matchup, away_p_row, away_bullpen_hr9, away_p_ttop),
     ]:
         if matchup_df is None or matchup_df.empty:
             continue
@@ -4837,15 +4812,13 @@ for _, game in slate.iterrows():
                     park_factor=hitter_park_mult, weather_mult=wx_mult_nowind,
                     pitch_match_score=row_dict.get("pitch_match_score"),
                     bullpen_hr9=opp_bullpen_hr9,
-                    # v43.2: previously-dead-coded context signals now wired
+                    # v43.3: TTop kept (real HR effect). ump/catcher reverted.
                     ttop_mult=opp_ttop,
-                    umpire_hr_mult=ump_hr_mult,
-                    catcher_hr_mult=opp_catcher_hr,
                 )
                 # p_pa is already soft-squashed inside hr_prob_per_pa; no
                 # external adjustment needed now that pitch_hr_mult is gone.
             except TypeError:
-                # Older props.py without the new params — fall back gracefully
+                # Older props.py without ttop_mult param — fall back gracefully
                 try:
                     p_pa = hr_prob_per_pa(
                         row_dict, opp_p_row,
@@ -7640,6 +7613,45 @@ if all_hitters:
     # rank #50 slate-wide. Recompute on the full combined frame so percentiles
     # reflect the whole slate (200-300 hitters).
     try:
+        # v43.3 (reviewer-validated): The hr_score values that flow in here
+        # are themselves contaminated — they were computed by sleepers.py
+        # hr_probability() using within-9-lineup percentile ranks. So they're
+        # "best on his team," not "best on the slate." Ranking those slate-wide
+        # mixes two reference frames (same bug we fixed for hr_form in v41a
+        # but never applied to hr_score).
+        #
+        # Fix: recompute hr_score itself using SLATE-WIDE percentile ranks on
+        # combined_all, then multiply by per-game env_boost. This makes
+        # hr_score and sleeper_score apples-to-apples slate quantities.
+        if (("barrel_pct" in combined_all.columns
+             or "iso" in combined_all.columns
+             or "hard_hit" in combined_all.columns)
+            and "env_boost" in combined_all.columns):
+            # Slate-wide percentile ranks of the same components sleepers.py
+            # uses (barrel 0.30, iso 0.20, hard_hit 0.15). Same weights, but
+            # ranks computed on the whole slate.
+            weight_sum = pd.Series(0.0, index=combined_all.index)
+            weighted = pd.Series(0.0, index=combined_all.index)
+            for col, w in [("barrel_pct", 0.30), ("iso", 0.20), ("hard_hit", 0.15)]:
+                if col in combined_all.columns:
+                    r = combined_all[col].rank(pct=True) * 100
+                    mask = r.notna()
+                    weight_sum[mask] += w
+                    weighted[mask] += r[mask] * w
+            # Normalize to 0-100 (assuming all three present = 0.65 total weight)
+            slate_hr_base = (weighted / weight_sum.replace(0, np.nan)).clip(0, 100)
+            # Apply per-game env_boost (already-computed per row)
+            env_b = pd.to_numeric(combined_all["env_boost"], errors="coerce").fillna(1.0)
+            # Slate-wide hr_score: base × env multiplier (capped same as sleepers.py)
+            slate_hr_score = (slate_hr_base * env_b).clip(0, 100).round(1)
+            # Only overwrite where we have a valid base; otherwise keep original
+            mask = slate_hr_base.notna()
+            if mask.any():
+                if "hr_score" in combined_all.columns:
+                    combined_all.loc[mask, "hr_score"] = slate_hr_score[mask]
+                else:
+                    combined_all["hr_score"] = slate_hr_score
+
         score_col = "hr_score" if "hr_score" in combined_all.columns else (
             "hr_prob" if "hr_prob" in combined_all.columns else None
         )
