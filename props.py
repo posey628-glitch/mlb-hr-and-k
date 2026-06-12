@@ -41,8 +41,6 @@ def hr_prob_per_pa(
     defense_factor: float = 1.0,
     min_pa: int = 100,
     bullpen_hr9: float | None = None,  # v37+ bullpen leverage adjustment
-    umpire_hr_mult: float = 1.0,  # v43.2: tight zone → more BIP → more HR
-    catcher_hr_mult: float = 1.0,  # v43.2: poor framer → more hitter counts → more HR
 ) -> float | None:
     """
     Returns P(HR | single PA today) using ONLY real data.
@@ -457,10 +455,6 @@ def hr_prob_per_pa(
     # Example bug fix: 1.17 wind × 1.21 park × 1.30 pitch_match = 1.84x
     # compounded multiplier was pushing modest hitters to elite tier.
     # New cap: 1.35× total context (still allows great matchups to boost ~35%).
-    # v43.2: include umpire_hr_mult and catcher_hr_mult as additional ctx
-    # factors. These are SMALL effects (typically 0.99-1.02) but real signals
-    # we built and never wired. ctx_mult cap of 1.35 still applies — they
-    # cannot compound dangerously.
     ctx_mult_raw = (
         park_factor
         * park_hand_factor
@@ -469,8 +463,6 @@ def hr_prob_per_pa(
         * ttop_mult
         * defense_factor
         * platoon_mult
-        * umpire_hr_mult
-        * catcher_hr_mult
     )
     ctx_mult = min(1.35, max(0.65, ctx_mult_raw))
 
