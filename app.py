@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.1-per-player-zone-hitter-lookup"
+APP_VERSION = "2026.06.10-v43.2-ttop-umpire-catcher-hr-wiring"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -3928,7 +3928,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.1 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.2 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status}"
 )
@@ -4684,16 +4684,65 @@ for _, game in slate.iterrows():
     wind_dir = (weather or {}).get("wind_dir_deg")
     pull_summaries = {}  # for displaying in game header
 
-    for matchup_df, opp_p_row, opp_bullpen_hr9 in [
-        (away_matchup, home_p_row, home_bullpen_hr9),
-        (home_matchup, away_p_row, away_bullpen_hr9),
-        # v42m: bench players get the SAME enrichment as the starting 9 so
-        # they have grades, pick_score, platoon flags etc. populated. This
-        # fixes the "CJ Abrams on bench with no grade" problem — if a real
-        # starter gets demoted to bench by PA-sort, they still have all the
-        # data the user needs to evaluate them as a late-swap candidate.
-        (away_bench_matchup, home_p_row, home_bullpen_hr9),
-        (home_bench_matchup, away_p_row, away_bullpen_hr9),
+    # v43.2: pre-compute umpire and catcher HR multipliers before the HR loop.
+    # These are derived from EXISTING K factors via inverse relationship:
+    # tight zone (low k_factor) = more balls in play = more HR opportunity.
+    # Small effects (typically 0.97-1.03) but real signals we built data for.
+    #
+    # ump_hr = 1 + (1 - ump_k) * 0.25   — quarter-strength inverse of K effect
+    # catcher_hr = 1 + (1 - catcher_kf) * 0.15  — smaller, framing has weaker HR link
+    ump_k = 1.0
+    try:
+        if ump:
+            ump_k = float(ump.get("k_factor", 1.0)) if ump.get("k_factor") is not None else 1.0
+    except Exception:
+        ump_k = 1.0
+    ump_hr_mult = 1.0 + (1.0 - ump_k) * 0.25
+
+    away_catcher_hr_mult = 1.0
+    home_catcher_hr_mult = 1.0
+    try:
+        from game_context import get_starting_catcher
+        _catcher_info = get_starting_catcher(gpk) or {}
+        _away_kf = float(_catcher_info.get("away_k_factor", 1.0))
+        _home_kf = float(_catcher_info.get("home_k_factor", 1.0))
+        # Home pitcher uses home catcher; away pitcher uses away catcher.
+        # When projecting AWAY hitters facing HOME pitcher, the relevant catcher
+        # is the HOME catcher (catching the home pitcher).
+        home_catcher_hr_mult = 1.0 + (1.0 - _home_kf) * 0.15  # affects away hitters
+        away_catcher_hr_mult = 1.0 + (1.0 - _away_kf) * 0.15  # affects home hitters
+    except Exception:
+        pass
+
+    # v43.2: TTop multiplier — derived from opposing pitcher's expected IP.
+    # If a starter goes 7 IP, the lineup sees him 3+ times → ~12% HR boost
+    # in 3rd-time-through PAs. Per-game scalar (not per-hitter).
+    def _ttop_for_pitcher(p_row):
+        try:
+            if p_row is None:
+                return 1.0
+            from game_context import ttop_multiplier
+            pid = p_row.get("player_id")
+            exp_ip = 5.5  # default
+            if pid is not None and not p_slate.empty and "pitcher_id" in p_slate.columns:
+                _ids = pd.to_numeric(p_slate["pitcher_id"], errors="coerce")
+                _match = p_slate[_ids == int(pid)]
+                if not _match.empty and "expected_ip" in _match.columns:
+                    v = _match.iloc[0].get("expected_ip")
+                    if v is not None and not pd.isna(v):
+                        exp_ip = float(v)
+            return float(ttop_multiplier(1, expected_ip=exp_ip))
+        except Exception:
+            return 1.0
+    home_p_ttop = _ttop_for_pitcher(home_p_row)  # away hitters face home pitcher
+    away_p_ttop = _ttop_for_pitcher(away_p_row)  # home hitters face away pitcher
+
+    for matchup_df, opp_p_row, opp_bullpen_hr9, opp_catcher_hr, opp_ttop in [
+        # (matchup, opposing_pitcher, opposing_bullpen, catcher_for_that_pitcher, ttop_for_that_pitcher)
+        (away_matchup, home_p_row, home_bullpen_hr9, home_catcher_hr_mult, home_p_ttop),
+        (home_matchup, away_p_row, away_bullpen_hr9, away_catcher_hr_mult, away_p_ttop),
+        (away_bench_matchup, home_p_row, home_bullpen_hr9, home_catcher_hr_mult, home_p_ttop),
+        (home_bench_matchup, away_p_row, away_bullpen_hr9, away_catcher_hr_mult, away_p_ttop),
     ]:
         if matchup_df is None or matchup_df.empty:
             continue
@@ -4788,20 +4837,33 @@ for _, game in slate.iterrows():
                     park_factor=hitter_park_mult, weather_mult=wx_mult_nowind,
                     pitch_match_score=row_dict.get("pitch_match_score"),
                     bullpen_hr9=opp_bullpen_hr9,
+                    # v43.2: previously-dead-coded context signals now wired
+                    ttop_mult=opp_ttop,
+                    umpire_hr_mult=ump_hr_mult,
+                    catcher_hr_mult=opp_catcher_hr,
                 )
                 # p_pa is already soft-squashed inside hr_prob_per_pa; no
                 # external adjustment needed now that pitch_hr_mult is gone.
             except TypeError:
+                # Older props.py without the new params — fall back gracefully
                 try:
                     p_pa = hr_prob_per_pa(
                         row_dict, opp_p_row,
-                        park_hr_factor=hitter_park_mult, weather_hr_factor=wx_mult,
+                        park_factor=hitter_park_mult, weather_mult=wx_mult_nowind,
+                        pitch_match_score=row_dict.get("pitch_match_score"),
+                        bullpen_hr9=opp_bullpen_hr9,
                     )
                 except TypeError:
                     try:
-                        p_pa = hr_prob_per_pa(row_dict, opp_p_row)
-                    except Exception:
-                        p_pa = None
+                        p_pa = hr_prob_per_pa(
+                            row_dict, opp_p_row,
+                            park_hr_factor=hitter_park_mult, weather_hr_factor=wx_mult,
+                        )
+                    except TypeError:
+                        try:
+                            p_pa = hr_prob_per_pa(row_dict, opp_p_row)
+                        except Exception:
+                            p_pa = None
             # Lineup-spot-aware expected PA per game
             # ONLY use lineup-position scaling when:
             #   - This player is in a REAL posted lineup (not roster-fill)
