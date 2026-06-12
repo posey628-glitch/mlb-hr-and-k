@@ -190,7 +190,7 @@ def get_pitcher_zone_tiers(season: int = CURRENT_SEASON, _stats_day: str = "") -
                 cl = c.lower()
                 if "player_id" in cl or cl == "id":
                     col_map["player_id"] = c
-                elif "heart" in cl and "pct" in cl or "heart" in cl and "percent" in cl:
+                elif ("heart" in cl and "pct" in cl) or ("heart" in cl and "percent" in cl):
                     col_map["heart"] = c
                 elif "shadow" in cl and ("pct" in cl or "percent" in cl):
                     col_map["shadow"] = c
@@ -403,6 +403,195 @@ def zone_fit_score(pitcher_id: int, hitter_id: int,
         "data_coverage_pct": round(total_pct, 1),
         "assessment": assessment,
     }
+
+
+# ----------------------------------------------------------------------------
+# Savant handedness-split Statcast (v43.5 — experimental, URL unverified)
+# ----------------------------------------------------------------------------
+# MLB Stats API splits give us basic handedness data (AVG, OPS, ISO, HR/PA,
+# K%, BB%). But contact-quality metrics by handedness (barrel%, hard_hit%,
+# xwOBA, avg_ev) are Statcast-only — they live in Savant.
+#
+# This is the gap that lets a hitter get an inflated grade against the side
+# they actually struggle against. Example: Jo Adell overall barrel% is ~8%,
+# but vs-LHP barrel% can be 30%+. Without these splits, power_score scores
+# him as a weak HR threat vs lefties when he's actually elite.
+#
+# DEFENSIVE PATTERN: tries several candidate URLs, returns empty DataFrame on
+# any failure. Caller treats empty as "no handedness Statcast data; fall
+# back to season-overall." Same pattern as zone tier fetchers.
+#
+# IMPORTANT: Savant URLs are NOT in the dev environment allowlist, so this
+# is NOT testable here. URL patterns must be verified in production. The
+# caption status indicator ("Savant handedness: ✅ working / ❌ unavailable")
+# tells you immediately if the fetcher connected.
+
+@st.cache_data(ttl=21600)  # 6hr — handedness splits stable day-over-day
+def get_hitter_handedness_statcast(season: int = CURRENT_SEASON,
+                                     _stats_day: str = "") -> pd.DataFrame:
+    """Pull hitter Statcast contact-quality metrics split by pitcher handedness.
+
+    Returns DataFrame with columns:
+      player_id,
+      vs_lhp_barrel_pct, vs_lhp_hard_hit, vs_lhp_xwoba, vs_lhp_avg_ev,
+      vs_rhp_barrel_pct, vs_rhp_hard_hit, vs_rhp_xwoba, vs_rhp_avg_ev
+    Empty on failure — caller falls back to season-overall stats.
+
+    Implementation note: Savant exposes handedness splits via the custom
+    leaderboard with a `split` parameter (or `pitch_hand` filter). We pull
+    vs-LHP and vs-RHP separately, then merge on player_id. Each side may
+    succeed or fail independently — partial data is better than none.
+    """
+    def _fetch_one_side(pitch_hand: str) -> pd.DataFrame:
+        """Fetch Statcast contact quality for hitters vs one pitcher hand.
+
+        pitch_hand: 'L' or 'R'
+        """
+        candidate_urls = [
+            # Custom leaderboard with pitch_hand filter and Statcast selections.
+            # Savant's custom-leaderboard endpoint accepts ?pitch_hand=L|R and
+            # returns a CSV when csv=true is appended.
+            f"https://baseballsavant.mlb.com/leaderboard/custom"
+            f"?year={season}&type=batter&filter=&min=30"
+            f"&pitch_hand={pitch_hand}"
+            f"&selections=player_id,player_name,pa,barrel_batted_rate,"
+            f"hard_hit_percent,xwoba,launch_speed"
+            f"&chart=false&x=barrel_batted_rate&y=xwoba&r=no&csv=true",
+            # Statcast leaderboard with split parameter (alternate Savant URL)
+            f"https://baseballsavant.mlb.com/leaderboard/statcast"
+            f"?type=batter&year={season}&player_type=batter"
+            f"&min_results=30&split=vs_{pitch_hand}HP&csv=true",
+            # Savant search CSV with pitcher_throws filter
+            f"https://baseballsavant.mlb.com/statcast_search/csv"
+            f"?all=true&year={season}&pitcher_throws={pitch_hand}"
+            f"&player_type=batter&min_pa=30",
+        ]
+        for url in candidate_urls:
+            try:
+                r = requests.get(url, headers=HEADERS, timeout=25)
+                r.raise_for_status()
+                if not r.text or len(r.text) < 100:
+                    continue
+                df = pd.read_csv(io.StringIO(r.text))
+                if df.empty:
+                    continue
+                # Flexible column matching — Savant column names vary
+                col_map = {}
+                for c in df.columns:
+                    cl = c.lower().replace(" ", "_")
+                    if cl in ("player_id", "playerid", "id", "mlb_id"):
+                        col_map["player_id"] = c
+                    elif "barrel" in cl and ("rate" in cl or "pct" in cl or "percent" in cl):
+                        col_map["barrel"] = c
+                    elif ("hard_hit" in cl or "hardhit" in cl) and (
+                        "rate" in cl or "pct" in cl or "percent" in cl
+                    ):
+                        col_map["hard_hit"] = c
+                    elif cl in ("xwoba", "x_woba", "estimated_woba"):
+                        col_map["xwoba"] = c
+                    elif "launch_speed" in cl or "avg_ev" in cl or "exit_velocity" in cl:
+                        col_map["avg_ev"] = c
+                # Need at least player_id + barrel to be useful
+                if "player_id" not in col_map or "barrel" not in col_map:
+                    continue
+                out = pd.DataFrame()
+                out["player_id"] = pd.to_numeric(
+                    df[col_map["player_id"]], errors="coerce"
+                ).astype("Int64")
+                out["barrel_pct"] = pd.to_numeric(df[col_map["barrel"]], errors="coerce")
+                for stat in ("hard_hit", "xwoba", "avg_ev"):
+                    if stat in col_map:
+                        out[stat] = pd.to_numeric(df[col_map[stat]], errors="coerce")
+                    else:
+                        out[stat] = pd.NA
+                return out.dropna(subset=["player_id"])
+            except Exception:
+                continue
+        return pd.DataFrame()
+
+    # Fetch both sides; either may fail independently
+    df_l = _fetch_one_side("L")
+    df_r = _fetch_one_side("R")
+
+    if df_l.empty and df_r.empty:
+        return pd.DataFrame()
+
+    # Rename columns with vs_lhp_ / vs_rhp_ prefix
+    if not df_l.empty:
+        df_l = df_l.rename(columns={
+            "barrel_pct": "vs_lhp_barrel_pct",
+            "hard_hit": "vs_lhp_hard_hit",
+            "xwoba": "vs_lhp_xwoba",
+            "avg_ev": "vs_lhp_avg_ev",
+        })
+    if not df_r.empty:
+        df_r = df_r.rename(columns={
+            "barrel_pct": "vs_rhp_barrel_pct",
+            "hard_hit": "vs_rhp_hard_hit",
+            "xwoba": "vs_rhp_xwoba",
+            "avg_ev": "vs_rhp_avg_ev",
+        })
+
+    # Outer merge on player_id — keep all hitters that appeared on either side
+    if df_l.empty:
+        return df_r
+    if df_r.empty:
+        return df_l
+    return df_l.merge(df_r, on="player_id", how="outer")
+
+
+def apply_handedness_overrides(matchup_df: pd.DataFrame,
+                                 p_throws: str | None,
+                                 min_split_pa: int = 30) -> pd.DataFrame:
+    """Per-game: override season-overall barrel/hard_hit/xwoba/avg_ev/iso
+    with handedness-specific values when available and sample is adequate.
+
+    This addresses the central handedness gap: power_score and hr_form use
+    season-overall contact quality, which over-rates platoon-split hitters
+    against the side they struggle with (and under-rates the reverse).
+
+    For each hitter in matchup_df:
+      1. If pitcher's throwing hand is unknown → no change
+      2. If hitter has vs_{X}_pa >= min_split_pa AND vs_{X}_barrel_pct exists
+         → overwrite barrel_pct with vs_{X}_barrel_pct
+         (same for hard_hit, xwoba, avg_ev, iso)
+      3. Else → no change (keeps season-overall)
+
+    Returns modified matchup_df. Original column values are not preserved
+    (they remain in vs_lhp_* / vs_rhp_* for reference). Switch hitters: the
+    vs_lhp/vs_rhp splits naturally reflect which side they batted (splits
+    accumulate based on pitcher faced), so the override works the same way.
+    """
+    if matchup_df is None or matchup_df.empty:
+        return matchup_df
+    if not p_throws or p_throws not in ("L", "R"):
+        return matchup_df
+
+    side = "lhp" if p_throws == "L" else "rhp"
+    pa_col = f"vs_{side}_pa"
+    if pa_col not in matchup_df.columns:
+        return matchup_df
+
+    df = matchup_df.copy()
+    # Boolean mask: hitters with adequate sample on this side
+    pa_vals = pd.to_numeric(df[pa_col], errors="coerce")
+    mask = pa_vals >= min_split_pa
+
+    # Override each stat where we have the handedness data and adequate sample
+    overrides = [
+        ("barrel_pct",  f"vs_{side}_barrel_pct"),
+        ("hard_hit",    f"vs_{side}_hard_hit"),
+        ("xwoba",       f"vs_{side}_xwoba"),
+        ("avg_ev",      f"vs_{side}_avg_ev"),
+        ("iso",         f"vs_{side}_iso"),
+    ]
+    for season_col, hand_col in overrides:
+        if season_col in df.columns and hand_col in df.columns:
+            hand_vals = pd.to_numeric(df[hand_col], errors="coerce")
+            # Apply override only where mask is True AND hand value is valid
+            row_mask = mask & hand_vals.notna()
+            df.loc[row_mask, season_col] = hand_vals[row_mask]
+    return df
 
 
 # ----------------------------------------------------------------------------
