@@ -638,10 +638,14 @@ def build_matchup_table(
             if total_pct < 80.0:  # need ≥80% coverage of pitch distribution
                 return ""
             avg_woba = weighted / total_pct
-            # League avg wOBA ~0.320. Hitters above 0.380 vs pitcher's mix = elite.
-            if avg_woba >= 0.420:
+            # v43.1: thresholds calibrated to realistic composite values.
+            # Tier-weighted composites get diluted by chase/waste (where every
+            # hitter performs poorly). Elite matchups produce composites
+            # around 0.350-0.370, not 0.420. See data_fetcher.zone_fit_score
+            # for the same recalibration.
+            if avg_woba >= 0.370:
                 return f"💣 elite zone fit ({avg_woba:.3f})"
-            if avg_woba >= 0.380:
+            if avg_woba >= 0.340:
                 return f"🎯 strong zone fit ({avg_woba:.3f})"
             if avg_woba <= 0.260:
                 return f"🛡️ poor zone fit ({avg_woba:.3f})"
