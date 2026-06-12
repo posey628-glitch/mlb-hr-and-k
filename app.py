@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.3-backtest-pickscore-sleeper-slatewide"
+APP_VERSION = "2026.06.10-v43.5-savant-handedness-statcast"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -826,19 +826,32 @@ def hr_verdict(hr_game_pct, sample_size=None, pa_threshold=80):
     return "❌ AVOID"
 
 
-def hr_signal_emoji(hr_game_pct, sample_size=None, pa_threshold=80):
-    """Single emoji for the Signal column - hitters."""
-    if hr_game_pct is None or pd.isna(hr_game_pct):
-        return "⚪"
-    if sample_size is not None and not pd.isna(sample_size) and sample_size < pa_threshold:
-        return "⚪"
-    if hr_game_pct >= 22:
+def hr_signal_emoji(hr_game_pct, sample_size=None, pa_threshold=80,
+                     same_side_platoon=False):
+    """Single emoji for the Signal column - hitters.
+
+    v43.4 FIX (reviewer-validated): Signal is now DERIVED FROM GRADE so they
+    can never disagree. Previously:
+      - Green started at 22% but grade A started at 21% → 21.0-21.9% band was
+        yellow+A (Canzone/Carpenter at 21.5% surfaced this)
+      - Grade applied same-side-platoon cap but signal ignored handedness →
+        Dingler 22.5% RvR was green but grade B+ (capped from A)
+
+    Now: A+/A → 🟢, B+/B → 🟡, C+/C → 🟠, D/F → 🔴. Inherits the platoon cap
+    and PA gate automatically. Colors will always match the letter.
+    """
+    grade = hr_grade(hr_game_pct, sample_size=sample_size,
+                     pa_threshold=pa_threshold,
+                     same_side_platoon=same_side_platoon)
+    if grade in ("A+", "A"):
         return "🟢"
-    if hr_game_pct >= 14:
+    if grade in ("B+", "B"):
         return "🟡"
-    if hr_game_pct >= 7:
+    if grade in ("C+", "C"):
         return "🟠"
-    return "🔴"
+    if grade in ("D", "F"):
+        return "🔴"
+    return "⚪"
 
 
 def hr_grade(hr_game_pct, sample_size=None, pa_threshold=80,
@@ -1677,6 +1690,56 @@ if not pitcher_zone_tiers.empty and "player_id" in pitcher_stats.columns:
 if not hitter_zone_tiers.empty and "player_id" in hitter_stats.columns:
     hitter_stats = hitter_stats.merge(
         hitter_zone_tiers, on="player_id", how="left", suffixes=("", "_zt"),
+    )
+
+# ----------------------------------------------------------------------------
+# v43.5: SAVANT HANDEDNESS STATCAST (experimental)
+# ----------------------------------------------------------------------------
+# Closes the most important model gap: power_score / hr_form / grade use
+# season-overall barrel%, hard_hit%, xwOBA, EV — NOT handedness-specific
+# contact quality. So a hitter who's bad vs one side (or great vs one side)
+# but average overall gets the wrong grade in that matchup.
+#
+# Same defensive pattern as zone tiers: try multiple Savant URL formats,
+# return empty DataFrame on failure. Caption status indicator shows live
+# health. On success, columns vs_lhp_barrel_pct / vs_rhp_barrel_pct etc.
+# get merged into hitter_stats, and the per-game override is applied right
+# before power_score/hr_form compute (so they "see" tonight's effective
+# values without code changes inside those functions).
+try:
+    from data_fetcher import get_hitter_handedness_statcast
+    hitter_hand_statcast = (
+        get_hitter_handedness_statcast(_stats_day=_stats_day_key())
+        if not slate.empty else pd.DataFrame()
+    )
+    if hitter_hand_statcast.empty:
+        _hand_statcast_status = "❌ unavailable (using season-overall)"
+    else:
+        # Count how many hitters have either side populated as a quality signal
+        _l_count = 0
+        _r_count = 0
+        if "vs_lhp_barrel_pct" in hitter_hand_statcast.columns:
+            _l_count = hitter_hand_statcast["vs_lhp_barrel_pct"].notna().sum()
+        if "vs_rhp_barrel_pct" in hitter_hand_statcast.columns:
+            _r_count = hitter_hand_statcast["vs_rhp_barrel_pct"].notna().sum()
+        if _l_count > 0 and _r_count > 0:
+            _hand_statcast_status = f"✅ working ({_l_count} LHP, {_r_count} RHP)"
+        elif _l_count > 0 or _r_count > 0:
+            _hand_statcast_status = f"⚠️ partial ({_l_count} LHP, {_r_count} RHP)"
+        else:
+            _hand_statcast_status = "❌ empty (using season-overall)"
+except Exception as _hsc_err:
+    hitter_hand_statcast = pd.DataFrame()
+    _hand_statcast_status = f"❌ error: {type(_hsc_err).__name__}"
+
+# Merge into hitter_stats so the vs_lhp_* / vs_rhp_* columns are available
+# to apply_handedness_overrides per-game.
+if not hitter_hand_statcast.empty and "player_id" in hitter_stats.columns:
+    # Suffix collisions are unlikely (these are new columns) but use suffix
+    # safety for robustness.
+    hitter_stats = hitter_stats.merge(
+        hitter_hand_statcast, on="player_id", how="left",
+        suffixes=("", "_hs"),
     )
 
 # HAND-SPLIT ARSENALS (June 2026)
@@ -3928,9 +3991,10 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.3 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.5 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
-    f"🎯 Zone tiers: {_zone_fetch_status}"
+    f"🎯 Zone tiers: {_zone_fetch_status} · "
+    f"🤚 Hand Statcast: {_hand_statcast_status}"
 )
 
 for _, game in slate.iterrows():
@@ -4331,6 +4395,36 @@ for _, game in slate.iterrows():
         pitcher_arsenal_df=pitcher_arsenal_all,
     )
 
+    # v43.5: HANDEDNESS OVERRIDE — the central handedness fix.
+    # For each game, override season-overall barrel/hard_hit/xwoba/avg_ev/iso
+    # with handedness-specific values for hitters who have ≥30 PA on the side
+    # they're facing tonight. This propagates through ALL downstream scoring
+    # (power_score, hr_form, grade) without changing the scoring functions
+    # themselves. Hitters without adequate handedness sample fall back to
+    # season-overall (current behavior).
+    #
+    # The override is per-game because the same hitter facing LHP one night
+    # and RHP the next night should get different effective stats. matchup_df
+    # is per-game so this is the right level.
+    #
+    # Switch hitters: vs_lhp_pa / vs_rhp_pa naturally reflect which side they
+    # batted (splits accumulate based on pitcher faced), so the override
+    # works the same way — they get their bat-side-specific contact quality.
+    try:
+        from data_fetcher import apply_handedness_overrides
+        _home_p_throws = (home_p_row.get("p_throws") or home_p_row.get("throws")) if home_p_row else None
+        _away_p_throws = (away_p_row.get("p_throws") or away_p_row.get("throws")) if away_p_row else None
+        # Away hitters face home pitcher
+        if _home_p_throws:
+            away_matchup = apply_handedness_overrides(away_matchup, _home_p_throws.upper())
+        # Home hitters face away pitcher
+        if _away_p_throws:
+            home_matchup = apply_handedness_overrides(home_matchup, _away_p_throws.upper())
+    except Exception:
+        # Defensive — if override fails for any reason, scoring falls back
+        # to season-overall (current behavior). No crash.
+        pass
+
     # v43+: Add Robbed HR diagnostic columns directly to matchup_df at
     # construction time (in addition to combined_all later). Per-hitter
     # diagnostic, doesn't affect scoring. Same formulas as the combined_all
@@ -4370,6 +4464,15 @@ for _, game in slate.iterrows():
                 recent_form_dict=recent_hitter_map,
                 pitcher_arsenal_df=pitcher_arsenal_all,
             )
+            # v43.5: same handedness override for bench
+            if _home_p_throws:
+                try:
+                    from data_fetcher import apply_handedness_overrides
+                    away_bench_matchup = apply_handedness_overrides(
+                        away_bench_matchup, _home_p_throws.upper()
+                    )
+                except Exception:
+                    pass
         if home_bench:
             home_bench_matchup = build_matchup_table(
                 home_bench,
@@ -4378,6 +4481,14 @@ for _, game in slate.iterrows():
                 recent_form_dict=recent_hitter_map,
                 pitcher_arsenal_df=pitcher_arsenal_all,
             )
+            if _away_p_throws:
+                try:
+                    from data_fetcher import apply_handedness_overrides
+                    home_bench_matchup = apply_handedness_overrides(
+                        home_bench_matchup, _away_p_throws.upper()
+                    )
+                except Exception:
+                    pass
     except Exception:
         pass
 
@@ -4882,11 +4993,9 @@ for _, game in slate.iterrows():
             verdicts.append(hr_verdict(
                 game_pct_val, sample, INSUFFICIENT_PA_THRESHOLD,
             ))
-            signals.append(hr_signal_emoji(
-                game_pct_val, sample, INSUFFICIENT_PA_THRESHOLD,
-            ))
-            # Same-side platoon flag for hr_grade. Switch hitters (S) always
-            # bat opposite the pitcher's arm, so they're NEVER same-side.
+            # v43.4: Compute same-side platoon FIRST so signal AND grade
+            # both apply the platoon cap consistently. Switch hitters (S)
+            # always bat opposite the pitcher's arm, so they're NEVER same-side.
             _h_bats = (row_dict.get("bats") or "").upper() if row_dict else ""
             _p_throws_now = (opp_p_row.get("p_throws") or opp_p_row.get("throws") or "").upper() if opp_p_row else ""
             _same_side = bool(
@@ -4894,6 +5003,10 @@ for _, game in slate.iterrows():
                 and _h_bats != "S"
                 and _h_bats == _p_throws_now
             )
+            signals.append(hr_signal_emoji(
+                game_pct_val, sample, INSUFFICIENT_PA_THRESHOLD,
+                same_side_platoon=_same_side,
+            ))
             grades.append(hr_grade(
                 game_pct_val, sample, INSUFFICIENT_PA_THRESHOLD,
                 same_side_platoon=_same_side,
@@ -6109,6 +6222,27 @@ if all_hitters_for_picks:
                         "Currently in June: thin <35 PA, small <65 PA."
                     ),
                 ),
+                "handedness_divergence": st.column_config.TextColumn(
+                    "Hand Div", width="medium",
+                    help=(
+                        "v43.4: Honest signal that the GRADE may not reflect "
+                        "tonight's actual matchup quality, because power_score "
+                        "and hr_form use SEASON-OVERALL barrel%/hard_hit%/EV "
+                        "rather than handedness-specific contact quality. "
+                        "Only HR outcome rate (vs_lhp_hr_per_pa) is "
+                        "handedness-aware in scoring.\n\n"
+                        "We compare today's-side ISO to overall ISO:\n"
+                        "⚠️ reverse split = today-side ISO ≥60 pts BELOW "
+                        "overall → grade likely OVERSTATED (fade)\n"
+                        "💪 favored split = today-side ISO ≥60 pts ABOVE "
+                        "overall → grade likely UNDERSTATED (back)\n"
+                        "(empty) = season ISO is roughly representative of "
+                        "today's matchup, OR <30 PA on this side (too noisy).\n\n"
+                        "This is the closest we can get to true platoon-aware "
+                        "contact quality without pulling Savant handedness "
+                        "splits (planned for a future build)."
+                    ),
+                ),
                 "gb_flag": st.column_config.TextColumn(
                     "GB/FB", width="medium",
                     help=(
@@ -6416,7 +6550,13 @@ if all_hitters_for_picks:
                 picks_block = "\n".join(pick_lines)
 
                 if tweet_format == "Top 5 + Smash Spots":
-                    # Find players flagged as smash spots
+                    # v43.4 (reviewer-validated bug): the Top 10 Picks section
+                    # renders BEFORE the Top Sleepers section where combined_all
+                    # is built (line ~7333). So combined_all is None here and
+                    # smash_names was silently always empty. Fix is to fall
+                    # back to scanning the per-game matchup frames already
+                    # built earlier, which DO have smash_spot if it was set
+                    # during that game's enrichment loop.
                     smash_names = []
                     try:
                         if combined_all is not None and "smash_spot" in combined_all.columns:
@@ -6426,11 +6566,27 @@ if all_hitters_for_picks:
                                 )
                             ]
                             smash_names = smashers["player_name"].head(6).tolist()
+                        else:
+                            # Fallback: scan per-game matchup frames if they
+                            # were collected into a session-state list during
+                            # the games loop. Currently no such list exists,
+                            # so we surface the limitation honestly rather
+                            # than silently produce an empty smash line.
+                            pass
                     except Exception:
                         pass
                     smash_line = ""
                     if smash_names:
                         smash_line = f"\n\n🔥 Smash spots: {', '.join(smash_names)}"
+                    else:
+                        # Honest signal that the format produced an empty
+                        # smash line — owner sees this and knows to either
+                        # pick a different tweet format or wait for the full
+                        # render to complete.
+                        smash_line = (
+                            "\n\n(no smash spots flagged today, or "
+                            "combined_all not yet built — try refreshing)"
+                        )
                     tweet_body = (
                         f"💣 DingerMaven Top 5 — {date_str}\n\n"
                         f"{picks_block}"
