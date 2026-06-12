@@ -643,6 +643,12 @@ def evaluate_hitter_projections(snapshot: dict, actuals: dict) -> dict:
             "power_score": h.get("power_score"),
             "hr_game_pct": h.get("hr_game_pct"),
             "sleeper_score": h.get("sleeper_score"),
+            # v43.3: extract pick_score + game so we can evaluate the actual
+            # ranking the app ships (top 10 by pick_score with max-2-per-game),
+            # not just the raw HR Game% list. Previously we were measuring a
+            # different selection than the one users actually see.
+            "pick_score": h.get("pick_score"),
+            "game": h.get("game"),
             "actual_hr": actual.get("hr", 0),
             "actual_ab": actual.get("ab", 0),
             "homered": actual.get("hr", 0) > 0,
@@ -665,9 +671,13 @@ def evaluate_hitter_projections(snapshot: dict, actuals: dict) -> dict:
     df_played = df[df["actual_ab"] > 0].copy()
     if not df_played.empty and df_played["hr_game_pct"].notna().any():
         # BRIER SCORE — the single most informative calibration metric for
-        # probabilistic forecasts. Lower = better. For rare events like HRs,
-        # well-calibrated models score around 0.04-0.06; values <0.03 are
-        # excellent, >0.08 mean systematic over-prediction.
+        # probabilistic forecasts. Lower = better. v43.3: thresholds aligned
+        # with the v42p app.py calibration. For HR/no-HR with ~14% base rate,
+        # the BLIND baseline (always predicting base rate) gets Brier ≈ 0.12.
+        # Useful interpretation: <0.09 excellent, <0.11 good, <0.13 decent
+        # (ranking strong but probs slightly inflated), 0.13+ needs tuning.
+        # Brier measures ABSOLUTE probability calibration, NOT ranking — a
+        # model can have great ranking + mediocre Brier if probs are inflated.
         # Formula: mean((predicted_probability - actual_outcome)^2)
         valid = df_played[df_played["hr_game_pct"].notna()].copy()
         if len(valid) > 0:
@@ -711,7 +721,38 @@ def evaluate_hitter_projections(snapshot: dict, actuals: dict) -> dict:
         metrics["power_score_bands"] = ps_summary
 
     # Top 10 predicted vs actual
+    # v43.3 CRITICAL FIX: Previously this section graded `df_played.nlargest(10,
+    # "hr_game_pct")` — but the APP actually ships top 10 by `pick_score` with
+    # max-2-per-game diversity. So the backtest was measuring a different list
+    # than the one users see. The headline "+25.9pp edge" was for hr_game_pct,
+    # not pick_score, meaning everything pick_score adds (env_boost weighting,
+    # convergence bonuses, platoon adjustments) was invisible to validation.
+    # Fix: grade BOTH lists. hr_game_pct top 10 kept for backward compat;
+    # pick_score top 10 added so we can finally measure the product we ship.
+    def _diverse_top_n(df, score_col, n=10, max_per_game=2):
+        """Select top-N by score_col, capping max_per_game per game (same
+        diversity rule the live app applies). Returns a DataFrame of the
+        selected rows in score order."""
+        if score_col not in df.columns:
+            return df.head(0)
+        sorted_df = df.dropna(subset=[score_col]).sort_values(
+            score_col, ascending=False
+        )
+        picked = []
+        game_counts = {}
+        for _, r in sorted_df.iterrows():
+            g = r.get("game") if "game" in df.columns else None
+            if g and game_counts.get(g, 0) >= max_per_game:
+                continue
+            picked.append(r)
+            if g:
+                game_counts[g] = game_counts.get(g, 0) + 1
+            if len(picked) >= n:
+                break
+        return pd.DataFrame(picked) if picked else df.head(0)
+
     if "hr_game_pct" in df_played.columns and df_played["hr_game_pct"].notna().any():
+        # Legacy hr_game_pct top 10 — kept for backward-compat tracking
         top10 = df_played.nlargest(10, "hr_game_pct")
         metrics["top10_hr_predictions"] = [
             {
@@ -724,6 +765,35 @@ def evaluate_hitter_projections(snapshot: dict, actuals: dict) -> dict:
         metrics["top10_hr_hit_rate"] = round(
             top10["homered"].sum() / len(top10) * 100, 1
         ) if len(top10) > 0 else 0.0
+
+    # v43.3: THE ONE THAT ACTUALLY MATTERS — pick_score top 10 with diversity.
+    # This grades the ranking the live app ships.
+    if "pick_score" in df_played.columns and df_played["pick_score"].notna().any():
+        top10_ps = _diverse_top_n(df_played, "pick_score", n=10, max_per_game=2)
+        if not top10_ps.empty:
+            metrics["top10_pick_score_predictions"] = [
+                {
+                    "name": r["player_name"],
+                    "pick_score": round(r.get("pick_score", 0), 1),
+                    "hr_game_pct": round(r.get("hr_game_pct", 0), 1) if pd.notna(r.get("hr_game_pct")) else None,
+                    "game": r.get("game"),
+                    "homered": bool(r["homered"]),
+                }
+                for _, r in top10_ps.iterrows()
+            ]
+            metrics["top10_pick_score_hit_rate"] = round(
+                top10_ps["homered"].sum() / len(top10_ps) * 100, 1
+            )
+
+    # v43.3: Confirmed-starter baseline. Previously the slate baseline was
+    # actual_hr_rate over ALL matched hitters (including bench appearances) —
+    # too generous, made any 10 strong starters look good. Use only confirmed
+    # starters as the fair comparator.
+    confirmed_starters = df_played[df_played.get("actual_ab", 0) >= 3] if "actual_ab" in df_played.columns else df_played
+    if not confirmed_starters.empty:
+        metrics["confirmed_starter_baseline_hr_rate"] = round(
+            confirmed_starters["homered"].sum() / len(confirmed_starters) * 100, 1
+        )
 
     # Sleeper accuracy - top 10 by sleeper_score
     if "sleeper_score" in df_played.columns and df_played["sleeper_score"].notna().any():
