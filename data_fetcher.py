@@ -271,6 +271,141 @@ def get_hitter_zone_tiers(season: int = CURRENT_SEASON, _stats_day: str = "") ->
 
 
 # ----------------------------------------------------------------------------
+# Per-player zone fetchers (v43+ — wrap bulk leaderboard fetchers)
+# ----------------------------------------------------------------------------
+# These return a single player's zone data as a dict. They wrap the bulk
+# leaderboard fetchers above which are cached, so per-player calls cost
+# nothing after the first slate load. Used by the Pitcher Lookup utility
+# so a user can scout any pitcher's zone tendencies.
+#
+# Return {} if no data found for the requested player (bulk fetch failed,
+# player not in leaderboard, etc). Callers should treat empty dict as
+# "no zone data available, fall back to other signals."
+
+def get_pitcher_zone_distribution(pitcher_id: int,
+                                    season: int = CURRENT_SEASON) -> dict:
+    """Return one pitcher's heart/shadow/chase/waste % distribution.
+
+    Wraps get_pitcher_zone_tiers (cached 6hr). Returns dict like:
+      {
+        "player_id": 696285,
+        "pitcher_heart_pct": 26.2,
+        "pitcher_shadow_pct": 41.5,
+        "pitcher_chase_pct": 24.1,
+        "pitcher_waste_pct": 8.2,
+      }
+    Or {} if not found.
+
+    Args:
+      pitcher_id: MLB player ID
+      season: which season's data (defaults to current)
+    """
+    try:
+        df = get_pitcher_zone_tiers(season=season, _stats_day=_stats_day_key())
+        if df is None or df.empty:
+            return {}
+        rows = df[df["player_id"] == int(pitcher_id)]
+        if rows.empty:
+            return {}
+        return rows.iloc[0].to_dict()
+    except Exception:
+        return {}
+
+
+def get_hitter_zone_performance(hitter_id: int,
+                                  season: int = CURRENT_SEASON) -> dict:
+    """Return one hitter's wOBA by zone tier.
+
+    Wraps get_hitter_zone_tiers (cached 6hr). Returns dict like:
+      {
+        "player_id": 592450,  # Judge
+        "hitter_heart_woba": 0.488,
+        "hitter_shadow_woba": 0.310,
+        "hitter_chase_woba": 0.140,
+        "hitter_waste_woba": 0.060,
+      }
+    Or {} if not found.
+
+    Args:
+      hitter_id: MLB player ID
+      season: which season's data (defaults to current)
+    """
+    try:
+        df = get_hitter_zone_tiers(season=season, _stats_day=_stats_day_key())
+        if df is None or df.empty:
+            return {}
+        rows = df[df["player_id"] == int(hitter_id)]
+        if rows.empty:
+            return {}
+        return rows.iloc[0].to_dict()
+    except Exception:
+        return {}
+
+
+def zone_fit_score(pitcher_id: int, hitter_id: int,
+                     season: int = CURRENT_SEASON) -> dict:
+    """Compute zone fit composite for one (pitcher, hitter) matchup.
+
+    Returns dict with:
+      - composite_woba: weighted hitter wOBA across the pitcher's tier distribution
+      - heart_share: pitcher's heart-of-plate %
+      - hitter_heart_woba: hitter's wOBA on heart pitches
+      - data_coverage: how much of the pitcher's distribution we have data for
+      - assessment: human-readable label
+    Or {} if data unavailable for either player.
+
+    This is the heart of zone fit: a pitcher who lives in the heart of the
+    plate (high heart_share) facing a hitter who crushes heart pitches
+    (high hitter_heart_woba) = HR risk. The composite_woba accounts for the
+    full tier distribution, not just the heart.
+    """
+    p_dist = get_pitcher_zone_distribution(pitcher_id, season)
+    h_perf = get_hitter_zone_performance(hitter_id, season)
+    if not p_dist or not h_perf:
+        return {}
+    tiers = ("heart", "shadow", "chase", "waste")
+    total_pct = 0.0
+    weighted = 0.0
+    for t in tiers:
+        p_pct = p_dist.get(f"pitcher_{t}_pct")
+        h_woba = h_perf.get(f"hitter_{t}_woba")
+        if (p_pct is None or pd.isna(p_pct)
+            or h_woba is None or pd.isna(h_woba)):
+            continue
+        try:
+            p_pct = float(p_pct); h_woba = float(h_woba)
+        except (TypeError, ValueError):
+            continue
+        weighted += p_pct * h_woba
+        total_pct += p_pct
+    if total_pct < 50.0:
+        return {}  # not enough data coverage to be meaningful
+    composite_woba = weighted / total_pct
+    # v43.1 calibration: tier-weighted composite is naturally diluted by
+    # chase/waste pitches (where every hitter performs poorly). Elite
+    # matchups produce composites ~0.350-0.370, not 0.420. League-average
+    # matchup composite is ~0.310. Recalibrated thresholds:
+    #   >= 0.370: ELITE (top ~5% of matchups — heart-pounder vs heart-crusher)
+    #   >= 0.340: STRONG (above neutral, favorable for hitter)
+    #   <= 0.260: POOR (below neutral, pitcher dominates the zones hitter struggles in)
+    if composite_woba >= 0.370:
+        assessment = "💣 elite zone fit"
+    elif composite_woba >= 0.340:
+        assessment = "🎯 strong zone fit"
+    elif composite_woba <= 0.260:
+        assessment = "🛡️ poor zone fit"
+    else:
+        assessment = "neutral"
+    return {
+        "composite_woba": round(composite_woba, 3),
+        "heart_share": round(float(p_dist.get("pitcher_heart_pct", 0)), 1),
+        "hitter_heart_woba": round(float(h_perf.get("hitter_heart_woba", 0)), 3),
+        "data_coverage_pct": round(total_pct, 1),
+        "assessment": assessment,
+    }
+
+
+# ----------------------------------------------------------------------------
 # Safe parsers - handle MLB Stats API "-.--" and other junk values
 # ----------------------------------------------------------------------------
 
