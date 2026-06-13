@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.11-handedness-hr-counts-visible"
+APP_VERSION = "2026.06.10-v43.12-bench-players-in-export"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -4169,7 +4169,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.11 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.12 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status}"
@@ -7937,7 +7937,26 @@ for gpk, ctx in game_context_map.items():
         # consumer of combined_all saw env_boost as missing. Same data —
         # park_mult × wx_mult per matchup_df — set here.
         x["env_boost"] = ctx.get("hr_mult", 1.0)
+        # v43.12: tag main-lineup vs bench so consumers can filter/sort
+        x["is_bench"] = False
         all_hitters.append(x)
+
+        # v43.12: BENCH PLAYERS — same enrichment, same grades, same scoring,
+        # they just weren't being added to combined_all before. Bug found by
+        # user feedback: "I see grades for small-sample guys now but not for
+        # bench/late-switch guys." Bench matchups are built and scored in the
+        # main matchup loop (lines ~4634-4671 and ~5005+), they just never
+        # made it through this append step into the export. Same fix shape
+        # as the env_boost-missing-from-combined_all issue in v42k.
+        bench = ctx.get(f"{side}_bench_matchup")
+        if bench is not None and not bench.empty:
+            xb = bench.copy()
+            xb["game"] = f"{g_row['away_team_abbr']} @ {g_row['home_team_abbr']}"
+            xb["team"] = g_row[f"{side}_team_abbr"]
+            xb["opp_pitcher"] = g_row.get(f"{opp_side}_pitcher", "TBD") or "TBD"
+            xb["env_boost"] = ctx.get("hr_mult", 1.0)
+            xb["is_bench"] = True  # tag so users can filter/sort bench rows
+            all_hitters.append(xb)
 
 if all_hitters:
     combined_all = pd.concat(all_hitters, ignore_index=True)
@@ -8481,11 +8500,19 @@ if all_hitters:
                 sort_cols = [c for c in ["pick_score", "hr_game_pct"] if c in search_results.columns]
                 if sort_cols:
                     search_results = search_results.sort_values(sort_cols, ascending=False)
-                # Add a "bench/starter" indicator using is_roster_fill
-                if "is_roster_fill" in search_results.columns:
-                    search_results["status"] = search_results["is_roster_fill"].apply(
-                        lambda x: "🪑 bench/roster" if x else "✅ starter"
-                    )
+                # Add a "starter / roster-fill / bench" indicator. Three states:
+                # - ✅ starter: in posted lineup (is_roster_fill=False, is_bench=False)
+                # - 🪑 roster-fill: shown in lineup as placeholder; lineup not posted yet
+                # - 🛋️ bench: actually on bench / late-swap candidate (is_bench=True)
+                def _status_label(row):
+                    if row.get("is_bench"):
+                        return "🛋️ bench"
+                    if row.get("is_roster_fill"):
+                        return "🪑 roster-fill"
+                    return "✅ starter"
+                if ("is_roster_fill" in search_results.columns
+                        or "is_bench" in search_results.columns):
+                    search_results["status"] = search_results.apply(_status_label, axis=1)
                     if "status" not in search_cols:
                         search_cols.insert(2, "status")
                 st.dataframe(
@@ -8507,11 +8534,14 @@ if all_hitters:
                     },
                 )
                 st.caption(
-                    "🪑 bench/roster = lineup not confirmed for this player (roster-fill mode). "
                     "✅ starter = confirmed in posted lineup. "
-                    "If a player you expected to be a confirmed starter shows as bench, "
-                    "the lineup may not be posted yet, or the cache may be stale "
-                    "(refresh the page after lineups post)."
+                    "🪑 roster-fill = lineup not posted yet, this player is a "
+                    "placeholder in the projected lineup. "
+                    "🛋️ bench = on the 40-man roster but not in tonight's 9; "
+                    "shown as a late-swap / pinch-hit candidate (v43.12). "
+                    "If a player you expected to be a confirmed starter shows "
+                    "as roster-fill or bench, the lineup may not be posted yet, "
+                    "or the cache may be stale (refresh the page after lineups post)."
                 )
             else:
                 st.warning(
