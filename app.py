@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.8-pickscore-headline-single-source-truth"
+APP_VERSION = "2026.06.10-v43.9-smash-name-lookup-convergence-export"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -4133,7 +4133,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.8 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.9 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status}"
@@ -4966,6 +4966,28 @@ for _, game in slate.iterrows():
     home_p_ttop = _ttop_for_pitcher(home_p_row)  # away hitters face home pitcher
     away_p_ttop = _ttop_for_pitcher(away_p_row)  # home hitters face away pitcher
 
+    # v43.9 (reviewer-validated, smash_spot bug fix):
+    # The in-loop ID-based grade lookup (v39j's float() coercion) can still
+    # silently return None when opp_p_row comes from a TBD proxy or when
+    # pitcher_id columns are typed differently across pitcher_stats vs p_slate.
+    # The EXPORT uses a NAME-based map (line ~5884) which works reliably —
+    # but the smash check fires BEFORE that map is built. Reviewer confirmed
+    # via live export: Kody Clemens, EXPLOIT+ in export, no smash flag because
+    # in-loop opp_pitcher_grade was None.
+    #
+    # Fix: build the name-based grade map BEFORE the matchup loop, share
+    # between smash check and export. ID-based path kept as fallback for
+    # edge cases (renamed pitchers, accent mismatches).
+    _pitcher_grade_by_name = {}
+    if (not p_slate.empty and "pitcher_name" in p_slate.columns
+            and "grade" in p_slate.columns):
+        try:
+            _pitcher_grade_by_name = (
+                p_slate.set_index("pitcher_name")["grade"].to_dict()
+            )
+        except Exception:
+            _pitcher_grade_by_name = {}
+
     for matchup_df, opp_p_row, opp_bullpen_hr9, opp_ttop in [
         (away_matchup, home_p_row, home_bullpen_hr9, home_p_ttop),
         (home_matchup, away_p_row, away_bullpen_hr9, away_p_ttop),
@@ -4975,31 +4997,38 @@ for _, game in slate.iterrows():
         if matchup_df is None or matchup_df.empty:
             continue
 
-        # Look up opposing pitcher's grade for SMASH SPOT detection
-        # Smash Spot = batter facing EXPLOIT/EXPLOIT+ pitcher AND favorable env+park.
-        # This is the "all stars align" flag the user requested.
+        # Look up opposing pitcher's grade for SMASH SPOT detection.
+        # v43.9: PRIMARY = name-based (the same source the export uses).
+        # FALLBACK = ID-based via float() coercion (v39j).
+        # If both fail, opp_pitcher_grade stays None and smash silently skips
+        # for THIS pitcher only (defensive, not the systemic broken-on-all-
+        # pitchers issue Reviewer caught).
         opp_pitcher_grade = None
-        opp_pitcher_id = opp_p_row.get("player_id") if opp_p_row else None
-        if (opp_pitcher_id is not None
-                and not (hasattr(opp_pitcher_id, "is_na") or pd.isna(opp_pitcher_id))
-                and not p_slate.empty
-                and "grade" in p_slate.columns):
-            try:
-                # v39j: Coerce through float to handle pandas Int64 (which raises
-                # TypeError on direct int() when the value is pd.NA). The previous
-                # `int(opp_pitcher_id)` path silently failed for any Int64-backed
-                # column, leaving opp_pitcher_grade=None and making smash_spots
-                # always empty. Going through float() handles Int64, float,
-                # numpy int64, and string IDs uniformly.
-                opp_pid_int = int(float(opp_pitcher_id))
-                _ids = pd.to_numeric(p_slate["pitcher_id"], errors="coerce")
-                _match = p_slate[_ids == opp_pid_int]
-                if not _match.empty:
-                    opp_pitcher_grade = _match.iloc[0].get("grade")
-            except (TypeError, ValueError):
-                pass
-            except Exception:
-                pass
+
+        # Try name-based lookup first (the one the export uses successfully)
+        opp_pitcher_name = (opp_p_row.get("player_name")
+                            or opp_p_row.get("pitcher_name")
+                            or "") if opp_p_row else ""
+        if opp_pitcher_name and opp_pitcher_name in _pitcher_grade_by_name:
+            opp_pitcher_grade = _pitcher_grade_by_name[opp_pitcher_name]
+
+        # Fallback: ID-based lookup (v39j Int64-safe path)
+        if opp_pitcher_grade is None:
+            opp_pitcher_id = opp_p_row.get("player_id") if opp_p_row else None
+            if (opp_pitcher_id is not None
+                    and not (hasattr(opp_pitcher_id, "is_na") or pd.isna(opp_pitcher_id))
+                    and not p_slate.empty
+                    and "grade" in p_slate.columns):
+                try:
+                    opp_pid_int = int(float(opp_pitcher_id))
+                    _ids = pd.to_numeric(p_slate["pitcher_id"], errors="coerce")
+                    _match = p_slate[_ids == opp_pid_int]
+                    if not _match.empty:
+                        opp_pitcher_grade = _match.iloc[0].get("grade")
+                except (TypeError, ValueError):
+                    pass
+                except Exception:
+                    pass
 
         hr_pa, hr_game, verdicts, signals, grades = [], [], [], [], []
         smash_spots = []  # NEW: triple-threat HR opportunity flags
@@ -6155,6 +6184,26 @@ if all_hitters_for_picks:
         except Exception:
             q["convergence_count"] = 0
             q["convergence_label"] = ""
+
+        # v43.9 (reviewer-validated, export visibility fix):
+        # pick_audit was built BEFORE convergence was computed, so the merge
+        # into combined_all didn't carry convergence_label / convergence_count
+        # to the Hitters export. Same class of bug the reviewer flagged for
+        # env_boost in v42k. Extend pick_audit now that the columns exist.
+        if (pick_audit is not None and not pick_audit.empty
+                and "player_id" in q.columns
+                and "convergence_label" in q.columns):
+            try:
+                _conv_extra = q[[
+                    "player_id", "convergence_label", "convergence_count"
+                ]].drop_duplicates(subset="player_id", keep="first")
+                # Merge convergence cols into pick_audit (which later merges
+                # into combined_all → Hitters export → user can see)
+                pick_audit = pick_audit.merge(
+                    _conv_extra, on="player_id", how="left",
+                )
+            except Exception:
+                pass
 
         # Diversity rule: max 2 picks per game so the top 5 doesn't pile up
         # on one matchup. Greedy selection: sort by pick_score, take in order,
