@@ -1418,6 +1418,12 @@ def _fetch_pitcher_splits_single(pitcher_id: int, season: int) -> dict:
                     # 54 PA, .269 SLG, no HR field = should be 0% not NaN.
                     if hr is not None:
                         out[f"vs_{label}_hr_per_pa"] = round(hr / denom * 100, 3)
+                        # v43.11: persist HR count so "3 HRs allowed to LHB in
+                        # 180 PA" is visible alongside the rate. Helps spot
+                        # situational vulnerability that the rate-only signal
+                        # buries (e.g., 4 HRs in 35 vs-LHB PA is a real signal
+                        # even though it's the same rate as 2 HRs in 17 PA).
+                        out[f"vs_{label}_hr"] = hr
                     # v40: If HR field is ABSENT, leave vs_*_hr_per_pa unset.
                     # Previously fabricated 0.0 when slg<.320 — but a missing
                     # field is an ambiguous API omission, and a fake 0%
@@ -1552,6 +1558,10 @@ def _fetch_hitter_splits_single(hitter_id: int, season: int) -> dict:
                 if denom and denom > 0:
                     if hr is not None:
                         out[f"vs_{label}_hr_per_pa"] = round(hr / denom * 100, 3)
+                        # v43.11: persist the raw HR count too. Rate alone hides
+                        # whether "3% vs LHP" is "1 HR in 33 PA" (noise) or
+                        # "12 HRs in 400 PA" (real platoon signal).
+                        out[f"vs_{label}_hr"] = hr
                     if k is not None:
                         out[f"vs_{label}_k_percent"] = round(k / denom * 100, 2)
                     if bb is not None:
@@ -1587,8 +1597,8 @@ def get_hitter_handedness_splits(season: int = CURRENT_SEASON,
 
     Returns DataFrame with columns:
       player_id, vs_lhp_pa, vs_lhp_avg, vs_lhp_obp, vs_lhp_slg, vs_lhp_iso,
-      vs_lhp_ops, vs_lhp_hr_per_pa, vs_lhp_k_percent, vs_lhp_bb_percent
-      (and matching vs_rhp_* columns)
+      vs_lhp_ops, vs_lhp_hr_per_pa, vs_lhp_hr, vs_lhp_k_percent, vs_lhp_bb_percent
+      (and matching vs_rhp_* columns; vs_lhp_hr added v43.11 — raw HR count)
 
     Pass hitter_ids from today's slate to avoid hammering the API.
     """
