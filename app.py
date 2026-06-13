@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.6-pick-audit-expander"
+APP_VERSION = "2026.06.10-v43.7-snapshot-version-tagging"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -3991,7 +3991,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.6 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.7 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status}"
@@ -8256,7 +8256,30 @@ if all_hitters:
         if (current_hour_key not in existing_snaps
                 and selected_date == datetime.now().date()
                 and combined_all is not None and len(combined_all) >= 100):
-            ok = save_snapshot(selected_date, combined_all, p_slate)
+            # v43.7: include version + key calibration constants so the
+            # rolling aggregator can correctly attribute metrics to model
+            # versions. Pick_score weights are the most critical — they
+            # changed materially in v42r (env 0.15 → 0.05).
+            _cal_consts = {
+                "league_hr_per_pa": 0.030,
+                "ps_weights": {
+                    "ps_hr_game":     0.25,
+                    "ps_matchup_opp": 0.15,
+                    "ps_power":       0.15,
+                    "ps_pitch_hr":    0.10,
+                    "ps_form":        0.12,
+                    "ps_sleeper":     0.05,
+                    "ps_lift":        0.06,
+                    "ps_env":         0.05,
+                },
+                "ctx_mult_cap": [0.65, 1.35],
+                "split_prior_pa": 150,
+            }
+            ok = save_snapshot(
+                selected_date, combined_all, p_slate,
+                app_version=APP_VERSION,
+                calibration_constants=_cal_consts,
+            )
             if ok:
                 # Count how many hourly snapshots exist for today
                 today_count = sum(1 for k in existing_snaps
@@ -8283,7 +8306,26 @@ if all_hitters:
         if st.button("💾 Save snapshot", help="Manually save current projections. v42: each save creates a new hourly snapshot — so save once before each game's lineups lock to capture lineup data accurately."):
             try:
                 from backtest import save_snapshot, durable_storage_configured, _snapshot_key_for_now
-                ok = save_snapshot(selected_date, combined_all, p_slate)
+                _cal_consts = {
+                    "league_hr_per_pa": 0.030,
+                    "ps_weights": {
+                        "ps_hr_game":     0.25,
+                        "ps_matchup_opp": 0.15,
+                        "ps_power":       0.15,
+                        "ps_pitch_hr":    0.10,
+                        "ps_form":        0.12,
+                        "ps_sleeper":     0.05,
+                        "ps_lift":        0.06,
+                        "ps_env":         0.05,
+                    },
+                    "ctx_mult_cap": [0.65, 1.35],
+                    "split_prior_pa": 150,
+                }
+                ok = save_snapshot(
+                    selected_date, combined_all, p_slate,
+                    app_version=APP_VERSION,
+                    calibration_constants=_cal_consts,
+                )
                 key = _snapshot_key_for_now(selected_date)
                 if ok:
                     if durable_storage_configured():
