@@ -694,6 +694,55 @@ def build_matchup_table(
         return ""
     df["split_confidence"] = df.apply(_split_confidence, axis=1)
 
+    # v43.4: HANDEDNESS DIVERGENCE FLAG (reviewer-validated concern).
+    # The grade and pick_score use SEASON-OVERALL barrel%, hard_hit%, EV,
+    # ISO etc. for power_score and hr_form. Only HR outcome rate
+    # (vs_lhp_hr_per_pa / vs_rhp_hr_per_pa) is handedness-aware in the
+    # actual scoring. So a hitter who's bad against one side but good
+    # overall would still get an inflated grade against that side.
+    #
+    # We don't pull handedness-specific barrel/hard_hit/EV (those are
+    # Statcast/Savant only — MLB Stats API gives basic splits only). But
+    # we DO have handedness-specific ISO. So we compare today's-side ISO
+    # to season-overall ISO and flag when they diverge meaningfully.
+    # This is a HONEST WARNING that the grade may not reflect tonight's
+    # actual matchup quality:
+    #   ⚠️ reverse split    : today-side ISO is ≥60 pts BELOW overall
+    #                          (grade likely overstated — fade)
+    #   💪 favored split    : today-side ISO is ≥60 pts ABOVE overall
+    #                          (grade likely understated — back)
+    # 60-pt ISO threshold = 1 std-dev of typical platoon splits (~50-70 pts).
+    # Requires ≥30 PA on the relevant side to avoid noise.
+    def _handedness_divergence(row):
+        if not p_throws_raw or p_throws_raw not in ("L", "R"):
+            return ""
+        split_key = "lhp" if p_throws_raw == "L" else "rhp"
+        # Skip switch hitters — vs_lhp/vs_rhp data already reflects which
+        # side they batted, so any divergence here is meaningful as-is.
+        # (Their grade is already side-correct via the HR rate split.)
+        season_iso = row.get("iso")
+        split_iso = row.get(f"vs_{split_key}_iso")
+        split_pa = row.get(f"vs_{split_key}_pa")
+        if (season_iso is None or pd.isna(season_iso)
+            or split_iso is None or pd.isna(split_iso)
+            or split_pa is None or pd.isna(split_pa)):
+            return ""
+        try:
+            season_iso_f = float(season_iso)
+            split_iso_f = float(split_iso)
+            split_pa_f = float(split_pa)
+        except (TypeError, ValueError):
+            return ""
+        if split_pa_f < 30:
+            return ""  # too noisy to trust the divergence
+        diff = split_iso_f - season_iso_f
+        if diff <= -0.060:
+            return f"⚠️ reverse split ({split_iso_f:.3f} vs {season_iso_f:.3f})"
+        if diff >= 0.060:
+            return f"💪 favored split ({split_iso_f:.3f} vs {season_iso_f:.3f})"
+        return ""
+    df["handedness_divergence"] = df.apply(_handedness_divergence, axis=1)
+
     display_cols = [
         "player_id", "player_name", "lineup_pos", "position", "bats",
         "is_roster_fill",  # CRITICAL: flag for whether lineup_pos is real or fill
@@ -704,6 +753,7 @@ def build_matchup_table(
         "zone_fit_flag",  # 💣/🎯/🛡️ Savant heart/shadow/chase/waste tier fit (v43, experimental)
         "pitcher_zone_pct",  # surfaced for the plate_discipline flag context
         "split_confidence",  # ⚠️ thin split / 📊 small split (caution flag)
+        "handedness_divergence",  # v43.4: ⚠️/💪 ISO divergence vs overall (grade caveat)
         # Composites (matching screenshot order)
         "matchup", "test_score", "ceiling", "zone_fit",
         "hr_form", "hr_form_label", "hr_form_arrow", "kHR",
@@ -741,11 +791,13 @@ def build_matchup_table(
         # whitelist or they get dropped before reaching hr_prob_per_pa().
         # Was the silent bug that prevented the entire hitter-split system
         # added in v20 from ever actually firing on projections.
+        # v43.11: vs_X_hr (raw count) added alongside rate so users can see
+        # "12 HRs in 280 vs-RHP PA" not just "4.3% HR rate."
         "vs_lhp_pa", "vs_lhp_avg", "vs_lhp_obp", "vs_lhp_slg",
-        "vs_lhp_iso", "vs_lhp_ops", "vs_lhp_hr_per_pa",
+        "vs_lhp_iso", "vs_lhp_ops", "vs_lhp_hr", "vs_lhp_hr_per_pa",
         "vs_lhp_k_percent", "vs_lhp_bb_percent",
         "vs_rhp_pa", "vs_rhp_avg", "vs_rhp_obp", "vs_rhp_slg",
-        "vs_rhp_iso", "vs_rhp_ops", "vs_rhp_hr_per_pa",
+        "vs_rhp_iso", "vs_rhp_ops", "vs_rhp_hr", "vs_rhp_hr_per_pa",
         "vs_rhp_k_percent", "vs_rhp_bb_percent",
         # HR PROFILE — avg HR distance + max exit velo (June 2026)
         "avg_hr_distance", "max_hit_speed",
