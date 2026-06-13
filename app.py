@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.10-grade-everyone-confidence-tier"
+APP_VERSION = "2026.06.10-v43.11-handedness-hr-counts-visible"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -4169,7 +4169,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.10 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.11 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status}"
@@ -5957,6 +5957,19 @@ if all_hitters_for_picks:
             combined_picks["opp_pitcher_grade"] = combined_picks["opp_pitcher"].map(_grade_map)
             combined_picks["opp_pitcher_hr9"] = combined_picks["opp_pitcher"].map(_hr9_map)
             combined_picks["opp_pitcher_barrel_allowed"] = combined_picks["opp_pitcher"].map(_barrel_a_map)
+
+            # v43.11: map pitcher's vs-LHB / vs-RHB HR DATA onto hitter rows.
+            # Lets the Pick Audit show "Pitcher vs RHB: 195 PA, 8 HR allowed"
+            # alongside the hitter's split. The user can finally see BOTH
+            # sides of the handedness matchup in one place.
+            for side in ("lhb", "rhb"):
+                for stat in ("pa", "hr", "hr_per_pa"):
+                    src = f"vs_{side}_{stat}"
+                    if src in p_slate.columns:
+                        _m = p_slate.set_index("pitcher_name")[src].to_dict()
+                        combined_picks[f"opp_pitcher_vs_{side}_{stat}"] = (
+                            combined_picks["opp_pitcher"].map(_m)
+                        )
             if "platoon_hr_flag" in p_slate.columns:
                 _platoon_map = p_slate.set_index("pitcher_name")["platoon_hr_flag"].to_dict()
                 combined_picks["opp_platoon_hr"] = combined_picks["opp_pitcher"].map(_platoon_map)
@@ -6631,19 +6644,58 @@ if all_hitters_for_picks:
                         platoon_str = f"{bats}HB vs {opp_p_throws}HP (opposite-side, favorable)"
 
                 # Handedness sample (the critical signal for "is this real?")
+                # v43.11: now shows raw HR count alongside rate so you can see
+                # "12 HRs in 280 PA" vs "1 HR in 33 PA" — same rate, very
+                # different reliability.
                 _sample_str = ""
                 if opp_p_throws == "L":
                     pa_v = pick_row.get("vs_lhp_pa")
                     hr_rate = pick_row.get("vs_lhp_hr_per_pa")
+                    hr_n = pick_row.get("vs_lhp_hr")
                     if pa_v is not None and not pd.isna(pa_v):
-                        rate_str = f", {hr_rate:.1f}% HR/PA" if (hr_rate is not None and not pd.isna(hr_rate)) else ""
-                        _sample_str = f"vs LHP: {int(pa_v)} PA{rate_str}"
+                        hr_part = ""
+                        if hr_n is not None and not pd.isna(hr_n):
+                            hr_part = f", {int(hr_n)} HR"
+                        rate_str = (
+                            f", {hr_rate:.1f}% HR/PA"
+                            if (hr_rate is not None and not pd.isna(hr_rate)) else ""
+                        )
+                        _sample_str = f"vs LHP: {int(pa_v)} PA{hr_part}{rate_str}"
                 elif opp_p_throws == "R":
                     pa_v = pick_row.get("vs_rhp_pa")
                     hr_rate = pick_row.get("vs_rhp_hr_per_pa")
+                    hr_n = pick_row.get("vs_rhp_hr")
                     if pa_v is not None and not pd.isna(pa_v):
-                        rate_str = f", {hr_rate:.1f}% HR/PA" if (hr_rate is not None and not pd.isna(hr_rate)) else ""
-                        _sample_str = f"vs RHP: {int(pa_v)} PA{rate_str}"
+                        hr_part = ""
+                        if hr_n is not None and not pd.isna(hr_n):
+                            hr_part = f", {int(hr_n)} HR"
+                        rate_str = (
+                            f", {hr_rate:.1f}% HR/PA"
+                            if (hr_rate is not None and not pd.isna(hr_rate)) else ""
+                        )
+                        _sample_str = f"vs RHP: {int(pa_v)} PA{hr_part}{rate_str}"
+
+                # Pitcher's handedness HRs allowed — same logic but flipped.
+                # v43.11: shows the FACING PITCHER's vs-batter-hand HR
+                # vulnerability so user sees "this pitcher gave up 8 HRs to
+                # RHB in 195 PA" right next to the hitter's split.
+                _pitcher_split_str = ""
+                if bats and bats != "S":
+                    p_side = "lhb" if bats == "L" else "rhb"
+                    p_pa = pick_row.get(f"opp_pitcher_vs_{p_side}_pa")
+                    p_hr = pick_row.get(f"opp_pitcher_vs_{p_side}_hr")
+                    p_rate = pick_row.get(f"opp_pitcher_vs_{p_side}_hr_per_pa")
+                    if p_pa is not None and not pd.isna(p_pa):
+                        hr_part = ""
+                        if p_hr is not None and not pd.isna(p_hr):
+                            hr_part = f", {int(p_hr)} HR allowed"
+                        rate_str = (
+                            f", {float(p_rate):.1f}% HR/PA"
+                            if (p_rate is not None and not pd.isna(p_rate)) else ""
+                        )
+                        _pitcher_split_str = (
+                            f"Pitcher vs {bats}HB: {int(p_pa)} PA{hr_part}{rate_str}"
+                        )
 
                 # Compute component contributions (raw value × weight = points)
                 # then rank by absolute contribution
@@ -6733,7 +6785,9 @@ if all_hitters_for_picks:
                 if platoon_str:
                     st.markdown(f"**Platoon:** {platoon_str}")
                 if _sample_str:
-                    st.markdown(f"**Sample:** {_sample_str}")
+                    st.markdown(f"**Hitter sample:** {_sample_str}")
+                if _pitcher_split_str:
+                    st.markdown(f"**Pitcher allows:** {_pitcher_split_str}")
                 st.markdown(f"**Top drivers:** {top_block}")
                 st.markdown(f"**Bonuses/penalties:** {bonus_block}")
                 if dominance_flag:
@@ -8363,6 +8417,16 @@ if all_hitters:
             combined_all["opp_pitcher_grade"] = combined_all["opp_pitcher"].map(grade_map)
             combined_all["opp_pitcher_hr9"] = combined_all["opp_pitcher"].map(hr9_map)
             combined_all["opp_pitcher_barrel_allowed"] = combined_all["opp_pitcher"].map(barrel_a_map)
+            # v43.11: pitcher's vs-LHB / vs-RHB HR data — for Hitters export.
+            # Same name-based mapping pattern that handles renamed pitchers etc.
+            for side in ("lhb", "rhb"):
+                for stat in ("pa", "hr", "hr_per_pa"):
+                    src = f"vs_{side}_{stat}"
+                    if src in p_slate.columns:
+                        _m = p_slate.set_index("pitcher_name")[src].to_dict()
+                        combined_all[f"opp_pitcher_vs_{side}_{stat}"] = (
+                            combined_all["opp_pitcher"].map(_m)
+                        )
             # NEW: surface pitcher platoon HR vulnerability and recent HR streak
             # on each hitter row so it's visible in the matchup table.
             if "platoon_hr_flag" in p_slate.columns:
