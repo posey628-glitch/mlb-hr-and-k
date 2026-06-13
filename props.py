@@ -39,12 +39,19 @@ def hr_prob_per_pa(
     pitch_match_score: float | None = None,
     ttop_mult: float = 1.0,
     defense_factor: float = 1.0,
-    min_pa: int = 100,
+    min_pa: int = 25,  # v43.10: lowered from 100 — give call-ups, returning players a projection
     bullpen_hr9: float | None = None,  # v37+ bullpen leverage adjustment
 ) -> float | None:
     """
     Returns P(HR | single PA today) using ONLY real data.
     Returns None if hitter has insufficient sample (< min_pa) or no real data.
+
+    v43.10: Lowered min_pa default from 100 to 25. Bayesian shrinkage with
+    50 PA prior already keeps small-sample projections sensible — a hitter
+    with 30 PA and 2 HRs gets a shrunk rate of ~4.4%, not the raw 6.7%.
+    Hiding them entirely (returning None) was worse than showing a shrunk
+    projection with a confidence indicator. The confidence_tier flag added
+    to hitter rows in app.py tells the user how much to trust each grade.
     """
     pa = hitter_row.get("pa") if hitter_row else None
     hr = hitter_row.get("home_run") if hitter_row else None
