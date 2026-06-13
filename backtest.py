@@ -905,7 +905,8 @@ def _rolling_aggregate_uncached(snapshot_dates_key: str, max_days: int) -> dict:
         snapshot_dates = sorted(available)[-max_days:]
 
     n_snapshots = 0
-    all_top10_rows = []
+    all_top10_rows = []           # legacy hr_game_pct top 10
+    all_top10_ps_rows = []        # v43.8: pick_score top 10 (the one we ship)
     all_brier = []
     per_day = []
 
@@ -926,14 +927,15 @@ def _rolling_aggregate_uncached(snapshot_dates_key: str, max_days: int) -> dict:
             "hitters_played": h_metrics.get("hitters_who_played", 0),
             "actual_hrs": h_metrics.get("total_actual_hrs", 0),
             "slate_hr_rate_pct": h_metrics.get("actual_hr_rate_pct", 0),
+            # Legacy metric (top 10 by raw hr_game_pct, no diversity)
             "top10_hit_rate_pct": h_metrics.get("top10_hr_hit_rate", 0),
+            # v43.8: pick_score top 10 hit rate (the ranking the app SHIPS).
+            # May be None for snapshots saved before v43.4 (no `game` field
+            # meant diversity cap silently never fired).
+            "top10_pick_score_hit_rate_pct": h_metrics.get("top10_pick_score_hit_rate"),
             "brier": h_metrics.get("brier_score"),
-            # v43.7: surface what version produced this snapshot so users
-            # can correctly compare "v42r got X% hit rate" vs "v43.5 got Y%".
-            # Older snapshots (pre-v43.7) will show None — that's accurate.
+            # v43.7: version + key calibration constant
             "app_version": snapshot.get("app_version"),
-            # Key calibration constant: env weight changed v42q→v42r (0.15→0.05).
-            # If this differs across days, the comparison isn't apples-to-apples.
             "ps_env_weight": (
                 snapshot.get("calibration_constants", {})
                         .get("ps_weights", {})
@@ -952,13 +954,31 @@ def _rolling_aggregate_uncached(snapshot_dates_key: str, max_days: int) -> dict:
                 "predicted_pct": entry.get("predicted_hr_pct"),
                 "homered": int(entry.get("homered", False)),
             })
+        # v43.8: also accumulate pick_score top 10 picks for the new headline
+        for entry in h_metrics.get("top10_pick_score_predictions", []) or []:
+            all_top10_ps_rows.append({
+                "date": sd,
+                "name": entry.get("name"),
+                "pick_score": entry.get("pick_score"),
+                "homered": int(entry.get("homered", False)),
+            })
 
     if n_snapshots == 0:
         return {"error": "No snapshots had matched actuals"}
 
+    # Legacy hr_game_pct top 10
     top10_total = len(all_top10_rows)
     top10_hr_count = sum(r["homered"] for r in all_top10_rows)
     top10_hr_rate = (top10_hr_count / top10_total * 100) if top10_total else 0
+
+    # v43.8: pick_score top 10 (the ranking we actually ship)
+    top10_ps_total = len(all_top10_ps_rows)
+    top10_ps_hr_count = sum(r["homered"] for r in all_top10_ps_rows)
+    top10_ps_hit_rate = (
+        (top10_ps_hr_count / top10_ps_total * 100) if top10_ps_total else 0
+    )
+    # Days where pick_score actually produced a top 10 (needs game field)
+    days_with_ps_data = len({r["date"] for r in all_top10_ps_rows})
 
     slate_rates = [d["slate_hr_rate_pct"] for d in per_day if d["slate_hr_rate_pct"]]
     avg_slate_rate = sum(slate_rates) / len(slate_rates) if slate_rates else 0
@@ -974,19 +994,62 @@ def _rolling_aggregate_uncached(snapshot_dates_key: str, max_days: int) -> dict:
             days_with_hit += 1
     any_hit_rate = (days_with_hit / days_total * 100) if days_total else 0
 
+    # v43.8: VERSION-DRIFT WARNING. If the aggregate spans multiple values of
+    # ps_env_weight (or multiple app_versions where the weight differs), the
+    # numbers blend two different models. Surface this explicitly so users
+    # know whether the aggregate is apples-to-apples or contains drift.
+    versions_seen = sorted(set(
+        d.get("app_version") for d in per_day if d.get("app_version")
+    ))
+    env_weights_seen = sorted(set(
+        d.get("ps_env_weight") for d in per_day
+        if d.get("ps_env_weight") is not None
+    ))
+    untagged_days = sum(1 for d in per_day if d.get("app_version") is None)
+    version_drift_warning = None
+    if len(env_weights_seen) > 1:
+        version_drift_warning = (
+            f"⚠️ AGGREGATE SPANS {len(env_weights_seen)} DIFFERENT ENV WEIGHTS "
+            f"({env_weights_seen}). The env reweight (v42q→v42r) changed "
+            f"how heavily park/weather drives ranking. Edge numbers across "
+            f"this boundary blend two different models. Filter to a single "
+            f"app_version for apples-to-apples comparison."
+        )
+    elif untagged_days > 0:
+        version_drift_warning = (
+            f"ℹ️ {untagged_days} of {len(per_day)} days are from pre-v43.7 "
+            f"snapshots (no version tag). Can't verify calibration consistency "
+            f"for those days."
+        )
+
     return {
         "n_snapshots": n_snapshots,
         "snapshot_dates": sorted([d["date"] for d in per_day]),
+        # Legacy fields (kept for backward-compat with banner / tweets)
         "top10_picks_total": top10_total,
         "top10_hrs_hit": top10_hr_count,
         "top10_hr_rate_pct": round(top10_hr_rate, 1),
+        # v43.8: pick_score fields (the metric we should be tuning against)
+        "top10_pick_score_picks_total": top10_ps_total,
+        "top10_pick_score_hrs_hit": top10_ps_hr_count,
+        "top10_pick_score_hit_rate_pct": round(top10_ps_hit_rate, 1) if top10_ps_total else None,
+        "days_with_pick_score_data": days_with_ps_data,
         "slate_baseline_hr_rate_pct": round(avg_slate_rate, 1),
-        "edge_vs_slate_pp": round(top10_hr_rate - avg_slate_rate, 1),
+        # Edges for BOTH metrics — let user compare which ranking is better
+        "edge_vs_slate_pp": round(top10_hr_rate - avg_slate_rate, 1),  # legacy
+        "edge_vs_slate_pp_pick_score": (
+            round(top10_ps_hit_rate - avg_slate_rate, 1) if top10_ps_total else None
+        ),
         "days_with_any_top10_hit": days_with_hit,
         "days_total": days_total,
         "any_hit_rate_pct": round(any_hit_rate, 1),
         "brier_mean": round(sum(all_brier) / len(all_brier), 4) if all_brier else None,
         "per_day_summary": per_day,
+        # v43.8: surface version state for the banner
+        "versions_seen": versions_seen,
+        "env_weights_seen": env_weights_seen,
+        "untagged_days": untagged_days,
+        "version_drift_warning": version_drift_warning,
     }
 
 
