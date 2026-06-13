@@ -25,7 +25,47 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.7-snapshot-version-tagging"
+APP_VERSION = "2026.06.10-v43.8-pickscore-headline-single-source-truth"
+
+# v43.8 (reviewer-validated): single source of truth for pick_score component
+# weights. Previously these were literal dicts in three places (the scoring
+# loop in `compute_pick_score`, the Pick Audit expander, and the snapshot
+# calibration_constants). Drift between them = snapshot tags lying about
+# what produced the scores. Now read from PICK_SCORE_WEIGHTS everywhere.
+# Mutate ONLY here; do not duplicate.
+#
+# History of changes:
+#   v42q: env weight 0.15 (caused env quadruple-count problem)
+#   v42r: env weight 0.05 (current — reviewer-validated structural fix)
+PICK_SCORE_WEIGHTS = {
+    "ps_hr_game":     0.25,
+    "ps_matchup_opp": 0.15,
+    "ps_power":       0.15,
+    "ps_pitch_hr":    0.10,
+    "ps_form":        0.12,
+    "ps_sleeper":     0.05,
+    "ps_lift":        0.06,
+    "ps_env":         0.05,  # v42r — reduced from 0.15
+}
+
+# Other key calibration constants — same SOT principle.
+LEAGUE_HR_PER_PA = 0.030       # Matches props.LEAGUE_HR_PER_PA
+CTX_MULT_CAP = [0.65, 1.35]    # Matches props.hr_prob_per_pa
+SPLIT_PRIOR_PA = 150           # Bayesian shrinkage anchor for handedness splits
+
+
+def _calibration_snapshot() -> dict:
+    """Return the current calibration constants in the shape that
+    save_snapshot expects. Single point of truth — both save call sites
+    use this so the snapshot can never lie about what produced the scores.
+    """
+    return {
+        "league_hr_per_pa": LEAGUE_HR_PER_PA,
+        "ps_weights": dict(PICK_SCORE_WEIGHTS),
+        "ctx_mult_cap": list(CTX_MULT_CAP),
+        "split_prior_pa": SPLIT_PRIOR_PA,
+    }
+
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -2317,16 +2357,43 @@ _eval_metrics = st.session_state.get("_auto_eval_metrics")
 _eval_date = st.session_state.get("_auto_eval_date")
 _eval_error = st.session_state.get("_auto_eval_error")
 if _eval_metrics and _eval_date:
-    _hit_rate = _eval_metrics.get("top10_hr_hit_rate", 0)
+    # v43.8: banner now leads with pick_score (the ranking the app actually
+    # ships) as primary, with hr_game_pct kept as the legacy comparison.
+    # For older snapshots (pre-v43.4 — no `game` field, so diversity cap
+    # silently degraded), top10_pick_score_hit_rate may be missing → fall
+    # back to the legacy metric and label honestly.
+    _ps_hit = _eval_metrics.get("top10_pick_score_hit_rate")
+    _ps_preds = _eval_metrics.get("top10_pick_score_predictions") or []
+    _legacy_hit = _eval_metrics.get("top10_hr_hit_rate", 0)
+    _legacy_preds = _eval_metrics.get("top10_hr_predictions") or []
+
+    # Primary metric: pick_score if available; else legacy with clear label.
+    if _ps_hit is not None:
+        _hit_rate = float(_ps_hit)
+        _preds = _ps_preds
+        _primary_label = "pick_score top 10"
+        _legacy_compare_str = (
+            f" · legacy hr_game_pct top 10: {_legacy_hit:.0f}%"
+            if _legacy_hit else ""
+        )
+    else:
+        # Pre-v43.4 snapshot — pick_score validation wasn't yet wired
+        _hit_rate = _legacy_hit
+        _preds = _legacy_preds
+        _primary_label = "legacy hr_game_pct top 10 (pre-v43.4 snapshot)"
+        _legacy_compare_str = ""
+
     _slate_rate = _eval_metrics.get("actual_hr_rate_pct", 0)
     _edge = _hit_rate - _slate_rate
     _actual_hrs = _eval_metrics.get("total_actual_hrs", 0)
-    _top10_hits = _eval_metrics.get("top10_hrs_hit", 0)
+    _top10_hits = int(round(_hit_rate / 10)) if _hit_rate else 0  # approx — actual count not in metrics dict directly
+    # Better: pull actual count from preds list
+    _top10_hits = sum(1 for p in _preds if p.get("homered"))
     edge_color = "🟢" if _edge >= 5 else "🟡" if _edge >= 0 else "🔴"
     with st.expander(
         f"{edge_color} **Yesterday's results ({_eval_date})** — "
-        f"Top 10 hit {_top10_hits}/10 ({_hit_rate:.0f}%) vs slate {_slate_rate:.1f}% "
-        f"(edge {_edge:+.1f}pp)",
+        f"{_primary_label}: {_top10_hits}/{len(_preds) or 10} ({_hit_rate:.0f}%) "
+        f"vs slate {_slate_rate:.1f}% (edge {_edge:+.1f}pp){_legacy_compare_str}",
         expanded=False,
     ):
         st.caption(
@@ -2334,13 +2401,47 @@ if _eval_metrics and _eval_date:
             f"{_eval_metrics.get('hitters_who_played', 0)} hitters. "
             f"Brier score: {_eval_metrics.get('brier_score', 0):.4f}"
         )
-        # Show each top 10 pick and whether they homered
-        _preds = _eval_metrics.get("top10_hr_predictions", [])
-        if _preds:
-            _pred_df = pd.DataFrame(_preds)
-            if "homered" in _pred_df.columns:
-                _pred_df["result"] = _pred_df["homered"].apply(lambda x: "💣 HR" if x else "—")
-            st.dataframe(_pred_df, hide_index=True, use_container_width=True)
+        # v43.8: when pick_score primary is available, also show legacy
+        # hr_game_pct list so you can SEE which picks differ between the
+        # two ranking methods. The reviewer was right: the +25.9pp edge
+        # we measured was hr_game_pct, not pick_score. This comparison
+        # lets us finally validate which ranking is better.
+        if _ps_hit is not None and _legacy_preds:
+            st.markdown(f"**pick_score top 10** ({_top10_hits}/{len(_ps_preds)} hit, {_hit_rate:.1f}%) — the ranking the app actually ships:")
+            _ps_df = pd.DataFrame(_ps_preds)
+            if "homered" in _ps_df.columns:
+                _ps_df["result"] = _ps_df["homered"].apply(lambda x: "💣 HR" if x else "—")
+            st.dataframe(_ps_df, hide_index=True, use_container_width=True)
+
+            _legacy_hits = sum(1 for p in _legacy_preds if p.get("homered"))
+            st.markdown(
+                f"**Legacy hr_game_pct top 10** ({_legacy_hits}/{len(_legacy_preds)} hit, "
+                f"{_legacy_hit:.1f}%) — for comparison, the metric we used to report:"
+            )
+            _l_df = pd.DataFrame(_legacy_preds)
+            if "homered" in _l_df.columns:
+                _l_df["result"] = _l_df["homered"].apply(lambda x: "💣 HR" if x else "—")
+            st.dataframe(_l_df, hide_index=True, use_container_width=True)
+
+            # Compute set difference so you can see who's exclusive to each list
+            _ps_names = {p.get("name") for p in _ps_preds}
+            _legacy_names = {p.get("name") for p in _legacy_preds}
+            only_ps = _ps_names - _legacy_names
+            only_legacy = _legacy_names - _ps_names
+            both = _ps_names & _legacy_names
+            st.caption(
+                f"**Overlap**: {len(both)} hitters in both lists · "
+                f"**Only pick_score**: {', '.join(sorted(only_ps)) if only_ps else 'none'} · "
+                f"**Only hr_game_pct**: {', '.join(sorted(only_legacy)) if only_legacy else 'none'}"
+            )
+        else:
+            # Either pre-v43.4 snapshot (no pick_score metric) or
+            # equivalent — just show what we have
+            if _preds:
+                _pred_df = pd.DataFrame(_preds)
+                if "homered" in _pred_df.columns:
+                    _pred_df["result"] = _pred_df["homered"].apply(lambda x: "💣 HR" if x else "—")
+                st.dataframe(_pred_df, hide_index=True, use_container_width=True)
 elif _eval_error:
     # Diagnostic banner so you can SEE why no recap appeared
     _err_code, _err_msg = _eval_error
@@ -2656,12 +2757,53 @@ if show_backtest:
                             delta=edge_label,
                             delta_color="normal" if edge > 0 else "inverse",
                             help=(
-                                "Top 10 HR rate MINUS slate baseline. Positive = "
-                                "model's picks are hitting at a meaningfully higher rate "
-                                "than random qualified hitters. The big number that "
-                                "tells you the model is or isn't working."
+                                "LEGACY metric: Top 10 by hr_game_pct vs slate baseline. "
+                                "This is the +25.9pp number we've historically reported. "
+                                "v43.8: now displayed alongside the pick_score edge (below) "
+                                "so you can compare which ranking is actually better."
                             ),
                         )
+
+                        # v43.8: SHIP THE PICK_SCORE METRIC ALONGSIDE LEGACY.
+                        # The whole point of v43.3+ was to start measuring the
+                        # ranking the app actually ships. Now we surface it.
+                        _ps_edge = agg.get("edge_vs_slate_pp_pick_score")
+                        _ps_hit = agg.get("top10_pick_score_hit_rate_pct")
+                        _ps_days = agg.get("days_with_pick_score_data", 0)
+                        if _ps_edge is not None and _ps_days > 0:
+                            st.markdown("**v43.8: pick_score edge — the ranking the app actually ships**")
+                            psc1, psc2, psc3 = st.columns(3)
+                            psc1.metric(
+                                "Pick_score top 10 hit rate",
+                                f"{_ps_hit}%",
+                                help="Top 10 by pick_score (with max-2-per-game diversity rule) — the ACTUAL ranking users see in the Top 10 Picks section. Compare this to the legacy hr_game_pct edge above.",
+                            )
+                            psc2.metric(
+                                "Pick_score edge vs slate",
+                                f"{_ps_edge:+.1f}pp",
+                                delta="above" if _ps_edge > 0 else "below",
+                                delta_color="normal" if _ps_edge > 0 else "inverse",
+                                help="If this is MEANINGFULLY higher than the legacy edge, pick_score's additional components (power, form, env, etc.) are adding signal. If it's LOWER, those components are adding noise and we should simplify back to hr_game_pct.",
+                            )
+                            psc3.metric(
+                                "Days with pick_score data",
+                                f"{_ps_days}",
+                                help="Snapshots with `game` field saved (v43.4+). Older snapshots don't have it so pick_score's diversity cap couldn't fire — those days are excluded from this edge.",
+                            )
+                        elif _ps_days == 0 and n > 0:
+                            st.info(
+                                "ℹ️ No snapshots yet have pick_score validation data — "
+                                "that requires the `game` field added in v43.4. New "
+                                "snapshots from v43.4+ will populate this. Until then, "
+                                "the legacy hr_game_pct edge is the only one available."
+                            )
+
+                        # v43.8: VERSION DRIFT WARNING. If aggregate spans
+                        # different ps_env_weight values (v42q→v42r was 0.15→0.05),
+                        # the headline number blends two different models.
+                        _drift = agg.get("version_drift_warning")
+                        if _drift:
+                            st.warning(_drift)
 
                         # "Days where at least one top 10 picked homered" — the
                         # Twitter-worthy headline number.
@@ -3991,7 +4133,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.7 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.8 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status}"
@@ -5788,39 +5930,51 @@ if all_hitters_for_picks:
         weights = []
         component_meta = []  # (output_col_name, raw_pct_series) for storage
 
+        # v43.8: weights now read from PICK_SCORE_WEIGHTS (single source of truth)
+        # rather than literal numbers — so the snapshot calibration_constants
+        # cannot drift from the actual weights used in scoring.
+        _PSW = PICK_SCORE_WEIGHTS
+
         # === Today's matchup (40%) ===
         if "hr_game_pct" in q.columns:
             _p = _pct(q["hr_game_pct"])
-            score_parts.append(_p); weights.append(0.25)
-            component_meta.append(("ps_hr_game", _p, 0.25))
+            _w = _PSW["ps_hr_game"]
+            score_parts.append(_p); weights.append(_w)
+            component_meta.append(("ps_hr_game", _p, _w))
         if "matchup_opp" in q.columns:
             _p = _pct(q["matchup_opp"])
-            score_parts.append(_p); weights.append(0.15)
-            component_meta.append(("ps_matchup_opp", _p, 0.15))
+            _w = _PSW["ps_matchup_opp"]
+            score_parts.append(_p); weights.append(_w)
+            component_meta.append(("ps_matchup_opp", _p, _w))
 
         # === Underlying power (25%) ===
         if "power_score" in q.columns:
             _p = _pct(q["power_score"])
-            score_parts.append(_p); weights.append(0.15)
-            component_meta.append(("ps_power", _p, 0.15))
+            _w = _PSW["ps_power"]
+            score_parts.append(_p); weights.append(_w)
+            component_meta.append(("ps_power", _p, _w))
         if "pitch_hr_score" in q.columns and q["pitch_hr_score"].notna().any():
             _p = _pct(q["pitch_hr_score"])
-            score_parts.append(_p); weights.append(0.10)
-            component_meta.append(("ps_pitch_hr", _p, 0.10))
+            _w = _PSW["ps_pitch_hr"]
+            score_parts.append(_p); weights.append(_w)
+            component_meta.append(("ps_pitch_hr", _p, _w))
 
         # === Recent form + sleeper lift (20%) ===
         if "hr_form" in q.columns:
             _p = _pct(q["hr_form"])
-            score_parts.append(_p); weights.append(0.12)
-            component_meta.append(("ps_form", _p, 0.12))
+            _w = _PSW["ps_form"]
+            score_parts.append(_p); weights.append(_w)
+            component_meta.append(("ps_form", _p, _w))
         if "sleeper_score" in q.columns and q["sleeper_score"].notna().any():
             _p = _pct(q["sleeper_score"])
-            score_parts.append(_p); weights.append(0.05)
-            component_meta.append(("ps_sleeper", _p, 0.05))
+            _w = _PSW["ps_sleeper"]
+            score_parts.append(_p); weights.append(_w)
+            component_meta.append(("ps_sleeper", _p, _w))
         if "lift_score" in q.columns and q["lift_score"].notna().any():
             _p = _pct(q["lift_score"])
-            score_parts.append(_p); weights.append(0.06)
-            component_meta.append(("ps_lift", _p, 0.06))
+            _w = _PSW["ps_lift"]
+            score_parts.append(_p); weights.append(_w)
+            component_meta.append(("ps_lift", _p, _w))
 
         # === Today's environment (5% — reduced from 15% in v42r) ===
         # v42r STRUCTURAL FIX (reviewer-validated): env appears in FOUR
@@ -5838,8 +5992,9 @@ if all_hitters_for_picks:
         # boost via the normalization step below (~10% each).
         if "env_boost" in q.columns:
             _p = _pct(q["env_boost"])
-            score_parts.append(_p); weights.append(0.05)
-            component_meta.append(("ps_env", _p, 0.05))
+            _w = _PSW["ps_env"]
+            score_parts.append(_p); weights.append(_w)
+            component_meta.append(("ps_env", _p, _w))
 
         if score_parts:
             total_w = sum(weights)
@@ -6346,18 +6501,10 @@ if all_hitters_for_picks:
                 "driven by one inflated component.'"
             )
 
-            # Component weights — must match the pick_score formula in models.py
-            # (used to compute % of score each component contributes)
-            _ps_weights = {
-                "ps_hr_game":      0.25,
-                "ps_matchup_opp":  0.15,
-                "ps_power":        0.15,
-                "ps_pitch_hr":     0.10,
-                "ps_form":         0.12,
-                "ps_sleeper":      0.05,
-                "ps_lift":         0.06,
-                "ps_env":          0.05,
-            }
+            # Component weights — read from PICK_SCORE_WEIGHTS (single source
+            # of truth). If you change pick_score weights, change them in ONE
+            # place at the top of app.py and audit + snapshots stay in sync.
+            _ps_weights = PICK_SCORE_WEIGHTS
             _ps_labels = {
                 "ps_hr_game":     "HR Game%",
                 "ps_matchup_opp": "Matchup",
@@ -8256,29 +8403,13 @@ if all_hitters:
         if (current_hour_key not in existing_snaps
                 and selected_date == datetime.now().date()
                 and combined_all is not None and len(combined_all) >= 100):
-            # v43.7: include version + key calibration constants so the
-            # rolling aggregator can correctly attribute metrics to model
-            # versions. Pick_score weights are the most critical — they
-            # changed materially in v42r (env 0.15 → 0.05).
-            _cal_consts = {
-                "league_hr_per_pa": 0.030,
-                "ps_weights": {
-                    "ps_hr_game":     0.25,
-                    "ps_matchup_opp": 0.15,
-                    "ps_power":       0.15,
-                    "ps_pitch_hr":    0.10,
-                    "ps_form":        0.12,
-                    "ps_sleeper":     0.05,
-                    "ps_lift":        0.06,
-                    "ps_env":         0.05,
-                },
-                "ctx_mult_cap": [0.65, 1.35],
-                "split_prior_pa": 150,
-            }
+            # v43.8: read calibration constants from single source of truth.
+            # The save can no longer drift from the scoring formula because
+            # both read the same module-level PICK_SCORE_WEIGHTS dict.
             ok = save_snapshot(
                 selected_date, combined_all, p_slate,
                 app_version=APP_VERSION,
-                calibration_constants=_cal_consts,
+                calibration_constants=_calibration_snapshot(),
             )
             if ok:
                 # Count how many hourly snapshots exist for today
@@ -8306,25 +8437,10 @@ if all_hitters:
         if st.button("💾 Save snapshot", help="Manually save current projections. v42: each save creates a new hourly snapshot — so save once before each game's lineups lock to capture lineup data accurately."):
             try:
                 from backtest import save_snapshot, durable_storage_configured, _snapshot_key_for_now
-                _cal_consts = {
-                    "league_hr_per_pa": 0.030,
-                    "ps_weights": {
-                        "ps_hr_game":     0.25,
-                        "ps_matchup_opp": 0.15,
-                        "ps_power":       0.15,
-                        "ps_pitch_hr":    0.10,
-                        "ps_form":        0.12,
-                        "ps_sleeper":     0.05,
-                        "ps_lift":        0.06,
-                        "ps_env":         0.05,
-                    },
-                    "ctx_mult_cap": [0.65, 1.35],
-                    "split_prior_pa": 150,
-                }
                 ok = save_snapshot(
                     selected_date, combined_all, p_slate,
                     app_version=APP_VERSION,
-                    calibration_constants=_cal_consts,
+                    calibration_constants=_calibration_snapshot(),
                 )
                 key = _snapshot_key_for_now(selected_date)
                 if ok:
