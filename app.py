@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.5-savant-handedness-statcast"
+APP_VERSION = "2026.06.10-v43.6-pick-audit-expander"
 
 # Core imports - make each one defensive so a single missing function
 # doesn't kill the whole app
@@ -3991,7 +3991,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.5 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.6 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status}"
@@ -6327,6 +6327,184 @@ if all_hitters_for_picks:
                 ),
             },
         )
+
+        # =====================================================================
+        # v43.6: PICK AUDIT EXPANDER — answers "why is this guy in the top 10?"
+        # ---------------------------------------------------------------------
+        # For each top 10 pick, surface the dominant pick_score components
+        # plus context (sample size, platoon side, opp pitcher quality, flags)
+        # so the user can immediately see WHAT is driving the ranking.
+        # Also flags "single-component dominance" — if any one component is
+        # >40% of the total score, that's a concentrated bet that may not be
+        # as robust as it looks.
+        # =====================================================================
+        with st.expander("🔍 Pick Audit — why is each pick ranked here?", expanded=False):
+            st.caption(
+                "For each top 10 pick: dominant pick_score components, sample "
+                "context, platoon side, and suspicion flags. Helps you tell "
+                "the difference between 'genuine strong pick' and 'rank "
+                "driven by one inflated component.'"
+            )
+
+            # Component weights — must match the pick_score formula in models.py
+            # (used to compute % of score each component contributes)
+            _ps_weights = {
+                "ps_hr_game":      0.25,
+                "ps_matchup_opp":  0.15,
+                "ps_power":        0.15,
+                "ps_pitch_hr":     0.10,
+                "ps_form":         0.12,
+                "ps_sleeper":      0.05,
+                "ps_lift":         0.06,
+                "ps_env":          0.05,
+            }
+            _ps_labels = {
+                "ps_hr_game":     "HR Game%",
+                "ps_matchup_opp": "Matchup",
+                "ps_power":       "Power",
+                "ps_pitch_hr":    "Pitch HR",
+                "ps_form":        "Form",
+                "ps_sleeper":     "Sleeper",
+                "ps_lift":        "Lift",
+                "ps_env":         "Env",
+            }
+
+            for _, pick_row in top10.iterrows():
+                rank = pick_row.get("rank", "?")
+                name = pick_row.get("player_name", "?")
+                team = pick_row.get("team", "?")
+                bats = (pick_row.get("bats") or "").upper()
+                opp_p = pick_row.get("opp_pitcher", "?")
+                opp_p_grade = pick_row.get("opp_pitcher_grade", "?")
+                opp_p_throws = (pick_row.get("opp_pitcher_throws") or "").upper()
+                pick_sc = pick_row.get("pick_score", 0)
+                hr_game = pick_row.get("hr_game_pct", 0)
+                env_b = pick_row.get("env_boost", 1.0)
+                game_str = pick_row.get("game", "?")
+
+                # Platoon analysis
+                platoon_str = ""
+                if bats and opp_p_throws:
+                    if bats == "S":
+                        effective = "L" if opp_p_throws == "R" else "R"
+                        platoon_str = f"S→{effective}HB vs {opp_p_throws}HP (favorable)"
+                    elif bats == opp_p_throws:
+                        platoon_str = f"{bats}HB vs {opp_p_throws}HP (same-side, disadvantaged)"
+                    else:
+                        platoon_str = f"{bats}HB vs {opp_p_throws}HP (opposite-side, favorable)"
+
+                # Handedness sample (the critical signal for "is this real?")
+                _sample_str = ""
+                if opp_p_throws == "L":
+                    pa_v = pick_row.get("vs_lhp_pa")
+                    hr_rate = pick_row.get("vs_lhp_hr_per_pa")
+                    if pa_v is not None and not pd.isna(pa_v):
+                        rate_str = f", {hr_rate:.1f}% HR/PA" if (hr_rate is not None and not pd.isna(hr_rate)) else ""
+                        _sample_str = f"vs LHP: {int(pa_v)} PA{rate_str}"
+                elif opp_p_throws == "R":
+                    pa_v = pick_row.get("vs_rhp_pa")
+                    hr_rate = pick_row.get("vs_rhp_hr_per_pa")
+                    if pa_v is not None and not pd.isna(pa_v):
+                        rate_str = f", {hr_rate:.1f}% HR/PA" if (hr_rate is not None and not pd.isna(hr_rate)) else ""
+                        _sample_str = f"vs RHP: {int(pa_v)} PA{rate_str}"
+
+                # Compute component contributions (raw value × weight = points)
+                # then rank by absolute contribution
+                contribs = []
+                for col, w in _ps_weights.items():
+                    val = pick_row.get(col)
+                    if val is None or pd.isna(val):
+                        continue
+                    pts = float(val) * w
+                    contribs.append((col, float(val), pts))
+                contribs.sort(key=lambda x: abs(x[2]), reverse=True)
+                top_contribs = contribs[:3]
+
+                # Bonuses/penalties (each row, not weighted further — already in pts)
+                bonuses = []
+                for col, lab in [
+                    ("ps_bonus_lineup",    "Lineup"),
+                    ("ps_bonus_platoon",   "Platoon"),
+                    ("ps_bonus_recent_hr", "Recent HR"),
+                    ("ps_penalty_il",      "IL penalty"),
+                ]:
+                    v = pick_row.get(col)
+                    if v is None or pd.isna(v):
+                        continue
+                    try:
+                        vf = float(v)
+                    except (TypeError, ValueError):
+                        continue
+                    if abs(vf) >= 0.5:  # only show meaningful bonuses
+                        sign = "+" if vf > 0 else ""
+                        bonuses.append(f"{lab} {sign}{vf:.1f}")
+
+                # Dominance check — flag if top component is >40% of total
+                dominance_flag = ""
+                total_pts = sum(abs(p) for _, _, p in contribs)
+                if total_pts > 0 and top_contribs:
+                    top_pct = abs(top_contribs[0][2]) / total_pts * 100
+                    if top_pct >= 40:
+                        dominance_flag = (
+                            f"⚠️ **{top_pct:.0f}% of score from {_ps_labels.get(top_contribs[0][0], top_contribs[0][0])}** "
+                            f"— rank is concentrated in one signal, less robust"
+                        )
+
+                # Other suspicion flags
+                suspicion = []
+                # Small handedness sample
+                if opp_p_throws == "L":
+                    pa_v = pick_row.get("vs_lhp_pa")
+                    if pa_v is not None and not pd.isna(pa_v) and float(pa_v) < 30:
+                        suspicion.append(f"⚠️ vs_lhp_pa only {int(pa_v)} — too noisy for handedness override (using season-overall power)")
+                elif opp_p_throws == "R":
+                    pa_v = pick_row.get("vs_rhp_pa")
+                    if pa_v is not None and not pd.isna(pa_v) and float(pa_v) < 30:
+                        suspicion.append(f"⚠️ vs_rhp_pa only {int(pa_v)} — too noisy for handedness override (using season-overall power)")
+                # Roster fill
+                if pick_row.get("is_roster_fill"):
+                    suspicion.append("⚠️ lineup not confirmed — projection assumes default lineup slot")
+                # Reverse split warning
+                _hand_div = pick_row.get("handedness_divergence", "")
+                if _hand_div and "reverse" in str(_hand_div).lower():
+                    suspicion.append(f"⚠️ {_hand_div} — grade may be OVERSTATED")
+                if _hand_div and "favored" in str(_hand_div).lower():
+                    suspicion.append(f"💪 {_hand_div} — grade may be UNDERSTATED")
+                # Heavy env tilt
+                if env_b is not None and not pd.isna(env_b):
+                    try:
+                        ebf = float(env_b)
+                        if ebf >= 1.20:
+                            suspicion.append(f"🌡️ env_boost {ebf:.2f}× — park/weather tilting heavily HR-favorable")
+                        elif ebf <= 0.85:
+                            suspicion.append(f"❄️ env_boost {ebf:.2f}× — park/weather suppressive (model still ranks high → power must be carrying it)")
+                    except (TypeError, ValueError):
+                        pass
+                # Tough pitcher
+                if str(opp_p_grade) in ("ELITE", "GOOD"):
+                    suspicion.append(f"🛡️ opp pitcher graded {opp_p_grade} — model is ranking despite tough matchup")
+
+                # Build the per-pick markdown
+                top_block = " · ".join(
+                    f"**{_ps_labels.get(col, col)}** {val:.1f} ({pts:+.2f}pts)"
+                    for col, val, pts in top_contribs
+                )
+                bonus_block = " · ".join(bonuses) if bonuses else "(none)"
+
+                st.markdown(f"### #{rank} {name} ({team}) — pick_score {pick_sc:.1f}, HR Game% {hr_game:.1f}%")
+                st.markdown(f"**Game:** {game_str} · **vs:** {opp_p} (grade {opp_p_grade})")
+                if platoon_str:
+                    st.markdown(f"**Platoon:** {platoon_str}")
+                if _sample_str:
+                    st.markdown(f"**Sample:** {_sample_str}")
+                st.markdown(f"**Top drivers:** {top_block}")
+                st.markdown(f"**Bonuses/penalties:** {bonus_block}")
+                if dominance_flag:
+                    st.markdown(dominance_flag)
+                for s in suspicion:
+                    st.markdown(s)
+                st.markdown("---")
+
         # Store for export
         top_picks_export = top10.copy()
         glance = " · ".join(
