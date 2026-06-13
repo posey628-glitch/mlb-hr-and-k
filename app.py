@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.9-smash-name-lookup-convergence-export"
+APP_VERSION = "2026.06.10-v43.10-grade-everyone-confidence-tier"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -909,8 +909,6 @@ def hr_grade(hr_game_pct, sample_size=None, pa_threshold=80,
       - Top 10% of plays: ~21%+ HR Game%
       - Top 25% of plays: ~17%+ HR Game%
       - Average MLB plate appearance pool: ~12% HR Game%
-    Old thresholds put ~30% of qualified hitters at A/A+. New thresholds
-    put ~10-15% there, restoring the "A+ is rare elite" signal.
 
     NEW CALIBRATION:
       A+ : ≥25%  (rare elite, top 3-5% of plays)
@@ -925,11 +923,22 @@ def hr_grade(hr_game_pct, sample_size=None, pa_threshold=80,
     SAME-SIDE PLATOON CAP (v38g): LvL and RvR matchups are inherently tougher
     than the projected HR% suggests. Cap same-side matchups one tier down:
     A+ → A, A → B+.
+
+    v43.10 (user-requested): the small-sample hide ("—" for any hitter below
+    pa_threshold) was removing call-ups, returning players, and platoon guys
+    from consideration entirely. Now we ALWAYS return a real letter grade.
+    The pa_confidence flag (computed separately and displayed next to grade)
+    surfaces sample uncertainty so users can decide how much to trust the
+    grade. Bayesian shrinkage in props.py keeps small-sample HR rates
+    sensible (50 PA prior → a 30-PA hitter's rate is heavily pulled toward
+    league mean).
     """
     if hr_game_pct is None or pd.isna(hr_game_pct):
         return "—"
-    if sample_size is None or pd.isna(sample_size) or sample_size < pa_threshold:
-        return "—"
+    # v43.10: removed the `sample_size < pa_threshold` short-circuit that
+    # used to return "—". Grade is now computed from the (shrunk) HR Game%
+    # for every hitter with valid data. Sample-size warning lives in the
+    # pa_confidence flag instead.
     if hr_game_pct >= 25:
         return "A" if same_side_platoon else "A+"
     if hr_game_pct >= 21:
@@ -945,6 +954,33 @@ def hr_grade(hr_game_pct, sample_size=None, pa_threshold=80,
     if hr_game_pct >= 4:
         return "D"
     return "F"
+
+
+def pa_confidence_tier(sample_size):
+    """v43.10: tiered confidence indicator for a hitter's season PA sample.
+
+    Displayed alongside the grade so users can see at a glance how reliable
+    the projection is. The grade itself is the same formula for everyone;
+    this tier surfaces uncertainty without hiding the data.
+
+    ✅ confident  : ≥150 PA — well-sampled, trust the grade as-is
+    📊 normal     : 75-149 PA — reasonable, slight noise
+    ⚠️ small      : 30-74 PA — caution, projection heavily weighted to league mean
+    ❓ very small : <30 PA   — mostly priors, treat as speculative
+    """
+    if sample_size is None or pd.isna(sample_size):
+        return "❓"
+    try:
+        pa = float(sample_size)
+    except (TypeError, ValueError):
+        return "❓"
+    if pa >= 150:
+        return "✅"
+    if pa >= 75:
+        return "📊"
+    if pa >= 30:
+        return "⚠️"
+    return "❓"
 
 
 def pitcher_signal_emoji(test_score, sample_size=None, pa_threshold=80):
@@ -4133,7 +4169,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.9 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.10 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status}"
@@ -5031,6 +5067,7 @@ for _, game in slate.iterrows():
                     pass
 
         hr_pa, hr_game, verdicts, signals, grades = [], [], [], [], []
+        pa_confidences = []  # v43.10: per-hitter sample-confidence tier
         smash_spots = []  # NEW: triple-threat HR opportunity flags
         pull_mults_col = []
         for _, hr in matchup_df.iterrows():
@@ -5182,6 +5219,9 @@ for _, game in slate.iterrows():
                 game_pct_val, sample, INSUFFICIENT_PA_THRESHOLD,
                 same_side_platoon=_same_side,
             ))
+            # v43.10: pa_confidence_tier surfaces sample-size uncertainty
+            # WITHOUT hiding the grade. ✅/📊/⚠️/❓ depending on PA count.
+            pa_confidences.append(pa_confidence_tier(sample))
 
             # SMASH SPOT calculation - the "all stars align" flag.
             # User's request: highlight when a batter has:
@@ -5260,6 +5300,7 @@ for _, game in slate.iterrows():
         matchup_df["verdict"] = verdicts
         matchup_df["alert"] = signals
         matchup_df["grade"] = grades
+        matchup_df["pa_confidence"] = pa_confidences  # v43.10
         matchup_df["smash_spot"] = smash_spots
         matchup_df["pull_wind_mult"] = pull_mults_col
 
