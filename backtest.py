@@ -263,7 +263,9 @@ def _snapshot_key_for_now(snapshot_date) -> str:
 
 def save_snapshot(snapshot_date, matchup_df: pd.DataFrame,
                     pitcher_slate_df: pd.DataFrame,
-                    snapshot_key: str | None = None) -> bool:
+                    snapshot_key: str | None = None,
+                    app_version: str | None = None,
+                    calibration_constants: dict | None = None) -> bool:
     """
     Persist a slim version of today's projections.
 
@@ -276,6 +278,12 @@ def save_snapshot(snapshot_date, matchup_df: pd.DataFrame,
     disk (fast read for current session). Returns True if EITHER succeeded.
     The Gist write is the one that matters for backtest persistence — local
     disk gets wiped on every Streamlit Cloud container restart.
+
+    v43.7 (data continuity fix): now stores app_version + calibration_constants
+    in each snapshot. Lets the rolling aggregator label metrics by version so
+    you can correctly say "v42r got 40% hit rate, v43.5 got 38%" instead of
+    blending all versions together. Without this tag, every model change
+    invalidates the cumulative comparison silently.
     """
     try:
         # v42: key by date + ET hour. Lets a 1pm and 7pm snapshot coexist.
@@ -298,6 +306,12 @@ def save_snapshot(snapshot_date, matchup_df: pd.DataFrame,
         if matchup_df is not None and not matchup_df.empty:
             keep_cols = [c for c in [
                 "player_id", "player_name", "team", "opp", "lineup_pos",
+                # v43.4: 'game' is REQUIRED for the v43.3 pick_score diversity
+                # validation to function. Without it, _diverse_top_n's max-2-
+                # per-game cap silently never fires (g is None for every row),
+                # which means the top10_pick_score metric was grading a list
+                # that could stack 4 hitters from one game — not what users see.
+                "game",
                 "is_roster_fill",  # v42: track which snapshots had real lineups
                 "power_score", "hr_game_pct", "hr_pa_pct",
                 "matchup", "sleeper_score", "barrel_pct", "iso",
@@ -323,6 +337,11 @@ def save_snapshot(snapshot_date, matchup_df: pd.DataFrame,
             "date": str(snapshot_date),
             "key": key,
             "saved_at": datetime.utcnow().isoformat(),
+            # v43.7: data continuity tags — lets the rolling aggregator
+            # label/filter by version. None for backward compat with
+            # snapshots saved before this field was added.
+            "app_version": app_version,
+            "calibration_constants": calibration_constants or {},
             "hitters": hitter_records,
             "pitchers": pitcher_records,
         }
@@ -909,6 +928,18 @@ def _rolling_aggregate_uncached(snapshot_dates_key: str, max_days: int) -> dict:
             "slate_hr_rate_pct": h_metrics.get("actual_hr_rate_pct", 0),
             "top10_hit_rate_pct": h_metrics.get("top10_hr_hit_rate", 0),
             "brier": h_metrics.get("brier_score"),
+            # v43.7: surface what version produced this snapshot so users
+            # can correctly compare "v42r got X% hit rate" vs "v43.5 got Y%".
+            # Older snapshots (pre-v43.7) will show None — that's accurate.
+            "app_version": snapshot.get("app_version"),
+            # Key calibration constant: env weight changed v42q→v42r (0.15→0.05).
+            # If this differs across days, the comparison isn't apples-to-apples.
+            "ps_env_weight": (
+                snapshot.get("calibration_constants", {})
+                        .get("ps_weights", {})
+                        .get("ps_env")
+                if snapshot.get("calibration_constants") else None
+            ),
         }
         per_day.append(day_summary)
         if h_metrics.get("brier_score") is not None:
