@@ -890,7 +890,13 @@ def add_power_score(
     # found to be noisier than expected (0.257) and trimmed 0.05→0.03. LA
     # re-added at small 0.02 (noisy but non-zero signal).
     #
-    # Total weights sum to exactly 1.00.
+    # Specs total weights sum to 0.98 (LA is added separately at 0.04 via
+    # compute_row, bringing the conceptual total to 1.02). Output is
+    # normalized by total_weight at the end, so the absolute sum doesn't
+    # affect scores — the RELATIVE weights are what matter. Earlier comment
+    # claimed "sum to exactly 1.00" which was inaccurate (reviewer-flagged
+    # v43.15). LA effectively carries slightly more relative weight than
+    # the bare 0.04 number suggests; budget that when hand-tuning.
     # v42d: ROLLED BACK pull_air_pct weighting. User's data coverage audit
     # showed pull_air_percent is 0% populated from Savant's leaderboard
     # endpoint — so the 5% weight slot we added in v42b was silently doing
