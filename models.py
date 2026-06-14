@@ -283,6 +283,32 @@ def build_matchup_table(
             to_drop = [c for c in la_present if c != best_col]
             df = df.drop(columns=to_drop)
 
+    # v43.14 (reviewer-validated, latent risk fix): same coalesce for avg_ev.
+    # Three source columns (`avg_best_speed`, `exit_velocity_avg`,
+    # `launch_speed`) map to `avg_ev` in the rename. After the rename, three
+    # columns share that name; the `~columns.duplicated()` dedupe at line ~312
+    # keeps the FIRST one — which could be the least-populated. `la` got the
+    # explicit pre-coalesce above; `avg_ev` was relying on column ordering
+    # luck. Apply the same pattern so the winner is data-driven, not
+    # order-driven. Not biting today (avg_ev coverage 88%, matches la), but
+    # latent — the day Savant changes column order we'd silently lose 87%
+    # of our exit-velo data.
+    ev_candidates = ["avg_best_speed", "exit_velocity_avg", "launch_speed",
+                       "avg_ev"]
+    ev_present = [c for c in ev_candidates if c in df.columns]
+    if len(ev_present) > 1:
+        best_col = None
+        best_count = -1
+        for c in ev_present:
+            coerced = pd.to_numeric(df[c], errors="coerce")
+            n = int(coerced.notna().sum())
+            if n > best_count:
+                best_count = n
+                best_col = c
+        if best_col is not None:
+            to_drop = [c for c in ev_present if c != best_col]
+            df = df.drop(columns=to_drop)
+
     rename = {
         "barrel_batted_rate": "barrel_pct",
         "hard_hit_percent": "hard_hit",
