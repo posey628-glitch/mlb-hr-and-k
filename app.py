@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.13-smash-tbd-nameerror-sutter"
+APP_VERSION = "2026.06.10-v43.14-bvp-history-deferred-cleanup"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -4169,7 +4169,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.13 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.14 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status}"
@@ -5320,6 +5320,55 @@ for _, game in slate.iterrows():
             except Exception:
                 smash_label = ""
             smash_spots.append(smash_label)
+
+        # v43.14: BATTER vs PITCHER (BvP) history.
+        # Honest analytics caveat: research finds BvP has weak predictive
+        # power vs sample-size noise. We surface it for transparency and
+        # apply a small (±5 pt cap) adjustment as a tiebreaker, not a
+        # driver. Only fires at ≥20 PA — below that, treated as no info.
+        bvp_points = []
+        bvp_flags = []
+        bvp_pa_list = []
+        bvp_hr_list = []
+        bvp_ab_list = []
+        try:
+            from data_fetcher import get_bvp_for_matchup, bvp_score_adjustment
+            opp_pid_for_bvp = (
+                opp_p_row.get("player_id") if opp_p_row else None
+            )
+            for _, row in matchup_df.iterrows():
+                bid = row.get("player_id")
+                if (bid is None or pd.isna(bid)
+                    or opp_pid_for_bvp is None or pd.isna(opp_pid_for_bvp)):
+                    bvp_points.append(0.0)
+                    bvp_flags.append("")
+                    bvp_pa_list.append(None)
+                    bvp_hr_list.append(None)
+                    bvp_ab_list.append(None)
+                    continue
+                try:
+                    bvp = get_bvp_for_matchup(int(bid), int(opp_pid_for_bvp))
+                except Exception:
+                    bvp = {}
+                pts, flag = bvp_score_adjustment(bvp)
+                bvp_points.append(pts)
+                bvp_flags.append(flag)
+                bvp_pa_list.append(bvp.get("bvp_pa"))
+                bvp_hr_list.append(bvp.get("bvp_hr"))
+                bvp_ab_list.append(bvp.get("bvp_ab"))
+        except Exception:
+            # If anything fails, leave BvP columns empty — model still works
+            bvp_points = [0.0] * len(matchup_df)
+            bvp_flags = [""] * len(matchup_df)
+            bvp_pa_list = [None] * len(matchup_df)
+            bvp_hr_list = [None] * len(matchup_df)
+            bvp_ab_list = [None] * len(matchup_df)
+
+        matchup_df["bvp_adjust"] = bvp_points
+        matchup_df["bvp_flag"] = bvp_flags
+        matchup_df["bvp_pa"] = bvp_pa_list
+        matchup_df["bvp_hr"] = bvp_hr_list
+        matchup_df["bvp_ab"] = bvp_ab_list
         matchup_df["hr_pa_pct"] = hr_pa
         matchup_df["hr_game_pct"] = hr_game
         matchup_df["verdict"] = verdicts
@@ -6178,6 +6227,20 @@ if all_hitters_for_picks:
             else:
                 q["ps_penalty_il"] = 0.0
 
+            # v43.14: BvP ADJUSTMENT — small tiebreaker, never a driver.
+            # Capped at ±5 in data_fetcher.bvp_score_adjustment. Only fires
+            # at PA ≥ 20. See analytics caveat in data_fetcher.py — BvP has
+            # weak predictive power but appears here as a transparency
+            # signal and light tiebreaker between similar grades. The
+            # ps_bvp column lets the Pick Audit show users exactly how
+            # much (if any) BvP moved the ranking.
+            if "bvp_adjust" in q.columns:
+                bvp_adj = pd.to_numeric(q["bvp_adjust"], errors="coerce").fillna(0.0)
+                q["pick_score"] = q["pick_score"] + bvp_adj
+                q["ps_bvp"] = bvp_adj
+            else:
+                q["ps_bvp"] = 0.0
+
             q["pick_score"] = q["pick_score"].round(1)
         else:
             q["pick_score"] = q.get("hr_game_pct", 0)
@@ -6186,7 +6249,7 @@ if all_hitters_for_picks:
                               "ps_pitch_hr", "ps_form", "ps_sleeper",
                               "ps_lift", "ps_env", "ps_bonus_lineup",
                               "ps_bonus_platoon", "ps_bonus_recent_hr",
-                              "ps_penalty_il"):
+                              "ps_penalty_il", "ps_bvp"):
                 q[col_name] = 0.0
 
         # Stash per-player audit so combined_all (Hitters export) carries it.
@@ -6195,7 +6258,7 @@ if all_hitters_for_picks:
             "ps_hr_game", "ps_matchup_opp", "ps_power", "ps_pitch_hr",
             "ps_form", "ps_sleeper", "ps_lift", "ps_env",
             "ps_bonus_lineup", "ps_bonus_platoon", "ps_bonus_recent_hr",
-            "ps_penalty_il",
+            "ps_penalty_il", "ps_bvp",  # v43.14: BvP adjustment column
         ) if c in q.columns]
         if "player_id" in q.columns:
             pick_audit = q[_ps_cols].drop_duplicates(subset="player_id", keep="first").copy()
@@ -6741,6 +6804,7 @@ if all_hitters_for_picks:
                     ("ps_bonus_platoon",   "Platoon"),
                     ("ps_bonus_recent_hr", "Recent HR"),
                     ("ps_penalty_il",      "IL penalty"),
+                    ("ps_bvp",             "BvP"),   # v43.14
                 ]:
                     v = pick_row.get(col)
                     if v is None or pd.isna(v):
@@ -6813,6 +6877,23 @@ if all_hitters_for_picks:
                     st.markdown(f"**Hitter sample:** {_sample_str}")
                 if _pitcher_split_str:
                     st.markdown(f"**Pitcher allows:** {_pitcher_split_str}")
+
+                # v43.14: BvP history (light-weight tiebreaker signal)
+                _bvp_flag = pick_row.get("bvp_flag", "") or ""
+                _bvp_pa = pick_row.get("bvp_pa")
+                _bvp_hr = pick_row.get("bvp_hr")
+                _bvp_ab = pick_row.get("bvp_ab")
+                if _bvp_flag:
+                    st.markdown(f"**Career BvP:** {_bvp_flag}")
+                elif _bvp_pa is not None and not pd.isna(_bvp_pa) and float(_bvp_pa) > 0:
+                    # We have BvP data but it's below the 20-PA threshold for
+                    # a scoring adjustment. Still show it — user wants to see.
+                    h_str = f"{int(_bvp_ab) if _bvp_ab else 0} AB" if _bvp_ab else ""
+                    hr_str = f", {int(_bvp_hr)} HR" if _bvp_hr is not None and not pd.isna(_bvp_hr) else ""
+                    st.markdown(
+                        f"**Career BvP:** {int(_bvp_pa)} PA "
+                        f"({h_str}{hr_str}) — small sample, no scoring effect"
+                    )
                 st.markdown(f"**Top drivers:** {top_block}")
                 st.markdown(f"**Bonuses/penalties:** {bonus_block}")
                 if dominance_flag:
@@ -7044,16 +7125,18 @@ if all_hitters_for_picks:
                 picks_block = "\n".join(pick_lines)
 
                 if tweet_format == "Top 5 + Smash Spots":
-                    # v43.4 (reviewer-validated bug): the Top 10 Picks section
-                    # renders BEFORE the Top Sleepers section where combined_all
-                    # is built (line ~7333). So combined_all is None here and
-                    # smash_names was silently always empty. Fix is to fall
-                    # back to scanning the per-game matchup frames already
-                    # built earlier, which DO have smash_spot if it was set
-                    # during that game's enrichment loop.
+                    # v43.14 (reviewer-validated, REAL fix for smash tweet):
+                    # Previous v43.4 made the failure honest but still produced
+                    # an empty line because combined_all doesn't exist at
+                    # this point in the render (it's built ~700 lines later).
+                    # The fix: read smash_spot from game_context_map's
+                    # per-game matchup frames, which ARE populated by now
+                    # (the games loop ran before this UI renders).
                     smash_names = []
                     try:
                         if combined_all is not None and "smash_spot" in combined_all.columns:
+                            # Best case — combined_all already built (rare at
+                            # this point but possible on re-render)
                             smashers = combined_all[
                                 combined_all["smash_spot"].fillna("").str.contains(
                                     "SMASH", na=False
@@ -7061,12 +7144,37 @@ if all_hitters_for_picks:
                             ]
                             smash_names = smashers["player_name"].head(6).tolist()
                         else:
-                            # Fallback: scan per-game matchup frames if they
-                            # were collected into a session-state list during
-                            # the games loop. Currently no such list exists,
-                            # so we surface the limitation honestly rather
-                            # than silently produce an empty smash line.
-                            pass
+                            # Fall back to game_context_map. matchup_df frames
+                            # are populated during the games loop (which has
+                            # already run), so smash_spot is computed and
+                            # available here.
+                            seen = set()
+                            scored_smashers = []
+                            for _gpk, _ctx in game_context_map.items():
+                                for _side in ("away_matchup", "home_matchup"):
+                                    _m = _ctx.get(_side)
+                                    if _m is None or _m.empty:
+                                        continue
+                                    if "smash_spot" not in _m.columns:
+                                        continue
+                                    _smash_rows = _m[
+                                        _m["smash_spot"].fillna("").str.contains(
+                                            "SMASH", na=False
+                                        )
+                                    ]
+                                    for _, _r in _smash_rows.iterrows():
+                                        _nm = _r.get("player_name")
+                                        if _nm and _nm not in seen:
+                                            seen.add(_nm)
+                                            # Score by smash tier so ELITE
+                                            # shows first
+                                            _label = str(_r.get("smash_spot") or "")
+                                            _tier = 3 if "ELITE" in _label else (
+                                                2 if "STRONG" in _label else 1
+                                            )
+                                            scored_smashers.append((_tier, _nm))
+                            scored_smashers.sort(key=lambda x: -x[0])
+                            smash_names = [nm for _, nm in scored_smashers[:6]]
                     except Exception:
                         pass
                     smash_line = ""
