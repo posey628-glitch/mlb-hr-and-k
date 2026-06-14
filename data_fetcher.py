@@ -595,6 +595,165 @@ def apply_handedness_overrides(matchup_df: pd.DataFrame,
 
 
 # ----------------------------------------------------------------------------
+# Batter vs Pitcher (BvP) history — v43.14
+# ----------------------------------------------------------------------------
+# IMPORTANT — honest analytics context: published research (FanGraphs,
+# Baseball Prospectus, etc.) consistently finds that career BvP has very
+# weak predictive power once you control for handedness, pitcher skill,
+# and park. The sample sizes are tiny (typical max ~30-50 PA across
+# multiple years, often <15 PA) and the noise dominates any signal.
+#
+# That said, BvP IS contextually interesting and worth surfacing:
+#   - Tiebreaker between similar grades
+#   - Display value (most user-facing tools show it)
+#   - Strong tails (4-for-8 with 3 HR) DO have weak predictive lift
+#
+# Our approach:
+#   1. Fetch via MLB Stats API's vsPlayer split endpoint
+#   2. Display raw counts (PA, HR, AB, hits) — let the user judge
+#   3. Light-weight scoring incorporation:
+#      - Only fires at PA >= 20 (below = treat as no information)
+#      - Hard-capped at ±5 bonus points to pick_score
+#      - Never overrides the model's underlying signal
+#
+# Cache duration: 12 hours. BvP changes only when these two specific players
+# face off, which happens at most once per series.
+
+@st.cache_data(ttl=43200)  # 12hr
+def get_bvp_for_matchup(batter_id: int, pitcher_id: int) -> dict:
+    """Fetch career batter-vs-pitcher stats from MLB Stats API.
+
+    Returns dict with:
+      pa, ab, hr, h, bb, k, avg, slg, ops, hr_per_pa
+    or {} on any failure / no history.
+
+    Endpoint: /api/v1/people/{batter_id}/stats?stats=vsPlayer&opposingPlayerId={pitcher_id}&group=hitting
+    """
+    if (batter_id is None or pitcher_id is None
+            or pd.isna(batter_id) or pd.isna(pitcher_id)):
+        return {}
+    try:
+        bid = int(batter_id)
+        pid = int(pitcher_id)
+    except (TypeError, ValueError):
+        return {}
+    if bid <= 0 or pid <= 0:
+        return {}
+
+    url = (
+        f"https://statsapi.mlb.com/api/v1/people/{bid}/stats"
+        f"?stats=vsPlayer&opposingPlayerId={pid}&group=hitting"
+    )
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=12)
+        if r.status_code != 200:
+            return {}
+        data = r.json()
+        # Aggregate across all season splits returned (career = sum)
+        agg_pa = 0; agg_ab = 0; agg_hr = 0; agg_h = 0
+        agg_bb = 0; agg_k = 0; agg_2b = 0; agg_3b = 0
+        for stat_group in data.get("stats", []):
+            for split in stat_group.get("splits", []):
+                stat = split.get("stat", {})
+
+                def _to_int(v):
+                    if v is None: return 0
+                    try: return int(v)
+                    except (TypeError, ValueError):
+                        try: return int(float(v))
+                        except (TypeError, ValueError): return 0
+
+                agg_pa += _to_int(stat.get("plateAppearances") or stat.get("pa"))
+                agg_ab += _to_int(stat.get("atBats") or stat.get("ab"))
+                agg_hr += _to_int(stat.get("homeRuns") or stat.get("hr"))
+                agg_h  += _to_int(stat.get("hits") or stat.get("h"))
+                agg_bb += _to_int(stat.get("baseOnBalls") or stat.get("bb"))
+                agg_k  += _to_int(stat.get("strikeOuts") or stat.get("so"))
+                agg_2b += _to_int(stat.get("doubles") or stat.get("2b"))
+                agg_3b += _to_int(stat.get("triples") or stat.get("3b"))
+
+        if agg_pa == 0 and agg_ab == 0:
+            return {}
+
+        denom_pa = agg_pa if agg_pa > 0 else agg_ab
+        denom_ab = agg_ab if agg_ab > 0 else agg_pa
+
+        # Compute derived stats
+        total_bases = (agg_h - agg_2b - agg_3b - agg_hr) + 2 * agg_2b + 3 * agg_3b + 4 * agg_hr
+        out = {
+            "bvp_pa": agg_pa or agg_ab,
+            "bvp_ab": agg_ab,
+            "bvp_hr": agg_hr,
+            "bvp_h": agg_h,
+            "bvp_bb": agg_bb,
+            "bvp_k": agg_k,
+            "bvp_avg": round(agg_h / denom_ab, 3) if denom_ab > 0 else None,
+            "bvp_slg": round(total_bases / denom_ab, 3) if denom_ab > 0 else None,
+            "bvp_hr_per_pa": round(agg_hr / denom_pa * 100, 2) if denom_pa > 0 else None,
+        }
+        return out
+    except Exception:
+        return {}
+
+
+def bvp_score_adjustment(bvp_dict: dict, min_pa: int = 20) -> tuple[float, str]:
+    """Convert BvP history into a small pick_score adjustment.
+
+    Returns (adjustment_points, descriptive_flag).
+
+    Adjustment is capped at ±5 points (intentionally small — BvP has weak
+    predictive power per the research, so we treat it as a tiebreaker, not
+    a driver). Returns (0, "") if sample is too small (<min_pa) or no data.
+
+    Flag examples:
+      "🎯 BvP +5 (8/15, 3 HR)"  — strong positive history
+      "⚠️ BvP -3 (1/18, 0 HR)"  — weak history
+      ""                         — insufficient sample or no data
+    """
+    if not bvp_dict:
+        return (0.0, "")
+    pa = bvp_dict.get("bvp_pa") or 0
+    if pa < min_pa:
+        return (0.0, "")
+
+    hr = bvp_dict.get("bvp_hr") or 0
+    hr_rate = bvp_dict.get("bvp_hr_per_pa")
+    h = bvp_dict.get("bvp_h") or 0
+    ab = bvp_dict.get("bvp_ab") or 0
+    slg = bvp_dict.get("bvp_slg")
+    avg = bvp_dict.get("bvp_avg")
+
+    # Score based on HR rate vs league average (~3% per PA)
+    # AND on overall production (SLG/AVG)
+    points = 0.0
+    if hr_rate is not None:
+        # +1 pt per 1% above league avg, capped at +5
+        # -1 pt per 1.5% below league avg, capped at -3
+        delta = float(hr_rate) - 3.0
+        if delta > 0:
+            points = min(5.0, delta * 1.0)
+        else:
+            points = max(-3.0, delta * 0.67)
+
+    # Build descriptive flag
+    if hr_rate is None:
+        return (0.0, "")
+    if points >= 3.0:
+        emoji = "💣"
+    elif points >= 1.5:
+        emoji = "🎯"
+    elif points <= -2.0:
+        emoji = "⚠️"
+    elif points <= -1.0:
+        emoji = "📉"
+    else:
+        emoji = "📊"
+    sign = "+" if points >= 0 else ""
+    flag = f"{emoji} BvP {sign}{points:.1f} ({h}/{ab}, {hr} HR in {pa} PA)"
+    return (round(points, 1), flag)
+
+
+# ----------------------------------------------------------------------------
 # Safe parsers - handle MLB Stats API "-.--" and other junk values
 # ----------------------------------------------------------------------------
 
