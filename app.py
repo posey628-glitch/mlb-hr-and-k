@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.12-bench-players-in-export"
+APP_VERSION = "2026.06.10-v43.13-smash-tbd-nameerror-sutter"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -2826,7 +2826,7 @@ if show_backtest:
                                 f"{_ps_days}",
                                 help="Snapshots with `game` field saved (v43.4+). Older snapshots don't have it so pick_score's diversity cap couldn't fire — those days are excluded from this edge.",
                             )
-                        elif _ps_days == 0 and n > 0:
+                        elif _ps_days == 0 and agg.get("n_snapshots", 0) > 0:
                             st.info(
                                 "ℹ️ No snapshots yet have pick_score validation data — "
                                 "that requires the `game` field added in v43.4. New "
@@ -4169,7 +4169,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.12 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.13 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status}"
@@ -5246,8 +5246,33 @@ for _, game in slate.iterrows():
                 # (pull_mult already encodes the pull-side wind effect).
                 full_env = hand_park * wx_mult_nowind * pull_mult
 
-                pitcher_name = (row_dict.get("opp_pitcher") or "").upper()
-                pitcher_is_tbd = pitcher_name in ("TBD", "TBA", "")
+                # v43.13 (reviewer-validated, smash_spot empty cluster fix):
+                # Previously checked `row_dict.get("opp_pitcher")` to detect
+                # TBD, but `opp_pitcher` is NOT on matchup_df at this point
+                # in the pipeline — it's added later when building
+                # combined_picks (~5820) and combined_all (~7930). So
+                # row_dict.get("opp_pitcher") returns None → "" → "" in
+                # ("TBD", "TBA", "") is True → every pitcher was treated as
+                # TBD → pitcher_exploitable always False → smash NEVER fires
+                # even though v43.9 made the grade lookup itself work. This
+                # is the actual cause the user reported as "no smash spots."
+                #
+                # Fix: read from opp_p_row (which IS in scope here — we use
+                # opp_pitcher_name from it on line ~5045 for the v43.9 grade
+                # lookup). Belt-and-suspenders: also accept None as a
+                # legitimate non-TBD signal (some sources omit the name).
+                pitcher_name = ""
+                if opp_p_row:
+                    raw_name = (opp_p_row.get("player_name")
+                                or opp_p_row.get("pitcher_name") or "")
+                    pitcher_name = str(raw_name).upper()
+                pitcher_is_tbd = pitcher_name in ("TBD", "TBA")  # NOT "" — empty just means we couldn't read it
+                # If we couldn't read the name at all but DO have a grade,
+                # trust the grade — the pitcher exists, we just didn't get
+                # the name into opp_p_row. This is the catch-all for the
+                # TBD-proxy code path.
+                if not pitcher_name and opp_pitcher_grade:
+                    pitcher_is_tbd = False
 
                 pitcher_exploitable = (
                     opp_pitcher_grade in ("EXPLOIT", "EXPLOIT+")
