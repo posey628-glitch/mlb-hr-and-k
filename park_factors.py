@@ -235,7 +235,8 @@ def wind_pull_side_multiplier(venue_name: str, bats: str,
     # Coors/Sutter park HR factors (1.21, 1.13) already embed historical
     # out-blowing wind effects, so layering full real-time wind on top
     # double-counts. The dampener attenuates but doesn't eliminate.
-    HIGH_ALTITUDE_PARKS = {"Coors Field", "Sutter Health Park", "Las Vegas Ballpark"}
+    HIGH_ALTITUDE_PARKS = {"Coors Field", "Las Vegas Ballpark"}
+    # v43.13: Sutter Health removed — see weather.py comment for rationale
     if venue_name in HIGH_ALTITUDE_PARKS:
         roof_factor = roof_factor * 0.6
 
