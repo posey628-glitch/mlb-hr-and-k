@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.14-bvp-history-deferred-cleanup"
+APP_VERSION = "2026.06.10-v43.15-ideal-screen-gb-pct-sibling-fix"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -4169,7 +4169,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.14 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.15 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status}"
@@ -4718,24 +4718,40 @@ for _, game in slate.iterrows():
     # the matchup layer — a power lifter vs a flyball-prone pitcher.
     try:
         from models import add_lift_score
+        # v43.15 (reviewer-validated, ideal_hr_screen sibling): same
+        # frame/column-name drift. home_p_row/away_p_row come from
+        # pitcher_stats, where the field is `groundballs_percent`. `gb_pct`
+        # is the alias build_pitcher_slate puts on p_slate. Reading `gb_pct`
+        # off these rows returned None → add_lift_score received None →
+        # the pitcher-flyball-tendency component of lift_score was silently
+        # inactive for every hitter on every slate. The elsewhere-pattern
+        # at line 4875 already does the right fallback (gb_pct → groundballs_percent);
+        # use the same here.
+        def _pitcher_gb(prow):
+            if not prow:
+                return None
+            return (prow.get("gb_pct")
+                    if prow.get("gb_pct") is not None
+                    else prow.get("groundballs_percent"))
+
         away_matchup = add_lift_score(
             away_matchup,
-            pitcher_gb_pct=(home_p_row.get("gb_pct") if home_p_row else None),
+            pitcher_gb_pct=_pitcher_gb(home_p_row),
         )
         home_matchup = add_lift_score(
             home_matchup,
-            pitcher_gb_pct=(away_p_row.get("gb_pct") if away_p_row else None),
+            pitcher_gb_pct=_pitcher_gb(away_p_row),
         )
         # v42m: bench gets lift_score too
         if not away_bench_matchup.empty:
             away_bench_matchup = add_lift_score(
                 away_bench_matchup,
-                pitcher_gb_pct=(home_p_row.get("gb_pct") if home_p_row else None),
+                pitcher_gb_pct=_pitcher_gb(home_p_row),
             )
         if not home_bench_matchup.empty:
             home_bench_matchup = add_lift_score(
                 home_bench_matchup,
-                pitcher_gb_pct=(away_p_row.get("gb_pct") if away_p_row else None),
+                pitcher_gb_pct=_pitcher_gb(away_p_row),
             )
     except Exception:
         pass
@@ -5393,8 +5409,37 @@ for _, game in slate.iterrows():
         # build_pitcher_slate, not fb_pct which doesn't exist on pitchers).
         try:
             p_hr9 = opp_p_row.get("hr9") if opp_p_row is not None else None
-            p_brl_allowed = opp_p_row.get("barrel_allowed") if opp_p_row is not None else None
-            p_fb_pct = opp_p_row.get("fb_allowed") if opp_p_row is not None else None
+            # v43.15 (reviewer-validated, proven via export):
+            # opp_p_row comes from pitcher_stats (away_p_row = rows.iloc[0]
+            # .to_dict()), where these Savant fields are stored under their
+            # RAW names. The aliases barrel_allowed / fb_allowed only exist
+            # AFTER build_pitcher_slate renames them onto p_slate. Reading
+            # the aliases off opp_p_row returns None → pitcher_ok always
+            # False → ideal_hr_screen was empty for every hitter on every
+            # slate, regardless of data quality or lineup confirmation.
+            # The prior in-code comment claiming "fb_allowed (correct column
+            # name from build_pitcher_slate)" was the exact source of the
+            # error: this row ISN'T from build_pitcher_slate.
+            #
+            # Export confirmed: barrel_allowed/fb_allowed are 100% populated
+            # on the Pitchers sheet (built from p_slate); barrel_batted_rate
+            # /flyballs_percent aren't columns there but they ARE the keys
+            # on pitcher_stats rows. Hitter feeders (barrel_pct, hard_hit,
+            # pulled_brl_pct) are all at ~88% coverage. Once these two key
+            # names are corrected, the screen actually fires.
+            p_brl_allowed = (
+                opp_p_row.get("barrel_batted_rate") if opp_p_row is not None else None
+            )
+            p_fb_pct = (
+                opp_p_row.get("flyballs_percent") if opp_p_row is not None else None
+            )
+            # Defensive fallback: if for any reason these come back None
+            # (different pitcher_stats schema, proxy row, etc.), try the
+            # p_slate alias too — costs nothing, may save a future regression.
+            if (p_brl_allowed is None or pd.isna(p_brl_allowed)) and opp_p_row is not None:
+                p_brl_allowed = opp_p_row.get("barrel_allowed")
+            if (p_fb_pct is None or pd.isna(p_fb_pct)) and opp_p_row is not None:
+                p_fb_pct = opp_p_row.get("fb_allowed")
 
             pitcher_ok = (
                 p_hr9 is not None and not pd.isna(p_hr9) and float(p_hr9) >= 1.2
