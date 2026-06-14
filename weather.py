@@ -573,7 +573,14 @@ def hr_multiplier(weather: dict, park: dict, skip_wind: bool = False,
     # weather and altitude effects. Adding a full temperature multiplier on
     # top of those park factors double-counts the temperature contribution.
     # Solution: halve the temperature effect at high-altitude parks.
-    HIGH_ALTITUDE_PARKS = {"Coors Field", "Sutter Health Park", "Las Vegas Ballpark"}
+    HIGH_ALTITUDE_PARKS = {"Coors Field", "Las Vegas Ballpark"}
+    # v43.13 (reviewer-validated): Sutter Health Park is ~30 ft elevation
+    # (West Sacramento) — NOT high altitude. It was incorrectly included
+    # in this set with a comment claiming HR factor 1.13 to "embed altitude
+    # like Coors," but the actual PARKS value is 95 (suppressive). The
+    # 0.5× temperature and 0.6× wind dampeners that fire here are meant
+    # for genuine altitude (Coors at 5,200 ft, Las Vegas at 2,030 ft).
+    # Apply them to a sea-level park = under-counting weather effects there.
     altitude_dampener = 0.5 if park.get("name") in HIGH_ALTITUDE_PARKS else 1.0
     temp = weather.get("temp_f")
     if temp is not None:
