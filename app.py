@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.15-ideal-screen-gb-pct-sibling-fix"
+APP_VERSION = "2026.06.10-v43.17-bat-tracking-opt-in"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -1669,6 +1669,32 @@ hide_started = st.sidebar.checkbox(
         "afternoon games."
     ),
 )
+
+# v43.17 (user-requested): Bat tracking / Blast % — OPT-IN. Defaults OFF
+# because Savant's bat tracking endpoints have changed field names between
+# 2024 beta and 2025 production, and we'd rather YOU see whether the fetch
+# worked (via the status caption below) than silently blend missing data
+# into hr_form. When enabled, blast_pct is fetched, merged into
+# hitter_stats, and added to the hr_form composite at a small weight (0.05)
+# so it can lift hitters with elite swing quality without overpowering
+# season-long power signals like barrel%.
+use_bat_tracking = st.sidebar.checkbox(
+    "📡 Fetch bat tracking (Blast %) — opt-in",
+    value=False,
+    help=(
+        "Statcast added bat tracking in 2024. 'Blast' = swing that's both "
+        "squared-up AND fast (≥75 mph bat speed). Captures swing quality "
+        "at the SWING level vs barrel% which is BBE-level only.\n\n"
+        "WHY OPT-IN: Savant has changed bat-tracking field names between "
+        "the 2024 beta and 2025 production. If field names drift again, "
+        "the fetch returns empty. The caption below this checkbox shows "
+        "live fetch status — if it says ❌, blast_pct isn't blended into "
+        "hr_form for this run (no silent degradation).\n\n"
+        "WHEN ENABLED: blast_pct gets a small (0.05) weight in hr_form. "
+        "barrel_pct already covers ~70% of what blast_pct measures, so "
+        "expect modest score changes, not dramatic ones."
+    ),
+)
 if hide_started and selected_date == datetime.now().date():
     try:
         # v42r: use Timestamp.now(tz="UTC") instead of utcnow().tz_localize().
@@ -1817,6 +1843,36 @@ if not hitter_hand_statcast.empty and "player_id" in hitter_stats.columns:
         hitter_hand_statcast, on="player_id", how="left",
         suffixes=("", "_hs"),
     )
+
+# v43.17 (user-requested): Bat tracking / Blast % — OPT-IN.
+# Fetches Statcast bat tracking only if the sidebar toggle is enabled.
+# Status caption shows the live result so user can SEE if Savant's
+# schema has drifted (caption goes ❌). When ❌, hr_form falls back to
+# v43.16 weights without blast_pct — no silent degradation.
+_bat_tracking_status = "⏸️ disabled (toggle in sidebar to enable)"
+if use_bat_tracking:
+    try:
+        from data_fetcher import get_bat_tracking
+        bat_track_df, _bat_tracking_status = (
+            get_bat_tracking(season=selected_date.year)
+            if not slate.empty else (pd.DataFrame(), "⏸️ no slate")
+        )
+        if not bat_track_df.empty and "player_id" in hitter_stats.columns:
+            # Merge blast_pct (and friends) into hitter_stats. The models.py
+            # hr_form composite will automatically pick up blast_pct because
+            # it's added to SCORING_WEIGHTS["hr_form"]. Non-merged hitters
+            # have NaN blast_pct and _score_from_weights handles that —
+            # those rows get scored on the other 8 components proportionally.
+            _keep_cols = ["player_id", "blast_pct"]
+            for _c in ("bat_speed", "fast_swing_pct", "squared_up_pct"):
+                if _c in bat_track_df.columns:
+                    _keep_cols.append(_c)
+            hitter_stats = hitter_stats.merge(
+                bat_track_df[_keep_cols], on="player_id", how="left",
+                suffixes=("", "_bt"),
+            )
+    except Exception as _bt_err:
+        _bat_tracking_status = f"❌ error: {type(_bt_err).__name__}"
 
 # HAND-SPLIT ARSENALS (June 2026)
 # Pitchers throw very different pitch mixes vs LHB vs RHB. A RHP might throw
@@ -4169,10 +4225,11 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.15 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.17 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
-    f"🤚 Hand Statcast: {_hand_statcast_status}"
+    f"🤚 Hand Statcast: {_hand_statcast_status} · "
+    f"🦇 Bat tracking: {_bat_tracking_status}"
 )
 
 for _, game in slate.iterrows():
@@ -5342,11 +5399,19 @@ for _, game in slate.iterrows():
         # power vs sample-size noise. We surface it for transparency and
         # apply a small (±5 pt cap) adjustment as a tiebreaker, not a
         # driver. Only fires at ≥20 PA — below that, treated as no info.
+        #
+        # v43.16 (user-requested, "complete BvP history for each player"):
+        # we now persist ALL fields from get_bvp_for_matchup, not just
+        # PA/HR/AB. The user wants the full slash line in the export
+        # (AVG/SLG/OPS/HR rate) for every hitter, regardless of whether
+        # the scoring threshold fires.
         bvp_points = []
         bvp_flags = []
-        bvp_pa_list = []
-        bvp_hr_list = []
-        bvp_ab_list = []
+        bvp_data_lists = {
+            "bvp_pa": [], "bvp_ab": [], "bvp_hr": [], "bvp_h": [],
+            "bvp_bb": [], "bvp_k": [], "bvp_avg": [], "bvp_slg": [],
+            "bvp_hr_per_pa": [],
+        }
         try:
             from data_fetcher import get_bvp_for_matchup, bvp_score_adjustment
             opp_pid_for_bvp = (
@@ -5358,9 +5423,8 @@ for _, game in slate.iterrows():
                     or opp_pid_for_bvp is None or pd.isna(opp_pid_for_bvp)):
                     bvp_points.append(0.0)
                     bvp_flags.append("")
-                    bvp_pa_list.append(None)
-                    bvp_hr_list.append(None)
-                    bvp_ab_list.append(None)
+                    for k in bvp_data_lists:
+                        bvp_data_lists[k].append(None)
                     continue
                 try:
                     bvp = get_bvp_for_matchup(int(bid), int(opp_pid_for_bvp))
@@ -5369,22 +5433,19 @@ for _, game in slate.iterrows():
                 pts, flag = bvp_score_adjustment(bvp)
                 bvp_points.append(pts)
                 bvp_flags.append(flag)
-                bvp_pa_list.append(bvp.get("bvp_pa"))
-                bvp_hr_list.append(bvp.get("bvp_hr"))
-                bvp_ab_list.append(bvp.get("bvp_ab"))
+                for k in bvp_data_lists:
+                    bvp_data_lists[k].append(bvp.get(k))
         except Exception:
             # If anything fails, leave BvP columns empty — model still works
             bvp_points = [0.0] * len(matchup_df)
             bvp_flags = [""] * len(matchup_df)
-            bvp_pa_list = [None] * len(matchup_df)
-            bvp_hr_list = [None] * len(matchup_df)
-            bvp_ab_list = [None] * len(matchup_df)
+            for k in bvp_data_lists:
+                bvp_data_lists[k] = [None] * len(matchup_df)
 
         matchup_df["bvp_adjust"] = bvp_points
         matchup_df["bvp_flag"] = bvp_flags
-        matchup_df["bvp_pa"] = bvp_pa_list
-        matchup_df["bvp_hr"] = bvp_hr_list
-        matchup_df["bvp_ab"] = bvp_ab_list
+        for k, v in bvp_data_lists.items():
+            matchup_df[k] = v
         matchup_df["hr_pa_pct"] = hr_pa
         matchup_df["hr_game_pct"] = hr_game
         matchup_df["verdict"] = verdicts
@@ -6924,21 +6985,55 @@ if all_hitters_for_picks:
                     st.markdown(f"**Pitcher allows:** {_pitcher_split_str}")
 
                 # v43.14: BvP history (light-weight tiebreaker signal)
+                # v43.16: shows complete slash line (AVG/SLG/OPS) when sample
+                # is meaningful, per user request for "complete BvP history."
                 _bvp_flag = pick_row.get("bvp_flag", "") or ""
                 _bvp_pa = pick_row.get("bvp_pa")
                 _bvp_hr = pick_row.get("bvp_hr")
                 _bvp_ab = pick_row.get("bvp_ab")
+                _bvp_h = pick_row.get("bvp_h")
+                _bvp_avg = pick_row.get("bvp_avg")
+                _bvp_slg = pick_row.get("bvp_slg")
+                _bvp_bb = pick_row.get("bvp_bb")
+                _bvp_k = pick_row.get("bvp_k")
                 if _bvp_flag:
+                    # Above 20 PA threshold — show flag + full slash line
+                    _slash_parts = []
+                    if _bvp_avg is not None and not pd.isna(_bvp_avg):
+                        _slash_parts.append(f"AVG {float(_bvp_avg):.3f}")
+                    if _bvp_slg is not None and not pd.isna(_bvp_slg):
+                        _slash_parts.append(f"SLG {float(_bvp_slg):.3f}")
+                    if _bvp_bb is not None and not pd.isna(_bvp_bb) and float(_bvp_bb) > 0:
+                        _slash_parts.append(f"{int(_bvp_bb)} BB")
+                    if _bvp_k is not None and not pd.isna(_bvp_k) and float(_bvp_k) > 0:
+                        _slash_parts.append(f"{int(_bvp_k)} K")
+                    _slash_str = " · ".join(_slash_parts)
                     st.markdown(f"**Career BvP:** {_bvp_flag}")
+                    if _slash_str:
+                        st.caption(f"   ↳ {_slash_str}")
                 elif _bvp_pa is not None and not pd.isna(_bvp_pa) and float(_bvp_pa) > 0:
-                    # We have BvP data but it's below the 20-PA threshold for
-                    # a scoring adjustment. Still show it — user wants to see.
-                    h_str = f"{int(_bvp_ab) if _bvp_ab else 0} AB" if _bvp_ab else ""
-                    hr_str = f", {int(_bvp_hr)} HR" if _bvp_hr is not None and not pd.isna(_bvp_hr) else ""
+                    # Below threshold — show raw data, no scoring effect
+                    _h_str = (
+                        f"{int(_bvp_h)}/{int(_bvp_ab)}"
+                        if (_bvp_h is not None and _bvp_ab is not None
+                            and not pd.isna(_bvp_h) and not pd.isna(_bvp_ab))
+                        else ""
+                    )
+                    _hr_str = (
+                        f", {int(_bvp_hr)} HR"
+                        if (_bvp_hr is not None and not pd.isna(_bvp_hr))
+                        else ""
+                    )
                     st.markdown(
                         f"**Career BvP:** {int(_bvp_pa)} PA "
-                        f"({h_str}{hr_str}) — small sample, no scoring effect"
+                        f"({_h_str}{_hr_str}) — small sample, no scoring effect"
                     )
+                    if _bvp_avg is not None and not pd.isna(_bvp_avg):
+                        st.caption(
+                            f"   ↳ AVG {float(_bvp_avg):.3f}"
+                            + (f" · SLG {float(_bvp_slg):.3f}"
+                               if _bvp_slg is not None and not pd.isna(_bvp_slg) else "")
+                        )
                 st.markdown(f"**Top drivers:** {top_block}")
                 st.markdown(f"**Bonuses/penalties:** {bonus_block}")
                 if dominance_flag:
