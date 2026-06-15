@@ -754,6 +754,136 @@ def bvp_score_adjustment(bvp_dict: dict, min_pa: int = 20) -> tuple[float, str]:
 
 
 # ----------------------------------------------------------------------------
+# Bat tracking / Blast % fetcher — v43.17 (OPT-IN)
+# ----------------------------------------------------------------------------
+# Statcast added bat tracking in mid-2024. The metric the user requested
+# ("Blast %") is a Statcast-defined event: a swing that is both
+# (a) squared up (contact quality) AND
+# (b) fast (bat speed ≥75 mph).
+# It captures roughly the same thing as barrel% but on the SWING level
+# rather than the BBE level, so it covers all swings not just contact.
+# This is real and predictive — June 2025 Statcast research showed
+# blast rate has higher year-over-year stability than barrel rate.
+#
+# Implementation notes (per user's "opt-in" requirement):
+#   - Defaults to DISABLED. User toggles in sidebar.
+#   - Caches 24hr (bat tracking changes slowly week-to-week).
+#   - Field names tried as a fallback chain (Savant has changed them
+#     between 2024 beta and 2025 production). Status reported in caption.
+#   - On any failure / empty result, the fetcher returns empty DataFrame
+#     and the status caption shows the failure. No silent zero-data.
+#   - If enabled and successful, app.py blends `blast_pct` into hr_form.
+#     If enabled but fetcher returned empty, hr_form falls back to v43.16
+#     weights (no blast component). No silent degradation.
+
+@st.cache_data(ttl=86400)  # 24hr — bat tracking is a slow-moving stat
+def get_bat_tracking(season: int = 2025) -> tuple[pd.DataFrame, str]:
+    """Fetch Statcast bat tracking leaderboard.
+
+    Returns (df, status_message). The status_message describes what
+    happened — used by the app's caption to show whether the fetch
+    actually worked. Possible statuses:
+      - "✅ N hitters" — success, df has rows
+      - "❌ no rows returned" — endpoint responded but df was empty
+      - "❌ no blast column" — endpoint returned data but expected field
+                                names weren't there (Savant schema drift)
+      - "❌ fetch error: ..." — HTTP / parse error
+
+    Tries multiple field name variants (Savant changed names between
+    2024 beta and 2025 prod):
+      - blast_rate, blasts_per_swing, blast_percent
+      - avg_bat_speed, bat_speed_avg
+      - fast_swing_rate, fast_swing_percent
+      - squared_up_rate, squared_up_per_swing
+    """
+    # Field name variants — try each, take whichever returns data
+    blast_candidates = ["blast_rate", "blasts_per_swing", "blast_percent",
+                          "blasts_per_bbe"]
+    bat_speed_candidates = ["avg_bat_speed", "bat_speed_avg", "swing_speed",
+                              "bat_speed"]
+    fast_swing_candidates = ["fast_swing_rate", "fast_swing_percent"]
+    squared_up_candidates = ["squared_up_rate", "squared_up_per_swing",
+                               "squared_up_percent"]
+
+    # Build a selections string that includes ALL candidates — Savant
+    # should return whichever ones it has, ignore the rest.
+    all_fields = (["player_id", "player_name"]
+                  + blast_candidates + bat_speed_candidates
+                  + fast_swing_candidates + squared_up_candidates)
+    selections = ",".join(all_fields)
+
+    candidate_urls = [
+        # Primary: custom leaderboard with bat-tracking selections.
+        # Same endpoint that already works for hard_hit/barrel_pct etc.
+        f"https://baseballsavant.mlb.com/leaderboard/custom"
+        f"?year={season}&type=batter&filter=&min=q"
+        f"&selections={selections}"
+        f"&chart=false&x=player_name&y=player_name&r=no&csv=true",
+        # Fallback: dedicated bat-tracking leaderboard URL
+        f"https://baseballsavant.mlb.com/leaderboard/bat-tracking"
+        f"?attackZone=&batSide=&season={season}&team=&min=q"
+        f"&sortColumn={blast_candidates[0]}&sortDirection=desc&csv=true",
+    ]
+
+    for url in candidate_urls:
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=25)
+            if r.status_code != 200:
+                continue
+            if not r.text or len(r.text) < 100:
+                continue
+            df = pd.read_csv(io.StringIO(r.text))
+            if df.empty:
+                continue
+
+            # Find which blast field came back
+            blast_col = next(
+                (c for c in blast_candidates if c in df.columns), None
+            )
+            if blast_col is None:
+                # Try contains match for any column with "blast" in name
+                blast_col = next(
+                    (c for c in df.columns if "blast" in c.lower()), None
+                )
+            if blast_col is None:
+                continue  # this URL didn't have blast field, try next
+
+            # Find supporting columns
+            bs_col = next((c for c in bat_speed_candidates if c in df.columns),
+                          next((c for c in df.columns if "bat_speed" in c.lower()
+                                or "swing_speed" in c.lower()), None))
+            fs_col = next((c for c in fast_swing_candidates if c in df.columns),
+                          next((c for c in df.columns if "fast_swing" in c.lower()), None))
+            sq_col = next((c for c in squared_up_candidates if c in df.columns),
+                          next((c for c in df.columns if "squared_up" in c.lower()), None))
+
+            # Build output frame with normalized column names
+            out = pd.DataFrame()
+            out["player_id"] = pd.to_numeric(df.get("player_id"), errors="coerce")
+            out["player_name"] = df.get("player_name")
+            out["blast_pct"] = pd.to_numeric(df[blast_col], errors="coerce")
+            if bs_col:
+                out["bat_speed"] = pd.to_numeric(df[bs_col], errors="coerce")
+            if fs_col:
+                out["fast_swing_pct"] = pd.to_numeric(df[fs_col], errors="coerce")
+            if sq_col:
+                out["squared_up_pct"] = pd.to_numeric(df[sq_col], errors="coerce")
+
+            # Filter to rows with non-null blast_pct AND valid player_id
+            out = out.dropna(subset=["blast_pct", "player_id"])
+            out["player_id"] = out["player_id"].astype("Int64")
+
+            if out.empty:
+                return pd.DataFrame(), "❌ no rows after filtering"
+            return out, f"✅ {len(out)} hitters"
+        except Exception as e:
+            # Try next URL
+            continue
+
+    return pd.DataFrame(), "❌ all endpoints failed (Savant schema drift?)"
+
+
+# ----------------------------------------------------------------------------
 # Safe parsers - handle MLB Stats API "-.--" and other junk values
 # ----------------------------------------------------------------------------
 
