@@ -34,13 +34,36 @@ SCORING_WEIGHTS = {
         "pitcher_barrel_allowed": 0.07,
     },
     "hr_form": {
-        "barrel_pct": 0.27,    # 0.30→0.27
-        "iso": 0.22,           # 0.25→0.22
-        "hard_hit": 0.13,      # 0.15→0.13
-        "avg_ev": 0.10,
-        "fb_pct": 0.10,
-        "pulled_brl_pct": 0.08,  # 0.10→0.08
-        "recent_iso_10": 0.10,   # v42c: 10-game ISO (community ideal window)
+        # v43.16 (user-requested rebalance): "HR form should include
+        # hard_hit%, barrel%, fly ball rate WITH NO high ground ball rate,
+        # high ISO, exit velo." Added gb_pct as NEGATIVE-weight component
+        # (high GB rate now penalizes the score, as user explicitly asked).
+        # Also slightly diffused top weights (barrel/iso were 49% combined,
+        # now 41%) to address "not weighing too much" — single signals
+        # should no longer dominate the composite.
+        #
+        # v43.17 (user-requested): blast_pct (Statcast bat tracking) added
+        # at small weight (0.05). _score_from_weights skips columns that
+        # aren't present, so if the sidebar toggle is OFF or the Savant
+        # fetch failed, this entry is silently no-op and the remaining
+        # weights renormalize. When data IS present, blast_pct lifts elite
+        # swing-quality hitters that barrel% alone may under-rate (e.g.,
+        # hitters with high blast rate but lower contact rate — power on
+        # the swing but they miss a lot, like prime Joey Gallo profile).
+        #
+        # Reviewer correlation analysis (v38d) showed barrel_pct/iso are the
+        # strongest predictors (0.749/0.690 corr) so they remain anchors,
+        # but the spread is now closer to the user's intuition that several
+        # quality signals together should carry the score.
+        "barrel_pct": 0.22,
+        "iso": 0.19,
+        "hard_hit": 0.13,
+        "avg_ev": 0.11,
+        "fb_pct": 0.11,
+        "pulled_brl_pct": 0.08,
+        "recent_iso_10": 0.10,
+        "gb_pct": 0.06,
+        "blast_pct": 0.05,  # v43.17 — auto-skipped if bat tracking disabled/empty
     },
     "ceiling": {
         "iso": 0.25,
@@ -375,7 +398,14 @@ def build_matchup_table(
 
     # Composite scores
     df["matchup"] = _score_from_weights(df, SCORING_WEIGHTS["matchup"])
-    df["hr_form"] = _score_from_weights(df, SCORING_WEIGHTS["hr_form"])
+    # v43.16: gb_pct is inverted via `neg` — high GB rate REDUCES hr_form,
+    # matching the user's intent ("HR form should... avoid high ground ball
+    # rate"). The percentile rank is flipped: a 60% GB hitter ranks at the
+    # 5th percentile post-inversion, contributing minimally to hr_form even
+    # though their raw GB% is high.
+    df["hr_form"] = _score_from_weights(
+        df, SCORING_WEIGHTS["hr_form"], neg=("gb_pct",)
+    )
     df["ceiling"] = _score_from_weights(df, SCORING_WEIGHTS["ceiling"])
 
     # COLD-STREAK CEILING on hr_form (June 2026)
@@ -789,6 +819,11 @@ def build_matchup_table(
         "barrel_pct", "pulled_brl_pct", "hard_hit", "sweet_spot_pct",
         "fb_pct", "gb_pct", "ld_pct",
         "la", "avg_ev",
+        # v43.17: bat tracking columns (Blast %, bat speed, etc.) — only
+        # populated when sidebar opt-in toggle is enabled AND Savant
+        # fetch succeeds. Otherwise NaN, _score_from_weights handles that
+        # gracefully and they appear empty in the export.
+        "blast_pct", "bat_speed", "fast_swing_pct", "squared_up_pct",
         # v42k: pull_air_pct (derived from pull_percent × fb_pct when Savant's
         # native column is empty). Was being computed in _normalize_player_df
         # but dropped here, so never reached combined_all — the H2H comparison
