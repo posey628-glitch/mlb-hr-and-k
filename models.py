@@ -1139,6 +1139,42 @@ def add_lift_score(
     return df
 
 
+def _season_phase(slate_date=None) -> str:
+    """v43.18 (reviewer-validated): shared season-phase helper. Both
+    pa_threshold_for_date (app.py) and _season_thresholds (models.py) used
+    to independently parse `month` from the date and switch on it. If MLB
+    ever shifts to a March opener, both would need updating. This helper
+    is the single source of truth — both consumers now derive their
+    specific thresholds from one bucket.
+
+    Returns one of: 'early', 'may', 'june', 'july', 'august', 'late'
+    """
+    import datetime
+    if slate_date is None:
+        slate_date = datetime.date.today()
+    try:
+        month = slate_date.month
+    except AttributeError:
+        try:
+            slate_date = datetime.datetime.strptime(
+                str(slate_date)[:10], "%Y-%m-%d"
+            ).date()
+            month = slate_date.month
+        except Exception:
+            month = 6  # default mid-season
+    if month <= 4:
+        return "early"
+    if month == 5:
+        return "may"
+    if month == 6:
+        return "june"
+    if month == 7:
+        return "july"
+    if month == 8:
+        return "august"
+    return "late"
+
+
 def _season_thresholds(slate_date=None):
     """
     Return season-aware thresholds. Earlier in season = lower bars.
@@ -1148,31 +1184,23 @@ def _season_thresholds(slate_date=None):
       split_thin / split_small — split-sample PA thresholds for the
         ⚠️ thin / 📊 small split flags. Lower in April, higher by August
         when most players have accumulated meaningful platoon samples.
+
+    v43.18: uses shared _season_phase to coordinate with app.pa_threshold_for_date
     """
-    import datetime
-    if slate_date is None:
-        slate_date = datetime.date.today()
-    try:
-        month = slate_date.month
-    except AttributeError:
-        try:
-            slate_date = datetime.datetime.strptime(str(slate_date)[:10], "%Y-%m-%d").date()
-            month = slate_date.month
-        except Exception:
-            month = 6  # default mid-season
-    if month <= 4:        # April: ~5 starts in
+    phase = _season_phase(slate_date)
+    if phase == "early":
         return {"full_ip": 15, "min_ip": 5, "full_gs": 3, "min_gs": 1,
                 "split_thin": 20, "split_small": 40}
-    elif month == 5:      # May: ~9 starts in
+    elif phase == "may":
         return {"full_ip": 30, "min_ip": 10, "full_gs": 5, "min_gs": 2,
                 "split_thin": 30, "split_small": 55}
-    elif month == 6:      # June: ~13 starts in
+    elif phase == "june":
         return {"full_ip": 50, "min_ip": 15, "full_gs": 8, "min_gs": 3,
                 "split_thin": 35, "split_small": 65}
-    elif month == 7:      # July: ~17 starts in
+    elif phase == "july":
         return {"full_ip": 70, "min_ip": 20, "full_gs": 10, "min_gs": 4,
                 "split_thin": 40, "split_small": 70}
-    elif month == 8:      # August: ~22 starts in
+    elif phase == "august":
         return {"full_ip": 90, "min_ip": 25, "full_gs": 14, "min_gs": 5,
                 "split_thin": 45, "split_small": 80}
     elif month == 9:      # September: ~28 starts in
