@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.17-bat-tracking-opt-in"
+APP_VERSION = "2026.06.10-v43.18-arsenal-cap-daynight-mult-deferred-cleanup"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -106,6 +106,14 @@ try:
     from data_fetcher import get_pitcher_arsenal
 except ImportError:
     def get_pitcher_arsenal(*a, **k): return pd.DataFrame()
+
+# v43.18 (reviewer-validated): hoist apply_handedness_overrides to module
+# scope so it's not re-imported 3x inside the matchup loop. Defensive
+# fallback if the import ever fails (returns input df unchanged).
+try:
+    from data_fetcher import apply_handedness_overrides
+except ImportError:
+    def apply_handedness_overrides(df, *a, **k): return df
 
 try:
     from data_fetcher import get_pitcher_recent_form
@@ -836,17 +844,27 @@ def safe_float(val) -> Optional[float]:
 
 
 def pa_threshold_for_date(d: date) -> int:
-    """PA threshold scales with how deep into the season we are."""
-    month = d.month
-    if month <= 4:
-        return 40
-    if month == 5:
-        return 80
-    if month == 6:
-        return 120
-    if month == 7:
-        return 160
-    return 200
+    """PA threshold scales with how deep into the season we are.
+
+    v43.18 (reviewer-validated): uses shared _season_phase from models.py
+    so this and _season_thresholds stay in lockstep on date logic.
+    """
+    try:
+        from models import _season_phase
+        phase = _season_phase(d)
+    except Exception:
+        phase = None
+        # Fallback to old inline logic if import fails
+        month = d.month
+        if month <= 4: phase = "early"
+        elif month == 5: phase = "may"
+        elif month == 6: phase = "june"
+        elif month == 7: phase = "july"
+        else: phase = "late"
+    return {
+        "early": 40, "may": 80, "june": 120,
+        "july": 160, "august": 200, "late": 200,
+    }.get(phase, 200)
 
 
 def hr_verdict(hr_game_pct, sample_size=None, pa_threshold=80):
@@ -1858,11 +1876,18 @@ if use_bat_tracking:
             if not slate.empty else (pd.DataFrame(), "⏸️ no slate")
         )
         if not bat_track_df.empty and "player_id" in hitter_stats.columns:
-            # Merge blast_pct (and friends) into hitter_stats. The models.py
-            # hr_form composite will automatically pick up blast_pct because
-            # it's added to SCORING_WEIGHTS["hr_form"]. Non-merged hitters
-            # have NaN blast_pct and _score_from_weights handles that —
-            # those rows get scored on the other 8 components proportionally.
+            # v43.18 (reviewer-validated, blast asymmetry fix):
+            # _score_from_weights renormalizes over present columns. So a
+            # hitter WITH blast_pct gets their other 8 components implicitly
+            # down-weighted, while a hitter WITHOUT blast_pct doesn't —
+            # asymmetric scoring on the same composite. The reviewer's
+            # exact phrasing: "missing-blast hitters get a slight relative
+            # boost on their remaining components." Fix: impute the slate
+            # MEDIAN of populated blast_pct for missing rows. That way
+            # every hitter has the column, the weighted average comparison
+            # is fair, and the missing-data hitters are treated as
+            # "average swing quality" rather than "scored on a different
+            # denominator."
             _keep_cols = ["player_id", "blast_pct"]
             for _c in ("bat_speed", "fast_swing_pct", "squared_up_pct"):
                 if _c in bat_track_df.columns:
@@ -1871,6 +1896,15 @@ if use_bat_tracking:
                 bat_track_df[_keep_cols], on="player_id", how="left",
                 suffixes=("", "_bt"),
             )
+            # Compute median of populated values, impute into NaN rows
+            try:
+                _bp_median = float(hitter_stats["blast_pct"].dropna().median())
+                if not pd.isna(_bp_median):
+                    _na_count = int(hitter_stats["blast_pct"].isna().sum())
+                    hitter_stats["blast_pct"] = hitter_stats["blast_pct"].fillna(_bp_median)
+                    _bat_tracking_status += f" (median-imputed {_na_count})"
+            except Exception:
+                pass
     except Exception as _bt_err:
         _bat_tracking_status = f"❌ error: {type(_bt_err).__name__}"
 
@@ -2085,19 +2119,34 @@ if not pitcher_trad.empty and "player_id" in pitcher_stats.columns:
                 pitcher_stats[col] = pitcher_stats[trad_col]
             pitcher_stats = pitcher_stats.drop(columns=[trad_col])
 
-# If OBP/SLG still missing after both sources, derive from Statcast components:
-# OPS we have; OBP ≈ (hits + walks) / PA fallback; SLG = ISO + AVG
-if "slg" in hitter_stats.columns and hitter_stats["slg"].isna().all():
+# If OBP/SLG still missing after both sources, derive from Statcast components.
+# v43.18 (reviewer-validated): the previous guard `.isna().all()` only fired
+# when EVERY row was NaN. After the trad coalesce, SLG is PARTIALLY populated
+# (some from Statcast, some from MLB Stats traditional, some still missing),
+# so .all() returns False and the rows that ARE still NaN never got derived.
+# Same bug class as the v42x LA-fill fix. Mask-fill: derive only the rows
+# that are actually NaN, leave good values intact.
+if "slg" in hitter_stats.columns and hitter_stats["slg"].isna().any():
     if "iso" in hitter_stats.columns and "avg" in hitter_stats.columns:
-        hitter_stats["slg"] = (hitter_stats["iso"] + hitter_stats["avg"]).round(3)
-if "obp" in hitter_stats.columns and hitter_stats["obp"].isna().all():
-    # No clean derivation available - leave NaN, will auto-hide
-    pass
+        _mask = hitter_stats["slg"].isna()
+        _derived = (hitter_stats["iso"] + hitter_stats["avg"]).round(3)
+        hitter_stats.loc[_mask, "slg"] = _derived[_mask]
 
-# Backstop: derive ISO from SLG - AVG if Statcast didn't supply it
-if "iso" not in hitter_stats.columns or hitter_stats["iso"].isna().all():
+# Backstop: derive ISO from SLG - AVG for rows still missing it.
+# v43.18: same mask-fill pattern. Was `.isna().all()` which only fired
+# when ZERO hitters had ISO from Statcast — a single populated row
+# suppressed derivation for everyone else.
+if "iso" in hitter_stats.columns and hitter_stats["iso"].isna().any():
     if "slg" in hitter_stats.columns and "avg" in hitter_stats.columns:
-        hitter_stats["iso"] = (hitter_stats["slg"] - hitter_stats["avg"]).round(3)
+        _mask = hitter_stats["iso"].isna()
+        _derived = (hitter_stats["slg"] - hitter_stats["avg"]).round(3)
+        # ISO can't be negative — clamp at 0 (handles tiny-sample AVG>SLG)
+        hitter_stats.loc[_mask, "iso"] = _derived[_mask].clip(lower=0)
+elif "iso" not in hitter_stats.columns:
+    if "slg" in hitter_stats.columns and "avg" in hitter_stats.columns:
+        hitter_stats["iso"] = (
+            (hitter_stats["slg"] - hitter_stats["avg"]).round(3).clip(lower=0)
+        )
 
 # Per-pitcher fallback: fetch stats individually for any starter still missing data
 with st.spinner("Filling in missing pitcher data..."):
@@ -2681,21 +2730,18 @@ if show_backtest:
                                 t10_hr = h_metrics.get("top10_hr_hit_rate", 0)
                                 m4.metric("Top-10 HR pick hit rate", f"{t10_hr}%")
 
-                                # Brier score — single best calibration metric.
-                                # Lower = better. v42p: thresholds RECALIBRATED
-                                # for HR-prediction base rate (~14% league HR/PA
-                                # per game = base-rate Brier ~0.12). Old
-                                # thresholds (<0.04 = Excellent) were for
-                                # 50%-event predictions and made the label
-                                # incorrectly flag good models as "Needs tuning".
-                                # Reference: a Brier just below 0.12 means
-                                # we're matching the base-rate predictor; below
-                                # 0.10 means meaningfully better; 0.13+ means
-                                # our absolute probabilities are over-confident
-                                # (which can still coexist with great ranking).
+                                # v43.18 (reviewer-validated UX): Brier is
+                                # demoted to a secondary diagnostic — placed
+                                # in an expander with an explicit explanation
+                                # that ranking edge (Top-10 hit rate vs slate)
+                                # is the PRIMARY signal. The reviewer's exact
+                                # point: "for a betting tool, ranking edge is
+                                # what matters; calibration is secondary."
+                                # Same data, less visual weight, less risk of
+                                # a user tuning toward calibration at the cost
+                                # of ranking.
                                 brier = h_metrics.get("brier_score")
                                 if brier is not None:
-                                    b_col, _ = st.columns([1, 3])
                                     if brier < 0.09:
                                         b_label = "Excellent"
                                     elif brier < 0.11:
@@ -2706,24 +2752,30 @@ if show_backtest:
                                         b_label = "OK (calibration drifting)"
                                     else:
                                         b_label = "Needs tuning"
-                                    b_col.metric(
-                                        "Brier score",
-                                        f"{brier:.4f}",
-                                        delta=b_label,
-                                        delta_color="off",
-                                        help=(
-                                            "Mean squared error between predicted "
-                                            "HR probability and actual outcome (0/1). "
-                                            "Lower = better. For HR (base rate ~14%): "
-                                            "<0.09 excellent · <0.11 good · "
-                                            "<0.13 decent (ranking strong, probs "
-                                            "slightly inflated) · 0.13+ tuning needed. "
-                                            "Brier measures ABSOLUTE probability "
-                                            "calibration, NOT ranking quality — "
-                                            "check Top-10 hit rate vs slate baseline "
-                                            "for ranking signal."
-                                        ),
-                                    )
+                                    with st.expander(
+                                        f"🔍 Brier score (calibration diagnostic): "
+                                        f"{brier:.4f} — {b_label}",
+                                        expanded=False,
+                                    ):
+                                        st.caption(
+                                            "**Calibration ≠ ranking.** Top-10 hit "
+                                            "rate above is the primary signal for "
+                                            "a betting tool. Brier measures ABSOLUTE "
+                                            "probability calibration — useful for "
+                                            "diagnosing 'are 25% predictions actually "
+                                            "hitting 25%?' but a model can have great "
+                                            "ranking edge AND poor Brier (over-confident "
+                                            "probabilities). Watch this only if it "
+                                            "trends above 0.15 for multiple days; "
+                                            "single-day moves are noise."
+                                        )
+                                        st.markdown(
+                                            f"**Score:** {brier:.4f}  \n"
+                                            f"**Tier:** {b_label}  \n"
+                                            "**Reference:** <0.09 excellent · "
+                                            "<0.11 good · <0.13 decent · "
+                                            "<0.15 OK · 0.15+ tune"
+                                        )
 
                                 # Show calibration table
                                 bands = h_metrics.get("hr_pct_bands", [])
@@ -3093,7 +3145,11 @@ if show_legend:
                 "| **C** | 7-10% | Below average |\n"
                 "| **D** | 4-7% | Poor matchup |\n"
                 "| **F** | <4% | Avoid |\n"
-                "| **—** | n/a | Insufficient sample |\n"
+                "| **—** | n/a | No real PA data (e.g., debuting player) |\n\n"
+                "**v43.10:** every hitter with ≥25 PA gets a grade. The "
+                "pa_confidence tier (✅/📊/⚠️/❓) tells you sample reliability "
+                "without hiding the grade. Only debutants or players with <25 "
+                "season PA show as **—**."
             )
         with gcol2:
             st.markdown(
@@ -3120,7 +3176,11 @@ if show_legend:
                 "🟡 Decent play (14-22%)\n\n"
                 "🟠 Below average (7-14%)\n\n"
                 "🔴 Avoid (< 7%)\n\n"
-                "⚪ Insufficient sample"
+                "*Note (v43.10): every hitter with ≥25 PA gets a colored "
+                "signal. The ⚪ neutral state no longer applies to hitters; "
+                "use the pa_confidence column (✅/📊/⚠️/❓) for sample "
+                "reliability. ⚪ still indicates insufficient data on PITCHER "
+                "signals (see middle column).*"
             )
             st.markdown("**Role flags (pitchers)**")
             st.markdown(
@@ -4225,7 +4285,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.17 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.18 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -4646,7 +4706,6 @@ for _, game in slate.iterrows():
     # batted (splits accumulate based on pitcher faced), so the override
     # works the same way — they get their bat-side-specific contact quality.
     try:
-        from data_fetcher import apply_handedness_overrides
         _home_p_throws = (home_p_row.get("p_throws") or home_p_row.get("throws")) if home_p_row else None
         _away_p_throws = (away_p_row.get("p_throws") or away_p_row.get("throws")) if away_p_row else None
         # Away hitters face home pitcher
@@ -4675,7 +4734,19 @@ for _, game in slate.iterrows():
             _b = pd.to_numeric(m_df["barrel_pct"], errors="coerce")
             _p = pd.to_numeric(m_df["pa"], errors="coerce")
             _h = pd.to_numeric(m_df["home_run"], errors="coerce")
-            m_df["xhr_neutral"] = ((_b / 100.0) * 0.385 * _p).round(2)
+            # v43.18 (reviewer-validated math fix):
+            # barrel_batted_rate is barrels per BBE (batted ball event), NOT
+            # per PA. BBE ≈ 0.65 × PA (after subtracting K, BB, HBP). The
+            # previous formula (barrel_pct/100 × 0.385 × PA) multiplied a
+            # per-BBE rate by total PA, overstating xHR by 1/0.65 ≈ 54%.
+            # The 0.385 "HR per barrel" constant was also off — actual league
+            # HR/barrel is ~0.50, so true xHR-per-PA = barrel_pct × 0.65 × 0.50
+            # ≈ barrel_pct × 0.325. We use a more conservative 0.25 to
+            # account for park-suppression and shrink the noisy tails.
+            # Display-only column (Luck Gap / Conv ratio) — doesn't move
+            # rankings, but the numbers are now meaningful instead of
+            # ~50% inflated.
+            m_df["xhr_neutral"] = ((_b / 100.0) * 0.25 * _p).round(2)
             m_df["hr_luck_gap"] = (m_df["xhr_neutral"] - _h).round(2)
             _den = m_df["xhr_neutral"].replace(0, np.nan)
             m_df["hr_conv_ratio"] = (_h / _den).round(2)
@@ -4702,7 +4773,6 @@ for _, game in slate.iterrows():
             # v43.5: same handedness override for bench
             if _home_p_throws:
                 try:
-                    from data_fetcher import apply_handedness_overrides
                     away_bench_matchup = apply_handedness_overrides(
                         away_bench_matchup, _home_p_throws.upper()
                     )
@@ -4718,7 +4788,6 @@ for _, game in slate.iterrows():
             )
             if _away_p_throws:
                 try:
-                    from data_fetcher import apply_handedness_overrides
                     home_bench_matchup = apply_handedness_overrides(
                         home_bench_matchup, _away_p_throws.upper()
                     )
@@ -4982,46 +5051,75 @@ for _, game in slate.iterrows():
         #     than vs_night (≥40% gap in either direction)
         #   - Game is night game AND vs_night meaningfully diverges from vs_day
         #   - Hitter has ≥40 PA in the relevant split for confidence
+        # v43.18 (reviewer-validated + user-asked): day_night_flag wasn't
+        # feeding into the actual HR probability — it was a display-only
+        # signal. Also reviewer noted the denominator had no floor (a hitter
+        # with vs_night_hr_per_pa = 0.5% gave inflated ratios). Both fixed:
+        # the function now returns (flag_str, multiplier) and the multiplier
+        # is applied in props.py hr_prob_per_pa via the day_night_mult arg.
+        # Multiplier capped at [0.93, 1.10] — day/night is a real but weak
+        # signal in published research (~3-5% true effect), so we honor it
+        # with a small adjustment rather than letting raw ratios swing
+        # projections 30-50%.
+        FLOOR_RATE = 0.5  # %, same floor pattern as _platoon_hr_flag fix v41b
         def _day_night_flag(row):
             if game_type not in ("day", "night"):
-                return ""
+                return "", 1.0
             if game_type == "day":
                 rel_pa = row.get("vs_day_pa")
                 rel_rate = row.get("vs_day_hr_per_pa")
                 other_rate = row.get("vs_night_hr_per_pa")
+                other_pa = row.get("vs_night_pa")
                 label_match = "🌞 day boost"
                 label_drag = "🌞 day drag"
             else:
                 rel_pa = row.get("vs_night_pa")
                 rel_rate = row.get("vs_night_hr_per_pa")
                 other_rate = row.get("vs_day_hr_per_pa")
+                other_pa = row.get("vs_day_pa")
                 label_match = "🌙 night boost"
                 label_drag = "🌙 night drag"
-            # Need sample
             try:
+                # Need ≥40 PA on the relevant side AND ≥40 PA on the
+                # comparison side (so we don't fire on one-sided data).
                 if rel_pa is None or pd.isna(rel_pa) or float(rel_pa) < 40:
-                    return ""
+                    return "", 1.0
+                if other_pa is None or pd.isna(other_pa) or float(other_pa) < 40:
+                    return "", 1.0
                 if rel_rate is None or pd.isna(rel_rate):
-                    return ""
-                if other_rate is None or pd.isna(other_rate) or float(other_rate) == 0:
-                    return ""
+                    return "", 1.0
+                if other_rate is None or pd.isna(other_rate):
+                    return "", 1.0
                 rel_f = float(rel_rate)
                 oth_f = float(other_rate)
             except (TypeError, ValueError):
-                return ""
-            # Ratio of tonight's relevant rate vs the opposite split
-            ratio = rel_f / oth_f if oth_f > 0 else 1.0
-            # v42q BUGFIX: vs_day_hr_per_pa is already stored as a PERCENT
-            # (e.g., 3.5 means 3.5%, NOT 0.035). The display previously did
-            # `{rel_f*100:.1f}%` which produced "350.0%" instead of "3.5%".
-            # The ratio comparison above is unaffected because both sides
-            # use the same units. props.py math is also correct (/100 there).
+                return "", 1.0
+            # v43.18: floor the denominator at 0.5% so a tiny "other side"
+            # rate doesn't produce a misleading 4x ratio
+            oth_capped = max(oth_f, FLOOR_RATE)
+            ratio = rel_f / oth_capped
+            # Display flag + small multiplier (cap [0.93, 1.10])
             if ratio >= 1.40:
-                return f"{label_match} ({rel_f:.1f}% vs {oth_f:.1f}%)"
+                # Boost — capped at +10% even for extreme ratios
+                mult = min(1.10, 1.0 + (ratio - 1.0) * 0.05)
+                return (
+                    f"{label_match} ({rel_f:.1f}% vs {oth_f:.1f}%)",
+                    round(mult, 3),
+                )
             if ratio <= 0.60:
-                return f"{label_drag} ({rel_f:.1f}% vs {oth_f:.1f}%)"
-            return ""
-        matchup_df["day_night_flag"] = matchup_df.apply(_day_night_flag, axis=1)
+                # Drag — capped at -7% (asymmetric, slightly less penalty
+                # since drag samples are noisier than boost samples)
+                mult = max(0.93, 1.0 - (1.0 - ratio) * 0.07)
+                return (
+                    f"{label_drag} ({rel_f:.1f}% vs {oth_f:.1f}%)",
+                    round(mult, 3),
+                )
+            return "", 1.0
+
+        # Apply per-row: store flag for display and multiplier for scoring
+        _dn_results = matchup_df.apply(_day_night_flag, axis=1)
+        matchup_df["day_night_flag"] = _dn_results.apply(lambda x: x[0])
+        matchup_df["day_night_mult"] = _dn_results.apply(lambda x: x[1])
 
     if use_pitch_match and HAVE_PITCH_MATCH:
         try:
@@ -5199,6 +5297,11 @@ for _, game in slate.iterrows():
             # is fine — that's not double-counting within the probability).
 
             try:
+                # v43.18: day_night_mult is pulled from the matchup row,
+                # populated earlier in _day_night_flag (returns flag + mult)
+                _dn_mult = row_dict.get("day_night_mult", 1.0)
+                if _dn_mult is None or pd.isna(_dn_mult):
+                    _dn_mult = 1.0
                 p_pa = hr_prob_per_pa(
                     row_dict, opp_p_row,
                     park_factor=hitter_park_mult, weather_mult=wx_mult_nowind,
@@ -5206,6 +5309,7 @@ for _, game in slate.iterrows():
                     bullpen_hr9=opp_bullpen_hr9,
                     # v43.3: TTop kept (real HR effect). ump/catcher reverted.
                     ttop_mult=opp_ttop,
+                    day_night_mult=float(_dn_mult),
                 )
                 # p_pa is already soft-squashed inside hr_prob_per_pa; no
                 # external adjustment needed now that pitch_hr_mult is gone.
@@ -8238,8 +8342,11 @@ if all_hitters:
     # actual HR. Display/audit-only — does NOT feed into pick_score.
     #
     # xhr_neutral: park-neutral expected HRs from quality of contact
-    #   = barrel_pct/100 × 0.385 × PA
-    #   (0.385 = approximate league HR-per-barrel in neutral conditions)
+    #   = barrel_pct/100 × 0.25 × PA
+    #   (0.25 = barrel-to-HR conversion accounting for BBE/PA ratio (~0.65)
+    #    × league HR-per-barrel (~0.50) × park-suppression. Was 0.385
+    #    pre-v43.18 — reviewer caught that barrel_pct is per-BBE not per-PA,
+    #    so multiplying by PA overstated xHR by ~50%.)
     #
     # hr_luck_gap: xhr_neutral - actual HRs
     #   POSITIVE = unlucky / contact quality says more HRs than they've gotten
@@ -8262,7 +8369,8 @@ if all_hitters:
             _pa_safe = pd.to_numeric(combined_all["pa"], errors="coerce")
             _hr_safe = pd.to_numeric(combined_all["home_run"], errors="coerce")
             combined_all["xhr_neutral"] = (
-                (_barrel_safe / 100.0) * 0.385 * _pa_safe
+                # v43.18: 0.385 → 0.25 (reviewer math fix — see _add_robbed_hr_cols)
+                (_barrel_safe / 100.0) * 0.25 * _pa_safe
             ).round(2)
             combined_all["hr_luck_gap"] = (
                 combined_all["xhr_neutral"] - _hr_safe
@@ -9002,24 +9110,24 @@ if all_hitters:
                             top_sl.to_excel(writer, sheet_name="Top 20 Sleepers", index=False)
                     # NEW: Top 10 Picks (the curated daily picks from Top Picks section)
                     try:
-                        if 'top_picks_export' in dir() and top_picks_export is not None and not top_picks_export.empty:
+                        if top_picks_export is not None and not top_picks_export.empty:
                             top_picks_export.to_excel(writer, sheet_name="Top 10 Picks", index=False)
                         # Honorable mentions — diversity-filtered plays worth knowing
-                        if ('honorable_mentions' in dir() and honorable_mentions is not None
+                        if (honorable_mentions is not None
                                 and not honorable_mentions.empty):
                             honorable_mentions.to_excel(writer, sheet_name="Honorable Mentions", index=False)
                         # Best Matchups — pure hitter/pitcher quality, env-free
-                        if ('best_matchups_export' in dir() and best_matchups_export is not None
+                        if (best_matchups_export is not None
                                 and not best_matchups_export.empty):
                             best_matchups_export.to_excel(writer, sheet_name="Best Matchups", index=False)
                         # NEW: Parlay suggestion sheets
-                        if 'two_leg_parlay_export' in dir() and two_leg_parlay_export is not None and not two_leg_parlay_export.empty:
+                        if two_leg_parlay_export is not None and not two_leg_parlay_export.empty:
                             two_leg_parlay_export.to_excel(writer, sheet_name="2-Leg Parlays", index=False)
-                        if 'three_leg_parlay_export' in dir() and three_leg_parlay_export is not None and not three_leg_parlay_export.empty:
+                        if three_leg_parlay_export is not None and not three_leg_parlay_export.empty:
                             three_leg_parlay_export.to_excel(writer, sheet_name="3-Leg Parlays", index=False)
-                        if 'sleeper_parlay_export' in dir() and sleeper_parlay_export is not None and not sleeper_parlay_export.empty:
+                        if sleeper_parlay_export is not None and not sleeper_parlay_export.empty:
                             sleeper_parlay_export.to_excel(writer, sheet_name="Sleeper Parlays", index=False)
-                        if 'rr_export' in dir() and rr_export is not None and not rr_export.empty:
+                        if rr_export is not None and not rr_export.empty:
                             rr_export.to_excel(writer, sheet_name="Round Robin", index=False)
                     except Exception:
                         pass
