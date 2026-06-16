@@ -27,6 +27,21 @@ import pandas as pd
 
 # Base HR rate per PA, MLB-wide. Used as anchor for prob calibration.
 LEAGUE_HR_PER_PA = 0.030
+
+# v43.19 (reviewer-validated): single source of truth for barrel→xHR.
+# Used by props.hr_prob_per_pa AND app.xhr_neutral display columns.
+# Derivation:
+#   barrel_pct = % of batted balls that are barrels (Statcast definition)
+#   BBE_per_PA ≈ 0.70   (typical PAs that become batted balls, excluding K/BB)
+#   HR_per_barrel ≈ 0.55 (Statcast research: barrels become HRs ~55% of time)
+#   xHR/PA ≈ (barrel_pct/100) × 0.70 × 0.55 = (barrel_pct/100) × 0.385
+# League avg 8% barrel × 0.385 = 3.08% xHR/PA, matching observed ~3.0% HR/PA.
+#
+# IMPORTANT: this constant already INCLUDES the BBE/PA factor. So when
+# computing xHR for full season: xHR = (barrel_pct/100) × CONSTANT × PA.
+# Don't multiply by BBE separately — that's the double-counting the v43.18
+# changelog was confused about.
+BARREL_TO_XHR_PER_PA = 0.385
 LEAGUE_K_PER_9 = 8.6
 
 
@@ -88,7 +103,9 @@ def hr_prob_per_pa(
 
     barrel_pct = hitter_row.get("barrel_pct")
     if barrel_pct is not None and not pd.isna(barrel_pct) and barrel_pct > 0:
-        h_xhr = float(barrel_pct) / 100 * 0.385
+        # v43.19: read from BARREL_TO_XHR_PER_PA constant (single source of
+        # truth — same value used by app.xhr_neutral display columns)
+        h_xhr = float(barrel_pct) / 100 * BARREL_TO_XHR_PER_PA
         # Weight observed by sample size (asymptote at 0.80)
         observed_weight = min(0.80, 0.30 + (pa - 100) / 500 * 0.50)
         observed_weight = max(0.30, observed_weight)
