@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.18-arsenal-cap-daynight-mult-deferred-cleanup"
+APP_VERSION = "2026.06.10-v43.19-season-crash-partition-daynight-xhr-revert"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -154,6 +154,10 @@ from models import build_matchup_table, build_pitcher_slate
 from sleepers import hr_probability, find_sleepers
 # Props - core functions are required, verdict_color is optional
 from props import hr_prob_per_pa, k_total_projection
+try:
+    from props import BARREL_TO_XHR_PER_PA
+except ImportError:
+    BARREL_TO_XHR_PER_PA = 0.385
 
 # hr_prob_full_game may not exist in older props.py versions
 try:
@@ -853,17 +857,23 @@ def pa_threshold_for_date(d: date) -> int:
         from models import _season_phase
         phase = _season_phase(d)
     except Exception:
-        phase = None
-        # Fallback to old inline logic if import fails
-        month = d.month
-        if month <= 4: phase = "early"
-        elif month == 5: phase = "may"
-        elif month == 6: phase = "june"
-        elif month == 7: phase = "july"
-        else: phase = "late"
+        phase = "june"
+        try:
+            month = d.month
+            if month <= 4: phase = "early"
+            elif month == 5: phase = "may"
+            elif month == 6: phase = "june"
+            elif month == 7: phase = "july"
+            elif month == 8: phase = "august"
+            elif month == 9: phase = "september"
+            elif month == 10: phase = "october"
+            else: phase = "offseason"
+        except Exception:
+            pass
     return {
         "early": 40, "may": 80, "june": 120,
-        "july": 160, "august": 200, "late": 200,
+        "july": 160, "august": 200,
+        "september": 250, "october": 280, "offseason": 200,
     }.get(phase, 200)
 
 
@@ -4285,7 +4295,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.18 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.19 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -4734,19 +4744,21 @@ for _, game in slate.iterrows():
             _b = pd.to_numeric(m_df["barrel_pct"], errors="coerce")
             _p = pd.to_numeric(m_df["pa"], errors="coerce")
             _h = pd.to_numeric(m_df["home_run"], errors="coerce")
-            # v43.18 (reviewer-validated math fix):
-            # barrel_batted_rate is barrels per BBE (batted ball event), NOT
-            # per PA. BBE ≈ 0.65 × PA (after subtracting K, BB, HBP). The
-            # previous formula (barrel_pct/100 × 0.385 × PA) multiplied a
-            # per-BBE rate by total PA, overstating xHR by 1/0.65 ≈ 54%.
-            # The 0.385 "HR per barrel" constant was also off — actual league
-            # HR/barrel is ~0.50, so true xHR-per-PA = barrel_pct × 0.65 × 0.50
-            # ≈ barrel_pct × 0.325. We use a more conservative 0.25 to
-            # account for park-suppression and shrink the noisy tails.
-            # Display-only column (Luck Gap / Conv ratio) — doesn't move
-            # rankings, but the numbers are now meaningful instead of
-            # ~50% inflated.
-            m_df["xhr_neutral"] = ((_b / 100.0) * 0.25 * _p).round(2)
+            # v43.19 (reviewer-validated, REVERTS v43.18 change which was
+            # wrong): use BARREL_TO_XHR_PER_PA from props.py — single source
+            # of truth, same value used by hr_prob_per_pa. The v43.18
+            # changelog claimed 0.385 was "barrels per BBE × PA = double
+            # counted" — but 0.385 in props.py was DERIVED from 0.70 (BBE/PA)
+            # × 0.55 (HR/barrel), meaning it ALREADY includes the BBE/PA
+            # correction. So multiplying by PA is correct: xHR = barrel_pct
+            # × CONSTANT × PA gives full-season xHR. The v43.18 0.25 change
+            # caused xhr_neutral to UNDER-count by ~35% (luck gaps showed
+            # hitters as luckier than they actually were).
+            try:
+                from props import BARREL_TO_XHR_PER_PA
+            except ImportError:
+                BARREL_TO_XHR_PER_PA = 0.385
+            m_df["xhr_neutral"] = ((_b / 100.0) * BARREL_TO_XHR_PER_PA * _p).round(2)
             m_df["hr_luck_gap"] = (m_df["xhr_neutral"] - _h).round(2)
             _den = m_df["xhr_neutral"].replace(0, np.nan)
             m_df["hr_conv_ratio"] = (_h / _den).round(2)
@@ -5051,17 +5063,17 @@ for _, game in slate.iterrows():
         #     than vs_night (≥40% gap in either direction)
         #   - Game is night game AND vs_night meaningfully diverges from vs_day
         #   - Hitter has ≥40 PA in the relevant split for confidence
-        # v43.18 (reviewer-validated + user-asked): day_night_flag wasn't
-        # feeding into the actual HR probability — it was a display-only
-        # signal. Also reviewer noted the denominator had no floor (a hitter
-        # with vs_night_hr_per_pa = 0.5% gave inflated ratios). Both fixed:
-        # the function now returns (flag_str, multiplier) and the multiplier
-        # is applied in props.py hr_prob_per_pa via the day_night_mult arg.
-        # Multiplier capped at [0.93, 1.10] — day/night is a real but weak
-        # signal in published research (~3-5% true effect), so we honor it
-        # with a small adjustment rather than letting raw ratios swing
-        # projections 30-50%.
-        FLOOR_RATE = 0.5  # %, same floor pattern as _platoon_hr_flag fix v41b
+        # v43.19 (reviewer-validated): day_night logic extracted out of
+        # _apply_pitch_match into its own pass below. Previously coupling
+        # meant unchecking "Pitch match score" silently disabled day/night
+        # adjustments too. Two unrelated features no longer entangled.
+
+    # v43.19: DAY/NIGHT ENRICHMENT — runs unconditionally, regardless of
+    # the pitch-match toggle.
+    FLOOR_RATE = 0.5  # %, same floor pattern as _platoon_hr_flag fix v41b
+    def _apply_day_night(matchup_df):
+        if matchup_df is None or matchup_df.empty:
+            return
         def _day_night_flag(row):
             if game_type not in ("day", "night"):
                 return "", 1.0
@@ -5080,8 +5092,6 @@ for _, game in slate.iterrows():
                 label_match = "🌙 night boost"
                 label_drag = "🌙 night drag"
             try:
-                # Need ≥40 PA on the relevant side AND ≥40 PA on the
-                # comparison side (so we don't fire on one-sided data).
                 if rel_pa is None or pd.isna(rel_pa) or float(rel_pa) < 40:
                     return "", 1.0
                 if other_pa is None or pd.isna(other_pa) or float(other_pa) < 40:
@@ -5094,32 +5104,29 @@ for _, game in slate.iterrows():
                 oth_f = float(other_rate)
             except (TypeError, ValueError):
                 return "", 1.0
-            # v43.18: floor the denominator at 0.5% so a tiny "other side"
-            # rate doesn't produce a misleading 4x ratio
             oth_capped = max(oth_f, FLOOR_RATE)
             ratio = rel_f / oth_capped
-            # Display flag + small multiplier (cap [0.93, 1.10])
             if ratio >= 1.40:
-                # Boost — capped at +10% even for extreme ratios
                 mult = min(1.10, 1.0 + (ratio - 1.0) * 0.05)
                 return (
                     f"{label_match} ({rel_f:.1f}% vs {oth_f:.1f}%)",
                     round(mult, 3),
                 )
             if ratio <= 0.60:
-                # Drag — capped at -7% (asymmetric, slightly less penalty
-                # since drag samples are noisier than boost samples)
                 mult = max(0.93, 1.0 - (1.0 - ratio) * 0.07)
                 return (
                     f"{label_drag} ({rel_f:.1f}% vs {oth_f:.1f}%)",
                     round(mult, 3),
                 )
             return "", 1.0
-
-        # Apply per-row: store flag for display and multiplier for scoring
         _dn_results = matchup_df.apply(_day_night_flag, axis=1)
         matchup_df["day_night_flag"] = _dn_results.apply(lambda x: x[0])
         matchup_df["day_night_mult"] = _dn_results.apply(lambda x: x[1])
+
+    _apply_day_night(away_matchup)
+    _apply_day_night(home_matchup)
+    _apply_day_night(away_bench_matchup)
+    _apply_day_night(home_bench_matchup)
 
     if use_pitch_match and HAVE_PITCH_MATCH:
         try:
@@ -8342,11 +8349,11 @@ if all_hitters:
     # actual HR. Display/audit-only — does NOT feed into pick_score.
     #
     # xhr_neutral: park-neutral expected HRs from quality of contact
-    #   = barrel_pct/100 × 0.25 × PA
-    #   (0.25 = barrel-to-HR conversion accounting for BBE/PA ratio (~0.65)
-    #    × league HR-per-barrel (~0.50) × park-suppression. Was 0.385
-    #    pre-v43.18 — reviewer caught that barrel_pct is per-BBE not per-PA,
-    #    so multiplying by PA overstated xHR by ~50%.)
+    #   = barrel_pct/100 × BARREL_TO_XHR_PER_PA × PA
+    #   (BARREL_TO_XHR_PER_PA = 0.385 = 0.70 BBE/PA × 0.55 HR/barrel.
+    #    Single source of truth in props.py; same constant used by
+    #    hr_prob_per_pa. v43.18 incorrectly reduced to 0.25 based on
+    #    a misreading; v43.19 reverted.)
     #
     # hr_luck_gap: xhr_neutral - actual HRs
     #   POSITIVE = unlucky / contact quality says more HRs than they've gotten
@@ -8369,8 +8376,12 @@ if all_hitters:
             _pa_safe = pd.to_numeric(combined_all["pa"], errors="coerce")
             _hr_safe = pd.to_numeric(combined_all["home_run"], errors="coerce")
             combined_all["xhr_neutral"] = (
-                # v43.18: 0.385 → 0.25 (reviewer math fix — see _add_robbed_hr_cols)
-                (_barrel_safe / 100.0) * 0.25 * _pa_safe
+                # v43.19: revert to BARREL_TO_XHR_PER_PA (= 0.385).
+                # See _add_robbed_hr_cols for full reasoning. The v43.18
+                # change to 0.25 was based on misreading props.py's
+                # derivation comment — the constant already includes
+                # the BBE/PA factor.
+                (_barrel_safe / 100.0) * BARREL_TO_XHR_PER_PA * _pa_safe
             ).round(2)
             combined_all["hr_luck_gap"] = (
                 combined_all["xhr_neutral"] - _hr_safe
