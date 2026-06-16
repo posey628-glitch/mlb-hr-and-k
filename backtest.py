@@ -1007,14 +1007,65 @@ def _rolling_aggregate_uncached(snapshot_dates_key: str, max_days: int) -> dict:
         if d.get("ps_env_weight") is not None
     ))
     untagged_days = sum(1 for d in per_day if d.get("app_version") is None)
+    # v43.18 (reviewer-validated): the warning approach was a workaround.
+    # The real fix is to partition the aggregate by ps_env_weight so we
+    # don't blend two different models in the headline number. This block
+    # computes the SAME aggregate but filtered to the dominant env_weight
+    # only, and surfaces both numbers (dominant-partition AND total) so
+    # users see what "apples-to-apples" looks like.
+    dominant_partition = None
+    dominant_edge_legacy = None
+    dominant_edge_ps = None
+    dominant_brier = None
+    dominant_n = None
+    if len(env_weights_seen) > 1:
+        # Find the env_weight with the most snapshot-days
+        from collections import Counter
+        weight_counts = Counter(
+            d.get("ps_env_weight") for d in per_day
+            if d.get("ps_env_weight") is not None
+        )
+        if weight_counts:
+            dominant_partition = weight_counts.most_common(1)[0][0]
+            dom_days = [
+                d for d in per_day
+                if d.get("ps_env_weight") == dominant_partition
+            ]
+            dom_top10_total = sum(d.get("top10_picks_total", 0) for d in dom_days)
+            dom_top10_hr = sum(d.get("top10_hrs_hit", 0) for d in dom_days)
+            dom_top10_ps_total = sum(d.get("top10_pick_score_picks_total", 0) for d in dom_days)
+            dom_top10_ps_hr = sum(d.get("top10_pick_score_hrs_hit", 0) for d in dom_days)
+            dom_slate_hrs = sum(d.get("slate_hrs", 0) for d in dom_days)
+            dom_slate_total = sum(d.get("slate_hitters", 0) for d in dom_days)
+            if dom_slate_total > 0:
+                dom_slate_rate = dom_slate_hrs / dom_slate_total * 100
+                dom_legacy_rate = (
+                    dom_top10_hr / dom_top10_total * 100 if dom_top10_total else 0
+                )
+                dom_ps_rate = (
+                    dom_top10_ps_hr / dom_top10_ps_total * 100 if dom_top10_ps_total else 0
+                )
+                dominant_edge_legacy = round(dom_legacy_rate - dom_slate_rate, 1)
+                dominant_edge_ps = round(dom_ps_rate - dom_slate_rate, 1) if dom_top10_ps_total else None
+                dominant_n = len(dom_days)
+            # Mean brier within the partition
+            dom_brier_vals = []
+            for d in dom_days:
+                b = d.get("brier_score")
+                if b is not None:
+                    dom_brier_vals.append(b)
+            if dom_brier_vals:
+                dominant_brier = round(sum(dom_brier_vals) / len(dom_brier_vals), 4)
+
     version_drift_warning = None
     if len(env_weights_seen) > 1:
         version_drift_warning = (
             f"⚠️ AGGREGATE SPANS {len(env_weights_seen)} DIFFERENT ENV WEIGHTS "
             f"({env_weights_seen}). The env reweight (v42q→v42r) changed "
-            f"how heavily park/weather drives ranking. Edge numbers across "
-            f"this boundary blend two different models. Filter to a single "
-            f"app_version for apples-to-apples comparison."
+            f"how heavily park/weather drives ranking. Headline edge below "
+            f"blends two different models. **Use the 'Dominant partition' "
+            f"numbers below for apples-to-apples comparison** (env_weight="
+            f"{dominant_partition}, {dominant_n} days)."
         )
     elif untagged_days > 0:
         version_drift_warning = (
@@ -1051,6 +1102,13 @@ def _rolling_aggregate_uncached(snapshot_dates_key: str, max_days: int) -> dict:
         "env_weights_seen": env_weights_seen,
         "untagged_days": untagged_days,
         "version_drift_warning": version_drift_warning,
+        # v43.18: dominant-partition numbers — apples-to-apples comparison
+        # when the aggregate spans multiple env_weights
+        "dominant_env_partition": dominant_partition,
+        "dominant_edge_legacy_pp": dominant_edge_legacy,
+        "dominant_edge_ps_pp": dominant_edge_ps,
+        "dominant_brier": dominant_brier,
+        "dominant_n_days": dominant_n,
     }
 
 
