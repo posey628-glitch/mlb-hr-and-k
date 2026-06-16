@@ -935,6 +935,21 @@ def _rolling_aggregate_uncached(snapshot_dates_key: str, max_days: int) -> dict:
             # meant diversity cap silently never fired).
             "top10_pick_score_hit_rate_pct": h_metrics.get("top10_pick_score_hit_rate"),
             "brier": h_metrics.get("brier_score"),
+            # v43.19 (reviewer-validated): raw counts so the dominant-
+            # partition aggregator can correctly sum across days. Previously
+            # only rates were stored, and the v43.18 dominant block tried
+            # to read fields like top10_picks_total / slate_hrs that don't
+            # exist, silently making the whole partition feature a no-op.
+            "top10_picks_total": len(h_metrics.get("top10_hr_predictions") or []),
+            "top10_hrs_hit": sum(
+                1 for e in (h_metrics.get("top10_hr_predictions") or [])
+                if e.get("homered")
+            ),
+            "top10_ps_picks_total": len(h_metrics.get("top10_pick_score_predictions") or []),
+            "top10_ps_hrs_hit": sum(
+                1 for e in (h_metrics.get("top10_pick_score_predictions") or [])
+                if e.get("homered")
+            ),
             # v43.7: version + key calibration constant
             "app_version": snapshot.get("app_version"),
             "ps_env_weight": (
@@ -1031,14 +1046,19 @@ def _rolling_aggregate_uncached(snapshot_dates_key: str, max_days: int) -> dict:
                 d for d in per_day
                 if d.get("ps_env_weight") == dominant_partition
             ]
+            # v43.19 (reviewer-validated fix): use the correct day_summary
+            # key names. The v43.18 version read top10_picks_total / slate_hrs
+            # etc. which don't exist on day_summary, so every aggregate was
+            # 0 and the partition feature was silently a no-op.
             dom_top10_total = sum(d.get("top10_picks_total", 0) for d in dom_days)
             dom_top10_hr = sum(d.get("top10_hrs_hit", 0) for d in dom_days)
-            dom_top10_ps_total = sum(d.get("top10_pick_score_picks_total", 0) for d in dom_days)
-            dom_top10_ps_hr = sum(d.get("top10_pick_score_hrs_hit", 0) for d in dom_days)
-            dom_slate_hrs = sum(d.get("slate_hrs", 0) for d in dom_days)
-            dom_slate_total = sum(d.get("slate_hitters", 0) for d in dom_days)
-            if dom_slate_total > 0:
-                dom_slate_rate = dom_slate_hrs / dom_slate_total * 100
+            dom_top10_ps_total = sum(d.get("top10_ps_picks_total", 0) for d in dom_days)
+            dom_top10_ps_hr = sum(d.get("top10_ps_hrs_hit", 0) for d in dom_days)
+            # Slate baseline: weight per-day rates by hitters_played
+            dom_total_hitters = sum(d.get("hitters_played", 0) for d in dom_days)
+            dom_total_hrs = sum(d.get("actual_hrs", 0) for d in dom_days)
+            if dom_total_hitters > 0:
+                dom_slate_rate = dom_total_hrs / dom_total_hitters * 100
                 dom_legacy_rate = (
                     dom_top10_hr / dom_top10_total * 100 if dom_top10_total else 0
                 )
@@ -1048,10 +1068,10 @@ def _rolling_aggregate_uncached(snapshot_dates_key: str, max_days: int) -> dict:
                 dominant_edge_legacy = round(dom_legacy_rate - dom_slate_rate, 1)
                 dominant_edge_ps = round(dom_ps_rate - dom_slate_rate, 1) if dom_top10_ps_total else None
                 dominant_n = len(dom_days)
-            # Mean brier within the partition
+            # Mean brier within the partition — key is "brier" not "brier_score"
             dom_brier_vals = []
             for d in dom_days:
-                b = d.get("brier_score")
+                b = d.get("brier")   # v43.19 fix: was "brier_score"
                 if b is not None:
                     dom_brier_vals.append(b)
             if dom_brier_vals:
