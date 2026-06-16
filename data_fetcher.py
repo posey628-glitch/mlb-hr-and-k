@@ -679,7 +679,11 @@ def get_bvp_for_matchup(batter_id: int, pitcher_id: int) -> dict:
         denom_ab = agg_ab if agg_ab > 0 else agg_pa
 
         # Compute derived stats
-        total_bases = (agg_h - agg_2b - agg_3b - agg_hr) + 2 * agg_2b + 3 * agg_3b + 4 * agg_hr
+        # v43.18 (reviewer-validated defensive): if MLB Stats API ever
+        # returns inconsistent data (agg_h < 2b+3b+hr), singles goes negative
+        # and SLG becomes nonsense. Clamp at zero.
+        singles = max(0, agg_h - agg_2b - agg_3b - agg_hr)
+        total_bases = singles + 2 * agg_2b + 3 * agg_3b + 4 * agg_hr
         out = {
             "bvp_pa": agg_pa or agg_ab,
             "bvp_ab": agg_ab,
