@@ -41,6 +41,7 @@ def hr_prob_per_pa(
     defense_factor: float = 1.0,
     min_pa: int = 25,  # v43.10: lowered from 100 — give call-ups, returning players a projection
     bullpen_hr9: float | None = None,  # v37+ bullpen leverage adjustment
+    day_night_mult: float = 1.0,  # v43.18: day/night handedness boost/drag (cap [0.93, 1.10])
 ) -> float | None:
     """
     Returns P(HR | single PA today) using ONLY real data.
@@ -462,6 +463,8 @@ def hr_prob_per_pa(
     # Example bug fix: 1.17 wind × 1.21 park × 1.30 pitch_match = 1.84x
     # compounded multiplier was pushing modest hitters to elite tier.
     # New cap: 1.35× total context (still allows great matchups to boost ~35%).
+    # v43.18: day_night_mult joins the stack (capped at [0.93, 1.10] at source,
+    # so the global ctx_mult cap [0.65, 1.35] still handles compound runaway).
     ctx_mult_raw = (
         park_factor
         * park_hand_factor
@@ -470,6 +473,7 @@ def hr_prob_per_pa(
         * ttop_mult
         * defense_factor
         * platoon_mult
+        * day_night_mult
     )
     ctx_mult = min(1.35, max(0.65, ctx_mult_raw))
 
