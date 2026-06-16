@@ -159,28 +159,41 @@ def pitch_match_score(
             adapt_factor = 1.35
         usage = usage_raw * adapt_factor
 
-        # Apply same Bayesian shrinkage to xwoba (default prior 0.320 = league avg)
+        # v43.18 (user-reported "Abrams 100 arsenal HR"): SEPARATE barrel
+        # shrinkage from xwOBA shrinkage. xwOBA stabilizes faster (prior 30
+        # is fine), but barrel rates on small per-pitch samples are very
+        # noisy — a hitter with 5% season barrel can show 30% on one pitch
+        # in 50 PA, and at prior=30 that gets 50/80=63% weight, enough to
+        # push the weighted average above the 22% ceiling and produce
+        # spurious 100 scores. Doubled barrel prior to 75 PA shrinks small
+        # samples more aggressively toward 7.5% league avg.
         pitch_pa = h_pa.get(pitch, 20)
-        shrink_weight = pitch_pa / (pitch_pa + 30)
-        h_val_shrunk = h_val * shrink_weight + 0.320 * (1 - shrink_weight)
+        BARREL_PRIOR_PA = 75   # v43.18: was 30
+        XWOBA_PRIOR_PA = 30    # unchanged — xwOBA is more stable
+        shrink_weight_xwoba = pitch_pa / (pitch_pa + XWOBA_PRIOR_PA)
+        shrink_weight_brl = pitch_pa / (pitch_pa + BARREL_PRIOR_PA)
+
+        # Apply Bayesian shrinkage to xwoba (default prior 0.320 = league avg)
+        h_val_shrunk = h_val * shrink_weight_xwoba + 0.320 * (1 - shrink_weight_xwoba)
 
         weighted_xwoba += usage * h_val_shrunk
         total_weight += usage
 
         slg_val = h_slg.get(pitch)
         if slg_val is not None:
-            # Same shrinkage applied to SLG (default prior .400 = league avg)
-            slg_shrunk = slg_val * shrink_weight + 0.400 * (1 - shrink_weight)
+            slg_shrunk = slg_val * shrink_weight_xwoba + 0.400 * (1 - shrink_weight_xwoba)
             weighted_slg += usage * slg_shrunk
             has_slg += usage
 
         brl_val = h_barrel.get(pitch)
         if brl_val is not None:
-            # SAMPLE-SIZE SHRINKAGE: per-pitch barrel rates with tiny samples
-            # are noisy (Ben Rice 199 total PA might have 15 PA vs sliders;
-            # 3 barrels = 20% which is misleading). Shrink toward league avg.
-            # League avg barrel% ≈ 7.5%. Bayesian shrinkage with prior weight 30 PA.
-            brl_shrunk = brl_val * shrink_weight + 7.5 * (1 - shrink_weight)
+            # SAMPLE-SIZE SHRINKAGE with v43.18 stronger prior
+            brl_shrunk = brl_val * shrink_weight_brl + 7.5 * (1 - shrink_weight_brl)
+            # v43.18: per-pitch HARD CAP at 20%. Even Aaron Judge's best
+            # pitch barrel is ~18%. A shrunk value above 20% is the
+            # residual of an inflated small-sample observation — clamp it
+            # so it can't pull the weighted average to the ceiling alone.
+            brl_shrunk = min(brl_shrunk, 20.0)
             weighted_barrel += usage * brl_shrunk
             has_barrel += usage
 
