@@ -720,6 +720,14 @@ def build_matchup_table(
     # tiny samples and flagging everything would be useless noise. In August
     # most hitters have meaningful samples and the bar should be higher.
     # See _season_thresholds() for the per-month calibration.
+    #
+    # v43.19 (reviewer-noted limitation): _season_thresholds() is called
+    # without a date, so it keys off TODAY's calendar rather than the
+    # slate's date. For live use this is correct. For backtest where
+    # someone evaluates an August slate while running the app in October,
+    # the thresholds will reflect October's calibration not August's.
+    # Tracked as a follow-up — fix is to thread slate_date through the
+    # build_matchup_table signature.
     _thresh = _season_thresholds()
     _split_thin = _thresh.get("split_thin", 40)
     _split_small = _thresh.get("split_small", 70)
@@ -1147,7 +1155,15 @@ def _season_phase(slate_date=None) -> str:
     is the single source of truth — both consumers now derive their
     specific thresholds from one bucket.
 
-    Returns one of: 'early', 'may', 'june', 'july', 'august', 'late'
+    v43.19 (reviewer-validated crash fix): added 'september' and 'october'
+    as distinct phases. Previously this collapsed everything ≥September
+    into 'late', which left _season_thresholds with unreachable Sept/Oct
+    threshold dicts AND a NameError crash for any postseason date
+    (the elif branches referenced an undefined `month` variable). Crash
+    was dormant only because it's June.
+
+    Returns one of: 'early', 'may', 'june', 'july', 'august',
+                    'september', 'october', 'offseason'
     """
     import datetime
     if slate_date is None:
@@ -1172,7 +1188,11 @@ def _season_phase(slate_date=None) -> str:
         return "july"
     if month == 8:
         return "august"
-    return "late"
+    if month == 9:
+        return "september"
+    if month == 10:
+        return "october"
+    return "offseason"
 
 
 def _season_thresholds(slate_date=None):
@@ -1186,32 +1206,31 @@ def _season_thresholds(slate_date=None):
         when most players have accumulated meaningful platoon samples.
 
     v43.18: uses shared _season_phase to coordinate with app.pa_threshold_for_date
+    v43.19 (reviewer-validated crash fix): table-based lookup replaces
+    the if/elif chain that had two zombie branches referencing a
+    nonexistent `month` variable left over from the v43.18 refactor.
+    Would crash for any September/October date.
     """
     phase = _season_phase(slate_date)
-    if phase == "early":
-        return {"full_ip": 15, "min_ip": 5, "full_gs": 3, "min_gs": 1,
-                "split_thin": 20, "split_small": 40}
-    elif phase == "may":
-        return {"full_ip": 30, "min_ip": 10, "full_gs": 5, "min_gs": 2,
-                "split_thin": 30, "split_small": 55}
-    elif phase == "june":
-        return {"full_ip": 50, "min_ip": 15, "full_gs": 8, "min_gs": 3,
-                "split_thin": 35, "split_small": 65}
-    elif phase == "july":
-        return {"full_ip": 70, "min_ip": 20, "full_gs": 10, "min_gs": 4,
-                "split_thin": 40, "split_small": 70}
-    elif phase == "august":
-        return {"full_ip": 90, "min_ip": 25, "full_gs": 14, "min_gs": 5,
-                "split_thin": 45, "split_small": 80}
-    elif month == 9:      # September: ~28 starts in
-        return {"full_ip": 110, "min_ip": 30, "full_gs": 18, "min_gs": 6,
-                "split_thin": 50, "split_small": 90}
-    elif month == 10:     # October
-        return {"full_ip": 130, "min_ip": 30, "full_gs": 20, "min_gs": 6,
-                "split_thin": 50, "split_small": 90}
-    else:                 # Offseason / spring
-        return {"full_ip": 30, "min_ip": 10, "full_gs": 5, "min_gs": 2,
-                "split_thin": 30, "split_small": 60}
+    TABLE = {
+        "early":     {"full_ip": 15,  "min_ip": 5,  "full_gs": 3,  "min_gs": 1,
+                      "split_thin": 20, "split_small": 40},
+        "may":       {"full_ip": 30,  "min_ip": 10, "full_gs": 5,  "min_gs": 2,
+                      "split_thin": 30, "split_small": 55},
+        "june":      {"full_ip": 50,  "min_ip": 15, "full_gs": 8,  "min_gs": 3,
+                      "split_thin": 35, "split_small": 65},
+        "july":      {"full_ip": 70,  "min_ip": 20, "full_gs": 10, "min_gs": 4,
+                      "split_thin": 40, "split_small": 70},
+        "august":    {"full_ip": 90,  "min_ip": 25, "full_gs": 14, "min_gs": 5,
+                      "split_thin": 45, "split_small": 80},
+        "september": {"full_ip": 110, "min_ip": 30, "full_gs": 18, "min_gs": 6,
+                      "split_thin": 50, "split_small": 90},
+        "october":   {"full_ip": 130, "min_ip": 30, "full_gs": 20, "min_gs": 6,
+                      "split_thin": 50, "split_small": 90},
+        "offseason": {"full_ip": 30,  "min_ip": 10, "full_gs": 5,  "min_gs": 2,
+                      "split_thin": 30, "split_small": 60},
+    }
+    return TABLE.get(phase, TABLE["june"])
 
 
 def build_pitcher_slate(
