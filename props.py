@@ -364,6 +364,49 @@ def hr_prob_per_pa(
                 shrunk_mult = raw_mult
             pitcher_mult = max(0.5, min(2.0, shrunk_mult))
 
+    # v43.21 (real accuracy gain — was deferred): pitcher RECENT form
+    # adjustment. We've been fetching recent_hr9 (HR/9 over L5 starts)
+    # since v37 but only using it for a display flag and a small fixed
+    # bonus (+1.5/+3). Recent form is one of the strongest signals for
+    # HR allowance — a pitcher whose recent_hr9 is 2.5 but season is 1.0
+    # is going through a stretch where his current stuff isn't working,
+    # and that's predictive for tonight. Conversely a usually-bad pitcher
+    # on a recent hot streak should get some credit.
+    #
+    # Conservative design:
+    #   - Only adjust when recent diverges MEANINGFULLY (ratio ≥1.5 worse
+    #     or ≤0.67 better) AND we have ≥3 recent starts (not 1 bad spot
+    #     start dragging everything)
+    #   - Cap the adjustment at ±10% on pitcher_mult — recent form is a
+    #     real signal but full season is still the stronger anchor for
+    #     most pitchers
+    #   - Re-clamp pitcher_mult to [0.5, 2.0] afterward
+    recent_hr9_val = (
+        pitcher_row.get("recent_hr9") if pitcher_row else None
+    )
+    recent_starts_val = (
+        pitcher_row.get("recent_starts") if pitcher_row else None
+    )
+    if (p_hr9 is not None and not pd.isna(p_hr9) and p_hr9 > 0
+            and recent_hr9_val is not None and not pd.isna(recent_hr9_val)
+            and float(recent_hr9_val) >= 0
+            and recent_starts_val is not None and not pd.isna(recent_starts_val)
+            and float(recent_starts_val) >= 3):
+        try:
+            ratio = float(recent_hr9_val) / float(p_hr9)
+            if ratio >= 1.5:
+                # Trending worse — bump pitcher_mult up (more HR exposure)
+                recent_form_adj = min(1.10, 1.0 + (ratio - 1.0) * 0.10)
+            elif ratio <= 0.67:
+                # Trending better — pull pitcher_mult down
+                recent_form_adj = max(0.92, 1.0 - (1.0 - ratio) * 0.10)
+            else:
+                recent_form_adj = 1.0
+            pitcher_mult = pitcher_mult * recent_form_adj
+            pitcher_mult = max(0.5, min(2.0, pitcher_mult))
+        except (TypeError, ValueError, ZeroDivisionError):
+            pass
+
     # NEW: PITCHER DAY/NIGHT adjustment.
     # Some pitchers are dramatically better at night (or day). Apply a modest
     # multiplier on pitcher_mult based on their day/night HR rate split.
