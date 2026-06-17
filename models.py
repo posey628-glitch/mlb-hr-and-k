@@ -1188,12 +1188,25 @@ def add_discipline_score(matchup_df: pd.DataFrame) -> pd.DataFrame:
         return max(0, min(100, (v - poor) / (elite - poor) * 100))
 
     def _row(row):
-        # K% INVERTED — lower K is better. Scale: elite=14%, poor=28%
-        k_raw = row.get("k_percent")
-        k_score = _scale(k_raw, 28, 14) if k_raw is not None else None
+        # v43.25 (reviewer-validated, CRITICAL bug fix): build_matchup_table
+        # renames k_percent → k_pct and bb_percent → bb_pct at line ~337
+        # BEFORE this function runs (it's called on the matchup_df output).
+        # The v43.23 implementation read the pre-rename names, so every row
+        # returned None and discipline_score was NaN for the entire export.
+        # The "ps_discipline" column then never even got created because
+        # the pick_score guard checks `.notna().any()`. Net effect: my v43.23
+        # rebalance trimmed every other component to "make room" for
+        # discipline, but discipline was inert — so the trim shipped without
+        # the addition. Read both names defensively for safety.
+        k_raw = row.get("k_pct")
+        if k_raw is None or pd.isna(k_raw):
+            k_raw = row.get("k_percent")
+        k_score = _scale(k_raw, 28, 14) if (k_raw is not None and not pd.isna(k_raw)) else None
         # BB% — higher is better. Scale: poor=4%, elite=14%
-        bb_raw = row.get("bb_percent")
-        bb_score = _scale(bb_raw, 4, 14) if bb_raw is not None else None
+        bb_raw = row.get("bb_pct")
+        if bb_raw is None or pd.isna(bb_raw):
+            bb_raw = row.get("bb_percent")
+        bb_score = _scale(bb_raw, 4, 14) if (bb_raw is not None and not pd.isna(bb_raw)) else None
 
         if k_score is None and bb_score is None:
             return None
