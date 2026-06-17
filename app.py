@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.24-daynight-doublecount-fix-doc-aligns"
+APP_VERSION = "2026.06.10-v43.25-discipline-column-fix-hrform-inversion-smash-docs"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -1722,8 +1722,8 @@ with st.sidebar:
 
             ("🔥 Smash Spot",
              "Multi-factor convergence flag.\n"
-             "- 🔥🔥🔥 **ELITE** — EXPLOIT+ pitcher + favorable park + favorable env + HR%≥19%\n"
-             "- 🔥🔥 **STRONG** — EXPLOIT/EXPLOIT+ + favorable park + favorable env + HR%≥15%\n"
+             "- 🔥🔥🔥 **ELITE** — EXPLOIT+ pitcher + favorable env (≥1.05) + HR%≥19%\n"
+             "- 🔥🔥 **STRONG** — EXPLOIT/EXPLOIT+ + favorable env (≥1.05) + HR%≥15%\n"
              "- 🔥 **SOLID** — EXPLOIT pitcher + favorable env + HR%≥12%"),
 
             ("pick_score",
@@ -3469,12 +3469,13 @@ if show_legend:
             "multiple advantages stacking together. Look for these FIRST when building your slate:\n\n"
             "| Tier | Conditions Required |\n"
             "|---|---|\n"
-            "| 🔥🔥🔥 **ELITE SMASH** | EXPLOIT+ pitcher + favorable env (≥1.05) + favorable park (≥1.04) + HR Game% ≥19% |\n"
-            "| 🔥🔥 **STRONG SMASH** | EXPLOIT/EXPLOIT+ pitcher + favorable env + favorable park + HR Game% ≥15% |\n"
-            "| 🔥 **SMASH** | EXPLOIT/EXPLOIT+ pitcher + (favorable env OR park) + HR Game% ≥15% |\n\n"
+            "| 🔥🔥🔥 **ELITE SMASH** | EXPLOIT+ pitcher + favorable env (≥1.05) + HR Game% ≥19% |\n"
+            "| 🔥🔥 **STRONG SMASH** | EXPLOIT/EXPLOIT+ pitcher + favorable env (≥1.05) + HR Game% ≥15% |\n"
+            "| 🔥 **SMASH** | EXPLOIT/EXPLOIT+ pitcher + HR Game% ≥15% (env not favorable) |\n\n"
             "Where:\n"
-            "- **Favorable env** = hand-aware park × weather × pull-wind ≥ 1.05\n"
-            "- **Favorable park** = hand-aware park × pull-wind ≥ 1.04\n"
+            "- **Favorable env** = hand-aware park × weather × pull-wind ≥ 1.05 "
+            "(single gate — earlier doc text referenced a separate park check, "
+            "but the code uses the combined env multiplier only)\n"
             "- **Pitcher grade** must NOT be TBD (we need real pitcher stats)\n\n"
             "Why this matters: when a hitter faces a bad pitcher (EXPLOIT) in a hitter-friendly "
             "ballpark with wind blowing out and good handedness platoon — that's where the model "
@@ -4445,7 +4446,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.24 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.25 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -8659,56 +8660,66 @@ if all_hitters:
     #    patch flows entirely through hr_form anyway — limiting it to
     #    just hr_form has zero ranking downside.
     # ========================================================================
+    # v43.25 (reviewer-validated bug fix): the inline reimplementation
+    # below previously dropped the gb_pct inversion that build_matchup_table
+    # uses (neg=("gb_pct",) passed to _score_from_weights). So a ground-ball
+    # hitter got a small positive contribution instead of a penalty. The
+    # magnitude was bounded (gb weight ~0.07/1.05 ≈ 6.7%) but directionally
+    # wrong. Fix: call the canonical _score_from_weights from models.py
+    # which handles the inversion correctly.
+    #
+    # KNOWN LIMITATION (reviewer-flagged): this recompute runs AFTER
+    # pick_score has been computed on combined_picks, so the slate-wide
+    # ranks update only affects the displayed hr_form in combined_all.
+    # pick_score itself was computed from the per-lineup hr_form. To make
+    # the recompute actually drive picks, it would need to run before
+    # pick_score on combined_picks — non-trivial because combined_picks
+    # is rebuilt per-game. Holding for now; this fix at least makes the
+    # DISPLAYED hr_form mathematically correct.
     try:
-        from models import SCORING_WEIGHTS, _safe_pct_rank
+        from models import SCORING_WEIGHTS, _safe_pct_rank, _score_from_weights
 
-        weights = SCORING_WEIGHTS.get("hr_form", {})
-        if weights:
-            contributions = []
-            for col, w in weights.items():
-                if col not in combined_all.columns:
-                    continue
-                ranked = _safe_pct_rank(combined_all[col])
-                weight_present = ranked.notna().astype(float) * w
-                contributions.append((weight_present, ranked.fillna(0)))
+        # Canonical path — same function build_matchup_table uses,
+        # with the same neg=("gb_pct",) argument so the inversion is
+        # preserved.
+        hr_form_slate = _score_from_weights(
+            combined_all,
+            SCORING_WEIGHTS.get("hr_form", {}),
+            neg=("gb_pct",),
+        )
 
-            if contributions:
-                total_weight = sum(wp for wp, _ in contributions)
-                weighted_sum = sum(wp * r for wp, r in contributions)
-                hr_form_slate = (weighted_sum / total_weight.replace(0, np.nan)).round(2)
-
-                # Re-apply cold-streak ceiling (Carroll fix). The ceiling logic
-                # mirrors build_matchup_table's _apply_cold_ceiling exactly:
-                #   < 5 games:   no cap
-                #   5-6 games:   75 ceiling
-                #   7-9 games:   60 ceiling
-                #   10+ games:   40 ceiling
-                if "games_since_hr" in combined_all.columns:
-                    def _apply_cold_ceiling(idx):
-                        form = hr_form_slate.iloc[idx]
-                        if pd.isna(form):
-                            return form
-                        gsh = combined_all["games_since_hr"].iloc[idx]
-                        if gsh is None or pd.isna(gsh):
-                            return form
-                        try:
-                            gsh_n = float(gsh)
-                        except (TypeError, ValueError):
-                            return form
-                        if gsh_n >= 10:
-                            return min(float(form), 40.0)
-                        if gsh_n >= 7:
-                            return min(float(form), 60.0)
-                        if gsh_n >= 5:
-                            return min(float(form), 75.0)
+        if hr_form_slate is not None and hr_form_slate.notna().any():
+            # Re-apply cold-streak ceiling (Carroll fix). The ceiling logic
+            # mirrors build_matchup_table's _apply_cold_ceiling exactly:
+            #   < 5 games:   no cap
+            #   5-6 games:   75 ceiling
+            #   7-9 games:   60 ceiling
+            #   10+ games:   40 ceiling
+            if "games_since_hr" in combined_all.columns:
+                def _apply_cold_ceiling(idx):
+                    form = hr_form_slate.iloc[idx]
+                    if pd.isna(form):
                         return form
-                    hr_form_slate = pd.Series(
-                        [_apply_cold_ceiling(i) for i in range(len(combined_all))],
-                        index=combined_all.index,
-                    )
+                    gsh = combined_all["games_since_hr"].iloc[idx]
+                    if gsh is None or pd.isna(gsh):
+                        return form
+                    try:
+                        gsh_n = float(gsh)
+                    except (TypeError, ValueError):
+                        return form
+                    if gsh_n >= 10:
+                        return min(float(form), 40.0)
+                    if gsh_n >= 7:
+                        return min(float(form), 60.0)
+                    if gsh_n >= 5:
+                        return min(float(form), 75.0)
+                    return form
+                hr_form_slate = pd.Series(
+                    [_apply_cold_ceiling(i) for i in range(len(combined_all))],
+                    index=combined_all.index,
+                )
 
-                if hr_form_slate.notna().any():
-                    combined_all["hr_form"] = hr_form_slate
+            combined_all["hr_form"] = hr_form_slate.round(2)
     except Exception:
         # Falls through to per-lineup hr_form already in combined_all. No crash.
         pass
@@ -9828,8 +9839,8 @@ if all_hitters:
         st.caption(
             "Hitters where multiple factors align: facing an EXPLOIT/EXPLOIT+ pitcher, "
             "favorable env (park × weather × pull-wind), AND strong HR Game%. "
-            "**ELITE SMASH** = EXPLOIT+ + favorable env + favorable park + HR%≥19%. "
-            "**STRONG SMASH** = EXPLOIT/+ + favorable env + favorable park + HR%≥15%. "
+            "**ELITE SMASH** = EXPLOIT+ + favorable env (≥1.05) + HR%≥19%. "
+            "**STRONG SMASH** = EXPLOIT/+ + favorable env (≥1.05) + HR%≥15%. "
             "**SMASH** = EXPLOIT/+ + (favorable env OR park) + HR%≥15%. "
             "**Max 2 hitters per team** (the top 2 by HR Game% on any team facing an "
             "exploit pitcher — avoids stacking the same lineup)."
