@@ -56,7 +56,16 @@ def hr_prob_per_pa(
     defense_factor: float = 1.0,
     min_pa: int = 25,  # v43.10: lowered from 100 — give call-ups, returning players a projection
     bullpen_hr9: float | None = None,  # v37+ bullpen leverage adjustment
-    day_night_mult: float = 1.0,  # v43.18: day/night handedness boost/drag (cap [0.93, 1.10])
+    # v43.24 (reviewer-validated DOUBLE-COUNT FIX): day_night_mult kwarg
+    # removed. There is an existing day/night block further down in this
+    # function (the "NEW: DAY/NIGHT adjustment" section near line ~210)
+    # that already adjusts h_base based on vs_{game_type}_hr_per_pa with
+    # principled per-hitter base-rate shrinkage. The v43.18 day_night_mult
+    # parameter added a SECOND adjustment in ctx_mult based on the same
+    # underlying split data — compounding to ±25% deviation when both
+    # fired in the same direction. Reverting to the props.py-internal
+    # path which is the more principled (shrinks toward player's own
+    # base rate, not a slate-ratio).
 ) -> float | None:
     """
     Returns P(HR | single PA today) using ONLY real data.
@@ -523,8 +532,10 @@ def hr_prob_per_pa(
     # Example bug fix: 1.17 wind × 1.21 park × 1.30 pitch_match = 1.84x
     # compounded multiplier was pushing modest hitters to elite tier.
     # New cap: 1.35× total context (still allows great matchups to boost ~35%).
-    # v43.18: day_night_mult joins the stack (capped at [0.93, 1.10] at source,
-    # so the global ctx_mult cap [0.65, 1.35] still handles compound runaway).
+    # v43.24 (reviewer-validated double-count fix): day_night_mult removed
+    # from this stack — the day/night adjustment happens once in the
+    # h_base block below (principled per-hitter shrinkage). Prior v43.18
+    # had day_night appearing in BOTH places, compounding ±25%.
     ctx_mult_raw = (
         park_factor
         * park_hand_factor
@@ -533,7 +544,6 @@ def hr_prob_per_pa(
         * ttop_mult
         * defense_factor
         * platoon_mult
-        * day_night_mult
     )
     ctx_mult = min(1.35, max(0.65, ctx_mult_raw))
 
