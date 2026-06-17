@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.19-season-crash-partition-daynight-xhr-revert"
+APP_VERSION = "2026.06.10-v43.21-grade-order-env-cap-recent-form-blend"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -187,15 +187,28 @@ HAVE_SPLITS = False
 
 try:
     from pitch_match import pitch_match_score, get_hitter_pitch_arsenal
-    # Lazy-load hitter arsenal df once for the wrapper
-    _hitter_arsenal_cache = {"df": None}
-    def _get_hitter_arsenal():
-        if _hitter_arsenal_cache["df"] is None:
+    # v43.20 (reviewer-validated, "biggest available accuracy win"):
+    # cache hitter arsenals in THREE flavors — combined (legacy), vs-LHP,
+    # vs-RHP. Previously the wrapper used only the combined version, so a
+    # hitter's xwoba-vs-cutter was aggregated across cutters from both
+    # lefties AND righties. Cutters move opposite directions relative to a
+    # batter depending on pitcher hand, so collapsing them is wrong.
+    # Selecting by tonight's pitcher's hand crosses apples-to-apples:
+    # pitcher's hand-split arsenal × hitter's hand-split pitch performance.
+    _hitter_arsenal_cache = {"all": None, "L": None, "R": None}
+    def _get_hitter_arsenal(pitcher_hand=None):
+        """Return the hitter pitch-arsenal frame keyed by pitcher hand.
+        pitcher_hand: 'L', 'R', or None (legacy combined fetch).
+        """
+        key = pitcher_hand if pitcher_hand in ("L", "R") else "all"
+        if _hitter_arsenal_cache[key] is None:
             try:
-                _hitter_arsenal_cache["df"] = get_hitter_pitch_arsenal()
+                _hitter_arsenal_cache[key] = get_hitter_pitch_arsenal(
+                    pitcher_hand=pitcher_hand
+                )
             except Exception:
-                _hitter_arsenal_cache["df"] = pd.DataFrame()
-        return _hitter_arsenal_cache["df"]
+                _hitter_arsenal_cache[key] = pd.DataFrame()
+        return _hitter_arsenal_cache[key]
 
     # Wrapper bridging old call signature in app.py to real function
     def pitch_match_score_for_hitter(batter_id, pitcher_row, pitcher_arsenal_df,
@@ -209,6 +222,12 @@ try:
         throw different mixes vs LHB vs RHB, so the per-pitch matchup is much
         more accurate when we use the hand-specific arsenal.
 
+        v43.20 (reviewer-validated): ALSO select the HITTER's arsenal by the
+        PITCHER's hand (extracted from pitcher_row's p_throws). Hand-aware
+        on BOTH sides of the matchup is the "biggest accuracy win" the
+        reviewer identified — the prior code crossed hand-specific pitcher
+        data against hand-agnostic hitter data.
+
         If hand-split data isn't available for this pitcher, falls back to the
         combined arsenal (same as before).
         """
@@ -217,7 +236,20 @@ try:
             if p_id is None:
                 return {"pitch_match_score": None}
 
-            # Try the hand-specific arsenal first
+            # v43.20: extract pitcher's hand for hitter-arsenal selection
+            p_throws = None
+            try:
+                pt = (pitcher_row.get("p_throws")
+                      or pitcher_row.get("throws") or "")
+                if pt and len(str(pt)) > 0:
+                    p_throws = str(pt)[0].upper()
+                    if p_throws not in ("L", "R"):
+                        p_throws = None
+            except Exception:
+                pass
+
+            # Try the hand-specific PITCHER arsenal first (pitchers throw
+            # different mixes to LHB vs RHB)
             this_pitcher_arsenal = pd.DataFrame()
             if batter_hand == "L" and arsenal_vs_L is not None and not arsenal_vs_L.empty:
                 if "player_id" in arsenal_vs_L.columns:
@@ -240,8 +272,15 @@ try:
 
             if this_pitcher_arsenal.empty:
                 return {"pitch_match_score": None}
-            # Filter hitter arsenal to this batter
-            hit_arsenal_df = _get_hitter_arsenal()
+
+            # v43.20: select HITTER arsenal by PITCHER's hand. Falls back to
+            # combined if hand-split fetch failed (e.g., Savant URL changed
+            # — same defensive pattern as the pitcher-side fallback above).
+            hit_arsenal_df = _get_hitter_arsenal(pitcher_hand=p_throws)
+            if hit_arsenal_df is None or hit_arsenal_df.empty:
+                # Fall back to combined if the hand-split fetch returned empty
+                hit_arsenal_df = _get_hitter_arsenal(pitcher_hand=None)
+
             this_hitter_arsenal = hit_arsenal_df[
                 hit_arsenal_df["player_id"] == batter_id
             ] if not hit_arsenal_df.empty and "player_id" in hit_arsenal_df.columns else pd.DataFrame()
@@ -923,20 +962,27 @@ def hr_signal_emoji(hr_game_pct, sample_size=None, pa_threshold=80,
 
 
 def hr_grade(hr_game_pct, sample_size=None, pa_threshold=80,
-              same_side_platoon=False):
+              same_side_platoon=False, env_mult=None):
     """Letter grade (A+/A/B+/B/C/D/F) for HR Game% - more intuitive than %.
 
-    RECALIBRATED v39k (June 2026): Old thresholds (A+ ≥22%, A ≥19%) were
-    set when projections were more conservative. As the model gained
-    multipliers (park × hand × pull-side × wind × bullpen × lift × catcher
-    framing × day/night), aggregate HR Game% drifted upward systematically.
-    Result: A+ became common, A was just "above average," and grades stopped
-    differentiating elite from solid.
-    Math context (4.3 PA/game, 3.0% league avg HR/PA = 12.3% baseline):
-      - Top 3% of plays: ~25%+ HR Game%
-      - Top 10% of plays: ~21%+ HR Game%
-      - Top 25% of plays: ~17%+ HR Game%
-      - Average MLB plate appearance pool: ~12% HR Game%
+    SAME-SIDE PLATOON CAP (v38g): LvL and RvR matchups are inherently tougher
+    than the projected HR% suggests. Cap same-side matchups one tier down:
+    A+ → A, A → B+.
+
+    v43.21 (user-requested): ENVIRONMENT HOSTILITY TIER-CAP. The HR Game%
+    DOES already include env (park/weather/wind), but the [0.65, 1.35] cap
+    on ctx_mult softens extreme hostility — a hitter who'd naturally drop
+    to 14% in a brutal env gets clipped at ~17%, which still grades B+.
+    Adding an explicit tier-cap when env_mult is below 0.85 makes the
+    grade reflect "this environment is actively working against this
+    hitter" without changing the underlying probability calculation. Same
+    pattern as same_side_platoon cap.
+
+    Caps applied (only triggered when env_mult < 0.85):
+      A+ → A    (clear suppression)
+      A  → B+
+      B+ → B
+      (B and below not capped further — already moderate grades)
 
     NEW CALIBRATION:
       A+ : ≥25%  (rare elite, top 3-5% of plays)
@@ -947,19 +993,6 @@ def hr_grade(hr_game_pct, sample_size=None, pa_threshold=80,
       C  : 7-10%  (below average)
       D  : 4-7%   (poor)
       F  : <4%    (avoid)
-
-    SAME-SIDE PLATOON CAP (v38g): LvL and RvR matchups are inherently tougher
-    than the projected HR% suggests. Cap same-side matchups one tier down:
-    A+ → A, A → B+.
-
-    v43.10 (user-requested): the small-sample hide ("—" for any hitter below
-    pa_threshold) was removing call-ups, returning players, and platoon guys
-    from consideration entirely. Now we ALWAYS return a real letter grade.
-    The pa_confidence flag (computed separately and displayed next to grade)
-    surfaces sample uncertainty so users can decide how much to trust the
-    grade. Bayesian shrinkage in props.py keeps small-sample HR rates
-    sensible (50 PA prior → a 30-PA hitter's rate is heavily pulled toward
-    league mean).
     """
     if hr_game_pct is None or pd.isna(hr_game_pct):
         return "—"
@@ -968,20 +1001,36 @@ def hr_grade(hr_game_pct, sample_size=None, pa_threshold=80,
     # for every hitter with valid data. Sample-size warning lives in the
     # pa_confidence flag instead.
     if hr_game_pct >= 25:
-        return "A" if same_side_platoon else "A+"
-    if hr_game_pct >= 21:
-        return "B+" if same_side_platoon else "A"
-    if hr_game_pct >= 17:
-        return "B+"
-    if hr_game_pct >= 13:
-        return "B"
-    if hr_game_pct >= 10:
-        return "C+"
-    if hr_game_pct >= 7:
-        return "C"
-    if hr_game_pct >= 4:
-        return "D"
-    return "F"
+        raw = "A" if same_side_platoon else "A+"
+    elif hr_game_pct >= 21:
+        raw = "B+" if same_side_platoon else "A"
+    elif hr_game_pct >= 17:
+        raw = "B+"
+    elif hr_game_pct >= 13:
+        raw = "B"
+    elif hr_game_pct >= 10:
+        raw = "C+"
+    elif hr_game_pct >= 7:
+        raw = "C"
+    elif hr_game_pct >= 4:
+        raw = "D"
+    else:
+        raw = "F"
+
+    # v43.21: ENV HOSTILITY TIER-CAP — display-level adjustment, doesn't
+    # change underlying hr_game_pct. The probability calculation already
+    # softens via the ctx_mult floor; this caps the LETTER GRADE so a
+    # hitter in a hostile env can't show as A even if their season
+    # power-line keeps the % elevated.
+    if env_mult is not None and not pd.isna(env_mult):
+        try:
+            env_f = float(env_mult)
+            if env_f < 0.85:
+                _CAP = {"A+": "A", "A": "B+", "B+": "B"}
+                raw = _CAP.get(raw, raw)
+        except (TypeError, ValueError):
+            pass
+    return raw
 
 
 def pa_confidence_tier(sample_size):
@@ -1098,30 +1147,31 @@ def pitcher_grade(test_score, hr_suppress=None, sample_size=None, pa_threshold=8
         # grades. The Gage Jump case: 18 IP, ERA 2.45, HR/9 0.00 → fallback
         # says ELITE, but that's pure small-sample noise.
         #
-        # ASYMMETRIC SHRINKAGE: We only shrink the "this pitcher looks good"
-        # tiers (ELITE/TOUGH), NOT the "this pitcher looks bad" tiers
-        # (EXPLOIT/EXPLOIT+). Reason: low ERA in small sample is often luck
-        # (BABIP regression, HR/FB regression), but high ERA in small sample
-        # tends to reflect real underlying issues (poor stuff, command).
-        # Feltner at 25 IP with ERA 4.85, HR/9 1.73 is genuinely exploitable
-        # — don't shrink him toward MIXED.
+        # v43.20 (reviewer-validated): symmetric shrinkage. Previous v39j
+        # only shrunk ELITE/TOUGH on the theory that "high ERA in small
+        # sample = real bad pitcher." Senga at 20 IP / 9.00 ERA shows that
+        # was wrong — returning-from-injury and other context can produce
+        # spuriously bad small samples too. Now both sides shrink.
         #
-        #   IP < 15:  force MIXED only if currently ELITE/TOUGH (the
-        #             optimistic tiers). EXPLOIT/EXPLOIT+ at <15 IP keep
-        #             their grade — small-sample bad pitchers are real.
-        #   IP 15-29: down-shift ELITE→TOUGH and TOUGH→MIXED. Leave
-        #             EXPLOIT/EXPLOIT+ alone.
-        #   IP ≥ 30:  no adjustment.
+        #   IP < 15:  force MIXED regardless of starting grade. Below 15 IP
+        #             is barely 2-3 starts — no grade is reliable.
+        #   IP 15-29: down-shift one tier (ELITE→TOUGH, TOUGH→MIXED,
+        #             EXPLOIT+→EXPLOIT, EXPLOIT→MIXED).
+        #   IP ≥ 30:  no adjustment — large enough sample to grade.
         if ip is not None and not pd.isna(ip):
             try:
                 ip_f = float(ip)
                 if ip_f < 15:
-                    if raw_grade in ("ELITE", "TOUGH"):
+                    if raw_grade in ("ELITE", "TOUGH", "EXPLOIT", "EXPLOIT+"):
                         return "MIXED"
                 elif ip_f < 30:
                     if raw_grade == "ELITE":
                         return "TOUGH"
                     if raw_grade == "TOUGH":
+                        return "MIXED"
+                    if raw_grade == "EXPLOIT+":
+                        return "EXPLOIT"
+                    if raw_grade == "EXPLOIT":
                         return "MIXED"
             except (TypeError, ValueError):
                 pass
@@ -1145,15 +1195,80 @@ def pitcher_grade(test_score, hr_suppress=None, sample_size=None, pa_threshold=8
     combined_max = max(test_score, hr_s)
     avg = (test_score + hr_s) / 2
 
+    # First-pass grade from slate-relative percentile
     if avg >= 80 and combined_min >= 70:
-        return "ELITE"
-    if avg >= 65 and combined_min >= 55:
-        return "TOUGH"
-    if combined_max <= 30 or combined_min <= 25:
-        return "EXPLOIT+"
-    if combined_max <= 45 or combined_min <= 35:
-        return "EXPLOIT"
-    return "MIXED"
+        raw_grade = "ELITE"
+    elif avg >= 65 and combined_min >= 55:
+        raw_grade = "TOUGH"
+    elif combined_max <= 30 or combined_min <= 25:
+        raw_grade = "EXPLOIT+"
+    elif combined_max <= 45 or combined_min <= 35:
+        raw_grade = "EXPLOIT"
+    else:
+        raw_grade = "MIXED"
+
+    # v43.20 (reviewer-validated, structural fix): the slate-relative
+    # percentile thresholds above mean ~25-30% of every slate is graded
+    # EXPLOIT+ by definition. On a slate of aces, the worst ace becomes
+    # EXPLOIT+. An absolute-sounding grade ("target this pitcher") should
+    # not be derived purely from a relative score.
+    #
+    # ABSOLUTE METRIC BACKSTOP: require real ERA/HR9 to support
+    # EXPLOIT/EXPLOIT+ tiers. A pitcher in the slate's bottom percentile
+    # who actually has a respectable ERA stays MIXED.
+    #   EXPLOIT+ requires: era >= 4.50 OR hr9 >= 1.40
+    #   EXPLOIT  requires: era >= 3.75 OR hr9 >= 1.15
+    # If neither metric is available, the slate-relative grade stands
+    # (no harm done in that edge case — likely a fresh call-up).
+    if raw_grade in ("EXPLOIT", "EXPLOIT+"):
+        try:
+            era_f = float(era) if (era is not None and not pd.isna(era)) else None
+            hr9_f = float(hr9) if (hr9 is not None and not pd.isna(hr9)) else None
+        except (TypeError, ValueError):
+            era_f, hr9_f = None, None
+
+        if era_f is not None or hr9_f is not None:
+            era_ok = era_f is not None and era_f >= 4.50
+            hr9_ok = hr9_f is not None and hr9_f >= 1.40
+            if raw_grade == "EXPLOIT+" and not (era_ok or hr9_ok):
+                # Doesn't meet absolute EXPLOIT+ threshold — try EXPLOIT
+                era_ok_e = era_f is not None and era_f >= 3.75
+                hr9_ok_e = hr9_f is not None and hr9_f >= 1.15
+                if era_ok_e or hr9_ok_e:
+                    raw_grade = "EXPLOIT"
+                else:
+                    raw_grade = "MIXED"
+            elif raw_grade == "EXPLOIT":
+                era_ok_e = era_f is not None and era_f >= 3.75
+                hr9_ok_e = hr9_f is not None and hr9_f >= 1.15
+                if not (era_ok_e or hr9_ok_e):
+                    raw_grade = "MIXED"
+
+    # v43.20: SYMMETRIC small-sample shrinkage. Previously only ELITE/TOUGH
+    # were shrunk on the assumption "high ERA in small sample is real, low
+    # ERA in small sample is luck." The reviewer's Senga-at-20-IP case is
+    # the counterexample: 9.00 ERA in 20 IP from a returning-from-injury
+    # pitcher is exactly the noise this shrinkage was built for. Now both
+    # sides shrink symmetrically.
+    if ip is not None and not pd.isna(ip):
+        try:
+            ip_f = float(ip)
+            if ip_f < 15:
+                if raw_grade in ("ELITE", "TOUGH", "EXPLOIT", "EXPLOIT+"):
+                    raw_grade = "MIXED"
+            elif ip_f < 30:
+                if raw_grade == "ELITE":
+                    raw_grade = "TOUGH"
+                elif raw_grade == "TOUGH":
+                    raw_grade = "MIXED"
+                elif raw_grade == "EXPLOIT+":
+                    raw_grade = "EXPLOIT"
+                elif raw_grade == "EXPLOIT":
+                    raw_grade = "MIXED"
+        except (TypeError, ValueError):
+            pass
+
+    return raw_grade
 
 
 def pitcher_grade_env_adj(base_grade, env_mult):
@@ -4295,7 +4410,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.19 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.21 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -5399,9 +5514,21 @@ for _, game in slate.iterrows():
                 game_pct_val, sample, INSUFFICIENT_PA_THRESHOLD,
                 same_side_platoon=_same_side,
             ))
+            # v43.21: env hostility tier-cap. Compute the relevant env
+            # multiplier for THIS hitter (hand-park × pull-wind × weather)
+            # and pass to hr_grade. If env_mult < 0.85 (clear suppression),
+            # the grade caps one tier down — display matches the matchup
+            # difficulty even when the season power-line keeps HR% elevated.
+            try:
+                _env_for_grade = (
+                    float(hand_park) * float(pull_mult) * float(wx_mult_nowind)
+                )
+            except (TypeError, ValueError):
+                _env_for_grade = None
             grades.append(hr_grade(
                 game_pct_val, sample, INSUFFICIENT_PA_THRESHOLD,
                 same_side_platoon=_same_side,
+                env_mult=_env_for_grade,
             ))
             # v43.10: pa_confidence_tier surfaces sample-size uncertainty
             # WITHOUT hiding the grade. ✅/📊/⚠️/❓ depending on PA count.
@@ -10173,6 +10300,34 @@ def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
         st.caption(f"{team_label}: no lineup data available yet.")
         return
 
+    # v43.20 (reviewer-validated): apply max-2-per-team smash cap HERE in
+    # the render (where the user actually sees it), not just in the
+    # dedicated Smash Spots leaderboard and export. Without this, the
+    # per-game card was showing 5-12 smash flags when a lineup faces an
+    # EXPLOIT/EXPLOIT+ pitcher, making the signal meaningless.
+    # Operate on a copy so we don't mutate the canonical matchup_df.
+    matchup_df = matchup_df.copy()
+    if ("smash_spot" in matchup_df.columns
+            and "hr_game_pct" in matchup_df.columns):
+        try:
+            # Identify smash flags ranked by HR Game% — keep top 2, blank the rest
+            _smash_mask = (
+                matchup_df["smash_spot"].fillna("").astype(str).str.contains(
+                    "SMASH", na=False
+                )
+            )
+            if _smash_mask.sum() > 2:
+                _ordered = (
+                    matchup_df[_smash_mask]
+                    .sort_values("hr_game_pct", ascending=False)
+                )
+                _keep_idx = _ordered.head(2).index
+                # Blank smash_spot on the lower-ranked smash rows
+                _drop_idx = _ordered.iloc[2:].index
+                matchup_df.loc[_drop_idx, "smash_spot"] = ""
+        except Exception:
+            pass
+
     # Detect if this is a roster-fill (unconfirmed) lineup
     is_unconfirmed = (
         "is_roster_fill" in matchup_df.columns
@@ -10199,7 +10354,26 @@ def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
     # best plays mid-table. Schwarber (A+, 23.9%) batting 5th would show
     # below Turner (B+, 16.1%) batting 2nd, making it hard to scan.
     # Lineup position is still visible in the # column for context.
-    if "hr_game_pct" in qualified.columns and qualified["hr_game_pct"].notna().any():
+    # v43.21 (user-reported): grade ordering bug. Sorting purely by
+    # hr_game_pct meant a same-side platoon hitter at 22% (capped to B+)
+    # appeared ABOVE a non-platoon hitter at 21% (kept as A) — wrong from
+    # a "show me the A grades first" reading. Now sort by grade tier
+    # FIRST, then hr_game_pct within tier as a tiebreaker. Same-tier
+    # hitters still sort by HR%, but tiers stay in order: A+ > A > B+ > B
+    # > C+ > C > D > F.
+    _GRADE_RANK = {
+        "A+": 0, "A": 1, "B+": 2, "B": 3,
+        "C+": 4, "C": 5, "D": 6, "F": 7, "—": 8, "": 9,
+    }
+    if "grade" in qualified.columns and "hr_game_pct" in qualified.columns:
+        qualified = qualified.assign(
+            _grade_rank=qualified["grade"].map(_GRADE_RANK).fillna(9)
+        ).sort_values(
+            ["_grade_rank", "hr_game_pct"],
+            ascending=[True, False],
+            na_position="last",
+        ).drop(columns=["_grade_rank"])
+    elif "hr_game_pct" in qualified.columns and qualified["hr_game_pct"].notna().any():
         qualified = qualified.sort_values(
             "hr_game_pct", ascending=False, na_position="last"
         )
@@ -11093,15 +11267,29 @@ for _, game in slate.iterrows():
                 st.caption(
                     "These hitters are on the active roster but NOT in the posted "
                     "starting lineup. If a player gets scratched late, one of these "
-                    "could be the replacement. Stats shown so you're prepared. "
-                    "**HR Game% NOT computed** — these aren't expected starters."
+                    "could be the replacement. Grades/signals shown — useful for "
+                    "spotting a real starter who's resting (or got demoted into "
+                    "the bench pool because lineups aren't posted yet)."
                 )
+                # v43.20 (reviewer-validated): grade/alert/hr_game_pct/
+                # pa_confidence ARE computed for bench in v43.12, but the
+                # display column whitelist stripped them — making Alvarez
+                # (grade A, 25.97% HR) and Vientos (grade B+, 23.19%)
+                # invisible. The old caption claiming "HR Game% NOT computed"
+                # was stale.
                 bench_cols = [c for c in [
-                    "player_name", "position", "bats", "pa",
+                    "player_name", "position", "bats", "pa", "pa_confidence",
+                    "hr_game_pct", "grade", "alert",
                     "barrel_pct", "iso", "xwoba", "home_run", "recent_hr",
                 ] if c in bench.columns]
                 st.dataframe(
-                    bench[bench_cols].sort_values("pa", ascending=False, na_position="last"),
+                    # v43.21: sort by hr_game_pct desc so A grades appear
+                    # first (was sorting by PA which buried high-grade bench
+                    # players below lower-grade ones with more season time)
+                    bench[bench_cols].sort_values(
+                        "hr_game_pct" if "hr_game_pct" in bench.columns else "pa",
+                        ascending=False, na_position="last"
+                    ),
                     hide_index=True, use_container_width=True,
                     column_config={
                         "player_name": st.column_config.TextColumn("Hitter"),
@@ -11120,14 +11308,23 @@ for _, game in slate.iterrows():
             ):
                 st.caption(
                     "Active-roster hitters NOT in the posted starting lineup. "
-                    "If someone gets scratched late, one of these is the likely replacement."
+                    "If someone gets scratched late, one of these is the likely "
+                    "replacement. Grades/signals shown — useful for spotting a "
+                    "real starter who's resting."
                 )
                 bench_cols = [c for c in [
-                    "player_name", "position", "bats", "pa",
+                    "player_name", "position", "bats", "pa", "pa_confidence",
+                    "hr_game_pct", "grade", "alert",
                     "barrel_pct", "iso", "xwoba", "home_run", "recent_hr",
                 ] if c in bench.columns]
                 st.dataframe(
-                    bench[bench_cols].sort_values("pa", ascending=False, na_position="last"),
+                    # v43.21: sort by hr_game_pct desc so A grades appear
+                    # first (was sorting by PA which buried high-grade bench
+                    # players below lower-grade ones with more season time)
+                    bench[bench_cols].sort_values(
+                        "hr_game_pct" if "hr_game_pct" in bench.columns else "pa",
+                        ascending=False, na_position="last"
+                    ),
                     hide_index=True, use_container_width=True,
                     column_config={
                         "player_name": st.column_config.TextColumn("Hitter"),
