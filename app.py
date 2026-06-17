@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.21-grade-order-env-cap-recent-form-blend"
+APP_VERSION = "2026.06.10-v43.22-weight-rebalance-pickscore-legend"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -38,14 +38,27 @@ APP_VERSION = "2026.06.10-v43.21-grade-order-env-cap-recent-form-blend"
 #   v42q: env weight 0.15 (caused env quadruple-count problem)
 #   v42r: env weight 0.05 (current — reviewer-validated structural fix)
 PICK_SCORE_WEIGHTS = {
-    "ps_hr_game":     0.25,
-    "ps_matchup_opp": 0.15,
-    "ps_power":       0.15,
-    "ps_pitch_hr":    0.10,
-    "ps_form":        0.12,
-    "ps_sleeper":     0.05,
-    "ps_lift":        0.06,
-    "ps_env":         0.05,  # v42r — reduced from 0.15
+    # v43.22 (user-flagged double-count, reviewer-validated principle):
+    # hr_game_pct is the COOKED OUTPUT — it already includes power × env ×
+    # pitcher × pitch_match × pull-side × bullpen × ... via the multiplier
+    # stack. Weighting ps_hr_game at 25% AND separately weighting the raw
+    # inputs (ps_power, ps_env, ps_matchup_opp, ps_pitch_hr) double-counts
+    # those signals through the back door. For HR-dominant profiles the
+    # effective share of ps_hr_game was ~40-48% of the audit base, not the
+    # nominal 25% — exactly the dominance the user observed.
+    #
+    # Rebalance reduces the cooked-output weight and promotes the raw
+    # power signal as the highest single component. ps_power is the
+    # cleanest independent signal of HR likelihood (barrel-driven, season-
+    # level) that ISN'T mostly redundant with hr_game_pct's multipliers.
+    "ps_hr_game":     0.18,  # was 0.25 — reduce dominance of cooked output
+    "ps_matchup_opp": 0.15,  # unchanged
+    "ps_power":       0.20,  # was 0.15 — now highest weighted, raw power
+    "ps_pitch_hr":    0.10,  # unchanged
+    "ps_form":        0.13,  # was 0.12 — modest bump for recent-form weight
+    "ps_sleeper":     0.05,  # unchanged
+    "ps_lift":        0.08,  # was 0.06 — contact-quality signal bump
+    "ps_env":         0.05,  # unchanged (was reduced to 0.05 in v42r)
 }
 
 # Other key calibration constants — same SOT principle.
@@ -4410,7 +4423,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.21 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.22 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -7034,6 +7047,28 @@ if all_hitters_for_picks:
                 "context, platoon side, and suspicion flags. Helps you tell "
                 "the difference between 'genuine strong pick' and 'rank "
                 "driven by one inflated component.'"
+            )
+            # v43.22 (user-asked Option C): pick_score is base (0-100) + bonuses
+            # — it can legitimately exceed 100. The "100" anchor implies a
+            # ceiling that isn't actually a ceiling. Make this explicit so a
+            # score of 101.3 (Eldridge case) reads as "elite base + stacked
+            # bonuses" rather than a bug.
+            st.info(
+                "📖 **How pick_score is built (and why it can exceed 100):**  \n"
+                "**Base (0-100):** weighted average of 8 components — "
+                "HR Game%, Matchup, Power, Pitch HR, Form, Sleeper, Lift, Env. "
+                "A hitter at the slate's 100th percentile on every component "
+                "would have base = 100.  \n"
+                "**Bonuses then ADDED on top:**  \n"
+                "• Confirmed lineup: **+3** (-2 if roster-fill)  \n"
+                "• Severe platoon vulnerability (matching hand): **+4** (notable: +2)  \n"
+                "• Opposing pitcher 🔥 recent HR streak: **+3** (⚠️ +1.5)  \n"
+                "• BvP career punisher (≥20 PA, real edge): **±5**  \n"
+                "• IL flag penalty: **−15**  \n"
+                "Max possible stack ≈ **+15** above base, so pick_score "
+                "of 100-110+ means an elite-base hitter with stacked bonuses "
+                "(NOT a math error). The breakdown below shows exactly where "
+                "the points came from."
             )
 
             # Component weights — read from PICK_SCORE_WEIGHTS (single source
