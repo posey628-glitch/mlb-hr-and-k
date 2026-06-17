@@ -22,50 +22,49 @@ import pandas as pd
 
 
 SCORING_WEIGHTS = {
+    # v43.23 (audit-driven, user-validated rebalance):
+    # Audit showed barrel_pct had ~25% effective weight across pick_score
+    # because it was the anchor in nearly every component. Other strong
+    # predictors (pulled_brl_pct corr 0.737, avg_ev 0.605, fb_pct 0.461)
+    # were underweighted at 3-5% effective. K% was barely used despite
+    # being a real HR-rate dampener. Rebalanced to flatten dominance.
     "matchup": {
-        "xwoba": 0.20,
-        "iso": 0.12,
-        "barrel_pct": 0.13,
-        "hard_hit": 0.08,
-        "k_pct_inv": 0.10,
+        # Pitcher-vs-hitter composite. Barrel% reduced (it's already heavily
+        # weighted in power_score, hr_form, and pitch_hr_score). K%_inv and
+        # pitcher_barrel_allowed strengthened — strikeouts cap HR opportunity
+        # per game, and pitcher barrel allowed is the most direct measure
+        # of pitcher HR vulnerability.
+        "xwoba": 0.18,                   # was 0.20
+        "iso": 0.10,                     # was 0.12
+        "barrel_pct": 0.08,              # was 0.13 — reduce duplication
+        "hard_hit": 0.10,                # was 0.08
+        "k_pct_inv": 0.12,               # was 0.10 — K% caps HR opportunity
         "sweet_spot_pct": 0.05,
         "pitcher_xwoba": 0.15,
         "pitcher_k_inv": 0.10,
-        "pitcher_barrel_allowed": 0.07,
+        "pitcher_barrel_allowed": 0.12,  # was 0.07 — direct HR vuln signal
     },
     "hr_form": {
-        # v43.16 (user-requested rebalance): "HR form should include
-        # hard_hit%, barrel%, fly ball rate WITH NO high ground ball rate,
-        # high ISO, exit velo." Added gb_pct as NEGATIVE-weight component
-        # (high GB rate now penalizes the score, as user explicitly asked).
-        # Also slightly diffused top weights (barrel/iso were 49% combined,
-        # now 41%) to address "not weighing too much" — single signals
-        # should no longer dominate the composite.
-        #
-        # v43.17 (user-requested): blast_pct (Statcast bat tracking) added
-        # at small weight (0.05). _score_from_weights skips columns that
-        # aren't present, so if the sidebar toggle is OFF or the Savant
-        # fetch failed, this entry is silently no-op and the remaining
-        # weights renormalize. When data IS present, blast_pct lifts elite
-        # swing-quality hitters that barrel% alone may under-rate (e.g.,
-        # hitters with high blast rate but lower contact rate — power on
-        # the swing but they miss a lot, like prime Joey Gallo profile).
-        #
-        # Reviewer correlation analysis (v38d) showed barrel_pct/iso are the
-        # strongest predictors (0.749/0.690 corr) so they remain anchors,
-        # but the spread is now closer to the user's intuition that several
-        # quality signals together should carry the score.
-        "barrel_pct": 0.22,
-        "iso": 0.19,
+        # Recent-form composite. v43.23 audit revealed barrel_pct/iso at
+        # 22%+19% = 41% of this single composite was excessive — and this
+        # composite is ALSO weighted at 13% of pick_score. So barrel% in
+        # ps_form alone was 0.13 × 0.22 = ~3% of pick_score before counting
+        # any other path. Reduced both, lifted pulled_brl%, avg_ev, fb_pct
+        # to reflect their independent correlations.
+        "barrel_pct": 0.15,        # was 0.22
+        "iso": 0.14,               # was 0.19
         "hard_hit": 0.13,
-        "avg_ev": 0.11,
-        "fb_pct": 0.11,
-        "pulled_brl_pct": 0.08,
+        "avg_ev": 0.14,            # was 0.11 — corr 0.605, underweighted
+        "fb_pct": 0.13,            # was 0.11 — corr 0.461, underweighted
+        "pulled_brl_pct": 0.14,    # was 0.08 — corr 0.737, badly underweighted
         "recent_iso_10": 0.10,
-        "gb_pct": 0.06,
-        "blast_pct": 0.05,  # v43.17 — auto-skipped if bat tracking disabled/empty
+        "gb_pct": 0.07,            # neg-weighted
+        "blast_pct": 0.05,         # auto-skipped if bat tracking off
     },
     "ceiling": {
+        # Ceiling/upside composite — kept barrel-heavy because ceiling is
+        # specifically about top-end power outcomes (not balanced HR rate).
+        # This composite is read only by zone_fit / boom audit, not pick_score.
         "iso": 0.25,
         "barrel_pct": 0.25,
         "pulled_brl_pct": 0.15,
@@ -948,14 +947,22 @@ def add_power_score(
     # (Possible alternative: Savant Statcast Search detail-level export.
     #  Held until we can test.)
     specs = [
-        ("barrel_pct",     0.25, 4.0, 22.0),    # 0.749 corr — anchor
-        ("iso",            0.18, 0.100, 0.350),
-        ("pulled_brl_pct", 0.11, 2.0, 18.0),    # 0.737 corr
-        ("hard_hit",       0.13, 30.0, 60.0),   # 0.590 corr
-        ("avg_ev",         0.12, 85.0, 95.0),   # 0.605 corr
-        ("fb_pct",         0.10, 18.0, 50.0),   # 0.461 corr
-        ("recent_iso",     0.06, 0.080, 0.380), # 0.465 corr
-        ("sweet_spot_pct", 0.03, 10.0, 40.0),
+        # v43.23 (audit-driven rebalance): barrel_pct was 25% of power_score
+        # AND power_score is 20% of pick_score AND barrel_pct appears in
+        # every other component. Effective weight ~25% of total pick_score
+        # on one input. Reduced barrel here; lifted pulled_brl_pct (corr
+        # 0.737 was badly underweighted at 0.11), avg_ev (corr 0.605),
+        # fb_pct (corr 0.461). After rebalance, no single input drives
+        # more than ~12% of power_score and the underused-but-real signals
+        # carry the weight their correlations earn.
+        ("barrel_pct",     0.18, 4.0, 22.0),    # was 0.25 — anchor reduced
+        ("pulled_brl_pct", 0.15, 2.0, 18.0),    # was 0.11 — corr 0.737
+        ("iso",            0.16, 0.100, 0.350), # was 0.18
+        ("avg_ev",         0.13, 85.0, 95.0),   # was 0.12 — corr 0.605
+        ("hard_hit",       0.13, 30.0, 60.0),   # was 0.13
+        ("fb_pct",         0.12, 18.0, 50.0),   # was 0.10 — corr 0.461
+        ("recent_iso",     0.08, 0.080, 0.380), # was 0.06
+        ("sweet_spot_pct", 0.03, 10.0, 40.0),   # noisier, kept small
         # v42q BUGFIX: removed `("la", 0.02, 4.0, 22.0)` — it was being
         # double-counted alongside the dedicated target-16° block at line ~707.
         # The two scoring models actively disagreed: specs treated higher LA
@@ -1144,6 +1151,65 @@ def add_lift_score(
         return round(lift, 1)
 
     df["lift_score"] = df.apply(_row_lift, axis=1)
+    return df
+
+
+def add_discipline_score(matchup_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    v43.23 — Plate Discipline composite (0-100).
+
+    User-validated audit finding: K% was barely used in scoring (only
+    k_pct_inv at ~2% effective weight in matchup_opp). But high-K hitters
+    homer LESS PER GAME even when their HR/PA looks elite, because they
+    strike out 30%+ of plate appearances and never put the ball in play.
+    A Joey Gallo-shape (16% barrel, 30% K) actually has fewer total HR
+    chances than a Yordan-shape (14% barrel, 17% K) over a season.
+
+    Components:
+      - K% (65%): inverted — lower K = better. Elite ≤14%, poor ≥28%.
+      - BB% (35%): higher BB = better. Elite ≥14%, poor ≤4%. BB% matters
+        because pitchers around the strike zone with worse stuff = more
+        elevatable pitches, AND walked guys still get later PAs.
+
+    Auto-skips if both columns absent. Returns NaN for rows missing both
+    so _score_from_weights renormalizes correctly.
+    """
+    if matchup_df is None or matchup_df.empty:
+        return matchup_df
+    df = matchup_df.copy()
+
+    def _scale(val, poor, elite):
+        if val is None or pd.isna(val):
+            return None
+        try:
+            v = float(val)
+        except (TypeError, ValueError):
+            return None
+        return max(0, min(100, (v - poor) / (elite - poor) * 100))
+
+    def _row(row):
+        # K% INVERTED — lower K is better. Scale: elite=14%, poor=28%
+        k_raw = row.get("k_percent")
+        k_score = _scale(k_raw, 28, 14) if k_raw is not None else None
+        # BB% — higher is better. Scale: poor=4%, elite=14%
+        bb_raw = row.get("bb_percent")
+        bb_score = _scale(bb_raw, 4, 14) if bb_raw is not None else None
+
+        if k_score is None and bb_score is None:
+            return None
+        # Weighted blend, renormalize if one component missing
+        weights = {"k": 0.65, "bb": 0.35}
+        total_w = 0.0
+        weighted = 0.0
+        if k_score is not None:
+            weighted += k_score * weights["k"]
+            total_w += weights["k"]
+        if bb_score is not None:
+            weighted += bb_score * weights["bb"]
+            total_w += weights["bb"]
+        return round(weighted / total_w, 1)
+
+    df["discipline_score"] = df.apply(_row, axis=1)
     return df
 
 
