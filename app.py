@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.22-weight-rebalance-pickscore-legend"
+APP_VERSION = "2026.06.10-v43.23-weight-audit-discipline-rebalance"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -38,27 +38,36 @@ APP_VERSION = "2026.06.10-v43.22-weight-rebalance-pickscore-legend"
 #   v42q: env weight 0.15 (caused env quadruple-count problem)
 #   v42r: env weight 0.05 (current — reviewer-validated structural fix)
 PICK_SCORE_WEIGHTS = {
-    # v43.22 (user-flagged double-count, reviewer-validated principle):
-    # hr_game_pct is the COOKED OUTPUT — it already includes power × env ×
-    # pitcher × pitch_match × pull-side × bullpen × ... via the multiplier
-    # stack. Weighting ps_hr_game at 25% AND separately weighting the raw
-    # inputs (ps_power, ps_env, ps_matchup_opp, ps_pitch_hr) double-counts
-    # those signals through the back door. For HR-dominant profiles the
-    # effective share of ps_hr_game was ~40-48% of the audit base, not the
-    # nominal 25% — exactly the dominance the user observed.
+    # v43.23 (audit-driven rebalance):
+    # Added ps_discipline (NEW) for K%/BB% signal that wasn't being
+    # incorporated properly. Trimmed other components slightly to make
+    # room. Cooked-output signal (ps_hr_game) trimmed further from 0.18
+    # to 0.16. ps_power trimmed slightly because the underlying
+    # SCORING_WEIGHTS were rebalanced — the raw signals it represents
+    # are no longer barrel-dominated, so the headline weight needs less
+    # to deliver the same effective signal mix.
     #
-    # Rebalance reduces the cooked-output weight and promotes the raw
-    # power signal as the highest single component. ps_power is the
-    # cleanest independent signal of HR likelihood (barrel-driven, season-
-    # level) that ISN'T mostly redundant with hr_game_pct's multipliers.
-    "ps_hr_game":     0.18,  # was 0.25 — reduce dominance of cooked output
-    "ps_matchup_opp": 0.15,  # unchanged
-    "ps_power":       0.20,  # was 0.15 — now highest weighted, raw power
-    "ps_pitch_hr":    0.10,  # unchanged
-    "ps_form":        0.13,  # was 0.12 — modest bump for recent-form weight
-    "ps_sleeper":     0.05,  # unchanged
-    "ps_lift":        0.08,  # was 0.06 — contact-quality signal bump
-    "ps_env":         0.05,  # unchanged (was reduced to 0.05 in v42r)
+    # Effective metric weights AFTER v43.23 rebalance (approximate):
+    #   barrel_pct:     ~15% (was ~25%) — anchor reduced
+    #   pulled_brl%:    ~7%  (was ~3%) — was badly underweighted
+    #   avg_ev:         ~7%  (was ~4%)
+    #   hard_hit:       ~8%  (similar)
+    #   fb_pct:         ~8%  (was ~5%)
+    #   iso:            ~8%  (similar)
+    #   K%_inv (disc):  ~5%  (was ~2%) — now meaningful
+    #   xwoba:          ~3%
+    #   recent_iso:     ~3%
+    #   pitcher signals: ~10% (combined, was ~6%)
+    # Top input weight ~15%, bottom-tail ~1-2%. Much flatter distribution.
+    "ps_hr_game":     0.16,  # was 0.18 — reduce cooked output further
+    "ps_matchup_opp": 0.13,  # was 0.15
+    "ps_power":       0.18,  # was 0.20 — rebalanced internally
+    "ps_pitch_hr":    0.09,  # was 0.10
+    "ps_form":        0.12,  # was 0.13
+    "ps_discipline":  0.06,  # NEW — K%/BB% composite
+    "ps_lift":        0.07,  # was 0.08
+    "ps_sleeper":     0.05,
+    "ps_env":         0.05,
 }
 
 # Other key calibration constants — same SOT principle.
@@ -4423,7 +4432,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.22 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.23 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -5022,7 +5031,21 @@ for _, game in slate.iterrows():
     except Exception:
         pass
 
-    # Pitch match score - single call per hitter, captures all outputs.
+    # v43.23 (audit-driven): add discipline_score (K% / BB% composite) so
+    # plate discipline contributes to pick_score instead of K% being a
+    # negligible ~2% effective weight buried in matchup_opp. Auto-skips
+    # rows missing both K% and BB% — composite returns NaN there and the
+    # downstream pct_rank handles it.
+    try:
+        from models import add_discipline_score
+        away_matchup = add_discipline_score(away_matchup)
+        home_matchup = add_discipline_score(home_matchup)
+        if not away_bench_matchup.empty:
+            away_bench_matchup = add_discipline_score(away_bench_matchup)
+        if not home_bench_matchup.empty:
+            home_bench_matchup = add_discipline_score(home_bench_matchup)
+    except Exception:
+        pass
     # NEW (June 2026): batter_hand passes the hitter's bat side ("L", "R", "S")
     # so the function can pick the pitcher's arsenal split AGAINST that side.
     # Switch hitters bat opposite the pitcher arm, so for "S" we derive
@@ -6490,6 +6513,16 @@ if all_hitters_for_picks:
             score_parts.append(_p); weights.append(_w)
             component_meta.append(("ps_lift", _p, _w))
 
+        # === v43.23: Plate discipline (NEW, 6%) ===
+        # K%/BB% composite. High-K hitters homer less per game even when
+        # HR/PA looks good — they strike out too often to get opportunities.
+        # Was buried at ~2% effective weight in matchup_opp before this.
+        if "discipline_score" in q.columns and q["discipline_score"].notna().any():
+            _p = _pct(q["discipline_score"])
+            _w = _PSW.get("ps_discipline", 0.06)
+            score_parts.append(_p); weights.append(_w)
+            component_meta.append(("ps_discipline", _p, _w))
+
         # === Today's environment (5% — reduced from 15% in v42r) ===
         # v42r STRUCTURAL FIX (reviewer-validated): env appears in FOUR
         # components of pick_score, not one:
@@ -6604,7 +6637,8 @@ if all_hitters_for_picks:
             # Initialize ps_* columns to 0 for schema stability
             for col_name in ("ps_hr_game", "ps_matchup_opp", "ps_power",
                               "ps_pitch_hr", "ps_form", "ps_sleeper",
-                              "ps_lift", "ps_env", "ps_bonus_lineup",
+                              "ps_lift", "ps_env", "ps_discipline",
+                              "ps_bonus_lineup",
                               "ps_bonus_platoon", "ps_bonus_recent_hr",
                               "ps_penalty_il", "ps_bvp"):
                 q[col_name] = 0.0
@@ -6614,8 +6648,9 @@ if all_hitters_for_picks:
             "player_id", "pick_score",
             "ps_hr_game", "ps_matchup_opp", "ps_power", "ps_pitch_hr",
             "ps_form", "ps_sleeper", "ps_lift", "ps_env",
+            "ps_discipline",  # v43.23: plate discipline component
             "ps_bonus_lineup", "ps_bonus_platoon", "ps_bonus_recent_hr",
-            "ps_penalty_il", "ps_bvp",  # v43.14: BvP adjustment column
+            "ps_penalty_il", "ps_bvp",
         ) if c in q.columns]
         if "player_id" in q.columns:
             pick_audit = q[_ps_cols].drop_duplicates(subset="player_id", keep="first").copy()
@@ -7081,6 +7116,7 @@ if all_hitters_for_picks:
                 "ps_power":       "Power",
                 "ps_pitch_hr":    "Pitch HR",
                 "ps_form":        "Form",
+                "ps_discipline":  "Discipline",  # v43.23
                 "ps_sleeper":     "Sleeper",
                 "ps_lift":        "Lift",
                 "ps_env":         "Env",
