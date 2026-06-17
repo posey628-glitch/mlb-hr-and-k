@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.23-weight-audit-discipline-rebalance"
+APP_VERSION = "2026.06.10-v43.24-daynight-doublecount-fix-doc-aligns"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -221,16 +221,27 @@ try:
     def _get_hitter_arsenal(pitcher_hand=None):
         """Return the hitter pitch-arsenal frame keyed by pitcher hand.
         pitcher_hand: 'L', 'R', or None (legacy combined fetch).
+
+        v43.24 (reviewer-validated fragility fix): if a fetch returns
+        empty (transient Savant failure), do NOT pin "empty" for the
+        whole session. Let the next call retry. Previously a single
+        timeout could disable pitch_match for the rest of the session.
         """
         key = pitcher_hand if pitcher_hand in ("L", "R") else "all"
-        if _hitter_arsenal_cache[key] is None:
-            try:
-                _hitter_arsenal_cache[key] = get_hitter_pitch_arsenal(
-                    pitcher_hand=pitcher_hand
-                )
-            except Exception:
-                _hitter_arsenal_cache[key] = pd.DataFrame()
-        return _hitter_arsenal_cache[key]
+        cached = _hitter_arsenal_cache[key]
+        # Only return cache if it's non-empty. None or empty → retry.
+        if cached is not None and not cached.empty:
+            return cached
+        try:
+            fetched = get_hitter_pitch_arsenal(pitcher_hand=pitcher_hand)
+        except Exception:
+            fetched = pd.DataFrame()
+        # Cache only if non-empty
+        if fetched is not None and not fetched.empty:
+            _hitter_arsenal_cache[key] = fetched
+            return fetched
+        # Empty result — leave cache as None so a subsequent call retries
+        return pd.DataFrame()
 
     # Wrapper bridging old call signature in app.py to real function
     def pitch_match_score_for_hitter(batter_id, pitcher_row, pitcher_arsenal_df,
@@ -3317,17 +3328,19 @@ if show_legend:
         st.markdown("---")
         leg1, leg2, leg3 = st.columns(3)
         with leg1:
-            st.markdown("**Signal column (hitters)**")
+            st.markdown("**Signal column (hitters)** — derived from letter grade (v43.4)")
             st.markdown(
-                "🟢 Strong HR play (HR Game% ≥ 22%)\n\n"
-                "🟡 Decent play (14-22%)\n\n"
-                "🟠 Below average (7-14%)\n\n"
-                "🔴 Avoid (< 7%)\n\n"
-                "*Note (v43.10): every hitter with ≥25 PA gets a colored "
-                "signal. The ⚪ neutral state no longer applies to hitters; "
-                "use the pa_confidence column (✅/📊/⚠️/❓) for sample "
-                "reliability. ⚪ still indicates insufficient data on PITCHER "
-                "signals (see middle column).*"
+                "🟢 Strong HR play (Grade **A+/A** — HR Game% ≥ 21%)\n\n"
+                "🟡 Decent play (Grade **B+/B** — 13-21%)\n\n"
+                "🟠 Below average (Grade **C+/C** — 7-13%)\n\n"
+                "🔴 Avoid (Grade **D/F** — <7%)\n\n"
+                "*v43.24 fix: legend bands now match the grade-derived signal "
+                "(was showing old 22%/14% cutoffs that disagreed with grade "
+                "thresholds 25/21/17/13). v43.10: every hitter with ≥25 PA "
+                "gets a colored signal. The ⚪ neutral state no longer applies "
+                "to hitters; use the pa_confidence column (✅/📊/⚠️/❓) for "
+                "sample reliability. ⚪ still indicates insufficient data on "
+                "PITCHER signals (see middle column).*"
             )
             st.markdown("**Role flags (pitchers)**")
             st.markdown(
@@ -4432,7 +4445,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.23 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.24 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -5221,13 +5234,23 @@ for _, game in slate.iterrows():
 
     # v43.19: DAY/NIGHT ENRICHMENT — runs unconditionally, regardless of
     # the pitch-match toggle.
+    # v43.24 (reviewer-validated double-count fix): the function now returns
+    # only the display flag. The mult-into-scoring path added in v43.18 was
+    # double-counting with the existing day/night block inside props.py
+    # (which uses principled per-hitter base-rate shrinkage). day_night_mult
+    # column no longer written — props.py reads vs_day/vs_night PA + rate
+    # directly from the row.
+    # Also: switched from tuple-return + .apply(lambda x: x[0]) to explicit
+    # list-building (reviewer-flagged fragility — DataFrame.apply on
+    # tuple-returning row functions can auto-expand to columns under some
+    # pandas versions).
     FLOOR_RATE = 0.5  # %, same floor pattern as _platoon_hr_flag fix v41b
     def _apply_day_night(matchup_df):
         if matchup_df is None or matchup_df.empty:
             return
         def _day_night_flag(row):
             if game_type not in ("day", "night"):
-                return "", 1.0
+                return ""
             if game_type == "day":
                 rel_pa = row.get("vs_day_pa")
                 rel_rate = row.get("vs_day_hr_per_pa")
@@ -5244,35 +5267,25 @@ for _, game in slate.iterrows():
                 label_drag = "🌙 night drag"
             try:
                 if rel_pa is None or pd.isna(rel_pa) or float(rel_pa) < 40:
-                    return "", 1.0
+                    return ""
                 if other_pa is None or pd.isna(other_pa) or float(other_pa) < 40:
-                    return "", 1.0
+                    return ""
                 if rel_rate is None or pd.isna(rel_rate):
-                    return "", 1.0
+                    return ""
                 if other_rate is None or pd.isna(other_rate):
-                    return "", 1.0
+                    return ""
                 rel_f = float(rel_rate)
                 oth_f = float(other_rate)
             except (TypeError, ValueError):
-                return "", 1.0
+                return ""
             oth_capped = max(oth_f, FLOOR_RATE)
             ratio = rel_f / oth_capped
             if ratio >= 1.40:
-                mult = min(1.10, 1.0 + (ratio - 1.0) * 0.05)
-                return (
-                    f"{label_match} ({rel_f:.1f}% vs {oth_f:.1f}%)",
-                    round(mult, 3),
-                )
+                return f"{label_match} ({rel_f:.1f}% vs {oth_f:.1f}%)"
             if ratio <= 0.60:
-                mult = max(0.93, 1.0 - (1.0 - ratio) * 0.07)
-                return (
-                    f"{label_drag} ({rel_f:.1f}% vs {oth_f:.1f}%)",
-                    round(mult, 3),
-                )
-            return "", 1.0
-        _dn_results = matchup_df.apply(_day_night_flag, axis=1)
-        matchup_df["day_night_flag"] = _dn_results.apply(lambda x: x[0])
-        matchup_df["day_night_mult"] = _dn_results.apply(lambda x: x[1])
+                return f"{label_drag} ({rel_f:.1f}% vs {oth_f:.1f}%)"
+            return ""
+        matchup_df["day_night_flag"] = matchup_df.apply(_day_night_flag, axis=1)
 
     _apply_day_night(away_matchup)
     _apply_day_night(home_matchup)
@@ -5455,11 +5468,10 @@ for _, game in slate.iterrows():
             # is fine — that's not double-counting within the probability).
 
             try:
-                # v43.18: day_night_mult is pulled from the matchup row,
-                # populated earlier in _day_night_flag (returns flag + mult)
-                _dn_mult = row_dict.get("day_night_mult", 1.0)
-                if _dn_mult is None or pd.isna(_dn_mult):
-                    _dn_mult = 1.0
+                # v43.24 (reviewer-validated double-count fix): day_night_mult
+                # no longer passed — props.py handles day/night via its
+                # internal h_base shrinkage block (more principled).
+                # day_night_flag remains as a DISPLAY flag only.
                 p_pa = hr_prob_per_pa(
                     row_dict, opp_p_row,
                     park_factor=hitter_park_mult, weather_mult=wx_mult_nowind,
@@ -5467,7 +5479,6 @@ for _, game in slate.iterrows():
                     bullpen_hr9=opp_bullpen_hr9,
                     # v43.3: TTop kept (real HR effect). ump/catcher reverted.
                     ttop_mult=opp_ttop,
-                    day_night_mult=float(_dn_mult),
                 )
                 # p_pa is already soft-squashed inside hr_prob_per_pa; no
                 # external adjustment needed now that pitch_hr_mult is gone.
@@ -5631,7 +5642,7 @@ for _, game in slate.iterrows():
                 )
                 game_pct_ok = game_pct_val is not None and game_pct_val >= 15
 
-                # SMASH SPOT THRESHOLD (June 2026 fix)
+                # SMASH SPOT THRESHOLD (June 2026 fix + v43.24 alignment)
                 # Previously we had TWO conditions: env_favorable (park × weather
                 # × wind ≥ 1.03) AND park_favorable (park × wind ONLY ≥ 1.02,
                 # NO weather). At HR-suppressing parks for the hitter's side
@@ -5643,7 +5654,13 @@ for _, game in slate.iterrows():
                 # Fix: only check env_favorable. The full_env already encodes
                 # park × weather × wind — checking park separately and stripping
                 # weather is redundant and broken.
-                env_favorable = full_env >= 1.03
+                #
+                # v43.24 (reviewer-validated doc mismatch): threshold raised
+                # 1.03 → 1.05 to match the user-facing legend text in
+                # render_top_picks (which said "≥1.05" while code checked
+                # 1.03). Docs were the spec; aligning code to docs makes
+                # smash flags slightly more selective.
+                env_favorable = full_env >= 1.05
 
                 # CRITICAL: Smash spots only apply to CONFIRMED LINEUPS.
                 # is_roster_fill is the authoritative flag set in models.py when
@@ -10078,10 +10095,11 @@ def build_col_config():
         "alert": st.column_config.TextColumn(
             "Signal", width="small",
             help=(
-                "🟢 = ELITE (HR Game% ≥ 22%) — top-tier HR play\n"
-                "🟡 = STRONG (14-22%) — solid HR consideration\n"
-                "🟠 = DECENT (7-14%) — middle of pack\n"
-                "🔴 = WEAK (< 7%) — avoid for HR props\n"
+                "v43.4+: derived from letter grade.\n"
+                "🟢 = Grade A+/A (HR Game% ≥ 21%) — top-tier HR play\n"
+                "🟡 = Grade B+/B (13-21%) — solid HR consideration\n"
+                "🟠 = Grade C+/C (7-13%) — middle of pack\n"
+                "🔴 = Grade D/F (< 7%) — avoid for HR props\n"
                 "⚪ = INSUFFICIENT SAMPLE — player has too few PA (< threshold) "
                 "for a reliable projection. NOT a sleeper indicator."
             ),
