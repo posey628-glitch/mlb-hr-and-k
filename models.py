@@ -840,6 +840,14 @@ def build_matchup_table(
         "k_pct", "bb_pct", "whiff_pct", "swing_percent",
         # Rates
         "obp", "slg", "ops", "babip",
+        # v43.29 (reviewer-validated CRITICAL fix): xBA + actual BA were
+        # being filtered out by this display_cols whitelist before reaching
+        # hit_prob_per_pa, so hit_game_pct fell back to the 0.250 default
+        # constant for every hitter — user-visible symptom: "every Red Sox
+        # player is B+." Same display_cols-drops-needed-columns failure
+        # pattern as the vs-LHP splits we fixed earlier. Adding aliases too
+        # for defensive resilience.
+        "xba", "ba", "avg", "batting_avg",
         # Counts
         "pa", "home_run", "recent_hr", "recent_iso", "recent_avg",
         "recent_hr_weighted_rate",
