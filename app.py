@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.27-hit-signal-orthogonal-to-hr"
+APP_VERSION = "2026.06.10-v43.28-display-wiring-discipline-park-hit"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -4446,7 +4446,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.27 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.28 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -10275,6 +10275,36 @@ def build_col_config():
                  "adjusted for pitcher BAA, park, platoon, K%). "
                  "League average ~65%.",
         ),
+        # v43.23: discipline score (K%/BB% composite). Powers ps_discipline
+        # in pick_score (6% weight). Higher = better contact/discipline.
+        "discipline_score": st.column_config.NumberColumn(
+            "Disc",
+            format="%.1f",
+            width="small",
+            help=(
+                "Plate discipline composite (0-100). K% (65%) inverted + "
+                "BB% (35%). Elite ≥70 (low K, good BB). Poor ≤30 (high K).\n"
+                "v43.23: feeds ps_discipline component of pick_score "
+                "(6% weight). High-K power hitters like Joey Gallo score "
+                "low here — that's the point. Real HR-per-game suffers when "
+                "the hitter strikes out 30%+ of PA."
+            ),
+        ),
+        # v43.26: park-history bonus flag — descriptive text showing the
+        # ±3 point adjustment from career venue history.
+        "park_history_flag": st.column_config.TextColumn(
+            "Park Hist",
+            help=(
+                "v43.26: career hits at this venue vs expected.\n"
+                "🏟️💣 = strong over-performance (≥2× expected, +2-3 pts)\n"
+                "🏟️ = moderate over-performance (1.5-2× expected, +1-2 pts)\n"
+                "📉 = under-performance (0.5-0.8× expected, -1 pt)\n"
+                "⚠️🏟️ = strong under-performance (<0.5× expected, -2 pts)\n"
+                "Empty if <40 PA at venue (sample too small).\n"
+                "Measures RESIDUAL beyond park_hand_factor — does THIS hitter "
+                "outperform/underperform what their handedness's average does here?"
+            ),
+        ),
         "player_name": st.column_config.TextColumn("Hitter"),
         "lineup_pos": st.column_config.NumberColumn(
             "#", width="small",
@@ -10639,11 +10669,23 @@ def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
         )
 
     cols_to_show = [c for c in [
+        # HR signal first — primary use case
         "alert", "grade", "smash_spot", "arsenal_flag", "gb_flag", "day_night_flag",
         "contact_flag", "split_confidence", "slate_leader_flag",
+        # v43.27: HIT signal — orthogonal to HR signal, visible right after HR signals
+        "hit_alert", "hit_grade",
+        # Identity / lineup
         "player_name", "lineup_pos", "bats", "position",
         "hr_profile_label",
-        "power_score", "lift_score", "matchup_opp", "hr_game_pct", "hr_pa_pct", "matchup", "test_score",
+        # Score composites — HR + hit alongside
+        "power_score", "lift_score", "matchup_opp",
+        "hr_game_pct", "hit_game_pct",  # v43.27 — both probabilities side-by-side
+        "hr_pa_pct", "hit_pa_pct",
+        "matchup", "test_score",
+        # v43.23: discipline_score visible now (was computed but never displayed)
+        "discipline_score",
+        # v43.26: park_history_flag visible now (was computed but never displayed)
+        "park_history_flag",
         "streak_label",
         "pa", "barrel_pct", "iso", "xwoba", "xwobacon",
         "obp", "slg", "ops",
