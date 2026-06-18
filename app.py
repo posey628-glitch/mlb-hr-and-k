@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.26-park-history-bonus"
+APP_VERSION = "2026.06.10-v43.27-hit-signal-orthogonal-to-hr"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -4446,7 +4446,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.26 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.27 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -5413,6 +5413,10 @@ for _, game in slate.iterrows():
         pa_confidences = []  # v43.10: per-hitter sample-confidence tier
         smash_spots = []  # NEW: triple-threat HR opportunity flags
         pull_mults_col = []
+        # v43.27: hit signal — orthogonal to HR signal. Useful for users
+        # picking between HR-friendly and contact-friendly hitters when
+        # the question is "hit prop" vs "HR prop."
+        hit_pa_list, hit_game_list, hit_grades, hit_signals = [], [], [], []
         for _, hr in matchup_df.iterrows():
             row_dict = hr.to_dict()
             # Inject game_type for day/night split adjustment in props.py.
@@ -5545,6 +5549,51 @@ for _, game in slate.iterrows():
             hr_pa.append(round(p_pa * 100, 2) if p_pa is not None else None)
             hr_game.append(round(p_game * 100, 2) if p_game is not None else None)
             game_pct_val = round(p_game * 100, 2) if p_game is not None else None
+
+            # v43.27: HIT signal — separate from HR signal.
+            # Uses simple xBA-based math (no full multiplier stack).
+            # Park HITS factor differs from park HR factor — we approximate
+            # using a small range derived from the same park's general
+            # offense-friendliness (capped [0.92, 1.10] inside hit_prob_per_pa).
+            # For now, use hand_park as a proxy (parks that boost HR also
+            # tend to boost hits, though magnitude is smaller — the function's
+            # internal cap handles that).
+            try:
+                from props import hit_prob_per_pa, hit_prob_full_game
+                from props import hit_grade as _hit_grade_fn
+                from props import hit_signal_emoji as _hit_sig_fn
+                # Platoon for hits is weaker than for HR. Use a softer cap.
+                # Compute same-side inline (don't reference a helper that doesn't exist).
+                _h_bats_now = (row_dict.get("bats") or "").upper()
+                _p_thr_now = (opp_p_row.get("p_throws") or opp_p_row.get("throws") or "").upper() if opp_p_row else ""
+                _ss_for_hit = bool(
+                    _h_bats_now and _p_thr_now
+                    and _h_bats_now != "S"
+                    and _h_bats_now == _p_thr_now
+                )
+                _hit_platoon = 0.95 if _ss_for_hit else 1.02
+                hit_pa = hit_prob_per_pa(
+                    row_dict, opp_p_row,
+                    park_hits_factor=hitter_park_mult,
+                    platoon_mult=_hit_platoon,
+                )
+                hit_game = hit_prob_full_game(hit_pa, expected_pa=expected_pa) if hit_pa is not None else None
+            except Exception:
+                hit_pa = None
+                hit_game = None
+
+            hit_game_pct_val = round(hit_game * 100, 2) if hit_game is not None else None
+            hit_pa_list.append(round(hit_pa * 100, 2) if hit_pa is not None else None)
+            hit_game_list.append(hit_game_pct_val)
+            # Defensive: _hit_grade_fn/_hit_sig_fn may not be defined if the
+            # try block above failed at import — fall back gracefully.
+            try:
+                hit_grades.append(_hit_grade_fn(hit_game_pct_val) if hit_game is not None else "—")
+                hit_signals.append(_hit_sig_fn(hit_game_pct_val))
+            except (NameError, Exception):
+                hit_grades.append("—")
+                hit_signals.append("⚪")
+
             verdicts.append(hr_verdict(
                 game_pct_val, sample, INSUFFICIENT_PA_THRESHOLD,
             ))
@@ -5806,6 +5855,11 @@ for _, game in slate.iterrows():
 
         matchup_df["hr_pa_pct"] = hr_pa
         matchup_df["hr_game_pct"] = hr_game
+        # v43.27: hit signal columns alongside HR signal
+        matchup_df["hit_pa_pct"] = hit_pa_list
+        matchup_df["hit_game_pct"] = hit_game_list
+        matchup_df["hit_grade"] = hit_grades
+        matchup_df["hit_alert"] = hit_signals
         matchup_df["verdict"] = verdicts
         matchup_df["alert"] = signals
         matchup_df["grade"] = grades
@@ -10195,6 +10249,31 @@ def build_col_config():
                 "⚪ = INSUFFICIENT SAMPLE — player has too few PA (< threshold) "
                 "for a reliable projection. NOT a sleeper indicator."
             ),
+        ),
+        # v43.27: HIT signal — orthogonal to HR signal.
+        "hit_alert": st.column_config.TextColumn(
+            "HitSig", width="small",
+            help=(
+                "v43.27: probability of getting AT LEAST 1 HIT in this game "
+                "(separate from HR signal — useful for hit-prop bets).\n"
+                "🟢 = Grade A+/A (≥78% hit_game_pct) — elite contact hitter\n"
+                "🟡 = Grade B+/B (60-78%) — solid contact\n"
+                "🟠 = Grade C+/C (40-60%) — average to weak\n"
+                "🔴 = Grade D/F (<40%) — avoid for hit props"
+            ),
+        ),
+        "hit_grade": st.column_config.TextColumn(
+            "Hit",
+            width="small",
+            help="HIT-prop letter grade (A+/A/B+/B/C+/C/D/F). Separate from HR grade — "
+                 "a Schwarber-shape may be Grade A for HR but C for Hit; "
+                 "Arraez-shape is the opposite.",
+        ),
+        "hit_game_pct": st.column_config.NumberColumn(
+            "Hit%", format="%.1f%%",
+            help="Probability of at least 1 hit in this game (xBA-based, "
+                 "adjusted for pitcher BAA, park, platoon, K%). "
+                 "League average ~65%.",
         ),
         "player_name": st.column_config.TextColumn("Hitter"),
         "lineup_pos": st.column_config.NumberColumn(
