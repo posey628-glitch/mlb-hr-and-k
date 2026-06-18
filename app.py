@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.25-discipline-column-fix-hrform-inversion-smash-docs"
+APP_VERSION = "2026.06.10-v43.26-park-history-bonus"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -4446,7 +4446,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.25 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.26 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -5738,6 +5738,72 @@ for _, game in slate.iterrows():
         matchup_df["bvp_flag"] = bvp_flags
         for k, v in bvp_data_lists.items():
             matchup_df[k] = v
+
+        # v43.26 (user-requested): batter-park history bonus.
+        # Park-AVERAGE HR factors are already in park_hand_factor (used as
+        # a multiplier on every projection). What this adds is the RESIDUAL:
+        # does THIS hitter outperform OR underperform what an average hitter
+        # of their handedness does at this specific venue?
+        #
+        # Sample-gated at 40 PA minimum (smaller samples are noise, and we
+        # have park_hand_factor handling the bulk effect anyway).
+        # Capped at ±3 points — intentionally smaller than BvP (±5) because
+        # we don't want overlap with the park multiplier we already apply.
+        #
+        # The expected-rate denominator (league × park_hand_factor) avoids
+        # double-counting: if Yankee Stadium boosts LHB 1.20×, every LHB's
+        # "expected" HR rate there is 3.6%, and we only flag if THIS LHB
+        # exceeds that.
+        bp_points = []
+        bp_flags = []
+        bp_data_lists = {"bp_pa": [], "bp_hr": [], "bp_hr_per_pa": []}
+        try:
+            from data_fetcher import (
+                get_batter_park_history, park_history_score_adjustment,
+            )
+            venue_id_for_bp = game.get("venue_id")
+            for _, row in matchup_df.iterrows():
+                bid = row.get("player_id")
+                bats = (row.get("bats") or "").upper()[:1] if row.get("bats") else None
+                if (bid is None or pd.isna(bid)
+                        or venue_id_for_bp is None or pd.isna(venue_id_for_bp)):
+                    bp_points.append(0.0)
+                    bp_flags.append("")
+                    for k in bp_data_lists:
+                        bp_data_lists[k].append(None)
+                    continue
+                try:
+                    bp = get_batter_park_history(int(bid), int(venue_id_for_bp))
+                except Exception:
+                    bp = {}
+                # Use THIS hitter's hand-aware park factor as the expected
+                # denominator. Falls back to 1.0 if we can't read it.
+                this_park_factor = 1.0
+                if bats in ("L", "R"):
+                    try:
+                        this_park_factor = float(
+                            get_park_hand_factor(venue_name, bats) or 1.0
+                        )
+                    except Exception:
+                        pass
+                pts, flag = park_history_score_adjustment(
+                    bp, park_hand_factor=this_park_factor,
+                )
+                bp_points.append(pts)
+                bp_flags.append(flag)
+                for k in bp_data_lists:
+                    bp_data_lists[k].append(bp.get(k))
+        except Exception:
+            bp_points = [0.0] * len(matchup_df)
+            bp_flags = [""] * len(matchup_df)
+            for k in bp_data_lists:
+                bp_data_lists[k] = [None] * len(matchup_df)
+
+        matchup_df["park_history_adjust"] = bp_points
+        matchup_df["park_history_flag"] = bp_flags
+        for k, v in bp_data_lists.items():
+            matchup_df[k] = v
+
         matchup_df["hr_pa_pct"] = hr_pa
         matchup_df["hr_game_pct"] = hr_game
         matchup_df["verdict"] = verdicts
@@ -6649,6 +6715,18 @@ if all_hitters_for_picks:
             else:
                 q["ps_bvp"] = 0.0
 
+            # v43.26 (user-requested): batter-park history bonus.
+            # Capped at ±3 in park_history_score_adjustment. Only fires at
+            # ≥40 PA at this venue. Expected denominator = league × park_hand
+            # factor, so this measures the RESIDUAL after the park multiplier
+            # we already apply elsewhere — no double-count.
+            if "park_history_adjust" in q.columns:
+                bp_adj = pd.to_numeric(q["park_history_adjust"], errors="coerce").fillna(0.0)
+                q["pick_score"] = q["pick_score"] + bp_adj
+                q["ps_park_history"] = bp_adj
+            else:
+                q["ps_park_history"] = 0.0
+
             q["pick_score"] = q["pick_score"].round(1)
         else:
             q["pick_score"] = q.get("hr_game_pct", 0)
@@ -6658,7 +6736,8 @@ if all_hitters_for_picks:
                               "ps_lift", "ps_env", "ps_discipline",
                               "ps_bonus_lineup",
                               "ps_bonus_platoon", "ps_bonus_recent_hr",
-                              "ps_penalty_il", "ps_bvp"):
+                              "ps_penalty_il", "ps_bvp",
+                              "ps_park_history"):  # v43.26
                 q[col_name] = 0.0
 
         # Stash per-player audit so combined_all (Hitters export) carries it.
@@ -6669,6 +6748,7 @@ if all_hitters_for_picks:
             "ps_discipline",  # v43.23: plate discipline component
             "ps_bonus_lineup", "ps_bonus_platoon", "ps_bonus_recent_hr",
             "ps_penalty_il", "ps_bvp",
+            "ps_park_history",  # v43.26: batter-at-venue residual
         ) if c in q.columns]
         if "player_id" in q.columns:
             pick_audit = q[_ps_cols].drop_duplicates(subset="player_id", keep="first").copy()
@@ -7108,18 +7188,19 @@ if all_hitters_for_picks:
             # bonuses" rather than a bug.
             st.info(
                 "📖 **How pick_score is built (and why it can exceed 100):**  \n"
-                "**Base (0-100):** weighted average of 8 components — "
-                "HR Game%, Matchup, Power, Pitch HR, Form, Sleeper, Lift, Env. "
-                "A hitter at the slate's 100th percentile on every component "
-                "would have base = 100.  \n"
+                "**Base (0-100):** weighted average of 9 components — "
+                "HR Game%, Matchup, Power, Pitch HR, Form, Discipline, "
+                "Sleeper, Lift, Env. A hitter at the slate's 100th percentile "
+                "on every component would have base = 100.  \n"
                 "**Bonuses then ADDED on top:**  \n"
                 "• Confirmed lineup: **+3** (-2 if roster-fill)  \n"
                 "• Severe platoon vulnerability (matching hand): **+4** (notable: +2)  \n"
                 "• Opposing pitcher 🔥 recent HR streak: **+3** (⚠️ +1.5)  \n"
                 "• BvP career punisher (≥20 PA, real edge): **±5**  \n"
+                "• Park history residual (≥40 PA at this venue): **±3** (v43.26)  \n"
                 "• IL flag penalty: **−15**  \n"
-                "Max possible stack ≈ **+15** above base, so pick_score "
-                "of 100-110+ means an elite-base hitter with stacked bonuses "
+                "Max possible stack ≈ **+18** above base, so pick_score "
+                "of 100-115+ means an elite-base hitter with stacked bonuses "
                 "(NOT a math error). The breakdown below shows exactly where "
                 "the points came from."
             )
