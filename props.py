@@ -588,6 +588,200 @@ def hr_prob_full_game(prob_per_pa: float | None, expected_pa: float = 4.2) -> fl
     return float(1 - (1 - prob_per_pa) ** expected_pa)
 
 
+# ============================================================================
+# v43.27 — HIT probability signal (parallel to HR signal, orthogonal use case)
+# ============================================================================
+# The HR machinery above scores power outcomes. This block scores HIT
+# outcomes — useful for differentiating Schwarber-shape (high HR, low hit)
+# from Arraez-shape (no HR, lots of hits) when picking for "any-hit" props
+# versus "HR" props.
+#
+# Architecture: completely separate from HR scoring. Doesn't touch
+# pick_score, hr_grade, or any HR-side multiplier. Hit signal lives in its
+# own columns (hit_pa_pct, hit_game_pct, hit_grade, hit_alert) for users
+# who want to differentiate the two questions.
+#
+# Math is simpler than HR: hits stabilize faster than power, the dynamic
+# range is narrower (~50%-80% per game vs ~5%-25% for HR), and the
+# multiplier stack is smaller (no pull-side, no wind, no LA target).
+# ============================================================================
+
+LEAGUE_HIT_PER_PA = 0.235  # ~0.250 BA × ~0.91 AB/PA average
+
+def hit_prob_per_pa(
+    hitter_row: dict,
+    pitcher_row: dict,
+    park_hits_factor: float = 1.0,
+    platoon_mult: float = 1.0,
+    min_pa: int = 25,
+) -> float | None:
+    """
+    Per-PA probability that this hitter gets a hit in this matchup.
+
+    INPUTS (all from existing data we already fetch):
+      - xba (expected batting average from Statcast, contact-quality based)
+      - ba (actual batting average — fallback if xba absent)
+      - k_pct / k_percent (penalty proxy — high K caps hit ceiling)
+      - pitcher BAA or h_per_9 (pitcher allow rate)
+      - park hits factor (different from park HR factor)
+
+    Returns None if hitter has insufficient PA.
+    """
+    if not isinstance(hitter_row, dict):
+        try:
+            hitter_row = dict(hitter_row)
+        except Exception:
+            return None
+
+    pa = hitter_row.get("pa") or hitter_row.get("PA") or 0
+    try:
+        pa_f = float(pa)
+    except (TypeError, ValueError):
+        return None
+    if pa_f < min_pa:
+        return None
+
+    # Hitter side — prefer xBA (predictive) over BA (descriptive).
+    # v43.27 FIX (from discipline-bug lesson): read BOTH possible column
+    # names since build_matchup_table renames some but not all.
+    xba = hitter_row.get("xba")
+    if xba is None or pd.isna(xba):
+        xba = hitter_row.get("xBA")
+    ba = hitter_row.get("ba")
+    if ba is None or pd.isna(ba):
+        ba = hitter_row.get("BA") or hitter_row.get("batting_avg")
+
+    try:
+        xba_f = float(xba) if xba is not None and not pd.isna(xba) else None
+        ba_f = float(ba) if ba is not None and not pd.isna(ba) else None
+    except (TypeError, ValueError):
+        xba_f, ba_f = None, None
+
+    if xba_f is not None and ba_f is not None:
+        # Blend: xBA weighted higher (more predictive of next-game performance)
+        hitter_ba = xba_f * 0.6 + ba_f * 0.4
+    elif xba_f is not None:
+        hitter_ba = xba_f
+    elif ba_f is not None:
+        hitter_ba = ba_f
+    else:
+        # No BA data — fall back to league average
+        hitter_ba = 0.250
+
+    # Convert BA to hit-per-PA: BA × (AB/PA). For most hitters AB/PA ≈ 0.91
+    # (subtracting BB/HBP/SH/SF). Use the hitter's actual if available.
+    bb_pct = hitter_row.get("bb_pct") or hitter_row.get("bb_percent") or 8.0
+    try:
+        bb_f = float(bb_pct)
+    except (TypeError, ValueError):
+        bb_f = 8.0
+    ab_per_pa = max(0.80, min(0.95, 1.0 - bb_f/100 - 0.02))  # -2% for HBP/SH/SF
+
+    hitter_h_per_pa = hitter_ba * ab_per_pa
+
+    # K% penalty — high-K hitters cap their hit ceiling. A hitter at 30% K
+    # never reaches their xBA in practice because 30% of PAs end without
+    # contact at all. Already implicit in xBA but apply a small additional
+    # correction for extreme cases.
+    k_pct = hitter_row.get("k_pct") or hitter_row.get("k_percent")
+    if k_pct is not None and not pd.isna(k_pct):
+        try:
+            k_f = float(k_pct)
+            # If K > 28%, apply a small dampener (5-10%)
+            if k_f > 28:
+                hitter_h_per_pa *= max(0.90, 1.0 - (k_f - 28) * 0.015)
+        except (TypeError, ValueError):
+            pass
+
+    # Pitcher side — use BAA (batting average against) if available, else
+    # derive from h_per_9 / batters_faced_per_9.
+    p_baa = None
+    if pitcher_row is not None:
+        try:
+            p_baa = pitcher_row.get("baa") or pitcher_row.get("BAA")
+            if p_baa is not None and not pd.isna(p_baa):
+                p_baa = float(p_baa)
+            else:
+                # Fallback derive: H/9 / typical 38 BF per 9 IP
+                h9 = pitcher_row.get("h9") or pitcher_row.get("h_per_9")
+                if h9 is not None and not pd.isna(h9):
+                    p_baa = float(h9) / 38.0
+        except (TypeError, ValueError):
+            p_baa = None
+
+    # Pitcher multiplier: ratio of pitcher's BAA to league avg (.250)
+    if p_baa is not None and 0.150 < p_baa < 0.400:
+        pitcher_mult = p_baa / 0.250
+        # Cap at [0.75, 1.30] — pitchers don't suppress hits as much as HRs
+        pitcher_mult = max(0.75, min(1.30, pitcher_mult))
+    else:
+        pitcher_mult = 1.0
+
+    # Park hits factor (separate from park HR factor — supplied by caller)
+    # Cap [0.92, 1.10] — park effect on hits is smaller than on HRs
+    park_mult = max(0.92, min(1.10, float(park_hits_factor)))
+
+    # Platoon for hits is weaker than for HRs (same-side BA penalty ≈ 5-10%)
+    # Caller passes platoon_mult already capped
+    platoon_clamped = max(0.92, min(1.10, float(platoon_mult)))
+
+    hit_pa = hitter_h_per_pa * pitcher_mult * park_mult * platoon_clamped
+
+    # Bound result — no hitter has >0.45 hit-per-PA (would be 0.450 BA)
+    hit_pa = max(0.10, min(0.45, hit_pa))
+    return float(hit_pa)
+
+
+def hit_prob_full_game(prob_per_pa: float | None, expected_pa: float = 4.2) -> float | None:
+    """
+    P(at least 1 hit in the game) = 1 - (1 - hit_pa) ^ PA.
+    """
+    if prob_per_pa is None or pd.isna(prob_per_pa):
+        return None
+    return float(1 - (1 - prob_per_pa) ** expected_pa)
+
+
+def hit_grade(hit_game_pct):
+    """
+    Letter grade for hit probability. Calibrated to hit-game baseline ~65%.
+
+    Real-world reference (1+ hit per 4.2 PA):
+      Arraez 2024: ~78% hit rate
+      Soto/Judge elite: ~72-75%
+      Average regular: ~62-68%
+      High-K profile: ~50-55%
+
+    A+ : ≥78%  (elite contact, Arraez-tier)
+    A  : 72-78% (strong contact)
+    B+ : 66-72% (above average)
+    B  : 58-66% (solid — typical regular)
+    C+ : 50-58% (below average)
+    C  : 42-50% (weak — high-K profile or struggling)
+    D  : 32-42% (poor)
+    F  : <32%   (avoid — bench / cold)
+    """
+    if hit_game_pct is None or pd.isna(hit_game_pct):
+        return "—"
+    if hit_game_pct >= 78: return "A+"
+    if hit_game_pct >= 72: return "A"
+    if hit_game_pct >= 66: return "B+"
+    if hit_game_pct >= 58: return "B"
+    if hit_game_pct >= 50: return "C+"
+    if hit_game_pct >= 42: return "C"
+    if hit_game_pct >= 32: return "D"
+    return "F"
+
+
+def hit_signal_emoji(hit_game_pct):
+    """Color signal for hit probability (parallel to HR signal)."""
+    if hit_game_pct is None or pd.isna(hit_game_pct):
+        return "⚪"
+    if hit_game_pct >= 72: return "🟢"  # A+ / A
+    if hit_game_pct >= 58: return "🟡"  # B+ / B
+    if hit_game_pct >= 42: return "🟠"  # C+ / C
+    return "🔴"  # D / F
+
+
 def k_total_projection(
     pitcher_row: dict,
     opp_lineup_k_pct: float | None,
