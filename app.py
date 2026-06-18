@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.28-display-wiring-discipline-park-hit"
+APP_VERSION = "2026.06.10-v43.29-arsenal-revert-hit-cols-mini-arsenal"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -209,39 +209,39 @@ HAVE_SPLITS = False
 
 try:
     from pitch_match import pitch_match_score, get_hitter_pitch_arsenal
-    # v43.20 (reviewer-validated, "biggest available accuracy win"):
-    # cache hitter arsenals in THREE flavors — combined (legacy), vs-LHP,
-    # vs-RHP. Previously the wrapper used only the combined version, so a
-    # hitter's xwoba-vs-cutter was aggregated across cutters from both
-    # lefties AND righties. Cutters move opposite directions relative to a
-    # batter depending on pitcher hand, so collapsing them is wrong.
-    # Selecting by tonight's pitcher's hand crosses apples-to-apples:
-    # pitcher's hand-split arsenal × hitter's hand-split pitch performance.
-    _hitter_arsenal_cache = {"all": None, "L": None, "R": None}
-    def _get_hitter_arsenal(pitcher_hand=None):
-        """Return the hitter pitch-arsenal frame keyed by pitcher hand.
-        pitcher_hand: 'L', 'R', or None (legacy combined fetch).
-
-        v43.24 (reviewer-validated fragility fix): if a fetch returns
-        empty (transient Savant failure), do NOT pin "empty" for the
-        whole session. Let the next call retry. Previously a single
-        timeout could disable pitch_match for the rest of the session.
-        """
-        key = pitcher_hand if pitcher_hand in ("L", "R") else "all"
-        cached = _hitter_arsenal_cache[key]
-        # Only return cache if it's non-empty. None or empty → retry.
-        if cached is not None and not cached.empty:
-            return cached
-        try:
-            fetched = get_hitter_pitch_arsenal(pitcher_hand=pitcher_hand)
-        except Exception:
-            fetched = pd.DataFrame()
-        # Cache only if non-empty
-        if fetched is not None and not fetched.empty:
-            _hitter_arsenal_cache[key] = fetched
-            return fetched
-        # Empty result — leave cache as None so a subsequent call retries
-        return pd.DataFrame()
+    # v43.29 (reviewer-validated CRITICAL fix): reverted v43.20 hand-split
+    # hitter arsenal. The Savant `&hand=L|R` parameter on the BATTER
+    # pitch-arsenal endpoint filters by the BATTER'S handedness (which
+    # batters appear in the leaderboard), NOT by the PITCHER'S handedness
+    # (data vs LHP/RHP). So when we requested pitcher_hand="L", Savant
+    # returned LHB-only data — any RHB looked up was missing → empty
+    # hitter arsenal → pitch_match_score returned None for ~half the slate.
+    # The wrapper's whole-frame-empty fallback never fired because the
+    # frame WAS populated (just with wrong hitters).
+    #
+    # User-visible symptom: "Arsenal HR says none for all hitters."
+    # Compounded by per-batter empty lookups failing silently with no
+    # signal back.
+    #
+    # Going hand-agnostic on the hitter side is the correct simplification.
+    # The PITCHER side IS still hand-split (via get_pitcher_arsenal_vs_hand,
+    # which uses the verified-correct endpoint). So we cross hand-aware
+    # pitcher data against the hitter's overall per-pitch performance.
+    # Not as theoretically clean as fully hand-aware on both sides, but
+    # it's the version that actually works.
+    _hitter_arsenal_cache = {"df": None}
+    def _get_hitter_arsenal():
+        """Single combined hitter arsenal (no hand split). v43.29 fix."""
+        if _hitter_arsenal_cache["df"] is None or _hitter_arsenal_cache["df"].empty:
+            try:
+                fetched = get_hitter_pitch_arsenal()  # no kwarg
+            except Exception:
+                fetched = pd.DataFrame()
+            if fetched is not None and not fetched.empty:
+                _hitter_arsenal_cache["df"] = fetched
+                return fetched
+            return pd.DataFrame()
+        return _hitter_arsenal_cache["df"]
 
     # Wrapper bridging old call signature in app.py to real function
     def pitch_match_score_for_hitter(batter_id, pitcher_row, pitcher_arsenal_df,
@@ -306,13 +306,10 @@ try:
             if this_pitcher_arsenal.empty:
                 return {"pitch_match_score": None}
 
-            # v43.20: select HITTER arsenal by PITCHER's hand. Falls back to
-            # combined if hand-split fetch failed (e.g., Savant URL changed
-            # — same defensive pattern as the pitcher-side fallback above).
-            hit_arsenal_df = _get_hitter_arsenal(pitcher_hand=p_throws)
-            if hit_arsenal_df is None or hit_arsenal_df.empty:
-                # Fall back to combined if the hand-split fetch returned empty
-                hit_arsenal_df = _get_hitter_arsenal(pitcher_hand=None)
+            # v43.29: drop pitcher_hand kwarg — _get_hitter_arsenal is now
+            # hand-agnostic (see comment at module top). PITCHER side is
+            # still hand-split via arsenal_vs_L/arsenal_vs_R.
+            hit_arsenal_df = _get_hitter_arsenal()
 
             this_hitter_arsenal = hit_arsenal_df[
                 hit_arsenal_df["player_id"] == batter_id
@@ -4446,7 +4443,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.28 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.29 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -5072,6 +5069,10 @@ for _, game in slate.iterrows():
         # v42s additions: per-matchup exposure edge and pitch mix volatility
         exposure_edges = []
         volatilities = []
+        # v43.29 (user-requested): mini-arsenal — hitter's stats vs the
+        # pitcher's top 3 pitches. "What's Buxton likely to see and how
+        # does he handle each one?"
+        mini_arsenals = []
         for _, hitter_row in matchup_df.iterrows():
             pid = hitter_row.get("player_id")
             bats = (hitter_row.get("bats") or "").upper()
@@ -5102,6 +5103,7 @@ for _, game in slate.iterrows():
                 worsts.append(ps.get("worst_pitch"))
                 exposure_edges.append(ps.get("pitch_exposure_edge"))
                 volatilities.append(ps.get("pitch_volatility"))
+                mini_arsenals.append(ps.get("mini_arsenal") or "")
             else:
                 scores.append(None)
                 hr_scores.append(None)
@@ -5110,6 +5112,7 @@ for _, game in slate.iterrows():
                 worsts.append(None)
                 exposure_edges.append(None)
                 volatilities.append(None)
+                mini_arsenals.append("")
         matchup_df["pitch_match_score"] = scores
         matchup_df["pitch_hr_score"] = hr_scores
         matchup_df["best_pitch"] = bests
@@ -5118,6 +5121,8 @@ for _, game in slate.iterrows():
         # v42s display signals — exposure edge and volatility
         matchup_df["pitch_exposure_edge"] = exposure_edges
         matchup_df["pitch_volatility"] = volatilities
+        # v43.29: top-3-pitches breakdown for the matchup
+        matchup_df["mini_arsenal"] = mini_arsenals
 
         # v43+: Pitch exposure flag — convert numeric edge to icon
         # +2 or more = "feasts on his stuff" — high-usage pitches the hitter crushes
@@ -6784,7 +6789,11 @@ if all_hitters_for_picks:
             q["pick_score"] = q["pick_score"].round(1)
         else:
             q["pick_score"] = q.get("hr_game_pct", 0)
-            # Initialize ps_* columns to 0 for schema stability
+            # v43.29 (user-requested cleanup): initialize ps_* columns to
+            # NaN (not 0.0) for non-qualified hitters. Previously every
+            # under-PA hitter showed 0.0 in every ps_* column — misleading,
+            # implies "computed but zero" when reality is "couldn't compute."
+            # NaN renders as empty in display, which is what the user wants.
             for col_name in ("ps_hr_game", "ps_matchup_opp", "ps_power",
                               "ps_pitch_hr", "ps_form", "ps_sleeper",
                               "ps_lift", "ps_env", "ps_discipline",
@@ -6792,7 +6801,7 @@ if all_hitters_for_picks:
                               "ps_bonus_platoon", "ps_bonus_recent_hr",
                               "ps_penalty_il", "ps_bvp",
                               "ps_park_history"):  # v43.26
-                q[col_name] = 0.0
+                q[col_name] = np.nan
 
         # Stash per-player audit so combined_all (Hitters export) carries it.
         _ps_cols = [c for c in (
@@ -10305,6 +10314,22 @@ def build_col_config():
                 "outperform/underperform what their handedness's average does here?"
             ),
         ),
+        # v43.29 (user-requested): hitter's per-pitch stats vs the pitcher's
+        # top 3 most-thrown pitches. Shows what the hitter is likely to see
+        # in this matchup and how they've handled each pitch.
+        "mini_arsenal": st.column_config.TextColumn(
+            "vs Top 3 Pitches",
+            width="large",
+            help=(
+                "v43.29: hitter's performance against the pitcher's THREE "
+                "most-thrown pitches in this matchup.\n"
+                "Format: 'FF 52%: brl 11%/slg .520 | SL 24%: brl 5%/slg .310'\n"
+                "= pitch (abbrev) + usage % | hitter's barrel% / SLG vs that pitch\n\n"
+                "Use this to confirm what the pick_score is REALLY based on. "
+                "If Buxton faces a LHP throwing 60% sinkers and Buxton's "
+                "barrel% vs sinkers is 18%, that's the exploit."
+            ),
+        ),
         "player_name": st.column_config.TextColumn("Hitter"),
         "lineup_pos": st.column_config.NumberColumn(
             "#", width="small",
@@ -10690,6 +10715,9 @@ def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
         "pa", "barrel_pct", "iso", "xwoba", "xwobacon",
         "obp", "slg", "ops",
         "pitch_match_score", "pitch_hr_score", "best_pitch", "best_pitch_xwoba", "worst_pitch",
+        # v43.29: top-3 pitch breakdown so user can see how this hitter
+        # handles the specific pitches this pitcher leans on
+        "mini_arsenal",
         "fb_pct", "la", "avg_ev", "hard_hit",
         "avg_hr_distance", "max_hit_speed",
         "k_pct", "bb_pct", "whiff_pct",
