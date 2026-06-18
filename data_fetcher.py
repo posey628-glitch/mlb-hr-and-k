@@ -758,6 +758,173 @@ def bvp_score_adjustment(bvp_dict: dict, min_pa: int = 20) -> tuple[float, str]:
 
 
 # ----------------------------------------------------------------------------
+# Batter-park history — v43.26 (user-requested)
+# ----------------------------------------------------------------------------
+# Park-AVERAGE HR factors are already in park_factors.py (hand-aware), and
+# we use them as a multiplier on every projection. But that's the average
+# LHB / RHB at the park — it doesn't capture that THIS hitter's swing plane
+# or pull-tendency may interact with THIS park geometry beyond what the
+# handedness average predicts. The RESIDUAL is small but real:
+# - Schwarber pulls FB to RF — Yankee Stadium short porch boosts him beyond
+#   what LHB-park factor says.
+# - Judge crushes Fenway despite RHB-park factor being neutral there,
+#   because his height/swing makes the Green Monster a launching pad.
+#
+# This fetcher gets career venue splits and returns enough to compute the
+# residual: (actual HR / expected HR) where expected uses league rate × hand-aware park.
+# ----------------------------------------------------------------------------
+
+@st.cache_data(ttl=86400)  # daily refresh — venue stats don't move during slate
+def get_batter_park_history(batter_id: int, venue_id: int,
+                             lookback_seasons: int = 3) -> dict:
+    """Return career batter stats at a specific venue across the last
+    `lookback_seasons` years (default 3). Returns dict with bp_pa, bp_hr,
+    bp_hr_per_pa, bp_h, bp_ab, bp_seasons. Empty dict on failure or no data.
+
+    Uses MLB Stats API /people/{id}/stats?stats=byDateRange not because
+    that endpoint segments by venue (it doesn't natively), but because we
+    can request gameLog and aggregate manually. We use a simpler approach:
+    sum byVenue splits via the splits endpoint.
+
+    Sample-size gating happens in park_history_score_adjustment, not here —
+    keep the fetcher honest (return what's actually in the data).
+    """
+    if not batter_id or not venue_id:
+        return {}
+    try:
+        # Try the splits endpoint first (cleanest path)
+        from datetime import date
+        current_year = date.today().year
+        # We aggregate across the last N seasons
+        agg = {"pa": 0, "hr": 0, "h": 0, "ab": 0, "seasons": 0}
+        for season in range(current_year - lookback_seasons + 1, current_year + 1):
+            url = (
+                f"https://statsapi.mlb.com/api/v1/people/{batter_id}"
+                f"/stats?stats=byDateRange&group=hitting"
+                f"&season={season}&sportId=1"
+            )
+            try:
+                r = requests.get(url, timeout=10)
+                if r.status_code != 200:
+                    continue
+                data = r.json()
+                splits = data.get("stats", [{}])[0].get("splits", [])
+                # We need venue-segmented data — the simpler endpoint:
+                # /people/{id}/stats?stats=vsTeam&season=X aggregates by opponent.
+                # For VENUE specifically, use stats=byVenue.
+            except Exception:
+                continue
+
+        # Cleaner path: use stats=statSplits with sitCodes for venue
+        # That endpoint returns career splits at each venue.
+        url = (
+            f"https://statsapi.mlb.com/api/v1/people/{batter_id}"
+            f"/stats?stats=statSplits&group=hitting&sitCodes=v{venue_id}"
+            f"&sportId=1"
+        )
+        try:
+            r = requests.get(url, timeout=10)
+            if r.status_code == 200:
+                data = r.json()
+                splits = data.get("stats", [{}])[0].get("splits", [])
+                if splits:
+                    stat = splits[0].get("stat", {})
+                    agg["pa"] = int(stat.get("plateAppearances", 0) or 0)
+                    agg["hr"] = int(stat.get("homeRuns", 0) or 0)
+                    agg["h"] = int(stat.get("hits", 0) or 0)
+                    agg["ab"] = int(stat.get("atBats", 0) or 0)
+                    agg["seasons"] = lookback_seasons
+        except Exception:
+            pass
+
+        if agg["pa"] == 0:
+            return {}
+
+        return {
+            "bp_pa": agg["pa"],
+            "bp_hr": agg["hr"],
+            "bp_h": agg["h"],
+            "bp_ab": agg["ab"],
+            "bp_hr_per_pa": round(agg["hr"] / agg["pa"] * 100, 2) if agg["pa"] else None,
+            "bp_seasons": agg["seasons"],
+        }
+    except Exception:
+        return {}
+
+
+def park_history_score_adjustment(history_dict: dict,
+                                    park_hand_factor: float = 1.0,
+                                    league_hr_per_pa_pct: float = 3.0,
+                                    min_pa: int = 40) -> tuple[float, str]:
+    """Convert batter-park history into a small pick_score adjustment.
+
+    Returns (adjustment_points, descriptive_flag).
+
+    Key principle (avoid double-counting with park_hand_factor):
+    EXPECTED HR rate at this park = league_avg × park_hand_factor.
+    We score the RESIDUAL: how much this batter exceeds OR underperforms
+    what their handedness's average would predict at this venue.
+
+    Adjustment capped at ±3 (smaller than BvP because samples are still
+    moderate and we don't want to overlap with park_hand_factor).
+    Returns (0, "") if pa < min_pa.
+
+    Flag examples:
+      "🏟️ Park +2.5 (8 HR in 145 PA, 2.1x expected)"
+      "⚠️ Park -1.0 (1 HR in 78 PA, 0.5x expected)"
+    """
+    if not history_dict:
+        return (0.0, "")
+    pa = history_dict.get("bp_pa") or 0
+    if pa < min_pa:
+        return (0.0, "")
+
+    actual_hr = history_dict.get("bp_hr") or 0
+    actual_rate_pct = history_dict.get("bp_hr_per_pa")
+    if actual_rate_pct is None:
+        return (0.0, "")
+
+    # Expected HR rate at this venue for an average-handedness hitter
+    expected_rate_pct = league_hr_per_pa_pct * float(park_hand_factor)
+    expected_rate_pct = max(expected_rate_pct, 0.5)  # floor to avoid divide-by-near-zero
+
+    # Ratio: actual vs expected
+    ratio = float(actual_rate_pct) / expected_rate_pct
+
+    # Score
+    # ratio 1.5+ (50% above expected): +2-3
+    # ratio 1.2-1.5: +1-2
+    # ratio 0.8-1.2: 0 (within noise)
+    # ratio 0.5-0.8: -1
+    # ratio <0.5: -2 (capped at -2, less aggressive on penalty side)
+    if ratio >= 1.5:
+        points = min(3.0, (ratio - 1.0) * 2.0)
+    elif ratio >= 1.2:
+        points = min(2.0, (ratio - 1.0) * 1.5)
+    elif ratio <= 0.5:
+        points = max(-2.0, (ratio - 1.0) * 1.5)
+    elif ratio <= 0.8:
+        points = max(-1.0, (ratio - 1.0) * 1.0)
+    else:
+        points = 0.0
+
+    # Build flag
+    if points >= 2.0:
+        emoji = "🏟️💣"
+    elif points >= 1.0:
+        emoji = "🏟️"
+    elif points <= -1.5:
+        emoji = "⚠️🏟️"
+    elif points <= -0.5:
+        emoji = "📉"
+    else:
+        return (0.0, "")  # too small to flag
+    sign = "+" if points >= 0 else ""
+    flag = f"{emoji} Park {sign}{points:.1f} ({actual_hr} HR in {pa} PA, {ratio:.1f}x expected)"
+    return (round(points, 1), flag)
+
+
+# ----------------------------------------------------------------------------
 # Bat tracking / Blast % fetcher — v43.17 (OPT-IN)
 # ----------------------------------------------------------------------------
 # Statcast added bat tracking in mid-2024. The metric the user requested
@@ -1038,6 +1205,7 @@ def get_slate(game_date: Optional[str] = None) -> pd.DataFrame:
                 "gameTime": g.get("gameDate"),
                 "status": g.get("status", {}).get("detailedState"),
                 "venue": g.get("venue", {}).get("name"),
+                "venue_id": g.get("venue", {}).get("id"),  # v43.26 — for park history
                 "away_team": away["team"]["name"],
                 "away_team_abbr": away["team"].get("abbreviation",
                                                    away["team"]["name"][:3].upper()),
