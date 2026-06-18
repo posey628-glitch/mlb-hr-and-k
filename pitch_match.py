@@ -45,6 +45,14 @@ def get_hitter_pitch_arsenal(season: int = CURRENT_SEASON) -> pd.DataFrame:
     Columns include: player_id, player_name, pitch_name, pitch_type,
     pitches, pa, ba, slg, woba, xwoba, est_woba, whiff_percent, k_percent,
     put_away, hard_hit_percent, run_value_per_100, velocity, etc.
+
+    v43.29 (reviewer-validated): the pitcher_hand parameter added in v43.20
+    was reverted. Savant's `&hand=` on this endpoint filters by BATTER
+    handedness, not pitcher handedness — so the v43.20 attempt produced
+    LHB-only data when we requested pitcher_hand="L" (rather than data
+    vs LHP). Half the per-batter lookups silently returned empty.
+    Going back to hand-agnostic for the hitter side; pitcher side stays
+    hand-split via the separate verified endpoint.
     """
     url = (
         "https://baseballsavant.mlb.com/leaderboard/pitch-arsenal-stats"
@@ -277,6 +285,51 @@ def pitch_match_score(
     except Exception:
         pitch_volatility = None
 
+    # v43.29 (user-requested): mini-arsenal string showing hitter's
+    # performance against the pitcher's TOP 3 most-thrown pitches.
+    # Example: "FF 52%: brl 11%/slg .520 | SL 24%: brl 5%/slg .310 | CH 14%: brl 2%/slg .240"
+    # This is the per-matchup "what's this hitter going to see and how do
+    # they handle it" snapshot the user asked for. Computed from the same
+    # breakdown the existing best_pitch / worst_pitch uses.
+    mini_arsenal = ""
+    try:
+        # Sort breakdown by pitcher_usage_raw desc, take top 3 with hitter data
+        with_data = [
+            b for b in breakdown
+            if b.get("hitter_xwoba_vs") is not None
+            and b.get("pitcher_usage_raw", 0) > 0
+        ]
+        top3 = sorted(with_data, key=lambda b: -b.get("pitcher_usage_raw", 0))[:3]
+        parts = []
+        for b in top3:
+            pitch = b.get("pitch") or "?"
+            usage = b.get("pitcher_usage_raw", 0)
+            brl = b.get("hitter_barrel_vs")
+            slg = b.get("hitter_slg_vs")
+            xwoba = b.get("hitter_xwoba_vs")
+            # Build segment with whatever stats we have
+            stat_parts = []
+            if brl is not None and not pd.isna(brl):
+                stat_parts.append(f"brl {float(brl):.0f}%")
+            if slg is not None and not pd.isna(slg):
+                stat_parts.append(f"slg {float(slg):.3f}".replace("0.", "."))
+            if xwoba is not None and not pd.isna(xwoba) and not stat_parts:
+                # Fallback to xwoba if barrel/slg missing
+                stat_parts.append(f"xwoba {float(xwoba):.3f}".replace("0.", "."))
+            stats_str = "/".join(stat_parts) if stat_parts else "—"
+            # Abbreviate pitch name for compact display
+            pitch_abbr = {
+                "Four-Seam Fastball": "FF", "Sinker": "SI", "Cutter": "FC",
+                "Slider": "SL", "Sweeper": "SW", "Slurve": "SV",
+                "Curveball": "CU", "Knuckle Curve": "KC",
+                "Changeup": "CH", "Splitter": "FS", "Forkball": "FO",
+                "Knuckleball": "KN", "Eephus": "EP",
+            }.get(pitch, pitch[:3].upper() if pitch else "?")
+            parts.append(f"{pitch_abbr} {usage*100:.0f}%: {stats_str}")
+        mini_arsenal = " | ".join(parts)
+    except Exception:
+        mini_arsenal = ""
+
     return {
         "pitch_match_score": round(score, 1),
         "pitch_hr_score": pitch_hr_score,
@@ -290,6 +343,7 @@ def pitch_match_score(
         "worst_pitch_xwoba": worst["hitter_xwoba_vs"] if worst else None,
         "pitch_exposure_edge": exposure_edge,
         "pitch_volatility": pitch_volatility,
+        "mini_arsenal": mini_arsenal,  # v43.29: user-requested top-3 pitch breakdown
         "breakdown": breakdown,
     }
 
