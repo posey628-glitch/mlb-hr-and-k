@@ -90,7 +90,7 @@ def hr_probability(
     score = (components * hr_mult).round(2)
     df["hr_score"] = score
     df["hr_prob"] = score  # alias - same value
-    df["hr_mult_today"] = hr_mult
+    df["hr_mult_today"] = round(float(hr_mult), 4)  # v43.30: kill float noise
     return df
 
 
