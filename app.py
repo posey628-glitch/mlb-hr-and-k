@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.29-arsenal-revert-hit-cols-mini-arsenal"
+APP_VERSION = "2026.06.10-v43.30-mini-arsenal-fmt-adaptive-removed-int-cast"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -4443,7 +4443,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.29 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.30 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -6417,7 +6417,12 @@ for gpk, ctx in game_context_map.items():
         x["opp_pitcher"] = g_row.get(f"{opp_side}_pitcher", "TBD") or "TBD"
         opp_p_row = ctx.get(f"{opp_side}_p_row") or {}
         x["opp_pitcher_xwoba"] = opp_p_row.get("xwoba")
-        x["env_boost"] = hr_mult
+        # v43.30 (reviewer-validated cosmetic fix): round on assignment so
+        # the export doesn't show 0.9652499999999999. park_mult * wx_mult
+        # produces float noise even when the inputs are clean; rounding
+        # to 4 decimals fixes the display without affecting any downstream
+        # computation (ps_env reads percentile-rank of this column).
+        x["env_boost"] = round(float(hr_mult), 4)
         all_hitters_for_picks.append(x)
 
 if all_hitters_for_picks:
@@ -8680,7 +8685,8 @@ for gpk, ctx in game_context_map.items():
         # the H2H comparison tool, breakout candidates display, and any other
         # consumer of combined_all saw env_boost as missing. Same data —
         # park_mult × wx_mult per matchup_df — set here.
-        x["env_boost"] = ctx.get("hr_mult", 1.0)
+        # v43.30: round to kill float noise (0.9652499999999999 → 0.9652)
+        x["env_boost"] = round(float(ctx.get("hr_mult", 1.0) or 1.0), 4)
         # v43.12: tag main-lineup vs bench so consumers can filter/sort
         x["is_bench"] = False
         all_hitters.append(x)
@@ -8698,7 +8704,7 @@ for gpk, ctx in game_context_map.items():
             xb["game"] = f"{g_row['away_team_abbr']} @ {g_row['home_team_abbr']}"
             xb["team"] = g_row[f"{side}_team_abbr"]
             xb["opp_pitcher"] = g_row.get(f"{opp_side}_pitcher", "TBD") or "TBD"
-            xb["env_boost"] = ctx.get("hr_mult", 1.0)
+            xb["env_boost"] = round(float(ctx.get("hr_mult", 1.0) or 1.0), 4)
             xb["is_bench"] = True  # tag so users can filter/sort bench rows
             all_hitters.append(xb)
 
@@ -9434,6 +9440,36 @@ if all_hitters:
         if HAS_OPENPYXL:
             try:
                 buffer = _io.BytesIO()
+
+                # v43.30 (reviewer-validated cosmetic): cast integer-count
+                # columns to pandas nullable Int64 before export, so the
+                # Excel doesn't show 296.0 / 7.0 / 87.0 for whole-number
+                # counts. Float upcasting happens whenever a column has
+                # even one NaN; Int64 (with capital I) allows nullable
+                # integers so we can have both nullable AND integer.
+                def _int_cast(df, cols):
+                    if df is None or df.empty:
+                        return df
+                    df = df.copy()
+                    for c in cols:
+                        if c in df.columns:
+                            try:
+                                df[c] = pd.to_numeric(df[c], errors="coerce").astype("Int64")
+                            except Exception:
+                                pass
+                    return df
+                _INTEGER_COUNT_COLS = (
+                    "pa", "ab", "home_run", "recent_hr",
+                    "hr_streak_games", "hr_last_5", "hr_last_10", "games_since_hr",
+                    "recent_ab_5", "recent_ab_10", "recent_h_10", "recent_hr_5", "recent_hr_10",
+                    "vs_day_pa", "vs_night_pa", "vs_lhp_pa", "vs_rhp_pa",
+                    "vs_lhp_hr", "vs_rhp_hr",
+                    "bvp_pa", "bvp_ab", "bvp_hits", "bvp_hr", "bvp_bb", "bvp_k",
+                    "bp_pa", "bp_hr", "bp_h", "bp_ab",  # v43.26 park history
+                )
+                if combined_all is not None and not combined_all.empty:
+                    combined_all = _int_cast(combined_all, _INTEGER_COUNT_COLS)
+
                 with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
                     sheets_written = 0
                     if combined_all is not None and not combined_all.empty:
