@@ -695,10 +695,21 @@ def hit_prob_per_pa(
 
     # Pitcher side — use BAA (batting average against) if available, else
     # derive from h_per_9 / batters_faced_per_9.
+    # v43.29 (reviewer-validated CRITICAL fix): the pitcher row from
+    # get_pitcher_stats stores the BAA value under "batting_avg" (it's
+    # batting average ALLOWED on pitcher rows). Previously this function
+    # looked for "baa"/"BAA"/"h9" only — never found them — so pitcher_mult
+    # always defaulted to 1.0 and the hit signal lost the pitcher dimension
+    # entirely. Adding the actual column name as a fallback.
     p_baa = None
     if pitcher_row is not None:
         try:
-            p_baa = pitcher_row.get("baa") or pitcher_row.get("BAA")
+            p_baa = (
+                pitcher_row.get("baa")
+                or pitcher_row.get("BAA")
+                or pitcher_row.get("batting_avg")   # v43.29 fix
+                or pitcher_row.get("avg")
+            )
             if p_baa is not None and not pd.isna(p_baa):
                 p_baa = float(p_baa)
             else:
