@@ -148,24 +148,26 @@ def pitch_match_score(
             missing_usage += usage_raw
             continue
 
-        # ADAPTIVE USAGE: shift toward pitches hitter is weaker against
-        # h_val = hitter's xwOBA vs this pitch
-        # If h_val > 0.380 (elite), pitcher avoids → 0.55× usage
-        # If h_val 0.340-0.380 (good), pitcher reduces → 0.75× usage
-        # If h_val 0.280-0.340 (avg), no change → 1.0× usage
-        # If h_val 0.240-0.280 (weak), pitcher uses more → 1.20× usage
-        # If h_val < 0.240 (very weak), pitcher throws lots → 1.35× usage
-        if h_val >= 0.380:
-            adapt_factor = 0.55
-        elif h_val >= 0.340:
-            adapt_factor = 0.75
-        elif h_val >= 0.280:
-            adapt_factor = 1.0
-        elif h_val >= 0.240:
-            adapt_factor = 1.20
-        else:
-            adapt_factor = 1.35
-        usage = usage_raw * adapt_factor
+        # v43.30 (reviewer-validated, CRITICAL accuracy fix): adaptive
+        # usage reweighting REMOVED. The old code multiplied pitcher_usage
+        # by 0.55-1.35 based on hitter xwOBA against that pitch — the
+        # theory being "smart pitchers reduce what hitters crush, throw
+        # more of what hitters can't hit." But:
+        #   1. It directly fights the model's stated purpose. A hitter who
+        #      crushes the pitcher's main pitch (xwOBA .420 on 60% FF)
+        #      should get a HIGHER pitch-match score, not LOWER. The
+        #      adaptation reduced that FF contribution to the weighted
+        #      average, pulling the score DOWN.
+        #   2. No empirical evidence pitchers adapt this predictably.
+        #      Pitchers throw their best pitches more often, full stop.
+        #   3. The factors were hardcoded — every pitcher got the same
+        #      adaptation regardless of stuff, control, or season history.
+        # Simulated case: hitter .420 xwOBA on 60% main pitch + .280 on
+        # 40% secondary → raw weighted .394 vs adapted .373. The hitter
+        # punishes the matchup but the score moved the wrong way.
+        # Reviewer recommendation: cut it. Honest signal beats
+        # principle-driven distortion.
+        usage = usage_raw  # no adapt_factor anymore
 
         # v43.18 (user-reported "Abrams 100 arsenal HR"): SEPARATE barrel
         # shrinkage from xwOBA shrinkage. xwOBA stabilizes faster (prior 30
@@ -208,8 +210,8 @@ def pitch_match_score(
         breakdown.append({
             "pitch": pitch,
             "pitcher_usage_raw": float(usage_raw),
-            "pitcher_usage_adjusted": float(usage),
-            "adapt_factor": adapt_factor,
+            "pitcher_usage_adjusted": float(usage),  # v43.30: same as raw now
+            "adapt_factor": 1.0,                     # v43.30: kept for back-compat
             "hitter_xwoba_vs": float(h_val),
             "hitter_slg_vs": slg_val,
             "hitter_barrel_vs": brl_val,
@@ -233,13 +235,17 @@ def pitch_match_score(
     pitch_hr_basis = None
     if has_barrel > total_weight * 0.5:
         avg_barrel = weighted_barrel / has_barrel
-        # Convert to 0-100 (barrel% range ~2-18%)
-        # CALIBRATION FIX: raised elite ceiling from 18% to 22% so only true
-        # mash-the-pitcher-on-every-pitch matchups hit 100. Schmitt at 14.9%
-        # overall barrel was hitting 100 because his per-pitch barrel vs the
-        # pitcher's secondary pitches was elite. Now Schmitt-tier matchups
-        # land around 70-80, leaving 90+ for genuine "barrel everything" cases.
-        pitch_hr_score = round(max(0, min(100, (avg_barrel - 2.0) / 20.0 * 100)), 1)
+        # Convert to 0-100 (barrel% range ~2-20%).
+        # v43.30 (reviewer-validated): divisor aligned to per-pitch cap.
+        # The per-pitch barrel is hard-capped at 20% (line ~199), so
+        # weighted_barrel / has_barrel can never exceed 20. Previous
+        # divisor 20.0 with -2 floor gave max score (20-2)/20*100 = 90
+        # — meaning the ceiling was unreachable and the top of the
+        # scale was structurally compressed. The fix: divisor 18.0
+        # (= cap 20 minus floor 2) so a hitter who maxes out the
+        # per-pitch cap on every pitcher pitch reaches exactly 100.
+        # Doesn't change Brier — display-only stretch on the high end.
+        pitch_hr_score = round(max(0, min(100, (avg_barrel - 2.0) / 18.0 * 100)), 1)
         pitch_hr_basis = "barrel"
     elif has_slg > total_weight * 0.5:
         avg_slg = weighted_slg / has_slg
@@ -317,15 +323,28 @@ def pitch_match_score(
                 # Fallback to xwoba if barrel/slg missing
                 stat_parts.append(f"xwoba {float(xwoba):.3f}".replace("0.", "."))
             stats_str = "/".join(stat_parts) if stat_parts else "—"
-            # Abbreviate pitch name for compact display
+            # v43.30 (reviewer-validated): Savant's pitch-name strings use
+            # "4-Seam Fastball" (digit-dash form), not "Four-Seam Fastball".
+            # The old map missed virtually every key and fell through to
+            # `pitch[:3].upper()` — producing "4-S" instead of "FF". Cover
+            # both forms defensively in case Savant ever normalizes.
             pitch_abbr = {
-                "Four-Seam Fastball": "FF", "Sinker": "SI", "Cutter": "FC",
+                "4-Seam Fastball": "FF", "Four-Seam Fastball": "FF",
+                "Sinker": "SI", "2-Seam Fastball": "SI", "Two-Seam Fastball": "SI",
+                "Cutter": "FC",
                 "Slider": "SL", "Sweeper": "SW", "Slurve": "SV",
-                "Curveball": "CU", "Knuckle Curve": "KC",
-                "Changeup": "CH", "Splitter": "FS", "Forkball": "FO",
-                "Knuckleball": "KN", "Eephus": "EP",
+                "Curveball": "CU", "Knuckle Curve": "KC", "Slow Curve": "SC",
+                "Changeup": "CH", "Splitter": "FS", "Split-Finger": "FS",
+                "Forkball": "FO", "Knuckleball": "KN", "Eephus": "EP",
+                "Screwball": "SC",
             }.get(pitch, pitch[:3].upper() if pitch else "?")
-            parts.append(f"{pitch_abbr} {usage*100:.0f}%: {stats_str}")
+            # v43.30 (reviewer-validated): Savant returns pitch_usage ALREADY
+            # as a percent (e.g. 20.6 for 20.6%). The previous formatter
+            # multiplied by 100 a second time, producing "2060%". Drop the
+            # ×100. Note: exposure_edge logic and pitch_match_score itself
+            # are unaffected — the score divides by total_weight, so absolute
+            # scale cancels. This was display-only nonsense.
+            parts.append(f"{pitch_abbr} {usage:.0f}%: {stats_str}")
         mini_arsenal = " | ".join(parts)
     except Exception:
         mini_arsenal = ""
