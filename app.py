@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.30-mini-arsenal-fmt-adaptive-removed-int-cast"
+APP_VERSION = "2026.06.10-v43.32-parallel-fetches-fast-load"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -1483,6 +1483,24 @@ with st.sidebar:
             "Display trades, signings, DFAs, releases, call-ups, IL moves "
             "from the last 2 days. Critical for catching mid-day roster changes "
             "that might affect tonight's slate."
+        ),
+    )
+
+    st.subheader("Performance (v43.32)")
+    fast_load_mode = st.checkbox(
+        "🚀 Fast load (skip per-batter API fetches)",
+        value=False,
+        help=(
+            "Skips two slow per-batter fetchers on cold cache:\n"
+            "• BvP career history — ~270 API calls per slate\n"
+            "• Park history (career venue stats) — another ~270 API calls\n\n"
+            "With fast load OFF (default): both run in parallel (~5-7s each "
+            "on cold cache, instant when cached). Pick_score still includes "
+            "BvP and park-history bonuses.\n\n"
+            "With fast load ON: both are skipped entirely. BvP and park-history "
+            "bonuses don't fire (ps_bvp=0, ps_park_history=0). Pick_score still "
+            "works using all OTHER signals. Use this for quick exploration or "
+            "when APIs are slow/down. Toggle OFF after to get full bonuses."
         ),
     )
 
@@ -4443,7 +4461,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.30 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.32 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -5759,10 +5777,46 @@ for _, game in slate.iterrows():
             "bvp_hr_per_pa": [],
         }
         try:
+            # v43.32: Fast Load Mode short-circuit — skip the entire BvP
+            # fetcher block. Columns get zeroed so pick_score still works
+            # (ps_bvp = 0 contribution), and the wider model is unaffected.
+            if globals().get("fast_load_mode", False):
+                raise StopIteration  # caught by the bare except below
+
             from data_fetcher import get_bvp_for_matchup, bvp_score_adjustment
+            from concurrent.futures import ThreadPoolExecutor
             opp_pid_for_bvp = (
                 opp_p_row.get("player_id") if opp_p_row else None
             )
+
+            # v43.32 (performance): batch-prefetch BvP for all batters in
+            # this matchup IN PARALLEL. Previously this loop did 18-30
+            # sequential HTTP calls per game; across a 15-game slate that
+            # was 270-450 sequential round-trips = 1-3 minutes on cold cache.
+            # ThreadPoolExecutor with 15 workers drops that to ~5-7s.
+            # @st.cache_data is thread-safe, so concurrent calls dedupe correctly.
+            _bvp_cache = {}
+            if opp_pid_for_bvp is not None and not pd.isna(opp_pid_for_bvp):
+                _valid_bids = [
+                    int(bid) for bid in matchup_df["player_id"]
+                    if bid is not None and not pd.isna(bid)
+                ]
+                if _valid_bids:
+                    def _one_bvp(bid):
+                        try:
+                            return bid, get_bvp_for_matchup(bid, int(opp_pid_for_bvp))
+                        except Exception:
+                            return bid, {}
+                    try:
+                        with ThreadPoolExecutor(max_workers=15) as ex:
+                            for bid, bvp in ex.map(_one_bvp, _valid_bids):
+                                _bvp_cache[bid] = bvp
+                    except Exception:
+                        # Fall back to sequential if threading breaks (defensive)
+                        for bid in _valid_bids:
+                            _, bvp = _one_bvp(bid)
+                            _bvp_cache[bid] = bvp
+
             for _, row in matchup_df.iterrows():
                 bid = row.get("player_id")
                 if (bid is None or pd.isna(bid)
@@ -5772,10 +5826,7 @@ for _, game in slate.iterrows():
                     for k in bvp_data_lists:
                         bvp_data_lists[k].append(None)
                     continue
-                try:
-                    bvp = get_bvp_for_matchup(int(bid), int(opp_pid_for_bvp))
-                except Exception:
-                    bvp = {}
+                bvp = _bvp_cache.get(int(bid), {})
                 pts, flag = bvp_score_adjustment(bvp)
                 bvp_points.append(pts)
                 bvp_flags.append(flag)
@@ -5812,10 +5863,41 @@ for _, game in slate.iterrows():
         bp_flags = []
         bp_data_lists = {"bp_pa": [], "bp_hr": [], "bp_hr_per_pa": []}
         try:
+            # v43.32: Fast Load Mode short-circuit — skip park-history.
+            if globals().get("fast_load_mode", False):
+                raise StopIteration
+
             from data_fetcher import (
                 get_batter_park_history, park_history_score_adjustment,
             )
+            from concurrent.futures import ThreadPoolExecutor
             venue_id_for_bp = game.get("venue_id")
+
+            # v43.32 (performance): batch-prefetch park history for all
+            # batters in parallel. Was the biggest cold-load bottleneck
+            # introduced in v43.26 — 270-450 sequential HTTP calls across
+            # a 15-game slate = 1-3 min added load. Parallel: ~5-7s.
+            _bp_cache = {}
+            if venue_id_for_bp is not None and not pd.isna(venue_id_for_bp):
+                _valid_bids = [
+                    int(bid) for bid in matchup_df["player_id"]
+                    if bid is not None and not pd.isna(bid)
+                ]
+                if _valid_bids:
+                    def _one_bp(bid):
+                        try:
+                            return bid, get_batter_park_history(bid, int(venue_id_for_bp))
+                        except Exception:
+                            return bid, {}
+                    try:
+                        with ThreadPoolExecutor(max_workers=15) as ex:
+                            for bid, bp in ex.map(_one_bp, _valid_bids):
+                                _bp_cache[bid] = bp
+                    except Exception:
+                        for bid in _valid_bids:
+                            _, bp = _one_bp(bid)
+                            _bp_cache[bid] = bp
+
             for _, row in matchup_df.iterrows():
                 bid = row.get("player_id")
                 bats = (row.get("bats") or "").upper()[:1] if row.get("bats") else None
@@ -5826,10 +5908,7 @@ for _, game in slate.iterrows():
                     for k in bp_data_lists:
                         bp_data_lists[k].append(None)
                     continue
-                try:
-                    bp = get_batter_park_history(int(bid), int(venue_id_for_bp))
-                except Exception:
-                    bp = {}
+                bp = _bp_cache.get(int(bid), {})
                 # Use THIS hitter's hand-aware park factor as the expected
                 # denominator. Falls back to 1.0 if we can't read it.
                 this_park_factor = 1.0
@@ -10069,6 +10148,213 @@ if all_hitters:
     # underlying gs_score column is no longer computed.
 else:
     st.caption("Waiting for matchup data to populate.")
+
+st.divider()
+
+
+# ============================================================================
+# CUSTOM GRADE BUILDER (v43.31) — user-requested
+# ============================================================================
+# Lets the user select any subset of metrics from combined_all, optionally
+# weight them, and get a custom letter grade for every hitter on the slate
+# based on those user-chosen criteria. Purely additive — does NOT touch
+# pick_score, hr_grade, hit_grade, or any existing scoring. Read-only on
+# combined_all.
+#
+# Use cases:
+#   - "What if I only care about barrel% and pulled_brl%?"
+#   - "Show me hitters that profile well on FB% + hard_hit + xwOBA"
+#   - "Rank by recent form + plate discipline only"
+#   - "Sort by ISO + recent HR streak — pure power play"
+# ============================================================================
+if combined_all is not None and not combined_all.empty:
+    with st.expander("🎛️ Custom Grade Builder — pick your own metrics", expanded=False):
+        st.markdown(
+            "Build your own composite grade. Pick the stats you care about and "
+            "the model will percentile-rank every hitter across the slate on those "
+            "metrics, then composite them. Adjust weights to emphasize what matters "
+            "most to you. **Purely exploratory — does not change pick_score.**"
+        )
+
+        # Metric catalog — name → (label, lower_is_better, description)
+        # Only metrics that actually live on combined_all show up; we filter below.
+        _METRIC_CATALOG = {
+            # === Power signals ===
+            "barrel_pct":             ("Barrel %",                 False, "Overall barrel rate"),
+            "pulled_brl_pct":         ("Pulled-air Barrel %",      False, "HR-specific (best single HR predictor)"),
+            "iso":                    ("ISO",                      False, "Isolated power (SLG - AVG)"),
+            "slg":                    ("SLG",                      False, "Slugging percentage"),
+            "hard_hit":               ("Hard Hit %",               False, "% of contact ≥95 mph EV"),
+            "avg_ev":                 ("Avg Exit Velocity",        False, "Average exit velocity"),
+            "fb_pct":                 ("Fly Ball %",               False, "FB rate (HRs come from FB)"),
+            "la":                     ("Launch Angle (avg)",       False, "Average launch angle"),
+            "max_hit_speed":          ("Max EV",                   False, "Peak exit velocity (raw power)"),
+            # === Predictive composites ===
+            "xwoba":                  ("xwOBA",                    False, "Expected wOBA (Statcast)"),
+            "xwobacon":               ("xwOBAcon",                 False, "Expected wOBA on contact"),
+            "xba":                    ("xBA",                      False, "Expected batting average"),
+            "ops":                    ("OPS",                      False, "On-base + slugging"),
+            "obp":                    ("OBP",                      False, "On-base percentage"),
+            # === Plate discipline ===
+            "bb_pct":                 ("BB %",                     False, "Walk rate (higher better)"),
+            "k_pct":                  ("K %",                      True,  "Strikeout rate (LOWER better)"),
+            "whiff_pct":              ("Whiff %",                  True,  "Whiff rate (LOWER better)"),
+            "discipline_score":       ("Discipline Score",         False, "K%/BB% composite (existing)"),
+            # === Form / recency ===
+            "recent_hr":              ("Recent HRs (14d)",         False, "HRs in last 14 days"),
+            "recent_hr_weighted_rate": ("Weighted Recent HR Rate",  False, "Recency-weighted HR/PA"),
+            "hr_streak_games":        ("Active HR Streak",         False, "Consecutive games with HR"),
+            "hr_form":                ("HR Form Composite",        False, "Multi-stat form (existing)"),
+            # === Existing composites ===
+            "power_score":            ("Power Score",              False, "Existing power composite"),
+            "matchup_opp":            ("Matchup vs Pitcher",       False, "Hitter advantage vs this pitcher"),
+            "hr_game_pct":            ("HR Game %",                False, "Model's HR probability this game"),
+            "hit_game_pct":           ("Hit Game %",               False, "Model's hit probability this game"),
+            # === Matchup specifics ===
+            "pitch_hr_score":         ("Arsenal HR Score",         False, "Per-pitch HR threat"),
+            "pitch_match_score":      ("Pitch Match Score",        False, "Per-pitch wOBA composite"),
+            "env_boost":              ("Environmental Boost",      False, "Park × weather multiplier"),
+            "park_hand_factor":       ("Park-Hand Factor",         False, "Park factor for this hitter's hand"),
+        }
+
+        # Filter to columns that exist + have data
+        _available = {
+            k: v for k, v in _METRIC_CATALOG.items()
+            if k in combined_all.columns
+            and pd.to_numeric(combined_all[k], errors="coerce").notna().any()
+        }
+
+        if not _available:
+            st.warning("No metrics available — no usable columns in combined_all.")
+        else:
+            # Build label → key map for the multiselect
+            _label_to_key = {f"{v[0]} — {v[2]}": k for k, v in _available.items()}
+
+            _selected_labels = st.multiselect(
+                "Pick metrics to include (1-10 recommended):",
+                options=list(_label_to_key.keys()),
+                default=[],
+                help=(
+                    "Each selected metric is percentile-ranked across the slate "
+                    "(0-100, higher = better; K%/whiff% auto-inverted). The "
+                    "composite is the weighted average of those ranks."
+                ),
+            )
+
+            _selected_keys = [_label_to_key[lbl] for lbl in _selected_labels]
+
+            if not _selected_keys:
+                st.info("Pick at least one metric to see custom grades.")
+            else:
+                # Optional weights — default equal weight.
+                _use_weights = st.checkbox(
+                    "Adjust weights (default: equal weight for all selected)",
+                    value=False,
+                )
+                _weights = {}
+                if _use_weights:
+                    cols = st.columns(min(4, len(_selected_keys)))
+                    for i, k in enumerate(_selected_keys):
+                        with cols[i % len(cols)]:
+                            label = _available[k][0]
+                            _weights[k] = st.slider(
+                                f"{label} weight",
+                                min_value=0.0, max_value=3.0, value=1.0, step=0.25,
+                                key=f"cgb_w_{k}",
+                            )
+                else:
+                    _weights = {k: 1.0 for k in _selected_keys}
+
+                # ====================================================
+                # COMPUTE CUSTOM COMPOSITE
+                # ====================================================
+                # For each metric: numeric → percentile-rank (NaN preserved)
+                # → invert if lower_is_better → multiply by user weight
+                # → sum per row, normalize by total weight from contributing
+                # (non-NaN) metrics for that row.
+                _custom_sum = pd.Series(0.0, index=combined_all.index)
+                _weight_total = pd.Series(0.0, index=combined_all.index)
+
+                for k in _selected_keys:
+                    col = pd.to_numeric(combined_all[k], errors="coerce")
+                    if col.isna().all():
+                        continue
+                    pct = col.rank(pct=True, na_option="keep") * 100
+                    lower_better = _available[k][1]
+                    if lower_better:
+                        pct = 100 - pct
+                    w = float(_weights.get(k, 1.0))
+                    mask = pct.notna()
+                    _custom_sum = _custom_sum.add((pct.fillna(0) * w), fill_value=0)
+                    _weight_total = _weight_total + (mask.astype(float) * w)
+
+                _custom_score = (_custom_sum / _weight_total.replace(0, np.nan))
+
+                # ====================================================
+                # GRADE FROM PERCENTILE COMPOSITE
+                # ====================================================
+                def _custom_grade(s):
+                    if pd.isna(s):
+                        return "—"
+                    if s >= 90: return "A+"
+                    if s >= 80: return "A"
+                    if s >= 70: return "B+"
+                    if s >= 55: return "B"
+                    if s >= 40: return "C+"
+                    if s >= 25: return "C"
+                    if s >= 10: return "D"
+                    return "F"
+
+                def _custom_emoji(s):
+                    if pd.isna(s):
+                        return "⚪"
+                    if s >= 80: return "🟢"
+                    if s >= 55: return "🟡"
+                    if s >= 25: return "🟠"
+                    return "🔴"
+
+                # ====================================================
+                # DISPLAY
+                # ====================================================
+                _has_score = _custom_score.notna()
+                if not _has_score.any():
+                    st.warning("No hitters have data on any of the selected metrics.")
+                else:
+                    _id_cols = [c for c in ("player_name", "team", "opp_pitcher")
+                                if c in combined_all.columns]
+                    _display = combined_all.loc[_has_score, _id_cols + _selected_keys].copy()
+                    _display["custom_signal"] = _custom_score[_has_score].apply(_custom_emoji)
+                    _display["custom_grade"] = _custom_score[_has_score].apply(_custom_grade)
+                    _display["custom_score"] = _custom_score[_has_score].round(1)
+                    _front = ["custom_signal", "custom_grade", "custom_score"]
+                    _display = _display[_front + [c for c in _display.columns if c not in _front]]
+                    _display = _display.sort_values(
+                        "custom_score", ascending=False, na_position="last",
+                    ).head(30)
+
+                    st.dataframe(
+                        _display, hide_index=True, use_container_width=True,
+                        column_config={
+                            "custom_signal": st.column_config.TextColumn("Sig", width="small"),
+                            "custom_grade":  st.column_config.TextColumn("Grade", width="small"),
+                            "custom_score":  st.column_config.NumberColumn(
+                                "Score (percentile)", format="%.1f",
+                                help="Weighted average of percentile ranks across selected metrics (0-100)",
+                            ),
+                            "player_name":   st.column_config.TextColumn("Hitter"),
+                            "team":          st.column_config.TextColumn("Team", width="small"),
+                            "opp_pitcher":   st.column_config.TextColumn("vs Pitcher"),
+                        },
+                    )
+                    n_qualified = int(_has_score.sum())
+                    weight_str = " (custom weights)" if _use_weights else " (equal weight)"
+                    st.caption(
+                        f"Top 30 of {n_qualified} hitters with data on at least one "
+                        f"selected metric. Composite of {len(_selected_keys)} metric"
+                        f"{'s' if len(_selected_keys) != 1 else ''}{weight_str}. "
+                        f"Grades: A+ ≥90 / A ≥80 / B+ ≥70 / B ≥55 / C+ ≥40 / C ≥25 / "
+                        f"D ≥10 / F <10 (percentile composite)."
+                    )
 
 st.divider()
 
