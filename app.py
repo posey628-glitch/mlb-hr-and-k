@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.32-parallel-fetches-fast-load"
+APP_VERSION = "2026.06.10-v43.33-honest-snapshot-status"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -4461,7 +4461,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.32 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.33 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -9425,7 +9425,10 @@ if all_hitters:
 
     auto_snap_status = ""
     try:
-        from backtest import save_snapshot, list_snapshots, _snapshot_key_for_now
+        from backtest import (
+            save_snapshot, list_snapshots, _snapshot_key_for_now,
+            last_save_status,
+        )
         existing_snaps = set(list_snapshots())
         # v42: hourly snapshot key. Auto-saves once per hour, not once per day.
         # Captures early-game lineups (1pm games need data from ~11am) AND
@@ -9442,16 +9445,32 @@ if all_hitters:
                 app_version=APP_VERSION,
                 calibration_constants=_calibration_snapshot(),
             )
-            if ok:
-                # Count how many hourly snapshots exist for today
-                today_count = sum(1 for k in existing_snaps
-                                  if k.startswith(str(selected_date)))
+            # v43.33: use granular status — distinguish durable Gist save
+            # from session-only local save. Previously this would proudly
+            # announce "✅ Auto-snapshot saved" even when Gist silently
+            # failed → backtest data didn't accumulate across deploys.
+            status = last_save_status()
+            today_count = sum(1 for k in existing_snaps
+                              if k.startswith(str(selected_date)))
+            if status.get("gist"):
                 auto_snap_status = (
                     f"✅ Auto-snapshot saved for {current_hour_key} "
-                    f"({today_count + 1} snapshot(s) today)"
+                    f"(durable — {today_count + 1} snapshot(s) today)"
                 )
+            elif status.get("local"):
+                err = status.get("gist_error") or "unknown"
+                auto_snap_status = (
+                    f"⚠️ Auto-snapshot for {current_hour_key} LOCAL ONLY — "
+                    f"WILL BE WIPED on next container restart. "
+                    f"Gist error: {err}"
+                )
+            elif ok:
+                auto_snap_status = f"Auto-snapshot for {current_hour_key} (tier status unclear)"
             else:
-                auto_snap_status = f"⚠️ Auto-snapshot failed - click button to save manually"
+                err = status.get("gist_error") or "unknown"
+                auto_snap_status = (
+                    f"❌ Auto-snapshot for {current_hour_key} FAILED on both tiers: {err}"
+                )
         elif current_hour_key in existing_snaps:
             today_count = sum(1 for k in existing_snaps
                               if k.startswith(str(selected_date)))
@@ -9459,31 +9478,57 @@ if all_hitters:
                 f"✅ Snapshot exists for current hour ({current_hour_key}). "
                 f"{today_count} snapshot(s) today total."
             )
-    except Exception:
-        pass
+    except Exception as e:
+        # v43.33: surface the exception instead of silently swallowing it.
+        # If list_snapshots itself raises (e.g. gist read failure), user
+        # needs to see why auto-save didn't fire.
+        auto_snap_status = f"⚠️ Auto-snap check error: {type(e).__name__}: {e}"
 
     # Save-snapshot + full export buttons - always render
     snap_col1, snap_col2, snap_col3 = st.columns([1.2, 1.5, 3])
     with snap_col1:
         if st.button("💾 Save snapshot", help="Manually save current projections. v42: each save creates a new hourly snapshot — so save once before each game's lineups lock to capture lineup data accurately."):
             try:
-                from backtest import save_snapshot, durable_storage_configured, _snapshot_key_for_now
+                from backtest import (
+                    save_snapshot, durable_storage_configured,
+                    _snapshot_key_for_now, last_save_status,
+                )
                 ok = save_snapshot(
                     selected_date, combined_all, p_slate,
                     app_version=APP_VERSION,
                     calibration_constants=_calibration_snapshot(),
                 )
                 key = _snapshot_key_for_now(selected_date)
-                if ok:
-                    if durable_storage_configured():
-                        st.success(f"✅ Saved snapshot {key} (durable — Gist)")
-                    else:
-                        st.warning(
-                            f"⚠️ Saved snapshot {key} (THIS SESSION ONLY — "
-                            f"will be wiped on next redeploy). Set up Gist persistence."
-                        )
+                # v43.33: read granular status — local vs gist tier.
+                # Previously the UI said "durable — Gist" if `ok=True` and
+                # the gist token EXISTED in secrets, but never checked if
+                # the gist write itself succeeded. Local /tmp writes almost
+                # always succeed → user saw "durable" even when gist failed
+                # → snapshots vanished on next container restart. This is
+                # the "snapshots aren't saving again" bug.
+                status = last_save_status()
+                if status.get("gist"):
+                    st.success(
+                        f"✅ Saved snapshot {key} (durable — Gist write confirmed)"
+                    )
+                elif status.get("local"):
+                    err = status.get("gist_error") or "unknown reason"
+                    st.error(
+                        f"⚠️ Saved snapshot {key} to LOCAL ONLY — "
+                        f"WILL BE WIPED on next container restart.\n\n"
+                        f"**Gist tier failed:** {err}\n\n"
+                        f"Common causes: gist_token expired (regenerate in "
+                        f"GitHub PAT settings), gist_id changed, rate limit "
+                        f"hit, or gist deleted. Local snapshot will be lost "
+                        f"when Streamlit Cloud restarts the container — "
+                        f"backtest history WILL NOT accumulate."
+                    )
+                elif ok:
+                    # Shouldn't happen — ok=True implies at least one tier worked
+                    st.warning(f"Saved snapshot {key} (tier status unclear)")
                 else:
-                    st.error("Snapshot save failed")
+                    err = status.get("gist_error") or "unknown"
+                    st.error(f"Snapshot save FAILED on both tiers. Reason: {err}")
             except Exception as e:
                 st.error(f"Backtest module error: {e}")
         if auto_snap_status:
