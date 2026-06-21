@@ -190,24 +190,32 @@ def _gist_write_all(snapshots: dict) -> bool:
         return False
 
 
-def _save_snapshot_to_gist(snapshot_date, payload: dict) -> bool:
+def _save_snapshot_to_gist(snapshot_date, payload: dict) -> tuple[bool, str | None]:
     """Upsert one snapshot into the gist. Read-modify-write the dict.
 
     v42i: CRITICAL — if the read fails (returns None), ABORT the write
     rather than wipe existing data. Better to skip this save and try again
-    next time than to nuke accumulated history."""
+    next time than to nuke accumulated history.
+
+    v43.33: returns (ok, error_message) so callers can show WHY a write
+    failed (token expired, gist deleted, rate limit, etc) instead of
+    silently returning False and letting the UI claim 'durable' falsely.
+    """
     if not durable_storage_configured():
-        return False
+        return False, "Gist not configured (gist_token/gist_id missing in secrets)"
     try:
         all_snaps = _gist_read_all()
         if all_snaps is None:
             # Read failed — DO NOT WRITE. Existing data may still be intact;
             # wiping it would be worse than skipping this save.
-            return False
+            return False, "Gist read failed (network/auth/rate limit) — write aborted to protect existing data"
         all_snaps[str(snapshot_date)] = payload
-        return _gist_write_all(all_snaps)
-    except Exception:
-        return False
+        ok = _gist_write_all(all_snaps)
+        if not ok:
+            return False, "Gist write API call returned non-2xx (check token permissions, rate limit)"
+        return True, None
+    except Exception as e:
+        return False, f"Gist save exception: {type(e).__name__}: {e}"
 
 
 def _load_snapshot_from_gist(snapshot_date) -> dict | None:
@@ -259,6 +267,27 @@ def _snapshot_key_for_now(snapshot_date) -> str:
         # Fallback: assume ET is UTC-4 (EDT)
         et_now = datetime.utcnow() - timedelta(hours=4)
     return f"{snapshot_date}T{et_now.hour:02d}"
+
+
+# v43.33: module-level status of the last save attempt so callers can show
+# honest "did the durable tier work?" feedback without re-running the save.
+_LAST_SAVE_STATUS: dict = {
+    "local": False,
+    "gist": False,
+    "gist_error": None,
+    "key": None,
+}
+
+def last_save_status() -> dict:
+    """Returns details of the most recent save_snapshot call.
+
+    Keys:
+      local:      bool — wrote to local /tmp successfully (gets wiped on restart)
+      gist:       bool — wrote to GitHub Gist successfully (durable)
+      gist_error: str | None — why gist failed (if it did)
+      key:        str — the snapshot key the last save used
+    """
+    return dict(_LAST_SAVE_STATUS)
 
 
 def save_snapshot(snapshot_date, matchup_df: pd.DataFrame,
@@ -350,18 +379,39 @@ def save_snapshot(snapshot_date, matchup_df: pd.DataFrame,
         # Write to BOTH tiers. Gist is the durable one; local is fast access.
         local_ok = False
         gist_ok = False
+        gist_error = None
         try:
             with open(path, "w") as f:
                 json.dump(payload, f, default=str)
             local_ok = True
-        except Exception:
+        except Exception as e:
             local_ok = False
+            # If even the local write failed, record why for diagnostics
+            if gist_error is None:
+                gist_error = f"local also failed: {type(e).__name__}: {e}"
 
         if durable_storage_configured():
-            gist_ok = _save_snapshot_to_gist(key, payload)
+            # v43.33: gist save now returns (ok, error) so we can show the
+            # user WHY the durable tier failed, not just that it did.
+            gist_ok, gist_error_str = _save_snapshot_to_gist(key, payload)
+            if not gist_ok:
+                gist_error = gist_error_str
+        else:
+            gist_error = "Gist not configured in Streamlit Secrets"
+
+        # v43.33: record the granular status so the UI can be honest about
+        # which tier(s) actually succeeded. The bool return below preserves
+        # back-compat with existing callers.
+        _LAST_SAVE_STATUS["local"] = local_ok
+        _LAST_SAVE_STATUS["gist"] = gist_ok
+        _LAST_SAVE_STATUS["gist_error"] = gist_error
+        _LAST_SAVE_STATUS["key"] = key
 
         return local_ok or gist_ok
-    except Exception:
+    except Exception as e:
+        _LAST_SAVE_STATUS["local"] = False
+        _LAST_SAVE_STATUS["gist"] = False
+        _LAST_SAVE_STATUS["gist_error"] = f"save_snapshot outer exception: {type(e).__name__}: {e}"
         return False
 
 
