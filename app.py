@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.34-game-tabs-ux"
+APP_VERSION = "2026.06.10-v43.35-wind-viz-svg"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -4461,7 +4461,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.34 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.35 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -10612,6 +10612,131 @@ st.subheader("🎮 Isolated Game-by-Game Matchups")
 st.caption("Real data only. Empty cells = data not available for that player.")
 
 
+# ----------------------------------------------------------------------------
+# v43.35: WIND VISUALIZATION (user-requested)
+# ----------------------------------------------------------------------------
+# Renders an SVG baseball field with a wind arrow showing direction relative
+# to park orientation. Uses existing data — no new fetchers required:
+#   - wind_mph, wind_dir_deg from weather
+#   - cf_bearing (CF compass heading) from park_factors
+# Color codes the arrow by HR impact (green=tailwind out, red=headwind in,
+# yellow=crosswind).
+# ----------------------------------------------------------------------------
+def _render_wind_diagram(wind_mph, wind_dir_deg, cf_bearing, venue_name=None):
+    """Draw an SVG baseball-field wind diagram.
+
+    wind_dir_deg = compass direction wind is COMING FROM (meteorological)
+    cf_bearing   = compass direction of CF from home plate (so 0 = CF points
+                   due North, 22 = Yankee Stadium CF points ~NNE)
+
+    Wind angle relative to CF:
+      0   = wind blowing OUT toward CF (tailwind, HR-friendly)
+      180 = wind blowing IN from CF (headwind, HR-suppressing)
+      90  = crosswind L→R
+      270 = crosswind R→L
+    """
+    if wind_mph is None or wind_dir_deg is None:
+        return
+    try:
+        wind_mph = float(wind_mph)
+        wind_dir_deg = float(wind_dir_deg)
+    except (TypeError, ValueError):
+        return
+    if wind_mph < 1:
+        return  # negligible wind — skip viz entirely
+    cf_bearing = float(cf_bearing or 0)
+
+    # Wind blows TOWARD = (wind_dir + 180) mod 360
+    # Angle relative to CF axis: 0 = straight out, 180 = straight in
+    blow_to = (wind_dir_deg + 180) % 360
+    angle_rel_cf = (blow_to - cf_bearing) % 360
+    # Normalize to -180..180 for math
+    if angle_rel_cf > 180:
+        angle_rel_cf -= 360
+
+    abs_angle = abs(angle_rel_cf)
+    # HR impact classification
+    if abs_angle <= 45:
+        color = "#22c55e"  # green — blowing out
+        impact = "OUT to OF"
+        impact_short = "tailwind"
+    elif abs_angle >= 135:
+        color = "#ef4444"  # red — blowing in
+        impact = "IN from OF"
+        impact_short = "headwind"
+    else:
+        color = "#eab308"  # yellow — crosswind
+        impact = "across field"
+        impact_short = "crosswind"
+
+    # Specifically helpful for LHB / RHB
+    pull_side = ""
+    if 30 <= angle_rel_cf <= 75:        # blowing to LF (RHB pull side)
+        pull_side = " → boosts RHB pull (LF)"
+    elif -75 <= angle_rel_cf <= -30:    # blowing to RF (LHB pull side)
+        pull_side = " → boosts LHB pull (RF)"
+    elif 105 <= abs_angle <= 150 and angle_rel_cf < 0:
+        pull_side = " ← from RF (hurts LHB pull)"
+    elif 105 <= abs_angle <= 150 and angle_rel_cf > 0:
+        pull_side = " ← from LF (hurts RHB pull)"
+
+    # SVG: 200x200, home plate at bottom center, CF arrow pointing up
+    # The arrow inside the field shows wind direction relative to the
+    # field as seen from above (CF at top, home plate at bottom).
+    # Arrow ROTATES based on angle_rel_cf — 0 = pointing toward CF (up).
+    import math
+    # SVG rotation: 0 = up (toward CF). Positive rotation = clockwise
+    # (toward RF / 1B side). angle_rel_cf positive means wind is east of
+    # CF axis (toward LF if positive bearing rotation).
+    # Wait — when looking FROM home plate TO CF (overhead view, CF up):
+    #   positive angle_rel_cf = wind blowing-toward direction is rotated
+    #   clockwise from CF. We need to draw arrow at that rotation.
+    rot = angle_rel_cf  # SVG rotate uses degrees, positive = clockwise
+
+    # Arrow path (a centered arrow pointing UP)
+    # Tail at (100, 145), head at (100, 55), arrowhead at (90,75)-(110,75)
+    cx, cy = 100, 100
+    svg = f'''
+<svg viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg" style="background:#0d1117; border-radius:8px;">
+  <!-- Outfield grass arc -->
+  <path d="M 30 130 A 70 70 0 0 1 170 130 L 100 195 Z" fill="#1a3a1a" stroke="#2d5a2d" stroke-width="1"/>
+  <!-- Infield diamond (rotated 45deg) -->
+  <polygon points="100,130 130,160 100,190 70,160" fill="#3a2a1a" stroke="#5a4a2a" stroke-width="1.5"/>
+  <!-- Bases -->
+  <circle cx="100" cy="190" r="3" fill="#ffffff"/>
+  <circle cx="130" cy="160" r="3" fill="#ffffff"/>
+  <circle cx="100" cy="130" r="3" fill="#ffffff"/>
+  <circle cx="70" cy="160" r="3" fill="#ffffff"/>
+  <!-- CF / LF / RF labels -->
+  <text x="100" y="25" text-anchor="middle" font-size="11" fill="#888" font-family="sans-serif">CF</text>
+  <text x="25" y="120" text-anchor="middle" font-size="11" fill="#888" font-family="sans-serif">LF</text>
+  <text x="175" y="120" text-anchor="middle" font-size="11" fill="#888" font-family="sans-serif">RF</text>
+  <text x="100" y="200" text-anchor="middle" font-size="9" fill="#666" font-family="sans-serif">HP</text>
+  <!-- Wind arrow (rotates around center) -->
+  <g transform="translate({cx},{cy}) rotate({rot:.1f})">
+    <line x1="0" y1="50" x2="0" y2="-50" stroke="{color}" stroke-width="4" stroke-linecap="round"/>
+    <polygon points="0,-60 -10,-40 10,-40" fill="{color}"/>
+    <circle cx="0" cy="50" r="4" fill="{color}"/>
+  </g>
+  <!-- Wind speed text -->
+  <text x="100" y="105" text-anchor="middle" font-size="14" fill="#ffffff" font-weight="bold" font-family="sans-serif">{wind_mph:.0f}mph</text>
+</svg>
+'''
+    # Display with caption
+    col_a, col_b = st.columns([1, 2])
+    with col_a:
+        st.markdown(svg, unsafe_allow_html=True)
+    with col_b:
+        st.markdown(
+            f"**Wind: {wind_mph:.0f} mph blowing {impact}**  \n"
+            f"<span style='color:{color}'>● {impact_short}</span>"
+            f"{pull_side}  \n"
+            f"<small>Coming from {wind_dir_deg:.0f}° (compass) · "
+            f"CF bearing {cf_bearing:.0f}°</small>",
+            unsafe_allow_html=True,
+        )
+
+
 def build_col_config():
     return {
         "alert": st.column_config.TextColumn(
@@ -11822,6 +11947,30 @@ if _valid_games:
                 st.warning(f"🌬️ **Wind hurts RHB:** {all_msgs}")
             else:
                 st.caption(f"🎯 **Pull-side wind:** {all_msgs}")
+
+        # v43.35 (user-requested): SVG wind diagram showing wind direction
+        # relative to park orientation. Renders only when we have all 3
+        # inputs (mph, dir, cf_bearing). For domes / very-low-wind games,
+        # the function self-skips.
+        try:
+            _wx_for_viz = ctx.get("weather") or {}
+            _wm = _wx_for_viz.get("wind_mph")
+            _wd = _wx_for_viz.get("wind_dir_deg")
+            # CF bearing comes from park_factors via get_park lookup
+            try:
+                from park_factors import get_park as _get_park_for_viz
+                _vp = _get_park_for_viz(game.get("venue", "")) or {}
+                _cfb = _vp.get("cf_bearing")
+            except Exception:
+                _cfb = None
+            # Only render outdoor games — skip domes (wind has no effect indoors)
+            _is_dome = (venue_roof_type == "dome") or (real_roof_closed is True)
+            if (not _is_dome and _wm is not None and _wd is not None
+                    and _cfb is not None):
+                with st.expander("🌬️ Wind direction diagram", expanded=False):
+                    _render_wind_diagram(_wm, _wd, _cfb, venue_name=game.get("venue"))
+        except Exception:
+            pass
 
         # PITCHER GRADE BANNER — show each starter's base grade alongside the
         # env-adjusted grade (post park × weather). Helps user see when an ELITE
