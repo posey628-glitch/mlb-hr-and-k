@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.33-honest-snapshot-status"
+APP_VERSION = "2026.06.10-v43.34-game-tabs-ux"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -4461,7 +4461,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.33 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.34 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -11603,535 +11603,568 @@ with st.expander("🔍 Hitter Lookup — scout any team's hitter", expanded=Fals
         st.warning(f"Hitter lookup failed: {type(_hl_err).__name__}: {_hl_err}")
 
 
-for _, game in slate.iterrows():
-    ctx = game_context_map.get(game["gamePk"], {})
-    if not ctx:
-        continue
+# v43.34 (UX): wrap game-by-game render in st.tabs() so users can jump
+# to any game with one click instead of scrolling through 15 games.
+# All compute happens earlier in game_context_map — this is pure layout.
+_valid_games = []
+for _, _g in slate.iterrows():
+    _c = game_context_map.get(_g["gamePk"], {})
+    if _c:
+        _valid_games.append((_g, _c))
 
-    # RAIN-RISK BANNER - shown ABOVE the game header so it can't be missed
-    wx = ctx.get("weather") or {}
-    pp = wx.get("precip_prob")
-    if pp is not None and pp >= 80:
-        st.error(
-            f"🌧️ **HIGH RAIN RISK ({pp:.0f}%)** — this game may be delayed or "
-            f"postponed. Treat projections as conditional on the game being played."
-        )
-    elif pp is not None and pp >= 50:
-        st.warning(
-            f"☔ **Rain risk ({pp:.0f}%)** — possible delay. Projections still apply if game is played."
-        )
-
-    away_tab = f"✈️ {game['away_team_abbr']} @ {game['home_team_abbr']}"
-    home_tab = f"🏠 {game['home_team_abbr']} vs {game['away_team_abbr']}"
-
-    # Game header with start time
-    away_k_mean = ctx["away_k_proj"].get("mean") if ctx.get("away_k_proj") else None
-    home_k_mean = ctx["home_k_proj"].get("mean") if ctx.get("home_k_proj") else None
-
-    # Format game time to user's local timezone (assumes ET, which is most common)
-    game_dt = game.get("gameTime")
-    time_str = ""
-    if isinstance(game_dt, pd.Timestamp):
-        try:
-            # Convert UTC to US Eastern (most common for MLB schedules)
-            local_dt = game_dt.tz_convert("US/Eastern") if game_dt.tzinfo else game_dt
-            # 12-hour format, strip leading zero on hour (Windows-safe)
-            time_str = local_dt.strftime("%I:%M %p ET").lstrip("0")
-        except Exception:
+if _valid_games:
+    def _tab_label(g, c):
+        wx = c.get("weather") or {}
+        pp = wx.get("precip_prob")
+        rain = " 🌧️" if pp is not None and pp >= 50 else ""
+        # Add game time so users can identify early vs late slate games
+        gtime = g.get("gameTime", "") or ""
+        time_str = ""
+        if gtime:
             try:
-                time_str = game_dt.strftime("%I:%M %p").lstrip("0")
+                from datetime import datetime as _dt
+                # gameTime is ISO format from MLB Stats API
+                dt = _dt.fromisoformat(gtime.replace("Z", "+00:00"))
+                # Convert to ET for display
+                try:
+                    import pytz
+                    et = dt.astimezone(pytz.timezone("US/Eastern"))
+                    time_str = f" {et.strftime('%-I:%M%p').lower().replace(':00', '')}"
+                except Exception:
+                    time_str = f" {dt.strftime('%H:%M')}"
             except Exception:
                 time_str = ""
+        return f"{g['away_team_abbr']} @ {g['home_team_abbr']}{time_str}{rain}"
 
-    header_bits = [f"### {game['away_team_abbr']} @ {game['home_team_abbr']}"]
-    if time_str:
-        header_bits.append(f"🕐 {time_str}")
-    if game.get("away_pitcher") and game.get("home_pitcher"):
-        header_bits.append(
-            f"**{game['away_pitcher']}** vs **{game['home_pitcher']}**"
-        )
-    # Status flag — surface in progress / final / postponed games prominently
-    game_status_str = (game.get("status") or "").strip()
-    if game_status_str:
-        in_progress = any(kw in game_status_str.lower() for kw in
-                          ("progress", "delayed", "warmup", "pre-game", "manager"))
-        is_final = any(kw in game_status_str.lower() for kw in
-                       ("final", "completed", "game over", "ended"))
-        is_postponed = any(kw in game_status_str.lower() for kw in
-                           ("postponed", "suspended", "cancelled", "canceled"))
-        if in_progress:
-            header_bits.append(f"🟠 **{game_status_str.upper()}** — bets locked")
-        elif is_final:
-            header_bits.append(f"🔴 **{game_status_str.upper()}** — game over")
-        elif is_postponed:
-            header_bits.append(f"⚫ **{game_status_str.upper()}**")
-    st.markdown(" · ".join(header_bits))
+    _tab_labels = [_tab_label(g, c) for g, c in _valid_games]
+    _game_tabs = st.tabs(_tab_labels)
 
-    # Loud full-width banner for games that have started or finished — user
-    # asked for an unmistakable signal so they don't pick from these.
-    if game_status_str:
-        gs_lower = game_status_str.lower()
-        if any(kw in gs_lower for kw in ("progress", "delayed", "warmup")):
-            st.error(
-                f"🟠 **GAME IN PROGRESS — picks no longer available** "
-                f"(except live betting). Status: {game_status_str}"
-            )
-        elif any(kw in gs_lower for kw in ("final", "completed", "game over", "ended")):
-            st.error(
-                f"🔴 **GAME FINAL — outcomes are set.** Status: {game_status_str}"
-            )
-        elif any(kw in gs_lower for kw in ("postponed", "suspended", "cancelled", "canceled")):
-            st.error(
-                f"⚫ **GAME {game_status_str.upper()}** — props void / refunded."
-            )
-
-    # Lineup confirmation status - warn if using roster-fill
-    away_conf = ctx.get("away_lineup_confirmed", True)
-    home_conf = ctx.get("home_lineup_confirmed", True)
-    if not away_conf or not home_conf:
-        unconfirmed = []
-        if not away_conf:
-            unconfirmed.append(game.get("away_team_abbr", "AWAY"))
-        if not home_conf:
-            unconfirmed.append(game.get("home_team_abbr", "HOME"))
-        st.warning(
-            f"⚠️ **Lineup not yet posted for {', '.join(unconfirmed)}** — "
-            "hitters sorted by season PA (likely starters first). The # column "
-            "shows '—' and lineup-position PA scaling is DISABLED for this game "
-            "(everyone uses 4.2 PA = league avg). Refresh after lineups post."
-        )
-
-    # Rain delay warning (>50% precipitation chance)
-    wx_info = ctx.get("weather") or {}
-    precip = wx_info.get("precip_prob")
-    if precip is not None and not pd.isna(precip):
-        if precip >= 80:
-            st.error(
-                f"🌧️ **HEAVY RAIN — {precip:.0f}% precipitation probability.** "
-                f"Game may be delayed or postponed. Reduce position sizes / "
-                f"consider waiting until lineups + game status confirmed."
-            )
-        elif precip >= 50:
-            st.warning(
-                f"🌦️ **Rain possible — {precip:.0f}% precipitation.** "
-                f"Conditions may slow ball flight, suppress HR potential."
-            )
-
-    # HR environment flag - prominent color-coded summary
-    hr_env_flag = ctx.get("hr_env_flag", "")
-    hr_env_color = ctx.get("hr_env_color", "")
-    # NEW: append day/night indicator to env flag
-    game_type_str = ctx.get("game_type", "")
-    if game_type_str == "day":
-        day_night_label = "☀️ DAY GAME"
-    elif game_type_str == "night":
-        day_night_label = "🌙 NIGHT GAME"
-    else:
-        day_night_label = ""
-
-    # ROOF STATUS — show what MLB reports, with manual override option
-    # for retractable parks where MLB hasn't reported status yet.
-    real_roof_closed = ctx.get("real_roof_closed")  # True / False / None
-    roof_condition = ctx.get("roof_condition", "")
-    venue_park = get_park(game.get("venue", "")) or {}
-    venue_roof_type = venue_park.get("roof", "open")
-
-    roof_label = ""
-    if real_roof_closed is True:
-        roof_label = f"🏟️ ROOF CLOSED ({roof_condition})" if roof_condition else "🏟️ ROOF CLOSED (MLB-confirmed)"
-    elif real_roof_closed is False and venue_roof_type == "retractable":
-        roof_label = "🏟️ ROOF OPEN (MLB-confirmed)"
-    elif venue_roof_type == "dome":
-        roof_label = "🏟️ DOME (always closed)"
-    elif venue_roof_type == "retractable":
-        roof_label = "🏟️ Retractable roof — status unknown, using temp guess"
-
-    if hr_env_flag:
-        combined_msg = hr_env_flag
-        if day_night_label:
-            combined_msg += f" · {day_night_label}"
-        if roof_label:
-            combined_msg += f" · {roof_label}"
-        if hr_env_color == "success":
-            st.success(combined_msg)
-        elif hr_env_color == "info":
-            st.info(combined_msg)
-        elif hr_env_color == "warning":
-            st.warning(combined_msg)
-        elif hr_env_color == "error":
-            st.error(combined_msg)
-        else:
-            st.caption(combined_msg)
-    elif day_night_label or roof_label:
-        st.caption(" · ".join(s for s in [day_night_label, roof_label] if s))
-
-    # Pull-wind interaction summary — show prominently when wind significantly
-    # helps or hurts a handedness side. User asked for easy-to-see flag.
-    pull_summaries = ctx.get("pull_wind_summary", [])
-    if pull_summaries:
-        # Determine which sides are affected
-        all_msgs = " · ".join(pull_summaries)
-        lhb_helped = "RF" in all_msgs and "boost" in all_msgs.lower()
-        rhb_helped = "LF" in all_msgs and "boost" in all_msgs.lower()
-        lhb_hurt = "RF" in all_msgs and "suppress" in all_msgs.lower()
-        rhb_hurt = "LF" in all_msgs and "suppress" in all_msgs.lower()
-        if lhb_helped and rhb_helped:
-            st.info(f"🌬️ **STRONG WIND — boosts BOTH LHB & RHB:** {all_msgs}")
-        elif lhb_helped:
-            st.info(f"🌬️ **Wind FAVORS LHB:** {all_msgs}")
-        elif rhb_helped:
-            st.info(f"🌬️ **Wind FAVORS RHB:** {all_msgs}")
-        elif lhb_hurt and rhb_hurt:
-            st.warning(f"🌬️ **WIND SUPPRESSES HRs both sides:** {all_msgs}")
-        elif lhb_hurt:
-            st.warning(f"🌬️ **Wind hurts LHB:** {all_msgs}")
-        elif rhb_hurt:
-            st.warning(f"🌬️ **Wind hurts RHB:** {all_msgs}")
-        else:
-            st.caption(f"🎯 **Pull-side wind:** {all_msgs}")
-
-    # PITCHER GRADE BANNER — show each starter's base grade alongside the
-    # env-adjusted grade (post park × weather). Helps user see when an ELITE
-    # pitcher in Coors becomes TOUGH, or an EXPLOIT in Petco becomes MIXED.
-    if not p_slate.empty and "grade" in p_slate.columns:
-        a_pid = (ctx.get("away_p_row") or {}).get("player_id")
-        h_pid = (ctx.get("home_p_row") or {}).get("player_id")
-        env_mult_show = ctx.get("hr_mult", 1.0)
-
-        def _pitcher_grade_str(pid, label, side_team):
-            if pid is None or pd.isna(pid):
-                return None
-            try:
-                pid_int = int(pid)
-            except (TypeError, ValueError):
-                return None
-            match = p_slate[p_slate["pitcher_id"] == pid_int]
-            if match.empty:
-                return None
-            base = match.iloc[0].get("grade") or "—"
-            env_adj = match.iloc[0].get("env_adj_grade") or base
-            name = match.iloc[0].get("pitcher_name") or label
-            if base == env_adj or env_adj == "—":
-                return f"**{name}** ({side_team}): {base}"
-            # Different — show transition with arrow
-            return f"**{name}** ({side_team}): {base} → **{env_adj}** (env-adj)"
-
-        away_str = _pitcher_grade_str(a_pid, game.get("away_pitcher", "TBD"),
-                                        game.get("away_team_abbr", ""))
-        home_str = _pitcher_grade_str(h_pid, game.get("home_pitcher", "TBD"),
-                                        game.get("home_team_abbr", ""))
-        pitcher_strs = [s for s in (away_str, home_str) if s]
-        if pitcher_strs:
-            st.caption(" · ".join(pitcher_strs) + f" · env_mult: {env_mult_show:.2f}×")
-
-    info_cols = st.columns(3)
-    with info_cols[0]:
-        st.metric("Venue", game.get("venue", "—"))
-    with info_cols[1]:
+    for _tab, (game, ctx) in zip(_game_tabs, _valid_games):
+      with _tab:
+        # RAIN-RISK BANNER - shown ABOVE the game header so it can't be missed
         wx = ctx.get("weather") or {}
-        if wx and not wx.get("error") and wx.get("temp_f") is not None:
-            temp = wx.get("temp_f")
-            wind = wx.get("wind_mph", 0)
-            wind_dir_deg = wx.get("wind_dir_deg")
-            # Convert degrees to compass direction
-            if wind_dir_deg is not None:
-                dirs = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
-                idx = int((wind_dir_deg + 22.5) / 45) % 8
-                wind_dir = dirs[idx]
-            else:
-                wind_dir = ""
-            pp = wx.get("precip_prob", 0) or 0
-            rain_str = f" · ☔{pp:.0f}%" if pp >= 30 else ""
-            st.metric(
-                "Weather",
-                f"{temp:.0f}°F · {wind:.0f}mph {wind_dir}{rain_str}",
-                help=ctx.get("summary", ""),
+        pp = wx.get("precip_prob")
+        if pp is not None and pp >= 80:
+            st.error(
+                f"🌧️ **HIGH RAIN RISK ({pp:.0f}%)** — this game may be delayed or "
+                f"postponed. Treat projections as conditional on the game being played."
             )
+        elif pp is not None and pp >= 50:
+            st.warning(
+                f"☔ **Rain risk ({pp:.0f}%)** — possible delay. Projections still apply if game is played."
+            )
+
+        away_tab = f"✈️ {game['away_team_abbr']} @ {game['home_team_abbr']}"
+        home_tab = f"🏠 {game['home_team_abbr']} vs {game['away_team_abbr']}"
+
+        # Game header with start time
+        away_k_mean = ctx["away_k_proj"].get("mean") if ctx.get("away_k_proj") else None
+        home_k_mean = ctx["home_k_proj"].get("mean") if ctx.get("home_k_proj") else None
+
+        # Format game time to user's local timezone (assumes ET, which is most common)
+        game_dt = game.get("gameTime")
+        time_str = ""
+        if isinstance(game_dt, pd.Timestamp):
+            try:
+                # Convert UTC to US Eastern (most common for MLB schedules)
+                local_dt = game_dt.tz_convert("US/Eastern") if game_dt.tzinfo else game_dt
+                # 12-hour format, strip leading zero on hour (Windows-safe)
+                time_str = local_dt.strftime("%I:%M %p ET").lstrip("0")
+            except Exception:
+                try:
+                    time_str = game_dt.strftime("%I:%M %p").lstrip("0")
+                except Exception:
+                    time_str = ""
+
+        header_bits = [f"### {game['away_team_abbr']} @ {game['home_team_abbr']}"]
+        if time_str:
+            header_bits.append(f"🕐 {time_str}")
+        if game.get("away_pitcher") and game.get("home_pitcher"):
+            header_bits.append(
+                f"**{game['away_pitcher']}** vs **{game['home_pitcher']}**"
+            )
+        # Status flag — surface in progress / final / postponed games prominently
+        game_status_str = (game.get("status") or "").strip()
+        if game_status_str:
+            in_progress = any(kw in game_status_str.lower() for kw in
+                              ("progress", "delayed", "warmup", "pre-game", "manager"))
+            is_final = any(kw in game_status_str.lower() for kw in
+                           ("final", "completed", "game over", "ended"))
+            is_postponed = any(kw in game_status_str.lower() for kw in
+                               ("postponed", "suspended", "cancelled", "canceled"))
+            if in_progress:
+                header_bits.append(f"🟠 **{game_status_str.upper()}** — bets locked")
+            elif is_final:
+                header_bits.append(f"🔴 **{game_status_str.upper()}** — game over")
+            elif is_postponed:
+                header_bits.append(f"⚫ **{game_status_str.upper()}**")
+        st.markdown(" · ".join(header_bits))
+
+        # Loud full-width banner for games that have started or finished — user
+        # asked for an unmistakable signal so they don't pick from these.
+        if game_status_str:
+            gs_lower = game_status_str.lower()
+            if any(kw in gs_lower for kw in ("progress", "delayed", "warmup")):
+                st.error(
+                    f"🟠 **GAME IN PROGRESS — picks no longer available** "
+                    f"(except live betting). Status: {game_status_str}"
+                )
+            elif any(kw in gs_lower for kw in ("final", "completed", "game over", "ended")):
+                st.error(
+                    f"🔴 **GAME FINAL — outcomes are set.** Status: {game_status_str}"
+                )
+            elif any(kw in gs_lower for kw in ("postponed", "suspended", "cancelled", "canceled")):
+                st.error(
+                    f"⚫ **GAME {game_status_str.upper()}** — props void / refunded."
+                )
+
+        # Lineup confirmation status - warn if using roster-fill
+        away_conf = ctx.get("away_lineup_confirmed", True)
+        home_conf = ctx.get("home_lineup_confirmed", True)
+        if not away_conf or not home_conf:
+            unconfirmed = []
+            if not away_conf:
+                unconfirmed.append(game.get("away_team_abbr", "AWAY"))
+            if not home_conf:
+                unconfirmed.append(game.get("home_team_abbr", "HOME"))
+            st.warning(
+                f"⚠️ **Lineup not yet posted for {', '.join(unconfirmed)}** — "
+                "hitters sorted by season PA (likely starters first). The # column "
+                "shows '—' and lineup-position PA scaling is DISABLED for this game "
+                "(everyone uses 4.2 PA = league avg). Refresh after lineups post."
+            )
+
+        # Rain delay warning (>50% precipitation chance)
+        wx_info = ctx.get("weather") or {}
+        precip = wx_info.get("precip_prob")
+        if precip is not None and not pd.isna(precip):
+            if precip >= 80:
+                st.error(
+                    f"🌧️ **HEAVY RAIN — {precip:.0f}% precipitation probability.** "
+                    f"Game may be delayed or postponed. Reduce position sizes / "
+                    f"consider waiting until lineups + game status confirmed."
+                )
+            elif precip >= 50:
+                st.warning(
+                    f"🌦️ **Rain possible — {precip:.0f}% precipitation.** "
+                    f"Conditions may slow ball flight, suppress HR potential."
+                )
+
+        # HR environment flag - prominent color-coded summary
+        hr_env_flag = ctx.get("hr_env_flag", "")
+        hr_env_color = ctx.get("hr_env_color", "")
+        # NEW: append day/night indicator to env flag
+        game_type_str = ctx.get("game_type", "")
+        if game_type_str == "day":
+            day_night_label = "☀️ DAY GAME"
+        elif game_type_str == "night":
+            day_night_label = "🌙 NIGHT GAME"
         else:
-            wx_help = ctx.get("summary", "Weather not loaded")
-            st.metric("Weather", "—", help=wx_help)
-    with info_cols[2]:
-        st.metric(
-            "Park × Wx", f"{ctx.get('hr_mult', 1.0):.2f}×",
-            help="Park HR factor × weather multiplier. >1.0 = HR-friendly.",
-        )
-        # Show umpire flag if K-factor is meaningfully non-neutral (±3%+)
-        ump_info = ctx.get("ump") or {}
-        ump_k = ump_info.get("k_factor", 1.0)
-        ump_name = ump_info.get("name")
-        if ump_name and (ump_k >= 1.03 or ump_k <= 0.97):
-            if ump_k >= 1.05:
-                st.caption(f"👨‍⚖️ **HP: {ump_name}** · K-friendly ({ump_k:.2f}×)")
-            elif ump_k >= 1.03:
-                st.caption(f"👨‍⚖️ HP: {ump_name} · slight K boost ({ump_k:.2f}×)")
-            elif ump_k <= 0.95:
-                st.caption(f"👨‍⚖️ **HP: {ump_name}** · K-suppressing ({ump_k:.2f}×)")
+            day_night_label = ""
+
+        # ROOF STATUS — show what MLB reports, with manual override option
+        # for retractable parks where MLB hasn't reported status yet.
+        real_roof_closed = ctx.get("real_roof_closed")  # True / False / None
+        roof_condition = ctx.get("roof_condition", "")
+        venue_park = get_park(game.get("venue", "")) or {}
+        venue_roof_type = venue_park.get("roof", "open")
+
+        roof_label = ""
+        if real_roof_closed is True:
+            roof_label = f"🏟️ ROOF CLOSED ({roof_condition})" if roof_condition else "🏟️ ROOF CLOSED (MLB-confirmed)"
+        elif real_roof_closed is False and venue_roof_type == "retractable":
+            roof_label = "🏟️ ROOF OPEN (MLB-confirmed)"
+        elif venue_roof_type == "dome":
+            roof_label = "🏟️ DOME (always closed)"
+        elif venue_roof_type == "retractable":
+            roof_label = "🏟️ Retractable roof — status unknown, using temp guess"
+
+        if hr_env_flag:
+            combined_msg = hr_env_flag
+            if day_night_label:
+                combined_msg += f" · {day_night_label}"
+            if roof_label:
+                combined_msg += f" · {roof_label}"
+            if hr_env_color == "success":
+                st.success(combined_msg)
+            elif hr_env_color == "info":
+                st.info(combined_msg)
+            elif hr_env_color == "warning":
+                st.warning(combined_msg)
+            elif hr_env_color == "error":
+                st.error(combined_msg)
             else:
-                st.caption(f"👨‍⚖️ HP: {ump_name} · slight K dampener ({ump_k:.2f}×)")
+                st.caption(combined_msg)
+        elif day_night_label or roof_label:
+            st.caption(" · ".join(s for s in [day_night_label, roof_label] if s))
 
-        # CATCHER FRAMING DISPLAY (v37c)
-        # Show flag for each starting catcher if their K factor is meaningfully
-        # non-neutral. Most catchers cluster at 1.0 and won't show anything.
-        away_catcher = ctx.get("away_catcher_name")
-        home_catcher = ctx.get("home_catcher_name")
-        away_kf = ctx.get("away_catcher_kf", 1.0)
-        home_kf = ctx.get("home_catcher_kf", 1.0)
-        for c_name, c_kf, team_label in [
-            (away_catcher, away_kf, game.get("away_team_abbr", "AWY")),
-            (home_catcher, home_kf, game.get("home_team_abbr", "HM")),
-        ]:
-            if not c_name:
-                continue
-            if c_kf >= 1.035:
-                st.caption(f"🧤 **{team_label} C: {c_name}** · elite framer (+{(c_kf-1)*100:.1f}% K)")
-            elif c_kf >= 1.02:
-                st.caption(f"🧤 {team_label} C: {c_name} · above-avg framer (+{(c_kf-1)*100:.1f}% K)")
-            elif c_kf <= 0.97:
-                st.caption(f"🧤 **{team_label} C: {c_name}** · poor framer ({(c_kf-1)*100:+.1f}% K)")
-            elif c_kf <= 0.985:
-                st.caption(f"🧤 {team_label} C: {c_name} · below-avg framer ({(c_kf-1)*100:+.1f}% K)")
+        # Pull-wind interaction summary — show prominently when wind significantly
+        # helps or hurts a handedness side. User asked for easy-to-see flag.
+        pull_summaries = ctx.get("pull_wind_summary", [])
+        if pull_summaries:
+            # Determine which sides are affected
+            all_msgs = " · ".join(pull_summaries)
+            lhb_helped = "RF" in all_msgs and "boost" in all_msgs.lower()
+            rhb_helped = "LF" in all_msgs and "boost" in all_msgs.lower()
+            lhb_hurt = "RF" in all_msgs and "suppress" in all_msgs.lower()
+            rhb_hurt = "LF" in all_msgs and "suppress" in all_msgs.lower()
+            if lhb_helped and rhb_helped:
+                st.info(f"🌬️ **STRONG WIND — boosts BOTH LHB & RHB:** {all_msgs}")
+            elif lhb_helped:
+                st.info(f"🌬️ **Wind FAVORS LHB:** {all_msgs}")
+            elif rhb_helped:
+                st.info(f"🌬️ **Wind FAVORS RHB:** {all_msgs}")
+            elif lhb_hurt and rhb_hurt:
+                st.warning(f"🌬️ **WIND SUPPRESSES HRs both sides:** {all_msgs}")
+            elif lhb_hurt:
+                st.warning(f"🌬️ **Wind hurts LHB:** {all_msgs}")
+            elif rhb_hurt:
+                st.warning(f"🌬️ **Wind hurts RHB:** {all_msgs}")
+            else:
+                st.caption(f"🎯 **Pull-side wind:** {all_msgs}")
 
-    # Per-game Top HR Hitter + Top Sleeper, combining both lineups
-    am = ctx.get("away_matchup")
-    hm = ctx.get("home_matchup")
-    pickable = []
-    if am is not None and not am.empty:
-        a_copy = am.copy()
-        a_copy["_team"] = game.get("away_team_abbr", "")
-        pickable.append(a_copy)
-    if hm is not None and not hm.empty:
-        h_copy = hm.copy()
-        h_copy["_team"] = game.get("home_team_abbr", "")
-        pickable.append(h_copy)
-    if pickable:
-        combined = pd.concat(pickable, ignore_index=True)
-        pick_cols = st.columns(2)
-        with pick_cols[0]:
-            if "hr_game_pct" in combined.columns:
-                valid = combined.dropna(subset=["hr_game_pct"])
-                if not valid.empty:
-                    top = valid.sort_values("hr_game_pct", ascending=False).iloc[0]
-                    pct = top.get("hr_game_pct", 0)
-                    alert = top.get("alert", "")
-                    # Show slate-leader flag if this player tops any category
-                    leader_badge = ""
-                    try:
-                        _pid = top.get("player_id")
-                        if _pid is not None and not pd.isna(_pid):
-                            cats = slate_leader_pid_map.get(int(_pid), [])
-                            if cats:
-                                leader_badge = " 🏆"
-                    except Exception:
-                        pass
-                    st.markdown(
-                        f"**🎯 Best HR Play**: {alert} **{top['player_name']}**{leader_badge} "
-                        f"({top['_team']}) — {pct:.1f}% HR Game"
-                    )
-        with pick_cols[1]:
-            if "sleeper_score" in combined.columns:
-                valid = combined.dropna(subset=["sleeper_score"])
-                if not valid.empty:
-                    # Filter: sleeper means meaningful HR upside despite low season pace
-                    sleepers_only = valid[valid["sleeper_score"] > 0]
-                    if not sleepers_only.empty:
-                        sl = sleepers_only.sort_values("sleeper_score", ascending=False).iloc[0]
-                        sc = sl.get("sleeper_score", 0)
-                        # NA-safe: pandas Series .get(...) can return pd.NA
-                        _hr_raw = sl.get("hr_game_pct", 0)
-                        try:
-                            hr_pct = 0 if pd.isna(_hr_raw) else float(_hr_raw)
-                        except (TypeError, ValueError):
-                            hr_pct = 0
-                        try:
-                            sc = 0 if pd.isna(sc) else float(sc)
-                        except (TypeError, ValueError):
-                            sc = 0
-                        st.markdown(
-                            f"**💎 Best Sleeper**: **{sl['player_name']}** "
-                            f"({sl['_team']}) — sleeper {sc:.1f}, HR {hr_pct:.1f}%"
-                        )
+        # PITCHER GRADE BANNER — show each starter's base grade alongside the
+        # env-adjusted grade (post park × weather). Helps user see when an ELITE
+        # pitcher in Coors becomes TOUGH, or an EXPLOIT in Petco becomes MIXED.
+        if not p_slate.empty and "grade" in p_slate.columns:
+            a_pid = (ctx.get("away_p_row") or {}).get("player_id")
+            h_pid = (ctx.get("home_p_row") or {}).get("player_id")
+            env_mult_show = ctx.get("hr_mult", 1.0)
 
-    tabs = st.tabs([away_tab, home_tab, "🎯 K Projections"])
-    with tabs[0]:
-        render_matchup_section(ctx.get("away_matchup"), game['away_team_abbr'])
-        # Late-swap candidates from active roster but not in tonight's 9
-        bench = ctx.get("away_bench_matchup")
-        if bench is not None and not bench.empty:
-            with st.expander(
-                f"🔄 {game['away_team_abbr']} bench / possible late-swap candidates "
-                f"({len(bench)} active-roster hitters not in tonight's 9)"
-            ):
-                st.caption(
-                    "These hitters are on the active roster but NOT in the posted "
-                    "starting lineup. If a player gets scratched late, one of these "
-                    "could be the replacement. Grades/signals shown — useful for "
-                    "spotting a real starter who's resting (or got demoted into "
-                    "the bench pool because lineups aren't posted yet)."
-                )
-                # v43.20 (reviewer-validated): grade/alert/hr_game_pct/
-                # pa_confidence ARE computed for bench in v43.12, but the
-                # display column whitelist stripped them — making Alvarez
-                # (grade A, 25.97% HR) and Vientos (grade B+, 23.19%)
-                # invisible. The old caption claiming "HR Game% NOT computed"
-                # was stale.
-                bench_cols = [c for c in [
-                    "player_name", "position", "bats", "pa", "pa_confidence",
-                    "hr_game_pct", "grade", "alert",
-                    "barrel_pct", "iso", "xwoba", "home_run", "recent_hr",
-                ] if c in bench.columns]
-                st.dataframe(
-                    # v43.21: sort by hr_game_pct desc so A grades appear
-                    # first (was sorting by PA which buried high-grade bench
-                    # players below lower-grade ones with more season time)
-                    bench[bench_cols].sort_values(
-                        "hr_game_pct" if "hr_game_pct" in bench.columns else "pa",
-                        ascending=False, na_position="last"
-                    ),
-                    hide_index=True, use_container_width=True,
-                    column_config={
-                        "player_name": st.column_config.TextColumn("Hitter"),
-                        "barrel_pct": st.column_config.NumberColumn("Brl%", format="%.1f%%"),
-                        "iso": st.column_config.NumberColumn("ISO", format="%.3f"),
-                        "xwoba": st.column_config.NumberColumn("xwOBA", format="%.3f"),
-                    },
-                )
-    with tabs[1]:
-        render_matchup_section(ctx.get("home_matchup"), game['home_team_abbr'])
-        bench = ctx.get("home_bench_matchup")
-        if bench is not None and not bench.empty:
-            with st.expander(
-                f"🔄 {game['home_team_abbr']} bench / possible late-swap candidates "
-                f"({len(bench)} active-roster hitters not in tonight's 9)"
-            ):
-                st.caption(
-                    "Active-roster hitters NOT in the posted starting lineup. "
-                    "If someone gets scratched late, one of these is the likely "
-                    "replacement. Grades/signals shown — useful for spotting a "
-                    "real starter who's resting."
-                )
-                bench_cols = [c for c in [
-                    "player_name", "position", "bats", "pa", "pa_confidence",
-                    "hr_game_pct", "grade", "alert",
-                    "barrel_pct", "iso", "xwoba", "home_run", "recent_hr",
-                ] if c in bench.columns]
-                st.dataframe(
-                    # v43.21: sort by hr_game_pct desc so A grades appear
-                    # first (was sorting by PA which buried high-grade bench
-                    # players below lower-grade ones with more season time)
-                    bench[bench_cols].sort_values(
-                        "hr_game_pct" if "hr_game_pct" in bench.columns else "pa",
-                        ascending=False, na_position="last"
-                    ),
-                    hide_index=True, use_container_width=True,
-                    column_config={
-                        "player_name": st.column_config.TextColumn("Hitter"),
-                        "barrel_pct": st.column_config.NumberColumn("Brl%", format="%.1f%%"),
-                        "iso": st.column_config.NumberColumn("ISO", format="%.3f"),
-                        "xwoba": st.column_config.NumberColumn("xwOBA", format="%.3f"),
-                    },
-                )
-    with tabs[2]:
-        kp1, kp2 = st.columns(2)
-        for col, side, label in [
-            (kp1, "away", game.get("away_pitcher") or "TBD"),
-            (kp2, "home", game.get("home_pitcher") or "TBD"),
-        ]:
-            with col:
-                pp = ctx.get(f"{side}_k_proj") or {}
-                if not pp or pp.get("mean") is None:
-                    st.write(f"**{label}** — no real K/9 data available")
-                    p_row = ctx.get(f"{side}_p_row") or {}
-                    if p_row:
-                        avail = [k for k, v in p_row.items()
-                                  if v is not None and not (isinstance(v, float) and pd.isna(v))
-                                  and k in ("k9", "k_percent", "era", "whip", "ip")]
-                        if avail:
-                            st.caption(f"Has: {', '.join(avail)}")
-                        else:
-                            st.caption("Pitcher has no real stat data this season yet")
-                    continue
-                st.markdown(
-                    f"**{label}** · Projected K: **{pp['mean']:.1f}** "
-                    f"(range {pp.get('low', 0):.1f}–{pp.get('high', 0):.1f})"
-                )
-                st.caption(
-                    f"Blended K/9: {pp.get('blended_k9', 0):.2f} · "
-                    f"Lineup adj: {pp.get('lineup_adj', 1):.2f}×"
-                )
-                lines = pd.DataFrame([
-                    {"Line": f"Over {x} K", "Prob": round(pp.get(f"p_over_{x}", 0) * 100, 1)}
-                    for x in ["5.5", "6.5", "7.5", "8.5"]
-                ])
-                st.dataframe(
-                    lines, hide_index=True, use_container_width=True,
-                    column_config={
-                        "Line": st.column_config.TextColumn("Line"),
-                        "Prob": st.column_config.NumberColumn("P(Over)", format="%.1f%%"),
-                    },
-                )
+            def _pitcher_grade_str(pid, label, side_team):
+                if pid is None or pd.isna(pid):
+                    return None
+                try:
+                    pid_int = int(pid)
+                except (TypeError, ValueError):
+                    return None
+                match = p_slate[p_slate["pitcher_id"] == pid_int]
+                if match.empty:
+                    return None
+                base = match.iloc[0].get("grade") or "—"
+                env_adj = match.iloc[0].get("env_adj_grade") or base
+                name = match.iloc[0].get("pitcher_name") or label
+                if base == env_adj or env_adj == "—":
+                    return f"**{name}** ({side_team}): {base}"
+                # Different — show transition with arrow
+                return f"**{name}** ({side_team}): {base} → **{env_adj}** (env-adj)"
 
-    if not pitcher_arsenal_all.empty:
-        with st.expander("🔬 Deep dive: Pitcher arsenal (combined + by hitter handedness)"):
-            st.caption(
-                "**What this shows:** the actual pitches each pitcher throws — "
-                "usage %, velocity, xwOBA allowed per pitch type. "
-                "**vs LHB / vs RHB tabs** show how the pitch mix CHANGES "
-                "depending on the batter's handedness. E.g. a RHP often throws "
-                "way more sliders to RHB (slider runs same-side away) and more "
-                "changeups to LHB (changeup runs opposite-side away). The arsenal "
-                "your hitter actually sees depends on which side they bat."
+            away_str = _pitcher_grade_str(a_pid, game.get("away_pitcher", "TBD"),
+                                            game.get("away_team_abbr", ""))
+            home_str = _pitcher_grade_str(h_pid, game.get("home_pitcher", "TBD"),
+                                            game.get("home_team_abbr", ""))
+            pitcher_strs = [s for s in (away_str, home_str) if s]
+            if pitcher_strs:
+                st.caption(" · ".join(pitcher_strs) + f" · env_mult: {env_mult_show:.2f}×")
+
+        info_cols = st.columns(3)
+        with info_cols[0]:
+            st.metric("Venue", game.get("venue", "—"))
+        with info_cols[1]:
+            wx = ctx.get("weather") or {}
+            if wx and not wx.get("error") and wx.get("temp_f") is not None:
+                temp = wx.get("temp_f")
+                wind = wx.get("wind_mph", 0)
+                wind_dir_deg = wx.get("wind_dir_deg")
+                # Convert degrees to compass direction
+                if wind_dir_deg is not None:
+                    dirs = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+                    idx = int((wind_dir_deg + 22.5) / 45) % 8
+                    wind_dir = dirs[idx]
+                else:
+                    wind_dir = ""
+                pp = wx.get("precip_prob", 0) or 0
+                rain_str = f" · ☔{pp:.0f}%" if pp >= 30 else ""
+                st.metric(
+                    "Weather",
+                    f"{temp:.0f}°F · {wind:.0f}mph {wind_dir}{rain_str}",
+                    help=ctx.get("summary", ""),
+                )
+            else:
+                wx_help = ctx.get("summary", "Weather not loaded")
+                st.metric("Weather", "—", help=wx_help)
+        with info_cols[2]:
+            st.metric(
+                "Park × Wx", f"{ctx.get('hr_mult', 1.0):.2f}×",
+                help="Park HR factor × weather multiplier. >1.0 = HR-friendly.",
             )
+            # Show umpire flag if K-factor is meaningfully non-neutral (±3%+)
+            ump_info = ctx.get("ump") or {}
+            ump_k = ump_info.get("k_factor", 1.0)
+            ump_name = ump_info.get("name")
+            if ump_name and (ump_k >= 1.03 or ump_k <= 0.97):
+                if ump_k >= 1.05:
+                    st.caption(f"👨‍⚖️ **HP: {ump_name}** · K-friendly ({ump_k:.2f}×)")
+                elif ump_k >= 1.03:
+                    st.caption(f"👨‍⚖️ HP: {ump_name} · slight K boost ({ump_k:.2f}×)")
+                elif ump_k <= 0.95:
+                    st.caption(f"👨‍⚖️ **HP: {ump_name}** · K-suppressing ({ump_k:.2f}×)")
+                else:
+                    st.caption(f"👨‍⚖️ HP: {ump_name} · slight K dampener ({ump_k:.2f}×)")
 
-            def _render_arsenal_tabs(p_id, p_name_label):
-                """Render combined / vs LHB / vs RHB arsenal tables for one pitcher."""
-                if not p_id:
-                    return
-                ars_combined = (pitcher_arsenal_all[pitcher_arsenal_all["player_id"] == p_id]
-                                if "player_id" in pitcher_arsenal_all.columns
-                                else pd.DataFrame())
-                ars_vs_L = (pitcher_arsenal_vs_L[pitcher_arsenal_vs_L["player_id"] == p_id]
-                             if (not pitcher_arsenal_vs_L.empty
-                                 and "player_id" in pitcher_arsenal_vs_L.columns)
-                             else pd.DataFrame())
-                ars_vs_R = (pitcher_arsenal_vs_R[pitcher_arsenal_vs_R["player_id"] == p_id]
-                             if (not pitcher_arsenal_vs_R.empty
-                                 and "player_id" in pitcher_arsenal_vs_R.columns)
-                             else pd.DataFrame())
-                if ars_combined.empty and ars_vs_L.empty and ars_vs_R.empty:
-                    return
-                st.markdown(f"**{p_name_label} arsenal**")
-                tabs_inner = st.tabs(["Combined", "vs LHB", "vs RHB"])
-                with tabs_inner[0]:
-                    if not ars_combined.empty:
-                        st.dataframe(ars_combined, hide_index=True, use_container_width=True)
-                    else:
-                        st.caption("No combined arsenal data.")
-                with tabs_inner[1]:
-                    if not ars_vs_L.empty:
-                        st.dataframe(ars_vs_L, hide_index=True, use_container_width=True)
-                    else:
-                        st.caption(
-                            "No vs-LHB arsenal data. The pitcher may not have faced "
-                            "enough LHB this season for Savant's minimum threshold."
+            # CATCHER FRAMING DISPLAY (v37c)
+            # Show flag for each starting catcher if their K factor is meaningfully
+            # non-neutral. Most catchers cluster at 1.0 and won't show anything.
+            away_catcher = ctx.get("away_catcher_name")
+            home_catcher = ctx.get("home_catcher_name")
+            away_kf = ctx.get("away_catcher_kf", 1.0)
+            home_kf = ctx.get("home_catcher_kf", 1.0)
+            for c_name, c_kf, team_label in [
+                (away_catcher, away_kf, game.get("away_team_abbr", "AWY")),
+                (home_catcher, home_kf, game.get("home_team_abbr", "HM")),
+            ]:
+                if not c_name:
+                    continue
+                if c_kf >= 1.035:
+                    st.caption(f"🧤 **{team_label} C: {c_name}** · elite framer (+{(c_kf-1)*100:.1f}% K)")
+                elif c_kf >= 1.02:
+                    st.caption(f"🧤 {team_label} C: {c_name} · above-avg framer (+{(c_kf-1)*100:.1f}% K)")
+                elif c_kf <= 0.97:
+                    st.caption(f"🧤 **{team_label} C: {c_name}** · poor framer ({(c_kf-1)*100:+.1f}% K)")
+                elif c_kf <= 0.985:
+                    st.caption(f"🧤 {team_label} C: {c_name} · below-avg framer ({(c_kf-1)*100:+.1f}% K)")
+
+        # Per-game Top HR Hitter + Top Sleeper, combining both lineups
+        am = ctx.get("away_matchup")
+        hm = ctx.get("home_matchup")
+        pickable = []
+        if am is not None and not am.empty:
+            a_copy = am.copy()
+            a_copy["_team"] = game.get("away_team_abbr", "")
+            pickable.append(a_copy)
+        if hm is not None and not hm.empty:
+            h_copy = hm.copy()
+            h_copy["_team"] = game.get("home_team_abbr", "")
+            pickable.append(h_copy)
+        if pickable:
+            combined = pd.concat(pickable, ignore_index=True)
+            pick_cols = st.columns(2)
+            with pick_cols[0]:
+                if "hr_game_pct" in combined.columns:
+                    valid = combined.dropna(subset=["hr_game_pct"])
+                    if not valid.empty:
+                        top = valid.sort_values("hr_game_pct", ascending=False).iloc[0]
+                        pct = top.get("hr_game_pct", 0)
+                        alert = top.get("alert", "")
+                        # Show slate-leader flag if this player tops any category
+                        leader_badge = ""
+                        try:
+                            _pid = top.get("player_id")
+                            if _pid is not None and not pd.isna(_pid):
+                                cats = slate_leader_pid_map.get(int(_pid), [])
+                                if cats:
+                                    leader_badge = " 🏆"
+                        except Exception:
+                            pass
+                        st.markdown(
+                            f"**🎯 Best HR Play**: {alert} **{top['player_name']}**{leader_badge} "
+                            f"({top['_team']}) — {pct:.1f}% HR Game"
                         )
-                with tabs_inner[2]:
-                    if not ars_vs_R.empty:
-                        st.dataframe(ars_vs_R, hide_index=True, use_container_width=True)
-                    else:
-                        st.caption(
-                            "No vs-RHB arsenal data. The pitcher may not have faced "
-                            "enough RHB this season for Savant's minimum threshold."
-                        )
+            with pick_cols[1]:
+                if "sleeper_score" in combined.columns:
+                    valid = combined.dropna(subset=["sleeper_score"])
+                    if not valid.empty:
+                        # Filter: sleeper means meaningful HR upside despite low season pace
+                        sleepers_only = valid[valid["sleeper_score"] > 0]
+                        if not sleepers_only.empty:
+                            sl = sleepers_only.sort_values("sleeper_score", ascending=False).iloc[0]
+                            sc = sl.get("sleeper_score", 0)
+                            # NA-safe: pandas Series .get(...) can return pd.NA
+                            _hr_raw = sl.get("hr_game_pct", 0)
+                            try:
+                                hr_pct = 0 if pd.isna(_hr_raw) else float(_hr_raw)
+                            except (TypeError, ValueError):
+                                hr_pct = 0
+                            try:
+                                sc = 0 if pd.isna(sc) else float(sc)
+                            except (TypeError, ValueError):
+                                sc = 0
+                            st.markdown(
+                                f"**💎 Best Sleeper**: **{sl['player_name']}** "
+                                f"({sl['_team']}) — sleeper {sc:.1f}, HR {hr_pct:.1f}%"
+                            )
 
-            sub1, sub2 = st.columns(2)
-            with sub1:
-                _render_arsenal_tabs(safe_int(game.get("home_pitcher_id")),
-                                       game.get("home_pitcher", "TBD"))
-            with sub2:
-                _render_arsenal_tabs(safe_int(game.get("away_pitcher_id")),
-                                       game.get("away_pitcher", "TBD"))
+        tabs = st.tabs([away_tab, home_tab, "🎯 K Projections"])
+        with tabs[0]:
+            render_matchup_section(ctx.get("away_matchup"), game['away_team_abbr'])
+            # Late-swap candidates from active roster but not in tonight's 9
+            bench = ctx.get("away_bench_matchup")
+            if bench is not None and not bench.empty:
+                with st.expander(
+                    f"🔄 {game['away_team_abbr']} bench / possible late-swap candidates "
+                    f"({len(bench)} active-roster hitters not in tonight's 9)"
+                ):
+                    st.caption(
+                        "These hitters are on the active roster but NOT in the posted "
+                        "starting lineup. If a player gets scratched late, one of these "
+                        "could be the replacement. Grades/signals shown — useful for "
+                        "spotting a real starter who's resting (or got demoted into "
+                        "the bench pool because lineups aren't posted yet)."
+                    )
+                    # v43.20 (reviewer-validated): grade/alert/hr_game_pct/
+                    # pa_confidence ARE computed for bench in v43.12, but the
+                    # display column whitelist stripped them — making Alvarez
+                    # (grade A, 25.97% HR) and Vientos (grade B+, 23.19%)
+                    # invisible. The old caption claiming "HR Game% NOT computed"
+                    # was stale.
+                    bench_cols = [c for c in [
+                        "player_name", "position", "bats", "pa", "pa_confidence",
+                        "hr_game_pct", "grade", "alert",
+                        "barrel_pct", "iso", "xwoba", "home_run", "recent_hr",
+                    ] if c in bench.columns]
+                    st.dataframe(
+                        # v43.21: sort by hr_game_pct desc so A grades appear
+                        # first (was sorting by PA which buried high-grade bench
+                        # players below lower-grade ones with more season time)
+                        bench[bench_cols].sort_values(
+                            "hr_game_pct" if "hr_game_pct" in bench.columns else "pa",
+                            ascending=False, na_position="last"
+                        ),
+                        hide_index=True, use_container_width=True,
+                        column_config={
+                            "player_name": st.column_config.TextColumn("Hitter"),
+                            "barrel_pct": st.column_config.NumberColumn("Brl%", format="%.1f%%"),
+                            "iso": st.column_config.NumberColumn("ISO", format="%.3f"),
+                            "xwoba": st.column_config.NumberColumn("xwOBA", format="%.3f"),
+                        },
+                    )
+        with tabs[1]:
+            render_matchup_section(ctx.get("home_matchup"), game['home_team_abbr'])
+            bench = ctx.get("home_bench_matchup")
+            if bench is not None and not bench.empty:
+                with st.expander(
+                    f"🔄 {game['home_team_abbr']} bench / possible late-swap candidates "
+                    f"({len(bench)} active-roster hitters not in tonight's 9)"
+                ):
+                    st.caption(
+                        "Active-roster hitters NOT in the posted starting lineup. "
+                        "If someone gets scratched late, one of these is the likely "
+                        "replacement. Grades/signals shown — useful for spotting a "
+                        "real starter who's resting."
+                    )
+                    bench_cols = [c for c in [
+                        "player_name", "position", "bats", "pa", "pa_confidence",
+                        "hr_game_pct", "grade", "alert",
+                        "barrel_pct", "iso", "xwoba", "home_run", "recent_hr",
+                    ] if c in bench.columns]
+                    st.dataframe(
+                        # v43.21: sort by hr_game_pct desc so A grades appear
+                        # first (was sorting by PA which buried high-grade bench
+                        # players below lower-grade ones with more season time)
+                        bench[bench_cols].sort_values(
+                            "hr_game_pct" if "hr_game_pct" in bench.columns else "pa",
+                            ascending=False, na_position="last"
+                        ),
+                        hide_index=True, use_container_width=True,
+                        column_config={
+                            "player_name": st.column_config.TextColumn("Hitter"),
+                            "barrel_pct": st.column_config.NumberColumn("Brl%", format="%.1f%%"),
+                            "iso": st.column_config.NumberColumn("ISO", format="%.3f"),
+                            "xwoba": st.column_config.NumberColumn("xwOBA", format="%.3f"),
+                        },
+                    )
+        with tabs[2]:
+            kp1, kp2 = st.columns(2)
+            for col, side, label in [
+                (kp1, "away", game.get("away_pitcher") or "TBD"),
+                (kp2, "home", game.get("home_pitcher") or "TBD"),
+            ]:
+                with col:
+                    pp = ctx.get(f"{side}_k_proj") or {}
+                    if not pp or pp.get("mean") is None:
+                        st.write(f"**{label}** — no real K/9 data available")
+                        p_row = ctx.get(f"{side}_p_row") or {}
+                        if p_row:
+                            avail = [k for k, v in p_row.items()
+                                      if v is not None and not (isinstance(v, float) and pd.isna(v))
+                                      and k in ("k9", "k_percent", "era", "whip", "ip")]
+                            if avail:
+                                st.caption(f"Has: {', '.join(avail)}")
+                            else:
+                                st.caption("Pitcher has no real stat data this season yet")
+                        continue
+                    st.markdown(
+                        f"**{label}** · Projected K: **{pp['mean']:.1f}** "
+                        f"(range {pp.get('low', 0):.1f}–{pp.get('high', 0):.1f})"
+                    )
+                    st.caption(
+                        f"Blended K/9: {pp.get('blended_k9', 0):.2f} · "
+                        f"Lineup adj: {pp.get('lineup_adj', 1):.2f}×"
+                    )
+                    lines = pd.DataFrame([
+                        {"Line": f"Over {x} K", "Prob": round(pp.get(f"p_over_{x}", 0) * 100, 1)}
+                        for x in ["5.5", "6.5", "7.5", "8.5"]
+                    ])
+                    st.dataframe(
+                        lines, hide_index=True, use_container_width=True,
+                        column_config={
+                            "Line": st.column_config.TextColumn("Line"),
+                            "Prob": st.column_config.NumberColumn("P(Over)", format="%.1f%%"),
+                        },
+                    )
 
-    st.divider()
+        if not pitcher_arsenal_all.empty:
+            with st.expander("🔬 Deep dive: Pitcher arsenal (combined + by hitter handedness)"):
+                st.caption(
+                    "**What this shows:** the actual pitches each pitcher throws — "
+                    "usage %, velocity, xwOBA allowed per pitch type. "
+                    "**vs LHB / vs RHB tabs** show how the pitch mix CHANGES "
+                    "depending on the batter's handedness. E.g. a RHP often throws "
+                    "way more sliders to RHB (slider runs same-side away) and more "
+                    "changeups to LHB (changeup runs opposite-side away). The arsenal "
+                    "your hitter actually sees depends on which side they bat."
+                )
+
+                def _render_arsenal_tabs(p_id, p_name_label):
+                    """Render combined / vs LHB / vs RHB arsenal tables for one pitcher."""
+                    if not p_id:
+                        return
+                    ars_combined = (pitcher_arsenal_all[pitcher_arsenal_all["player_id"] == p_id]
+                                    if "player_id" in pitcher_arsenal_all.columns
+                                    else pd.DataFrame())
+                    ars_vs_L = (pitcher_arsenal_vs_L[pitcher_arsenal_vs_L["player_id"] == p_id]
+                                 if (not pitcher_arsenal_vs_L.empty
+                                     and "player_id" in pitcher_arsenal_vs_L.columns)
+                                 else pd.DataFrame())
+                    ars_vs_R = (pitcher_arsenal_vs_R[pitcher_arsenal_vs_R["player_id"] == p_id]
+                                 if (not pitcher_arsenal_vs_R.empty
+                                     and "player_id" in pitcher_arsenal_vs_R.columns)
+                                 else pd.DataFrame())
+                    if ars_combined.empty and ars_vs_L.empty and ars_vs_R.empty:
+                        return
+                    st.markdown(f"**{p_name_label} arsenal**")
+                    tabs_inner = st.tabs(["Combined", "vs LHB", "vs RHB"])
+                    with tabs_inner[0]:
+                        if not ars_combined.empty:
+                            st.dataframe(ars_combined, hide_index=True, use_container_width=True)
+                        else:
+                            st.caption("No combined arsenal data.")
+                    with tabs_inner[1]:
+                        if not ars_vs_L.empty:
+                            st.dataframe(ars_vs_L, hide_index=True, use_container_width=True)
+                        else:
+                            st.caption(
+                                "No vs-LHB arsenal data. The pitcher may not have faced "
+                                "enough LHB this season for Savant's minimum threshold."
+                            )
+                    with tabs_inner[2]:
+                        if not ars_vs_R.empty:
+                            st.dataframe(ars_vs_R, hide_index=True, use_container_width=True)
+                        else:
+                            st.caption(
+                                "No vs-RHB arsenal data. The pitcher may not have faced "
+                                "enough RHB this season for Savant's minimum threshold."
+                            )
+
+                sub1, sub2 = st.columns(2)
+                with sub1:
+                    _render_arsenal_tabs(safe_int(game.get("home_pitcher_id")),
+                                           game.get("home_pitcher", "TBD"))
+                with sub2:
+                    _render_arsenal_tabs(safe_int(game.get("away_pitcher_id")),
+                                           game.get("away_pitcher", "TBD"))
+
+        st.divider()
 
 
 st.caption(
