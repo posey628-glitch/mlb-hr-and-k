@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.43-reviewer-fixes"
+APP_VERSION = "2026.06.10-v43.44-typo-and-coverage-fixes"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -4495,7 +4495,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.43 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.44 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -6161,7 +6161,15 @@ for _, game in slate.iterrows():
             for _, row in matchup_df.iterrows():
                 base_grade = row.get("grade", "")
                 platoon = str(row.get("platoon_hitter_flag", "") or "")
-                bats = strsafe_str(row.get("bats", "")).upper()
+                # v43.44 (reviewer-validated): typo from v43.43 regex sweep.
+                # Original was `str(row.get("bats", "") or "").upper()`. The
+                # regex anchored on `(` so it left the `str` prefix outside
+                # the match, producing `strsafe_str(...)`. The bare
+                # `except Exception: pass` below hid the NameError, so
+                # grade_context silently fell back to plain grade for every
+                # hitter on every slate. Platoon annotations (💪/⚠️/⚡) have
+                # been dead since v43.43.
+                bats = safe_str(row.get("bats", "")).upper()
 
                 # Determine pitcher hand from row (set on the matchup_df construction)
                 pitcher_throws = row.get("opp_pitcher_throws") or row.get("p_throws")
@@ -6193,8 +6201,19 @@ for _, game in slate.iterrows():
                     f"{base_grade} {annotation}".strip() if annotation else base_grade
                 )
             matchup_df["grade_context"] = grade_context
-        except Exception:
+        except Exception as _gc_e:
+            # v43.44 (reviewer-validated): previously a bare `except Exception: pass`
+            # masked the v43.43 `strsafe_str` typo for a full ship, leaving
+            # platoon annotations silently dead. Now we stash the error in
+            # session state so the diagnostic panel can surface it next reload.
             matchup_df["grade_context"] = matchup_df.get("grade", [""] * len(matchup_df))
+            try:
+                _errs = st.session_state.setdefault("_silent_scoring_errors", [])
+                _err_msg = f"grade_context: {type(_gc_e).__name__}: {_gc_e}"
+                if _err_msg not in _errs:  # dedupe
+                    _errs.append(_err_msg)
+            except Exception:
+                pass
 
     # Sleeper score - uses sleepers.py functions correctly
     try:
@@ -7102,6 +7121,62 @@ if combined_picks is not None and not combined_picks.empty:
             )
     except Exception as _se:
         st.warning(f"v43.43 smash override fallback: {_se}")
+
+    # v43.44 (reviewer-validated coverage check): handedness splits are called
+    # "the single biggest accuracy gap" the model addresses. A silent failure
+    # in _fetch_pitcher_splits_single would quietly gut the model. This caption
+    # shows the actual coverage so we know if the endpoint is returning data.
+    try:
+        n_total = len(combined_picks)
+        # Hitter handedness columns (vs_lhp_pa / vs_rhp_pa are populated when
+        # the splits fetcher returned per-hand stats)
+        cov_pieces = []
+        if "vs_lhp_pa" in combined_picks.columns:
+            n_lhp = combined_picks["vs_lhp_pa"].notna().sum()
+            cov_pieces.append(f"vs LHP: {n_lhp}/{n_total} ({100*n_lhp/max(1,n_total):.0f}%)")
+        if "vs_rhp_pa" in combined_picks.columns:
+            n_rhp = combined_picks["vs_rhp_pa"].notna().sum()
+            cov_pieces.append(f"vs RHP: {n_rhp}/{n_total} ({100*n_rhp/max(1,n_total):.0f}%)")
+        # Pitcher split columns (vs_lhb_pa / vs_rhb_pa on p_slate were mapped
+        # onto combined_picks as opp_pitcher_vs_lhb_pa etc.)
+        if "opp_pitcher_vs_lhb_pa" in combined_picks.columns:
+            n_plhb = combined_picks["opp_pitcher_vs_lhb_pa"].notna().sum()
+            cov_pieces.append(f"Pitcher vs LHB: {n_plhb}/{n_total} ({100*n_plhb/max(1,n_total):.0f}%)")
+        if "opp_pitcher_vs_rhb_pa" in combined_picks.columns:
+            n_prhb = combined_picks["opp_pitcher_vs_rhb_pa"].notna().sum()
+            cov_pieces.append(f"Pitcher vs RHB: {n_prhb}/{n_total} ({100*n_prhb/max(1,n_total):.0f}%)")
+
+        if cov_pieces:
+            st.caption(
+                "v43.44 Handedness-split coverage · " + " · ".join(cov_pieces)
+                + "  ← if these are 0% or near it, the splits endpoint isn't"
+                + " returning data and the handedness-blend feature is dead."
+            )
+    except Exception:
+        pass
+
+    # v43.44 (reviewer-validated): surface any errors that the bare-except
+    # paths in the matchup loop swallowed. Previously these crashed silently
+    # for ENTIRE FEATURES (grade_context platoon annotations were dead for a
+    # whole ship before the reviewer caught it). Now they show up in a
+    # collapsed expander so the user / reviewer can see if anything is failing
+    # silently next time.
+    _silent_errs = st.session_state.get("_silent_scoring_errors", [])
+    if _silent_errs:
+        with st.expander(
+            f"🔧 v43.44 diagnostic: {len(_silent_errs)} silent scoring error(s) detected this run",
+            expanded=False,
+        ):
+            st.caption(
+                "These exceptions were caught by defensive `try/except` blocks "
+                "in the scoring pipeline. The app didn't crash, but a feature "
+                "may have silently fallen back to a default value. If anything "
+                "looks empty or stale in the output, the cause is likely here."
+            )
+            for _err in _silent_errs:
+                st.code(_err)
+        # Clear after surfacing so we only show this run's errors
+        st.session_state["_silent_scoring_errors"] = []
 
     if "pa" in combined_picks.columns and "hr_game_pct" in combined_picks.columns:
         q = combined_picks[
