@@ -811,6 +811,12 @@ _LAST_PARK_HISTORY_STATS = {
     "exceptions": 0,      # network exceptions
     "has_splits": 0,      # response contained venue splits at all
     "venue_matched": 0,   # response had a split matching the target venue
+    # v43.47 diagnostic: capture first non-200 status + URL so we can see
+    # WHY the API is rejecting our calls. Without this, "HTTP 200: 0%" just
+    # tells us it's broken — not what to fix.
+    "first_error_status": None,
+    "first_error_url": None,
+    "first_error_body": None,
 }
 
 def last_park_history_stats() -> dict:
@@ -823,6 +829,8 @@ def reset_park_history_stats() -> None:
     _LAST_PARK_HISTORY_STATS = {
         "attempts": 0, "bad_args": 0, "http_ok": 0, "http_errors": 0,
         "exceptions": 0, "has_splits": 0, "venue_matched": 0,
+        "first_error_status": None, "first_error_url": None,
+        "first_error_body": None,
     }
 
 @st.cache_data(ttl=86400)  # daily refresh — venue stats don't move during slate
@@ -859,7 +867,16 @@ def get_batter_park_history(batter_id: int, venue_id: int,
         any_splits = False
         any_match = False
 
-        for season in range(current_year - lookback_seasons + 1, current_year + 1):
+        # v43.47: skip the in-progress season. byVenue stat type may not be
+        # populated for incomplete seasons — MLB Stats API often returns
+        # empty or 400 for it. Use last lookback_seasons COMPLETED seasons.
+        # If we're in mid-2026, this means 2023/2024/2025 (last 3 completed).
+        # Hitters who haven't played at this venue since 2022 won't show up,
+        # but the data is more reliable.
+        end_year = current_year - 1  # last completed season
+        start_year = end_year - lookback_seasons + 1
+
+        for season in range(start_year, end_year + 1):
             url = (
                 f"https://statsapi.mlb.com/api/v1/people/{batter_id}"
                 f"/stats?stats=byVenue&group=hitting"
@@ -869,6 +886,14 @@ def get_batter_park_history(batter_id: int, venue_id: int,
                 r = requests.get(url, timeout=10)
                 if r.status_code != 200:
                     _LAST_PARK_HISTORY_STATS["http_errors"] += 1
+                    # v43.47: capture FIRST error so we can debug why
+                    if _LAST_PARK_HISTORY_STATS["first_error_status"] is None:
+                        _LAST_PARK_HISTORY_STATS["first_error_status"] = r.status_code
+                        _LAST_PARK_HISTORY_STATS["first_error_url"] = url
+                        try:
+                            _LAST_PARK_HISTORY_STATS["first_error_body"] = r.text[:300]
+                        except Exception:
+                            pass
                     continue
                 any_200 = True
                 data = r.json()
@@ -890,8 +915,13 @@ def get_batter_park_history(batter_id: int, venue_id: int,
                     agg["ab"] += int(stat.get("atBats", 0) or 0)
                     agg["seasons"] += 1
                     break
-            except Exception:
+            except Exception as _e:
                 _LAST_PARK_HISTORY_STATS["exceptions"] += 1
+                if _LAST_PARK_HISTORY_STATS["first_error_status"] is None:
+                    _LAST_PARK_HISTORY_STATS["first_error_status"] = (
+                        f"exception: {type(_e).__name__}"
+                    )
+                    _LAST_PARK_HISTORY_STATS["first_error_url"] = url
                 continue
 
         if any_200:
