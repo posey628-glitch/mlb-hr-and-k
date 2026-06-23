@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.42-score-cap-smash-park-history-fixes"
+APP_VERSION = "2026.06.10-v43.43-reviewer-fixes"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -905,6 +905,26 @@ def safe_int(val) -> Optional[int]:
         return int(val)
     except (ValueError, TypeError):
         return None
+
+
+def safe_str(val) -> str:
+    """v43.43 (crash fix): return value as str, or empty string if None/NaN.
+
+    Replaces the unsafe pattern `(x or "").upper()` which crashes when x
+    is float NaN (NaN is truthy in Python, so `nan or ""` returns nan,
+    then .upper() fails with AttributeError).
+
+    Use as: `safe_str(row.get("bats")).upper()`
+    """
+    if val is None:
+        return ""
+    try:
+        if pd.isna(val):
+            return ""
+    except (TypeError, ValueError):
+        # Some non-numeric values throw on pd.isna — treat as string
+        pass
+    return str(val)
 
 
 def safe_float(val) -> Optional[float]:
@@ -1888,6 +1908,11 @@ use_bat_tracking = st.sidebar.checkbox(
 )
 if hide_started and selected_date == datetime.now().date():
     try:
+        # v43.43 (reviewer-validated bias fix): preserve the pre-filter slate
+        # so the snapshot payload can record which games were dropped. Backtest
+        # aggregator uses this to detect biased snapshots (afternoon games
+        # excluded → calibration data non-representative of full slate).
+        slate_unfiltered = slate.copy()
         # v42r: use Timestamp.now(tz="UTC") instead of utcnow().tz_localize().
         # On older pandas versions utcnow() returns naive UTC and then
         # tz_localize behaves correctly, but on newer pandas utcnow() returns
@@ -1907,9 +1932,18 @@ if hide_started and selected_date == datetime.now().date():
                     return True
             mask = slate["gameTime"].apply(_is_upcoming)
             n_filtered = (~mask).sum()
+            # v43.43: capture which games were filtered, for snapshot metadata
+            try:
+                dropped_gamepks = (
+                    slate.loc[~mask, "gamePk"].astype(int).tolist()
+                    if "gamePk" in slate.columns else []
+                )
+            except Exception:
+                dropped_gamepks = []
             slate = slate[mask].reset_index(drop=True)
             # Stash for snapshot bias warning downstream
             st.session_state["_filter_dropped_games"] = int(n_filtered)
+            st.session_state["_filter_dropped_gamepks"] = dropped_gamepks
             if n_filtered > 0:
                 st.info(
                     f"⏱️ Hiding {n_filtered} game{'s' if n_filtered != 1 else ''} "
@@ -4461,7 +4495,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.42 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.43 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -5090,7 +5124,7 @@ for _, game in slate.iterrows():
     def _apply_pitch_match(matchup_df, opp_p_row):
         if not opp_p_row or matchup_df is None or matchup_df.empty:
             return
-        opp_p_throws = (opp_p_row.get("p_throws") or opp_p_row.get("throws") or "").upper()
+        opp_p_throws = safe_str(opp_p_row.get("p_throws") or opp_p_row.get("throws")).upper()
         scores, hr_scores, bests, bestxw, worsts = [], [], [], [], []
         # v42s additions: per-matchup exposure edge and pitch mix volatility
         exposure_edges = []
@@ -5101,7 +5135,7 @@ for _, game in slate.iterrows():
         mini_arsenals = []
         for _, hitter_row in matchup_df.iterrows():
             pid = hitter_row.get("player_id")
-            bats = (hitter_row.get("bats") or "").upper()
+            bats = safe_str(hitter_row.get("bats")).upper()
             # Switch hitters: bat opposite the pitcher → effective hand
             # is opposite of pitcher's throwing arm.
             if bats == "S":
@@ -5598,8 +5632,8 @@ for _, game in slate.iterrows():
                 from props import hit_signal_emoji as _hit_sig_fn
                 # Platoon for hits is weaker than for HR. Use a softer cap.
                 # Compute same-side inline (don't reference a helper that doesn't exist).
-                _h_bats_now = (row_dict.get("bats") or "").upper()
-                _p_thr_now = (opp_p_row.get("p_throws") or opp_p_row.get("throws") or "").upper() if opp_p_row else ""
+                _h_bats_now = safe_str(row_dict.get("bats")).upper()
+                _p_thr_now = safe_str(opp_p_row.get("p_throws") or opp_p_row.get("throws")).upper() if opp_p_row else ""
                 _ss_for_hit = bool(
                     _h_bats_now and _p_thr_now
                     and _h_bats_now != "S"
@@ -5655,8 +5689,8 @@ for _, game in slate.iterrows():
             # v43.4: Compute same-side platoon FIRST so signal AND grade
             # both apply the platoon cap consistently. Switch hitters (S)
             # always bat opposite the pitcher's arm, so they're NEVER same-side.
-            _h_bats = (row_dict.get("bats") or "").upper() if row_dict else ""
-            _p_throws_now = (opp_p_row.get("p_throws") or opp_p_row.get("throws") or "").upper() if opp_p_row else ""
+            _h_bats = safe_str(row_dict.get("bats")).upper() if row_dict else ""
+            _p_throws_now = safe_str(opp_p_row.get("p_throws") or opp_p_row.get("throws")).upper() if opp_p_row else ""
             _same_side = bool(
                 _h_bats and _p_throws_now
                 and _h_bats != "S"
@@ -5932,7 +5966,7 @@ for _, game in slate.iterrows():
 
             for _, row in matchup_df.iterrows():
                 bid = row.get("player_id")
-                bats = (row.get("bats") or "").upper()[:1] if row.get("bats") else None
+                bats = safe_str(row.get("bats")).upper()[:1] if row.get("bats") else None
                 if (bid is None or pd.isna(bid)
                         or venue_id_for_bp is None or pd.isna(venue_id_for_bp)):
                     bp_points.append(0.0)
@@ -6127,7 +6161,7 @@ for _, game in slate.iterrows():
             for _, row in matchup_df.iterrows():
                 base_grade = row.get("grade", "")
                 platoon = str(row.get("platoon_hitter_flag", "") or "")
-                bats = str(row.get("bats", "") or "").upper()
+                bats = strsafe_str(row.get("bats", "")).upper()
 
                 # Determine pitcher hand from row (set on the matchup_df construction)
                 pitcher_throws = row.get("opp_pitcher_throws") or row.get("p_throws")
@@ -6583,9 +6617,9 @@ if all_hitters_for_picks:
                 avg_ev=row.get("avg_ev"),
                 env_mult=row.get("env_boost"),
                 same_side_platoon=bool(
-                    (row.get("bats") or "").upper() != "S"
-                    and (row.get("bats") or "").upper()
-                        == (row.get("opp_pitcher_throws") or "").upper()
+                    safe_str(row.get("bats")).upper() != "S"
+                    and safe_str(row.get("bats")).upper()
+                        == safe_str(row.get("opp_pitcher_throws")).upper()
                 ),
                 sample_size=row.get("pa"),
             )
@@ -6638,22 +6672,13 @@ if all_hitters_for_picks:
                 _mdf["hr_score_signal"] = new_sigs
                 _mdf["grade"] = new_grades
 
-                # v43.42 (user feedback): smash_spot must track HR Score.
-                # Previously the multi-factor smash logic could fire empty
-                # for hitters with elite HR Score (Yordan 95 score → no
-                # smash flag). Now: override smash from the score directly.
-                # Top plays of the slate consistently show 🔥.
-                if "smash_spot" in _mdf.columns:
-                    new_smash = []
-                    for _sc in new_scores:
-                        if _sc is None or pd.isna(_sc):
-                            new_smash.append("")
-                            continue
-                        if _sc >= 85: new_smash.append("🔥🔥🔥 ELITE")
-                        elif _sc >= 70: new_smash.append("🔥🔥 STRONG")
-                        elif _sc >= 55: new_smash.append("🔥 SMASH")
-                        else: new_smash.append("")
-                    _mdf["smash_spot"] = new_smash
+                # v43.43 (reviewer-validated): the v43.42 smash override
+                # used to live here, deriving smash purely from hr_score
+                # with no pitcher or env gates. That over-fired because
+                # slate-rescaled scores GUARANTEE chunks of hitters above
+                # any fixed threshold. Smash override has been moved to
+                # a later block (after opp_pitcher_grade and env_boost
+                # are both on combined_picks) where proper gates can fire.
 
         # Audit info — distribution of new scores
         _score_vals = combined_picks["hr_score"].dropna()
@@ -6972,6 +6997,112 @@ if combined_picks is not None and not combined_picks.empty:
                 combined_picks["opp_recent_hr"] = combined_picks["opp_pitcher"].map(_recent_hr_map)
         except Exception:
             pass
+
+    # ========================================================================
+    # v43.43 (reviewer-validated): SMASH OVERRIDE — properly gated
+    # ========================================================================
+    # The v43.42 smash logic derived smash purely from hr_score (>=85 → ELITE,
+    # >=70 → STRONG, >=55 → SMASH). But hr_score is SLATE-RESCALED — by
+    # construction the slate's top 5% scores ~95 every single night. That
+    # means smash was firing for the top ~15-20 hitters every slate regardless
+    # of actual matchup quality. The flag became meaningless.
+    #
+    # Reviewer caught this: "Smash is now driven purely by HR Score with no
+    # pitcher-grade or environment gate at all. The rescaling guarantees
+    # smash flags exist every night."
+    #
+    # Fix: re-add the multi-factor gates that smash ORIGINALLY required.
+    # Smash should mean "all stars align" — high score AND favorable pitcher
+    # AND non-hostile environment. Some nights will have ZERO smash plays.
+    # That's correct — most nights don't have a triple-threat alignment.
+    # ========================================================================
+    try:
+        if "hr_score" in combined_picks.columns:
+            new_smash_per_pid = {}
+            for _, _row in combined_picks.iterrows():
+                _sc = _row.get("hr_score")
+                _pid = _row.get("player_id")
+                if _pid is None or pd.isna(_pid):
+                    continue
+                if _sc is None or pd.isna(_sc):
+                    new_smash_per_pid[int(_pid)] = ""
+                    continue
+
+                # Pitcher quality gate — favor EXPLOIT(+) pitchers (vulnerable),
+                # block ELITE/TOUGH pitchers (no smash spot against an ace).
+                _pg = _row.get("opp_pitcher_grade") or ""
+                _pg_upper = str(_pg).upper()
+                pitcher_favorable = _pg_upper in ("EXPLOIT", "EXPLOIT+")
+                pitcher_hostile = _pg_upper in ("ELITE", "ELITE+", "TOUGH")
+
+                # Env gate — env_boost ≥ 1.0 means park×weather actively helps;
+                # < 0.92 actively hurts. Allow anything in between for the
+                # lower smash tier; require ≥ 1.0 for ELITE/STRONG.
+                _env = _row.get("env_boost")
+                env_favorable = False
+                env_neutral = True  # default to neutral if no data
+                try:
+                    if _env is not None and not pd.isna(_env):
+                        _env_f = float(_env)
+                        env_favorable = _env_f >= 1.00
+                        env_neutral = _env_f >= 0.92
+                except (TypeError, ValueError):
+                    pass
+
+                # Tiered smash assignment
+                if pitcher_hostile:
+                    # Never smash against an ace, regardless of HR Score
+                    new_smash_per_pid[int(_pid)] = ""
+                elif _sc >= 85 and pitcher_favorable and env_favorable:
+                    new_smash_per_pid[int(_pid)] = "🔥🔥🔥 ELITE"
+                elif _sc >= 75 and pitcher_favorable and env_neutral:
+                    new_smash_per_pid[int(_pid)] = "🔥🔥 STRONG"
+                elif _sc >= 65 and pitcher_favorable and env_neutral:
+                    new_smash_per_pid[int(_pid)] = "🔥 SMASH"
+                else:
+                    new_smash_per_pid[int(_pid)] = ""
+
+            # Write back to combined_picks
+            combined_picks["smash_spot"] = combined_picks["player_id"].apply(
+                lambda p: new_smash_per_pid.get(int(p), "")
+                if p is not None and not pd.isna(p) else ""
+            )
+
+            # Back-map smash to every matchup_df via player_id (mirrors
+            # the v43.41 hr_score back-map pattern)
+            for _gpk, _ctx in game_context_map.items():
+                for _side_key in ("away_matchup", "home_matchup",
+                                   "away_bench_matchup", "home_bench_matchup"):
+                    _mdf = _ctx.get(_side_key)
+                    if _mdf is None or _mdf.empty:
+                        continue
+                    if "player_id" not in _mdf.columns:
+                        continue
+                    new_smash = []
+                    for _pid in _mdf["player_id"]:
+                        if _pid is None or pd.isna(_pid):
+                            new_smash.append("")
+                            continue
+                        new_smash.append(new_smash_per_pid.get(int(_pid), ""))
+                    _mdf["smash_spot"] = new_smash
+
+            # Diagnostic: how many smash flags fired total
+            _smash_counts = combined_picks["smash_spot"].value_counts().to_dict()
+            _elite_n = _smash_counts.get("🔥🔥🔥 ELITE", 0)
+            _strong_n = _smash_counts.get("🔥🔥 STRONG", 0)
+            _smash_n = _smash_counts.get("🔥 SMASH", 0)
+            _total = _elite_n + _strong_n + _smash_n
+            st.caption(
+                f"v43.43 Smash distribution · "
+                f"🔥🔥🔥 ELITE: {_elite_n} · "
+                f"🔥🔥 STRONG: {_strong_n} · "
+                f"🔥 SMASH: {_smash_n} · "
+                f"Total: {_total} / {len(combined_picks)} hitters "
+                f"(gated by pitcher quality + env, not just HR Score)"
+            )
+    except Exception as _se:
+        st.warning(f"v43.43 smash override fallback: {_se}")
+
     if "pa" in combined_picks.columns and "hr_game_pct" in combined_picks.columns:
         q = combined_picks[
             combined_picks["pa"].notna()
@@ -7685,10 +7816,10 @@ if combined_picks is not None and not combined_picks.empty:
                 rank = pick_row.get("rank", "?")
                 name = pick_row.get("player_name", "?")
                 team = pick_row.get("team", "?")
-                bats = (pick_row.get("bats") or "").upper()
+                bats = safe_str(pick_row.get("bats")).upper()
                 opp_p = pick_row.get("opp_pitcher", "?")
                 opp_p_grade = pick_row.get("opp_pitcher_grade", "?")
-                opp_p_throws = (pick_row.get("opp_pitcher_throws") or "").upper()
+                opp_p_throws = safe_str(pick_row.get("opp_pitcher_throws")).upper()
                 pick_sc = pick_row.get("pick_score", 0)
                 hr_game = pick_row.get("hr_game_pct", 0)
                 env_b = pick_row.get("env_boost", 1.0)
@@ -9753,10 +9884,19 @@ if all_hitters:
             # v43.8: read calibration constants from single source of truth.
             # The save can no longer drift from the scoring formula because
             # both read the same module-level PICK_SCORE_WEIGHTS dict.
+            # v43.43 (reviewer-validated): pass filter-bias metadata so the
+            # snapshot records whether afternoon games were filtered out.
+            # Backtest aggregator can detect biased snapshots downstream.
+            _bias_meta = {
+                "hide_started_active": bool(hide_started),
+                "n_filtered": int(st.session_state.get("_filter_dropped_games", 0) or 0),
+                "dropped_gamepks": st.session_state.get("_filter_dropped_gamepks", []) or [],
+            }
             ok = save_snapshot(
                 selected_date, combined_all, p_slate,
                 app_version=APP_VERSION,
                 calibration_constants=_calibration_snapshot(),
+                filter_bias_metadata=_bias_meta,
             )
             # v43.33: use granular status — distinguish durable Gist save
             # from session-only local save. Previously this would proudly
@@ -9806,10 +9946,17 @@ if all_hitters:
                     save_snapshot, durable_storage_configured,
                     _snapshot_key_for_now, last_save_status,
                 )
+                # v43.43 (reviewer-validated): bias metadata for backtest detection
+                _bias_meta_manual = {
+                    "hide_started_active": bool(hide_started),
+                    "n_filtered": int(st.session_state.get("_filter_dropped_games", 0) or 0),
+                    "dropped_gamepks": st.session_state.get("_filter_dropped_gamepks", []) or [],
+                }
                 ok = save_snapshot(
                     selected_date, combined_all, p_slate,
                     app_version=APP_VERSION,
                     calibration_constants=_calibration_snapshot(),
+                    filter_bias_metadata=_bias_meta_manual,
                 )
                 key = _snapshot_key_for_now(selected_date)
                 # v43.33: read granular status — local vs gist tier.
@@ -11266,12 +11413,17 @@ def build_col_config():
         "smash_spot": st.column_config.TextColumn(
             "Smash", width="small",
             help=(
-                "v43.42: derived from HR Score for consistency. Top plays "
-                "automatically show 🔥.\n\n"
-                "🔥🔥🔥 ELITE = HR Score ≥ 85 (top elite of the slate)\n"
-                "🔥🔥 STRONG = HR Score 70-84 (above-average green play)\n"
-                "🔥 SMASH = HR Score 55-69 (yellow tier, worth considering)\n"
-                "(blank below 55)"
+                "v43.43: properly gated — smash requires HR Score "
+                "AND favorable pitcher AND non-hostile environment. "
+                "Some slates have ZERO smash plays — that's correct.\n\n"
+                "🔥🔥🔥 ELITE = HR Score ≥ 85 AND facing EXPLOIT/EXPLOIT+ pitcher "
+                "AND env_boost ≥ 1.00 (park × weather actively helps)\n"
+                "🔥🔥 STRONG = HR Score ≥ 75 AND favorable pitcher AND "
+                "env_boost ≥ 0.92 (not actively hostile)\n"
+                "🔥 SMASH = HR Score ≥ 65 AND favorable pitcher AND "
+                "env_boost ≥ 0.92\n\n"
+                "AUTOMATIC BLOCK: facing ELITE/ELITE+/TOUGH pitcher → "
+                "no smash flag regardless of HR Score (can't smash an ace)."
             ),
         ),
         "hr_pa_pct": st.column_config.NumberColumn(
