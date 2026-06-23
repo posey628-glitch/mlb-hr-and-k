@@ -787,10 +787,114 @@ def hit_signal_emoji(hit_game_pct):
     """Color signal for hit probability (parallel to HR signal)."""
     if hit_game_pct is None or pd.isna(hit_game_pct):
         return "⚪"
-    if hit_game_pct >= 72: return "🟢"  # A+ / A
-    if hit_game_pct >= 58: return "🟡"  # B+ / B
-    if hit_game_pct >= 42: return "🟠"  # C+ / C
-    return "🔴"  # D / F
+    if hit_game_pct >= 72: return "🟢"
+    if hit_game_pct >= 58: return "🟡"
+    if hit_game_pct >= 42: return "🟠"
+    return "🔴"
+
+
+# ============================================================================
+# v43.38 — TOTAL BASES signal (user-requested)
+# ============================================================================
+# Estimates expected total bases per game (singles=1, doubles=2, triples=3,
+# HR=4, walks=0/excluded per user request — SLG already excludes BB by
+# definition: SLG = TB / AB).
+# ============================================================================
+
+LEAGUE_SLG = 0.410
+
+def total_bases_per_pa(hitter_row, pitcher_row,
+                        park_hits_factor=1.0, platoon_mult=1.0, min_pa=25):
+    """Expected total bases per PA (excludes walks).
+    Uses xSLG (predictive) anchored, adjusted by pitcher SLG-against, park,
+    platoon. Returns None for sub-min_pa hitters.
+    """
+    if not isinstance(hitter_row, dict):
+        try:
+            hitter_row = dict(hitter_row)
+        except Exception:
+            return None
+    pa = hitter_row.get("pa") or hitter_row.get("PA") or 0
+    try:
+        if float(pa) < min_pa:
+            return None
+    except (TypeError, ValueError):
+        return None
+
+    xslg = hitter_row.get("xslg") or hitter_row.get("xSLG")
+    slg = hitter_row.get("slg") or hitter_row.get("SLG")
+    try:
+        xslg_f = float(xslg) if xslg is not None and not pd.isna(xslg) else None
+        slg_f = float(slg) if slg is not None and not pd.isna(slg) else None
+    except (TypeError, ValueError):
+        xslg_f, slg_f = None, None
+    if xslg_f is not None and slg_f is not None:
+        hitter_slg = xslg_f * 0.6 + slg_f * 0.4
+    elif xslg_f is not None:
+        hitter_slg = xslg_f
+    elif slg_f is not None:
+        hitter_slg = slg_f
+    else:
+        hitter_slg = LEAGUE_SLG
+
+    bb_pct = hitter_row.get("bb_pct") or hitter_row.get("bb_percent") or 8.0
+    try:
+        bb_f = float(bb_pct)
+    except (TypeError, ValueError):
+        bb_f = 8.0
+    ab_per_pa = max(0.80, min(0.95, 1.0 - bb_f/100 - 0.02))
+
+    base = hitter_slg * ab_per_pa
+
+    # Pitcher adjustment — SLG-against or BAA proxy
+    pitcher_mult = 1.0
+    if pitcher_row is not None:
+        try:
+            p_slg = (pitcher_row.get("slg_against") or pitcher_row.get("slg")
+                     or pitcher_row.get("SLG_against"))
+            if p_slg is not None and not pd.isna(p_slg):
+                p_f = float(p_slg)
+                if 0.250 < p_f < 0.700:
+                    pitcher_mult = p_f / LEAGUE_SLG
+            else:
+                p_baa = (pitcher_row.get("baa") or pitcher_row.get("BAA")
+                         or pitcher_row.get("batting_avg"))
+                if p_baa is not None and not pd.isna(p_baa):
+                    p_baa_f = float(p_baa)
+                    if 0.150 < p_baa_f < 0.400:
+                        pitcher_mult = (p_baa_f * 1.7) / LEAGUE_SLG
+        except (TypeError, ValueError):
+            pass
+    pitcher_mult = max(0.70, min(1.35, pitcher_mult))
+    park_mult = max(0.92, min(1.10, float(park_hits_factor)))
+    platoon_clamped = max(0.90, min(1.12, float(platoon_mult)))
+
+    bases_pa = base * pitcher_mult * park_mult * platoon_clamped
+    return float(max(0.10, min(1.40, bases_pa)))
+
+
+def total_bases_per_game(bases_pa, expected_pa=4.2):
+    """Expected total bases for the game (linear bases_pa × PA)."""
+    if bases_pa is None or pd.isna(bases_pa):
+        return None
+    return float(bases_pa * expected_pa)
+
+
+def total_bases_grade(expected_bases):
+    """Grade for expected bases per game.
+    League avg ~1.55 (SLG .410 × 0.91 AB/PA × 4.2 PA).
+    A+ ≥ 2.3 / A ≥ 2.0 / B+ ≥ 1.8 / B ≥ 1.6 / C+ ≥ 1.4 / C ≥ 1.2 / D ≥ 1.0 / F <1.0
+    """
+    if expected_bases is None or pd.isna(expected_bases):
+        return "—"
+    if expected_bases >= 2.3: return "A+"
+    if expected_bases >= 2.0: return "A"
+    if expected_bases >= 1.8: return "B+"
+    if expected_bases >= 1.6: return "B"
+    if expected_bases >= 1.4: return "C+"
+    if expected_bases >= 1.2: return "C"
+    if expected_bases >= 1.0: return "D"
+    return "F"
 
 
 def k_total_projection(
