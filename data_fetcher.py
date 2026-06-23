@@ -792,35 +792,49 @@ def get_batter_park_history(batter_id: int, venue_id: int,
     if not batter_id or not venue_id:
         return {}
     try:
-        # v43.39 (reviewer-validated perf): dead loop removed. Previously a
-        # `for season in range(N)` loop fetched byDateRange data but never
-        # used the result — `splits` was assigned and immediately discarded.
-        # That meant 3× wasted HTTP calls per batter per slate (~270 batters
-        # × 3 = ~800 useless round-trips on cold cache).
-        # The real venue lookup happens below via statSplits&sitCodes=v{N}.
-        agg = {"pa": 0, "hr": 0, "h": 0, "ab": 0, "seasons": lookback_seasons}
+        # v43.42 (user-reported "park hist empty for ALL"): the previous
+        # statSplits&sitCodes=v{venue_id} endpoint returned no data — that
+        # parameter format isn't valid in MLB Stats API. Reviewer flagged
+        # this as unverified in v43.26. Switching to stats=byVenue which
+        # IS a documented MLB Stats API stat type.
+        #
+        # byVenue returns one split per venue the player has played at.
+        # We then filter by venue.id == venue_id and aggregate across the
+        # lookback seasons.
+        agg = {"pa": 0, "hr": 0, "h": 0, "ab": 0, "seasons": 0}
 
-        # Real path: statSplits with sitCodes for venue
-        # That endpoint returns career splits at each venue.
-        url = (
-            f"https://statsapi.mlb.com/api/v1/people/{batter_id}"
-            f"/stats?stats=statSplits&group=hitting&sitCodes=v{venue_id}"
-            f"&sportId=1"
-        )
-        try:
-            r = requests.get(url, timeout=10)
-            if r.status_code == 200:
+        from datetime import date as _date
+        current_year = _date.today().year
+
+        for season in range(current_year - lookback_seasons + 1, current_year + 1):
+            url = (
+                f"https://statsapi.mlb.com/api/v1/people/{batter_id}"
+                f"/stats?stats=byVenue&group=hitting"
+                f"&season={season}&sportId=1"
+            )
+            try:
+                r = requests.get(url, timeout=10)
+                if r.status_code != 200:
+                    continue
                 data = r.json()
-                splits = data.get("stats", [{}])[0].get("splits", [])
-                if splits:
-                    stat = splits[0].get("stat", {})
-                    agg["pa"] = int(stat.get("plateAppearances", 0) or 0)
-                    agg["hr"] = int(stat.get("homeRuns", 0) or 0)
-                    agg["h"] = int(stat.get("hits", 0) or 0)
-                    agg["ab"] = int(stat.get("atBats", 0) or 0)
-                    agg["seasons"] = lookback_seasons
-        except Exception:
-            pass
+                # Schema: stats[0].splits[] each has venue.id and stat dict
+                stats_list = data.get("stats", [])
+                if not stats_list:
+                    continue
+                splits = stats_list[0].get("splits", [])
+                for split in splits:
+                    venue_obj = split.get("venue", {}) or {}
+                    if venue_obj.get("id") != venue_id:
+                        continue
+                    stat = split.get("stat", {}) or {}
+                    agg["pa"] += int(stat.get("plateAppearances", 0) or 0)
+                    agg["hr"] += int(stat.get("homeRuns", 0) or 0)
+                    agg["h"]  += int(stat.get("hits", 0) or 0)
+                    agg["ab"] += int(stat.get("atBats", 0) or 0)
+                    agg["seasons"] += 1
+                    break  # one venue per season
+            except Exception:
+                continue
 
         if agg["pa"] == 0:
             return {}
@@ -932,6 +946,17 @@ def park_history_score_adjustment(history_dict: dict,
 #     If enabled but fetcher returned empty, hr_form falls back to v43.16
 #     weights (no blast component). No silent degradation.
 
+# v43.42 diagnostic: when get_bat_tracking can't find an
+# ideal_attack_angle column under any candidate name, it stores Savant's
+# ACTUAL response columns here so we can verify the field name. The app
+# surfaces this in an expander when IAA is missing for everyone.
+_LAST_BAT_TRACKING_COLS: list = []
+
+def last_bat_tracking_columns() -> list:
+    """Returns the most recent Savant bat-tracking response's column names.
+    Empty when IAA was found or fetcher hasn't run."""
+    return list(_LAST_BAT_TRACKING_COLS)
+
 @st.cache_data(ttl=86400)  # 24hr — bat tracking is a slow-moving stat
 def get_bat_tracking(season: int = 2025) -> tuple[pd.DataFrame, str]:
     """Fetch Statcast bat tracking leaderboard.
@@ -963,12 +988,20 @@ def get_bat_tracking(season: int = 2025) -> tuple[pd.DataFrame, str]:
     # v43.36 (user-requested): Ideal Attack Angle — Statcast bat-tracking
     # metric: % of competitive swings where attack angle is 5-20°. This is
     # the "HR launch zone" swing path. League avg ~50-55%, elite ~65%+.
-    # Field name in Savant CSV is uncertain (Statcast schema drifts) —
-    # try several candidates; populates ideal_attack_angle_pct if found.
+    # v43.42: expanded candidate list — none of the original 6 names
+    # matched what Savant returns. Adding common Statcast bat-tracking
+    # field naming patterns. If STILL none match, log what columns Savant
+    # actually returned so we can fix it on next ship.
     ideal_aa_candidates = [
+        # Original candidates (v43.36)
         "attack_angle_in_range_pct", "ideal_attack_angle_pct",
         "attack_angle_ideal", "ideal_swing_pct", "ideal_attack_rate",
         "attack_angle_in_zone_pct",
+        # v43.42 additions — common Statcast bat-tracking patterns
+        "attack_angle_in_ideal_range_pct", "attack_angle_ideal_pct",
+        "ideal_attack_angle_rate", "competitive_swings_in_attack_range_pct",
+        "attack_angle_ideal_range", "attack_angle_5_20_pct",
+        "swings_in_attack_range_rate", "ideal_attack_swing_rate",
     ]
 
     # Build a selections string that includes ALL candidates — Savant
@@ -1029,6 +1062,13 @@ def get_bat_tracking(season: int = 2025) -> tuple[pd.DataFrame, str]:
                            next((c for c in df.columns
                                  if ("attack" in c.lower() and "angle" in c.lower())
                                  or "ideal_attack" in c.lower()), None))
+
+            # v43.42: when IAA isn't found, log what Savant ACTUALLY returned
+            # to a module-level diagnostic so we can verify the field name
+            # offline. Without this we keep guessing field names blindly.
+            if not iaa_col:
+                global _LAST_BAT_TRACKING_COLS
+                _LAST_BAT_TRACKING_COLS = list(df.columns)
 
             # Build output frame with normalized column names
             out = pd.DataFrame()
