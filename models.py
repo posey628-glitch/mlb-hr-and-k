@@ -836,6 +836,13 @@ def build_matchup_table(
         # but dropped here, so never reached combined_all — the H2H comparison
         # tool and other consumers always saw it missing.
         "pull_air_pct",
+        # v43.39 (reviewer-validated): raw pull_pct/pull_percent was being
+        # filtered out, so add_hr_criteria's pull≥40 check and
+        # compute_comprehensive_hr_grade's mechanical-fail cap couldn't
+        # see it. Pull_air_pct (pull × FB / 100) is on a ~10-20 scale,
+        # not 40+. Adding both canonical names so whichever Savant returns
+        # survives into the matchup_df.
+        "pull_pct", "pull_percent",
         # Plate discipline
         "k_pct", "bb_pct", "whiff_pct", "swing_percent",
         # Rates
@@ -1364,6 +1371,14 @@ def add_hr_criteria(df: pd.DataFrame) -> pd.DataFrame:
     df["hr_criteria_total"] = [s[1] for s in summaries]
     df["hr_criteria_label"] = [s[2] for s in summaries]
     df["hr_profile_grade"] = [s[3] for s in summaries]
+
+    # v43.39 (reviewer-validated CRITICAL fix): missing return df. Without
+    # it, add_hr_criteria(df) returned None, and call sites doing
+    # `away_matchup = add_hr_criteria(away_matchup)` overwrote the
+    # DataFrame with None. Next access (e.g. `matchup_df.empty`) crashed
+    # with AttributeError on NoneType.
+    return df
+
 
 # ============================================================================
 # v43.37 — COMPREHENSIVE HR GRADE (user-requested rebuild)
