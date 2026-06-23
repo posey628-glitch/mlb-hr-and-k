@@ -1514,6 +1514,58 @@ def compute_comprehensive_hr_composite(slate_df: pd.DataFrame) -> pd.Series:
     return final.round(1)
 
 
+def rescale_composite_to_slate(composite_series: pd.Series) -> pd.Series:
+    """v43.41: Rescale composite scores so the slate distribution spans 10-95.
+
+    Why: the raw composite (weighted average of percentile ranks) regresses
+    to the mean. Even elite hitters score ~70-75 because they're not 99th
+    percentile in every tier. Result: users see mostly 45-60 and can't
+    differentiate. Rescaling makes the SPREAD interpretable — best play of
+    the slate reads ~95, worst ~10, median ~50.
+
+    Method: linear scale so slate's 5th pct → 10, 95th pct → 95.
+    Anchoring on the tails (not min/max) avoids one extreme outlier
+    dominating the rescale.
+
+    Returns:
+      Series of rescaled scores (0-100), same index as input.
+      Returns input unchanged if too few values to compute percentiles.
+    """
+    if composite_series is None or composite_series.empty:
+        return composite_series
+    valid = composite_series.dropna()
+    if len(valid) < 10:
+        # Not enough data points for percentile rescale — return as-is
+        return composite_series
+
+    p5 = valid.quantile(0.05)
+    p95 = valid.quantile(0.95)
+    if p95 - p5 < 1e-6:
+        # Degenerate (all values nearly identical) — return midpoint
+        return pd.Series(50.0, index=composite_series.index, dtype=float)
+
+    rescaled = 10.0 + (composite_series - p5) * (95.0 - 10.0) / (p95 - p5)
+    rescaled = rescaled.clip(0, 100)
+    return rescaled.round(1)
+
+
+def hr_score_signal(hr_score):
+    """v43.41: Color emoji from HR Score band.
+    Bands aligned to slate-rescaled distribution:
+      🟢 75+ (top ~25% of slate)
+      🟡 50-74 (above median)
+      🟠 25-49 (below median)
+      🔴 <25 (bottom quartile)
+      ⚪ no data
+    """
+    if hr_score is None or pd.isna(hr_score):
+        return "⚪"
+    if hr_score >= 75: return "🟢"
+    if hr_score >= 50: return "🟡"
+    if hr_score >= 25: return "🟠"
+    return "🔴"
+
+
 def comprehensive_hr_grade(composite, pull_pct=None, avg_ev=None,
                              env_mult=None, same_side_platoon=False,
                              sample_size=None, pa_threshold=25):
