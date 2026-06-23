@@ -358,7 +358,8 @@ def save_snapshot(snapshot_date, matchup_df: pd.DataFrame,
                     pitcher_slate_df: pd.DataFrame,
                     snapshot_key: str | None = None,
                     app_version: str | None = None,
-                    calibration_constants: dict | None = None) -> bool:
+                    calibration_constants: dict | None = None,
+                    filter_bias_metadata: dict | None = None) -> bool:
     """
     Persist a slim version of today's projections.
 
@@ -377,6 +378,12 @@ def save_snapshot(snapshot_date, matchup_df: pd.DataFrame,
     you can correctly say "v42r got 40% hit rate, v43.5 got 38%" instead of
     blending all versions together. Without this tag, every model change
     invalidates the cumulative comparison silently.
+
+    v43.43 (reviewer-validated bias-tagging): accepts filter_bias_metadata
+    dict like {"hide_started_active": True, "n_filtered": 3,
+    "dropped_gamepks": [...]}. Stored in payload so the backtest aggregator
+    can detect snapshots that are missing afternoon games (biased calibration
+    data) and either skip them or weight them appropriately.
     """
     try:
         # v42: key by date + ET hour. Lets a 1pm and 7pm snapshot coexist.
@@ -436,6 +443,12 @@ def save_snapshot(snapshot_date, matchup_df: pd.DataFrame,
             # snapshots saved before this field was added.
             "app_version": app_version,
             "calibration_constants": calibration_constants or {},
+            # v43.43: filter bias metadata. When hide_started filtered out
+            # games (e.g., afternoon games on an evening reload), this records
+            # how many and which ones. Backtest aggregator can use this to
+            # detect biased snapshots and either skip them or note the bias.
+            # None / empty dict on snapshots taken before any games started.
+            "filter_bias": filter_bias_metadata or {},
             "hitters": hitter_records,
             "pitchers": pitcher_records,
         }
