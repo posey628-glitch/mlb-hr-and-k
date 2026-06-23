@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.44-typo-and-coverage-fixes"
+APP_VERSION = "2026.06.10-v43.45-delete-dead-hr-form-recompute"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -4495,7 +4495,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.44 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.45 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -9374,110 +9374,17 @@ if all_hitters:
             # If merge fails, don't break the export — ps_* columns just won't appear
             pass
 
-    # ========================================================================
-    # SLATE-WIDE hr_form RECOMPUTE (v41a — fixes verification gaps)
-    # ========================================================================
-    # models.py build_matchup_table computes hr_form as a percentile rank
-    # WITHIN each 9-man lineup. That means a "B+" hr_form on a stacked
-    # Yankees lineup and a "B+" hr_form on a weak Marlins lineup get the
-    # same score even though they're on completely different absolute
-    # scales. This breaks cross-game comparisons and contaminates snapshot
-    # data for backtest regression.
-    #
-    # v41a CORRECTIONS to v41:
-    #
-    # 1. Only recompute hr_form (NOT matchup, NOT ceiling). The matchup
-    #    and ceiling composite weights include pitcher columns
-    #    (pitcher_xwoba, pitcher_k_inv, pitcher_barrel_allowed) that are
-    #    NOT in models.py display_cols whitelist — so they're dropped
-    #    before combined_all is built. Recomputing those composites slate-
-    #    wide would silently renormalize over only the hitter-quality
-    #    weights, eliminating the pitcher dimension entirely (worse than
-    #    leaving them as-is). Held until pitcher columns are added to
-    #    display_cols.
-    #
-    # 2. Re-apply the cold-streak ceiling AFTER recompute. The original
-    #    build_matchup_table applies _apply_cold_ceiling AFTER
-    #    _score_from_weights. v41 overwrote hr_form with raw slate-wide
-    #    ranks, bypassing the ceiling, which would re-inflate Carroll-tier
-    #    cold sluggers (the bug that ceiling was built to fix). Now
-    #    explicitly re-applied here.
-    #
-    # 3. Only hr_form actually FEEDS pick_score (12% weight). matchup
-    #    and ceiling are display-only. So the ranking impact of this
-    #    patch flows entirely through hr_form anyway — limiting it to
-    #    just hr_form has zero ranking downside.
-    # ========================================================================
-    # v43.25 (reviewer-validated bug fix): the inline reimplementation
-    # below previously dropped the gb_pct inversion that build_matchup_table
-    # uses (neg=("gb_pct",) passed to _score_from_weights). So a ground-ball
-    # hitter got a small positive contribution instead of a penalty. The
-    # magnitude was bounded (gb weight ~0.07/1.05 ≈ 6.7%) but directionally
-    # wrong. Fix: call the canonical _score_from_weights from models.py
-    # which handles the inversion correctly.
-    #
-    # KNOWN LIMITATION (reviewer-flagged): this recompute runs AFTER
-    # pick_score has been computed on combined_picks, so the slate-wide
-    # ranks update only affects the displayed hr_form in combined_all.
-    # pick_score itself was computed from the per-lineup hr_form. To make
-    # the recompute actually drive picks, it would need to run before
-    # pick_score on combined_picks — non-trivial because combined_picks
-    # is rebuilt per-game. Holding for now; this fix at least makes the
-    # DISPLAYED hr_form mathematically correct.
-    try:
-        from models import SCORING_WEIGHTS, _safe_pct_rank, _score_from_weights
+    # v43.45 (reviewer-validated deletion): the v43.25 slate-wide hr_form
+    # recompute was removed. The block ran AFTER pick_score had already
+    # been computed on combined_picks, so its slate-wide rank update only
+    # changed the DISPLAYED hr_form in combined_all — never the ranking.
+    # The reviewer flagged this: 'a block of non-trivial code exists to
+    # cosmetically adjust a column nobody downstream reads for decisions.'
+    # Pure deletion: ~95 lines of code that did nothing useful, replaced by
+    # this comment. To resurrect with actual effect, the recompute would
+    # need to run BEFORE pick_score on combined_picks — non-trivial because
+    # combined_picks is built per-game.
 
-        # Canonical path — same function build_matchup_table uses,
-        # with the same neg=("gb_pct",) argument so the inversion is
-        # preserved.
-        hr_form_slate = _score_from_weights(
-            combined_all,
-            SCORING_WEIGHTS.get("hr_form", {}),
-            neg=("gb_pct",),
-        )
-
-        if hr_form_slate is not None and hr_form_slate.notna().any():
-            # Re-apply cold-streak ceiling (Carroll fix). The ceiling logic
-            # mirrors build_matchup_table's _apply_cold_ceiling exactly:
-            #   < 5 games:   no cap
-            #   5-6 games:   75 ceiling
-            #   7-9 games:   60 ceiling
-            #   10+ games:   40 ceiling
-            if "games_since_hr" in combined_all.columns:
-                def _apply_cold_ceiling(idx):
-                    form = hr_form_slate.iloc[idx]
-                    if pd.isna(form):
-                        return form
-                    gsh = combined_all["games_since_hr"].iloc[idx]
-                    if gsh is None or pd.isna(gsh):
-                        return form
-                    try:
-                        gsh_n = float(gsh)
-                    except (TypeError, ValueError):
-                        return form
-                    if gsh_n >= 10:
-                        return min(float(form), 40.0)
-                    if gsh_n >= 7:
-                        return min(float(form), 60.0)
-                    if gsh_n >= 5:
-                        return min(float(form), 75.0)
-                    return form
-                hr_form_slate = pd.Series(
-                    [_apply_cold_ceiling(i) for i in range(len(combined_all))],
-                    index=combined_all.index,
-                )
-
-            combined_all["hr_form"] = hr_form_slate.round(2)
-    except Exception:
-        # Falls through to per-lineup hr_form already in combined_all. No crash.
-        pass
-
-    # NOTE: matchup and ceiling composites NOT recomputed slate-wide because
-    # their weights include pitcher_xwoba / pitcher_k_inv / pitcher_barrel_allowed
-    # which aren't in models.py display_cols. Recomputing without those columns
-    # would silently eliminate the pitcher dimension from the score, which is
-    # worse than the per-lineup percentile ranks already in place. To fix
-    # later: add those pitcher columns to display_cols in build_matchup_table.
 
     # ========================================================================
     # HITTER IL DETECTION via ACTIVE ROSTER CROSS-CHECK (v39h)
