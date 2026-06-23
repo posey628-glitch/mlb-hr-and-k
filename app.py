@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.41-hr-score-unified"
+APP_VERSION = "2026.06.10-v43.42-score-cap-smash-park-history-fixes"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -4461,7 +4461,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.41 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.42 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -6442,15 +6442,15 @@ st.divider()
 # ============================================================================
 st.subheader("🏆 Top 10 Picks of the Day")
 st.caption(
-    "**HR Score (0-100)** is the primary metric — comprehensive composite of "
+    "**HR Score (0-95)** is the primary metric — comprehensive composite of "
     "8 weighted tiers (HR probability, power, swing mechanics, matchup, form, "
     "environment, discipline, lineup context). **Rescaled per slate**, so the "
-    "best play of the night reads ~95 and worst ~10. The 🎯 column shows color "
-    "(🟢≥75 / 🟡 50-74 / 🟠 25-49 / 🔴 <25). Use HR Score for primary ranking, "
-    "HR Game% for the raw probability. **Note:** a hitter facing an ace can "
-    "still appear here if they have an elite per-pitch match against that "
-    "pitcher's arsenal — the model acknowledges tough matchups via the Matchup "
-    "column (<50 = pitcher edge). Max 2 per game; max 3 if slate is small."
+    "best play of the night reads ~95 and worst ~10. "
+    "**Important:** HR Score 95 is NOT a probability — it means 'top tier of "
+    "tonight's slate.' The actual HR probability is in the HR Game% column. "
+    "The 🎯 column shows color (🟢≥70 / 🟡 50-69 / 🟠 25-49 / 🔴 <25). "
+    "Smash flag 🔥 derives from HR Score for consistency. "
+    "Max 2 per game; max 3 if slate is small."
 )
 
 
@@ -6638,18 +6638,75 @@ if all_hitters_for_picks:
                 _mdf["hr_score_signal"] = new_sigs
                 _mdf["grade"] = new_grades
 
+                # v43.42 (user feedback): smash_spot must track HR Score.
+                # Previously the multi-factor smash logic could fire empty
+                # for hitters with elite HR Score (Yordan 95 score → no
+                # smash flag). Now: override smash from the score directly.
+                # Top plays of the slate consistently show 🔥.
+                if "smash_spot" in _mdf.columns:
+                    new_smash = []
+                    for _sc in new_scores:
+                        if _sc is None or pd.isna(_sc):
+                            new_smash.append("")
+                            continue
+                        if _sc >= 85: new_smash.append("🔥🔥🔥 ELITE")
+                        elif _sc >= 70: new_smash.append("🔥🔥 STRONG")
+                        elif _sc >= 55: new_smash.append("🔥 SMASH")
+                        else: new_smash.append("")
+                    _mdf["smash_spot"] = new_smash
+
         # Audit info — distribution of new scores
         _score_vals = combined_picks["hr_score"].dropna()
         if len(_score_vals) > 0:
             st.caption(
-                f"v43.41 HR Score (0-100) · "
+                f"v43.42 HR Score (0-95) · "
                 f"min {_score_vals.min():.0f} · "
                 f"med {_score_vals.median():.0f} · "
                 f"max {_score_vals.max():.0f} · "
                 f"top 10 hitters score ≥ {_score_vals.nlargest(10).min():.0f}"
             )
+
+        # v43.42: IAA diagnostic — if ideal_attack_angle_pct is empty for
+        # EVERYONE, surface what columns Savant actually returned so we can
+        # add the right field name next ship. (Only shows when truly empty
+        # — if some hitters have IAA, the field IS being matched.)
+        if "ideal_attack_angle_pct" in combined_picks.columns:
+            _iaa_nonempty = combined_picks["ideal_attack_angle_pct"].notna().sum()
+        else:
+            _iaa_nonempty = 0
+        if _iaa_nonempty == 0:
+            try:
+                from data_fetcher import last_bat_tracking_columns
+                _cols = last_bat_tracking_columns()
+                if _cols:
+                    # Filter to interesting candidates (contain "attack" or "angle"
+                    # or "ideal" so the user/me can spot the right name fast)
+                    _interesting = [c for c in _cols if any(
+                        k in c.lower() for k in ("attack", "angle", "ideal", "swing")
+                    )]
+                    with st.expander(
+                        "🔧 v43.42 diagnostic: Ideal Attack Angle column not found in Savant response",
+                        expanded=False,
+                    ):
+                        st.caption(
+                            "The IAA criterion in the HR Profile checklist (criterion 4) "
+                            "is showing as '·' (no data) for all hitters because none of "
+                            "the candidate field names match what Savant returned. "
+                            "The columns most likely to contain IAA-related data are:"
+                        )
+                        if _interesting:
+                            st.code("\n".join(_interesting))
+                        else:
+                            st.code("(no columns containing attack/angle/ideal/swing)")
+                        st.caption(
+                            f"Full Savant column list ({len(_cols)} cols): "
+                            + ", ".join(_cols[:30])
+                            + (" ... (truncated)" if len(_cols) > 30 else "")
+                        )
+            except Exception:
+                pass
     except Exception as _ce:
-        st.warning(f"v43.41 HR Score fallback: {_ce}")
+        st.warning(f"v43.42 HR Score fallback: {_ce}")
 
 
 
@@ -11053,7 +11110,7 @@ def build_col_config():
             ),
         ),
         "hit_grade": st.column_config.TextColumn(
-            "Hit",
+            "Hit Grade",
             width="small",
             help="HIT-prop letter grade (A+/A/B+/B/C+/C/D/F). Separate from HR grade — "
                  "a Schwarber-shape may be Grade A for HR but C for Hit; "
@@ -11196,31 +11253,25 @@ def build_col_config():
             ),
         ),
         "grade": st.column_config.TextColumn(
-            "Grade", width="small",
+            "HR Grade", width="small",
             help=(
-                "Letter grade equivalent of HR Game% (recalibrated v39k):\n"
-                "A+ : ≥25% (rare elite — top 3-5%)\n"
-                "A  : 21-25% (strong — top 10%)\n"
-                "B+ : 17-21% (above avg — top 25%)\n"
-                "B  : 13-17% (solid)\n"
-                "C+ : 10-13% (modest)\n"
-                "C  : 7-10% (below avg)\n"
-                "D  : 4-7% (poor)\n"
-                "F  : <4% (avoid)\n"
-                "—  : insufficient sample"
+                "**HR letter grade** (legacy/secondary — primary HR metric is HR Score 0-95).\n"
+                "Comprehensive composite-derived letter (v43.37+):\n"
+                "A+ : everything aligns (top ~5%) · A : strong\n"
+                "B+/B : solid / above avg · C+/C : middle of pack\n"
+                "D/F : weak · — : insufficient sample\n"
+                "Cap layers: hostile env, same-side platoon, mechanical fail (pull<35 + EV<88)."
             ),
         ),
         "smash_spot": st.column_config.TextColumn(
             "Smash", width="small",
             help=(
-                "THE 'all stars align' flag — triple-threat HR opportunity.\n\n"
-                "🔥🔥🔥 ELITE SMASH = facing EXPLOIT+ pitcher AND favorable env "
-                "(park × wx × wind ≥1.05) AND favorable park (≥1.04) AND HR Game% ≥19%.\n\n"
-                "🔥🔥 STRONG SMASH = EXPLOIT/+ pitcher + favorable env + favorable park + "
-                "HR Game% ≥15%.\n\n"
-                "🔥 SMASH = EXPLOIT/+ pitcher + (favorable env OR park) + HR Game% ≥15%.\n\n"
-                "Requires: confirmed lineup, real pitcher (not TBD).\n"
-                "Limited to 2 per team in the leaderboard."
+                "v43.42: derived from HR Score for consistency. Top plays "
+                "automatically show 🔥.\n\n"
+                "🔥🔥🔥 ELITE = HR Score ≥ 85 (top elite of the slate)\n"
+                "🔥🔥 STRONG = HR Score 70-84 (above-average green play)\n"
+                "🔥 SMASH = HR Score 55-69 (yellow tier, worth considering)\n"
+                "(blank below 55)"
             ),
         ),
         "hr_pa_pct": st.column_config.NumberColumn(
