@@ -799,6 +799,32 @@ def bvp_score_adjustment(bvp_dict: dict, min_pa: int = 20) -> tuple[float, str]:
 # residual: (actual HR / expected HR) where expected uses league rate × hand-aware park.
 # ----------------------------------------------------------------------------
 
+# v43.46 diagnostic: track park-history fetch outcomes so the UI can
+# surface a coverage caption. Previous v43.42 byVenue endpoint shipped
+# without verification; reviewer flagged "silent failure into except:pass
+# would quietly gut the model while everything looks fine."
+_LAST_PARK_HISTORY_STATS = {
+    "attempts": 0,        # total calls
+    "bad_args": 0,        # missing batter_id or venue_id
+    "http_ok": 0,         # at least one season returned 200
+    "http_errors": 0,     # non-200 responses
+    "exceptions": 0,      # network exceptions
+    "has_splits": 0,      # response contained venue splits at all
+    "venue_matched": 0,   # response had a split matching the target venue
+}
+
+def last_park_history_stats() -> dict:
+    """v43.46: returns aggregate fetch outcomes for the most recent slate."""
+    return dict(_LAST_PARK_HISTORY_STATS)
+
+def reset_park_history_stats() -> None:
+    """v43.46: clear stats at the start of each slate."""
+    global _LAST_PARK_HISTORY_STATS
+    _LAST_PARK_HISTORY_STATS = {
+        "attempts": 0, "bad_args": 0, "http_ok": 0, "http_errors": 0,
+        "exceptions": 0, "has_splits": 0, "venue_matched": 0,
+    }
+
 @st.cache_data(ttl=86400)  # daily refresh — venue stats don't move during slate
 def get_batter_park_history(batter_id: int, venue_id: int,
                              lookback_seasons: int = 3) -> dict:
@@ -806,60 +832,74 @@ def get_batter_park_history(batter_id: int, venue_id: int,
     `lookback_seasons` years (default 3). Returns dict with bp_pa, bp_hr,
     bp_hr_per_pa, bp_h, bp_ab, bp_seasons. Empty dict on failure or no data.
 
-    Uses MLB Stats API /people/{id}/stats?stats=byDateRange not because
-    that endpoint segments by venue (it doesn't natively), but because we
-    can request gameLog and aggregate manually. We use a simpler approach:
-    sum byVenue splits via the splits endpoint.
+    Uses MLB Stats API stats=byVenue endpoint, aggregated across the
+    lookback seasons.
 
-    Sample-size gating happens in park_history_score_adjustment, not here —
-    keep the fetcher honest (return what's actually in the data).
+    v43.46: Added gameType=R (regular season only — excludes spring
+    training, postseason, exhibitions) AND tracking in module state so
+    the UI can surface a coverage caption. Previous v43.42 implementation
+    shipped without verification — reviewer's exact concern: 'silent
+    failure into the except:pass would quietly gut the model while
+    everything looks fine.'
+
+    Sample-size gating happens in park_history_score_adjustment, not here.
     """
+    global _LAST_PARK_HISTORY_STATS
+    _LAST_PARK_HISTORY_STATS["attempts"] += 1
+
     if not batter_id or not venue_id:
+        _LAST_PARK_HISTORY_STATS["bad_args"] += 1
         return {}
     try:
-        # v43.42 (user-reported "park hist empty for ALL"): the previous
-        # statSplits&sitCodes=v{venue_id} endpoint returned no data — that
-        # parameter format isn't valid in MLB Stats API. Reviewer flagged
-        # this as unverified in v43.26. Switching to stats=byVenue which
-        # IS a documented MLB Stats API stat type.
-        #
-        # byVenue returns one split per venue the player has played at.
-        # We then filter by venue.id == venue_id and aggregate across the
-        # lookback seasons.
         agg = {"pa": 0, "hr": 0, "h": 0, "ab": 0, "seasons": 0}
 
         from datetime import date as _date
         current_year = _date.today().year
+        any_200 = False
+        any_splits = False
+        any_match = False
 
         for season in range(current_year - lookback_seasons + 1, current_year + 1):
             url = (
                 f"https://statsapi.mlb.com/api/v1/people/{batter_id}"
                 f"/stats?stats=byVenue&group=hitting"
-                f"&season={season}&sportId=1"
+                f"&season={season}&sportId=1&gameType=R"
             )
             try:
                 r = requests.get(url, timeout=10)
                 if r.status_code != 200:
+                    _LAST_PARK_HISTORY_STATS["http_errors"] += 1
                     continue
+                any_200 = True
                 data = r.json()
-                # Schema: stats[0].splits[] each has venue.id and stat dict
                 stats_list = data.get("stats", [])
                 if not stats_list:
                     continue
                 splits = stats_list[0].get("splits", [])
+                if splits:
+                    any_splits = True
                 for split in splits:
                     venue_obj = split.get("venue", {}) or {}
                     if venue_obj.get("id") != venue_id:
                         continue
+                    any_match = True
                     stat = split.get("stat", {}) or {}
                     agg["pa"] += int(stat.get("plateAppearances", 0) or 0)
                     agg["hr"] += int(stat.get("homeRuns", 0) or 0)
                     agg["h"]  += int(stat.get("hits", 0) or 0)
                     agg["ab"] += int(stat.get("atBats", 0) or 0)
                     agg["seasons"] += 1
-                    break  # one venue per season
+                    break
             except Exception:
+                _LAST_PARK_HISTORY_STATS["exceptions"] += 1
                 continue
+
+        if any_200:
+            _LAST_PARK_HISTORY_STATS["http_ok"] += 1
+        if any_splits:
+            _LAST_PARK_HISTORY_STATS["has_splits"] += 1
+        if any_match:
+            _LAST_PARK_HISTORY_STATS["venue_matched"] += 1
 
         if agg["pa"] == 0:
             return {}
