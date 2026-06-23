@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.46-park-history-diagnostic"
+APP_VERSION = "2026.06.10-v43.47-park-hist-error-capture"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -4495,7 +4495,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.46 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.47 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -7179,32 +7179,46 @@ if combined_picks is not None and not combined_picks.empty:
             )
             # If something broke, surface details
             if matched == 0:
-                with st.expander("🔧 v43.46 park history diagnostic", expanded=False):
-                    if http_ok == 0:
+                with st.expander("🔧 v43.47 park history diagnostic", expanded=False):
+                    # v43.47: surface the FIRST actual error (HTTP status, URL,
+                    # response body) so we can finally see what the API is saying
+                    err_status = _ph.get("first_error_status")
+                    err_url = _ph.get("first_error_url")
+                    err_body = _ph.get("first_error_body")
+                    if err_status is not None:
+                        st.error(f"**First error: HTTP {err_status}**")
+                        if err_url:
+                            st.code(err_url, language="text")
+                        if err_body:
+                            st.caption("Response body (first 300 chars):")
+                            st.code(err_body, language="json")
+                        st.caption(
+                            "Interpretation guide:\n"
+                            "• HTTP 400 = bad request — `stats=byVenue` likely not a valid stat type\n"
+                            "• HTTP 404 = endpoint path wrong\n"
+                            "• HTTP 422 = parameter combination invalid\n"
+                            "• exception:Timeout = network unreachable\n"
+                            "• exception:ConnectionError = DNS or blocked"
+                        )
+                    elif http_ok == 0:
                         st.error(
                             f"All {attempts} HTTP calls failed (errors: "
-                            f"{_ph['http_errors']}, exceptions: {_ph['exceptions']}). "
-                            "Endpoint likely down or wrong URL."
+                            f"{_ph['http_errors']}, exceptions: {_ph['exceptions']}) "
+                            "but no first_error_status captured — diagnostic bug."
                         )
                     elif has_splits == 0:
                         st.error(
                             f"All {attempts} responses were 200 but contained "
                             "no venue splits. `stats=byVenue` may not be a "
-                            "valid endpoint for this season, or `gameType=R` "
-                            "filter is excluding all data."
+                            "valid stat type at this season scope."
                         )
                     elif matched == 0:
                         st.error(
                             f"{has_splits} responses had venue splits, but "
-                            "none matched our target venue_id. The schema "
+                            "none matched our target venue_id. Schema "
                             "`split.venue.id` may be wrong, or venue IDs from "
                             "schedule don't match those in byVenue response."
                         )
-                    st.caption(
-                        "Need to verify by hitting the URL directly:\n"
-                        "`https://statsapi.mlb.com/api/v1/people/{ID}/stats"
-                        "?stats=byVenue&group=hitting&season=2025&sportId=1&gameType=R`"
-                    )
     except Exception:
         pass
 
