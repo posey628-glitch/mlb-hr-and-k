@@ -1517,6 +1517,11 @@ def compute_comprehensive_hr_composite(slate_df: pd.DataFrame) -> pd.Series:
 def rescale_composite_to_slate(composite_series: pd.Series) -> pd.Series:
     """v43.41: Rescale composite scores so the slate distribution spans 10-95.
 
+    v43.42 (user feedback): top cap is 95, NOT 100. "HR Score 100" was
+    being read as "100% chance of HR" / "guaranteed yard" — which is wrong
+    (HR Score is a slate-relative composite, not a probability). Capping at
+    95 makes the elite tier read as "near-elite, not certain."
+
     Why: the raw composite (weighted average of percentile ranks) regresses
     to the mean. Even elite hitters score ~70-75 because they're not 99th
     percentile in every tier. Result: users see mostly 45-60 and can't
@@ -1525,42 +1530,42 @@ def rescale_composite_to_slate(composite_series: pd.Series) -> pd.Series:
 
     Method: linear scale so slate's 5th pct → 10, 95th pct → 95.
     Anchoring on the tails (not min/max) avoids one extreme outlier
-    dominating the rescale.
+    dominating the rescale. Final clip is 0-95 (not 0-100).
 
     Returns:
-      Series of rescaled scores (0-100), same index as input.
+      Series of rescaled scores (0-95), same index as input.
       Returns input unchanged if too few values to compute percentiles.
     """
     if composite_series is None or composite_series.empty:
         return composite_series
     valid = composite_series.dropna()
     if len(valid) < 10:
-        # Not enough data points for percentile rescale — return as-is
         return composite_series
 
     p5 = valid.quantile(0.05)
     p95 = valid.quantile(0.95)
     if p95 - p5 < 1e-6:
-        # Degenerate (all values nearly identical) — return midpoint
         return pd.Series(50.0, index=composite_series.index, dtype=float)
 
     rescaled = 10.0 + (composite_series - p5) * (95.0 - 10.0) / (p95 - p5)
-    rescaled = rescaled.clip(0, 100)
+    # v43.42: cap at 95, not 100 — avoid "100 = guaranteed" misread
+    rescaled = rescaled.clip(0, 95)
     return rescaled.round(1)
 
 
 def hr_score_signal(hr_score):
     """v43.41: Color emoji from HR Score band.
+    v43.42: bands adjusted for 0-95 cap (was 0-100).
     Bands aligned to slate-rescaled distribution:
-      🟢 75+ (top ~25% of slate)
-      🟡 50-74 (above median)
+      🟢 70+ (top ~25% of slate — strong play)
+      🟡 50-69 (above median)
       🟠 25-49 (below median)
       🔴 <25 (bottom quartile)
       ⚪ no data
     """
     if hr_score is None or pd.isna(hr_score):
         return "⚪"
-    if hr_score >= 75: return "🟢"
+    if hr_score >= 70: return "🟢"
     if hr_score >= 50: return "🟡"
     if hr_score >= 25: return "🟠"
     return "🔴"
