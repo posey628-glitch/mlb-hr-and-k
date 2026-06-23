@@ -203,7 +203,7 @@ def _parse_wttr_response_for_hour(response: dict, target_dt: datetime) -> dict:
     }
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)  # v43.42: 30min (was 1hr) for fresher game-time weather
 def _fetch_single_wttr(lat: float, lon: float, target_dt_str: str) -> dict:
     """Cached wttr.in single-location fetch. Used as Open-Meteo fallback.
 
@@ -234,7 +234,7 @@ def _fetch_single_wttr(lat: float, lon: float, target_dt_str: str) -> dict:
         return {}
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)  # v43.42: 30min (was 1hr) for fresher game-time weather
 def _fetch_single_om(lat: float, lon: float, target_dt_str: str) -> dict:
     """
     Cached single-location Open-Meteo fetch. Cache key is (lat, lon, hour-iso).
