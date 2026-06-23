@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.45-delete-dead-hr-form-recompute"
+APP_VERSION = "2026.06.10-v43.46-park-history-diagnostic"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -4495,7 +4495,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.45 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.46 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -7152,6 +7152,59 @@ if combined_picks is not None and not combined_picks.empty:
                 + "  ← if these are 0% or near it, the splits endpoint isn't"
                 + " returning data and the handedness-blend feature is dead."
             )
+    except Exception:
+        pass
+
+    # v43.46: park history fetch diagnostic. Shipped v43.42's byVenue fix
+    # without verifying — user reported still empty. Now we track each
+    # fetch outcome so the UI can pinpoint exactly where the chain breaks:
+    # HTTP failure, no splits returned, venue ID mismatch, etc.
+    try:
+        from data_fetcher import last_park_history_stats
+        _ph = last_park_history_stats()
+        if _ph.get("attempts", 0) > 0:
+            attempts = _ph["attempts"]
+            http_ok = _ph["http_ok"]
+            has_splits = _ph["has_splits"]
+            matched = _ph["venue_matched"]
+            # Render a single line with all 3 funnel stages
+            _pct = lambda n: f"{100 * n / max(1, attempts):.0f}%"
+            st.caption(
+                f"v43.46 Park history fetch funnel ({attempts} batters) · "
+                f"HTTP 200: {http_ok} ({_pct(http_ok)}) · "
+                f"has venue splits: {has_splits} ({_pct(has_splits)}) · "
+                f"target venue matched: {matched} ({_pct(matched)})"
+                + ("  ✅ pipeline working" if matched > 0 else
+                   "  ❌ pipeline broken — see details below")
+            )
+            # If something broke, surface details
+            if matched == 0:
+                with st.expander("🔧 v43.46 park history diagnostic", expanded=False):
+                    if http_ok == 0:
+                        st.error(
+                            f"All {attempts} HTTP calls failed (errors: "
+                            f"{_ph['http_errors']}, exceptions: {_ph['exceptions']}). "
+                            "Endpoint likely down or wrong URL."
+                        )
+                    elif has_splits == 0:
+                        st.error(
+                            f"All {attempts} responses were 200 but contained "
+                            "no venue splits. `stats=byVenue` may not be a "
+                            "valid endpoint for this season, or `gameType=R` "
+                            "filter is excluding all data."
+                        )
+                    elif matched == 0:
+                        st.error(
+                            f"{has_splits} responses had venue splits, but "
+                            "none matched our target venue_id. The schema "
+                            "`split.venue.id` may be wrong, or venue IDs from "
+                            "schedule don't match those in byVenue response."
+                        )
+                    st.caption(
+                        "Need to verify by hitting the URL directly:\n"
+                        "`https://statsapi.mlb.com/api/v1/people/{ID}/stats"
+                        "?stats=byVenue&group=hitting&season=2025&sportId=1&gameType=R`"
+                    )
     except Exception:
         pass
 
