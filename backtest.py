@@ -113,6 +113,16 @@ def durable_storage_configured() -> bool:
     return bool(_gist_token()) and bool(_gist_id())
 
 
+# v43.40: module-level diagnostic for the most recent gist read attempt.
+# Lets the UI surface the EXACT error code (401=token, 404=gist gone,
+# 429=rate limit) instead of the generic "network/auth/rate limit" message.
+_LAST_GIST_READ_ERROR: str | None = None
+
+def last_gist_read_error() -> str | None:
+    """Returns the most recent gist read failure reason, or None if last read succeeded."""
+    return _LAST_GIST_READ_ERROR
+
+
 def _gist_read_all() -> dict | None:
     """Fetch the gist contents and return the parsed snapshot dict.
 
@@ -128,10 +138,21 @@ def _gist_read_all() -> dict | None:
     A single transient GitHub API hiccup could destroy weeks of accumulated
     backtest data. Now we return None on failure so callers can abort the
     write instead of silently wiping the gist.
+
+    v43.40: Capture the specific HTTP status code into _LAST_GIST_READ_ERROR
+    so the UI can show "401 Unauthorized — token expired" instead of the
+    vague "network/auth/rate limit" diagnostic that left users guessing.
     """
+    global _LAST_GIST_READ_ERROR
+    _LAST_GIST_READ_ERROR = None
+
     token = _gist_token()
     gist_id = _gist_id()
-    if not token or not gist_id:
+    if not token:
+        _LAST_GIST_READ_ERROR = "gist_token missing from Streamlit Secrets"
+        return None
+    if not gist_id:
+        _LAST_GIST_READ_ERROR = "gist_id missing from Streamlit Secrets"
         return None
     try:
         r = requests.get(
@@ -142,7 +163,36 @@ def _gist_read_all() -> dict | None:
             },
             timeout=10,
         )
-        r.raise_for_status()
+        if r.status_code == 401:
+            _LAST_GIST_READ_ERROR = (
+                "HTTP 401 Unauthorized — GitHub token is invalid or EXPIRED. "
+                "Regenerate at https://github.com/settings/tokens with `gist` "
+                "scope, then update gist_token in Streamlit Secrets."
+            )
+            return None
+        if r.status_code == 404:
+            _LAST_GIST_READ_ERROR = (
+                f"HTTP 404 Not Found — gist_id '{gist_id}' doesn't exist. "
+                "The gist may have been deleted, or gist_id is wrong in Secrets. "
+                "Verify at https://gist.github.com"
+            )
+            return None
+        if r.status_code == 403:
+            # Could be rate limit OR scope issue
+            remaining = r.headers.get("X-RateLimit-Remaining", "?")
+            reset = r.headers.get("X-RateLimit-Reset", "?")
+            _LAST_GIST_READ_ERROR = (
+                f"HTTP 403 Forbidden — rate limit or token-scope issue. "
+                f"Rate limit remaining: {remaining}, resets at unix {reset}. "
+                f"If remaining=0, wait. Otherwise: token may not have `gist` scope; regenerate it."
+            )
+            return None
+        if r.status_code != 200:
+            _LAST_GIST_READ_ERROR = (
+                f"HTTP {r.status_code} from GitHub Gist API. "
+                f"Response: {r.text[:200]}"
+            )
+            return None
         files = r.json().get("files", {})
         target = files.get(GIST_FILENAME)
         if not target:
@@ -153,10 +203,20 @@ def _gist_read_all() -> dict | None:
         if not content.strip():
             return {}
         return json.loads(content)
-    except Exception:
-        # Network error, JSON parse error, auth failure, rate limit — any of
-        # these means we DON'T know what's in the gist. Return None so the
-        # caller can refuse to write and avoid data loss.
+    except requests.exceptions.Timeout:
+        _LAST_GIST_READ_ERROR = "Network timeout to api.github.com (>10s)"
+        return None
+    except requests.exceptions.ConnectionError as e:
+        _LAST_GIST_READ_ERROR = f"Network connection failed: {type(e).__name__}"
+        return None
+    except json.JSONDecodeError as e:
+        _LAST_GIST_READ_ERROR = (
+            f"Gist content is not valid JSON ({e}). "
+            "Someone may have edited the gist manually. Check at gist.github.com."
+        )
+        return None
+    except Exception as e:
+        _LAST_GIST_READ_ERROR = f"Unexpected exception: {type(e).__name__}: {e}"
         return None
 
 
@@ -200,15 +260,19 @@ def _save_snapshot_to_gist(snapshot_date, payload: dict) -> tuple[bool, str | No
     v43.33: returns (ok, error_message) so callers can show WHY a write
     failed (token expired, gist deleted, rate limit, etc) instead of
     silently returning False and letting the UI claim 'durable' falsely.
+
+    v43.40: error message now includes the specific HTTP status / cause
+    from _gist_read_all so the user knows exactly what to fix.
     """
     if not durable_storage_configured():
         return False, "Gist not configured (gist_token/gist_id missing in secrets)"
     try:
         all_snaps = _gist_read_all()
         if all_snaps is None:
-            # Read failed — DO NOT WRITE. Existing data may still be intact;
-            # wiping it would be worse than skipping this save.
-            return False, "Gist read failed (network/auth/rate limit) — write aborted to protect existing data"
+            # Surface the SPECIFIC reason — token expired, gist gone, rate
+            # limit, etc — rather than the generic vague string.
+            specific = last_gist_read_error() or "unknown read failure"
+            return False, f"Gist read failed — write aborted to protect existing data. Reason: {specific}"
         all_snaps[str(snapshot_date)] = payload
         ok = _gist_write_all(all_snaps)
         if not ok:
