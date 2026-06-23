@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.38-comprehensive-grade-total-bases-slate-forecast"
+APP_VERSION = "2026.06.10-v43.39-critical-crash-fixes"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -4461,7 +4461,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.38 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.39 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -6436,117 +6436,6 @@ else:
 st.divider()
 
 
-# ============================================================================
-# v43.38 — SLATE FORECAST + 2+ BASES PER TEAM (user-requested)
-# ============================================================================
-# Two new top-of-page sections:
-#   1. Expected total HRs across the slate (sum of game-HR probabilities)
-#   2. Top 3 hitters per team most likely to get ≥2 total bases (excl walks)
-# ============================================================================
-if combined_picks is not None and not combined_picks.empty:
-    # ---- Slate HR forecast ----
-    try:
-        hr_pcts = pd.to_numeric(
-            combined_picks.get("hr_game_pct", pd.Series(dtype=float)),
-            errors="coerce",
-        )
-        if hr_pcts.notna().any():
-            # Sum probabilities = expected count of hitters who homer.
-            # Add ~5% upward adjustment for multi-HR games (Schwarber-tier
-            # multi-HR rate is ~3-5% of HR-game outcomes).
-            expected_hrs = float(hr_pcts.sum() / 100.0) * 1.05
-            import math
-            # Poisson approximation: var = mean, 2σ window ≈ ±2√mean
-            spread = 2 * math.sqrt(expected_hrs)
-            low = max(0, int(round(expected_hrs - spread)))
-            high = int(round(expected_hrs + spread))
-
-            col_a, col_b, col_c = st.columns(3)
-            with col_a:
-                st.metric(
-                    "📊 Expected HRs (slate)",
-                    f"{expected_hrs:.1f}",
-                    f"range {low}–{high}",
-                    delta_color="off",
-                )
-            with col_b:
-                n_qual = int(hr_pcts.notna().sum())
-                st.metric(
-                    "Hitters with projection",
-                    f"{n_qual}",
-                    f"of {len(combined_picks)} on slate",
-                    delta_color="off",
-                )
-            with col_c:
-                # Avg HR Game% per qualified hitter
-                avg_hr = float(hr_pcts.mean())
-                st.metric(
-                    "Avg HR Game% (qualified)",
-                    f"{avg_hr:.1f}%",
-                    "vs ~12.5% slate baseline",
-                    delta_color="off",
-                )
-            st.caption(
-                "📐 *Forecast = sum of per-hitter game-HR probabilities × 1.05 "
-                "(slight upward for multi-HR games). Range = ±2σ Poisson interval — "
-                "actual total falls in this window ~95% of nights.*"
-            )
-    except Exception:
-        pass
-
-    # ---- Top 3 per team likely to get ≥2 total bases ----
-    try:
-        if ("expected_total_bases" in combined_picks.columns
-                and "team" in combined_picks.columns
-                and combined_picks["expected_total_bases"].notna().any()):
-            tb = combined_picks.dropna(subset=["expected_total_bases", "team"]).copy()
-            tb["expected_total_bases"] = pd.to_numeric(
-                tb["expected_total_bases"], errors="coerce"
-            )
-            # Threshold: only flag hitters with expected_bases ≥ 1.5 (above
-            # league avg ~1.55 — meaningful "2+ bases play")
-            tb = tb[tb["expected_total_bases"] >= 1.5]
-            if not tb.empty:
-                # Top 3 per team, sorted within team
-                tb_top = tb.sort_values(
-                    ["team", "expected_total_bases"], ascending=[True, False]
-                ).groupby("team").head(3).reset_index(drop=True)
-
-                with st.expander(
-                    f"🎯 2+ Bases Plays — Top 3 per team ({len(tb_top)} hitters)",
-                    expanded=False,
-                ):
-                    st.caption(
-                        "Hitters most likely to total ≥2 bases tonight (excludes walks — "
-                        "SLG is TB/AB by definition). Uses xSLG anchored, adjusted by "
-                        "pitcher SLG-against, park, and platoon. Threshold: expected "
-                        "bases ≥1.5. Only top 3 per team — many teams will have fewer."
-                    )
-                    # Display columns
-                    show_cols = [c for c in (
-                        "team", "player_name", "opp_pitcher",
-                        "tb_grade", "expected_total_bases",
-                        "hr_game_pct", "hit_game_pct",
-                        "slg", "xslg",
-                    ) if c in tb_top.columns]
-                    st.dataframe(
-                        tb_top[show_cols], hide_index=True, use_container_width=True,
-                        column_config={
-                            "team": st.column_config.TextColumn("Team", width="small"),
-                            "tb_grade": st.column_config.TextColumn("TB Grade", width="small"),
-                            "expected_total_bases": st.column_config.NumberColumn(
-                                "Exp Bases", format="%.2f",
-                                help="Expected total bases this game (excludes walks)",
-                            ),
-                            "hr_game_pct": st.column_config.NumberColumn("HR%", format="%.1f%%"),
-                            "hit_game_pct": st.column_config.NumberColumn("Hit%", format="%.1f%%"),
-                            "slg": st.column_config.NumberColumn("SLG", format="%.3f"),
-                            "xslg": st.column_config.NumberColumn("xSLG", format="%.3f"),
-                        },
-                    )
-    except Exception:
-        pass
-
 
 # ============================================================================
 # TOP 5 PICKS OF THE DAY — combined HR signal across all factors
@@ -6748,6 +6637,118 @@ if all_hitters_for_picks:
         # (which is still computed during matchup build). No silent break.
         st.warning(f"v43.37 comprehensive grade fallback: {_ce}")
 
+
+
+# ============================================================================
+# v43.38 — SLATE FORECAST + 2+ BASES PER TEAM (user-requested)
+# ============================================================================
+# Two new top-of-page sections:
+#   1. Expected total HRs across the slate (sum of game-HR probabilities)
+#   2. Top 3 hitters per team most likely to get ≥2 total bases (excl walks)
+# ============================================================================
+if combined_picks is not None and not combined_picks.empty:
+    # ---- Slate HR forecast ----
+    try:
+        hr_pcts = pd.to_numeric(
+            combined_picks.get("hr_game_pct", pd.Series(dtype=float)),
+            errors="coerce",
+        )
+        if hr_pcts.notna().any():
+            # Sum probabilities = expected count of hitters who homer.
+            # Add ~5% upward adjustment for multi-HR games (Schwarber-tier
+            # multi-HR rate is ~3-5% of HR-game outcomes).
+            expected_hrs = float(hr_pcts.sum() / 100.0) * 1.05
+            import math
+            # Poisson approximation: var = mean, 2σ window ≈ ±2√mean
+            spread = 2 * math.sqrt(expected_hrs)
+            low = max(0, int(round(expected_hrs - spread)))
+            high = int(round(expected_hrs + spread))
+
+            col_a, col_b, col_c = st.columns(3)
+            with col_a:
+                st.metric(
+                    "📊 Expected HRs (slate)",
+                    f"{expected_hrs:.1f}",
+                    f"range {low}–{high}",
+                    delta_color="off",
+                )
+            with col_b:
+                n_qual = int(hr_pcts.notna().sum())
+                st.metric(
+                    "Hitters with projection",
+                    f"{n_qual}",
+                    f"of {len(combined_picks)} on slate",
+                    delta_color="off",
+                )
+            with col_c:
+                # Avg HR Game% per qualified hitter
+                avg_hr = float(hr_pcts.mean())
+                st.metric(
+                    "Avg HR Game% (qualified)",
+                    f"{avg_hr:.1f}%",
+                    "vs ~12.5% slate baseline",
+                    delta_color="off",
+                )
+            st.caption(
+                "📐 *Forecast = sum of per-hitter game-HR probabilities × 1.05 "
+                "(slight upward for multi-HR games). Range = ±2σ Poisson interval — "
+                "actual total falls in this window ~95% of nights.*"
+            )
+    except Exception:
+        pass
+
+    # ---- Top 3 per team likely to get ≥2 total bases ----
+    try:
+        if ("expected_total_bases" in combined_picks.columns
+                and "team" in combined_picks.columns
+                and combined_picks["expected_total_bases"].notna().any()):
+            tb = combined_picks.dropna(subset=["expected_total_bases", "team"]).copy()
+            tb["expected_total_bases"] = pd.to_numeric(
+                tb["expected_total_bases"], errors="coerce"
+            )
+            # Threshold: only flag hitters with expected_bases ≥ 1.5 (above
+            # league avg ~1.55 — meaningful "2+ bases play")
+            tb = tb[tb["expected_total_bases"] >= 1.5]
+            if not tb.empty:
+                # Top 3 per team, sorted within team
+                tb_top = tb.sort_values(
+                    ["team", "expected_total_bases"], ascending=[True, False]
+                ).groupby("team").head(3).reset_index(drop=True)
+
+                with st.expander(
+                    f"🎯 2+ Bases Plays — Top 3 per team ({len(tb_top)} hitters)",
+                    expanded=False,
+                ):
+                    st.caption(
+                        "Hitters most likely to total ≥2 bases tonight (excludes walks — "
+                        "SLG is TB/AB by definition). Uses xSLG anchored, adjusted by "
+                        "pitcher SLG-against, park, and platoon. Threshold: expected "
+                        "bases ≥1.5. Only top 3 per team — many teams will have fewer."
+                    )
+                    # Display columns
+                    show_cols = [c for c in (
+                        "team", "player_name", "opp_pitcher",
+                        "tb_grade", "expected_total_bases",
+                        "hr_game_pct", "hit_game_pct",
+                        "slg", "xslg",
+                    ) if c in tb_top.columns]
+                    st.dataframe(
+                        tb_top[show_cols], hide_index=True, use_container_width=True,
+                        column_config={
+                            "team": st.column_config.TextColumn("Team", width="small"),
+                            "tb_grade": st.column_config.TextColumn("TB Grade", width="small"),
+                            "expected_total_bases": st.column_config.NumberColumn(
+                                "Exp Bases", format="%.2f",
+                                help="Expected total bases this game (excludes walks)",
+                            ),
+                            "hr_game_pct": st.column_config.NumberColumn("HR%", format="%.1f%%"),
+                            "hit_game_pct": st.column_config.NumberColumn("Hit%", format="%.1f%%"),
+                            "slg": st.column_config.NumberColumn("SLG", format="%.3f"),
+                            "xslg": st.column_config.NumberColumn("xSLG", format="%.3f"),
+                        },
+                    )
+    except Exception:
+        pass
     # ====================================================================
     # SLATE LEADERS — who's #1 in each meaningful category across the slate
     # ====================================================================
