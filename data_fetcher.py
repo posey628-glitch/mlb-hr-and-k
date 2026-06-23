@@ -792,30 +792,15 @@ def get_batter_park_history(batter_id: int, venue_id: int,
     if not batter_id or not venue_id:
         return {}
     try:
-        # Try the splits endpoint first (cleanest path)
-        from datetime import date
-        current_year = date.today().year
-        # We aggregate across the last N seasons
-        agg = {"pa": 0, "hr": 0, "h": 0, "ab": 0, "seasons": 0}
-        for season in range(current_year - lookback_seasons + 1, current_year + 1):
-            url = (
-                f"https://statsapi.mlb.com/api/v1/people/{batter_id}"
-                f"/stats?stats=byDateRange&group=hitting"
-                f"&season={season}&sportId=1"
-            )
-            try:
-                r = requests.get(url, timeout=10)
-                if r.status_code != 200:
-                    continue
-                data = r.json()
-                splits = data.get("stats", [{}])[0].get("splits", [])
-                # We need venue-segmented data — the simpler endpoint:
-                # /people/{id}/stats?stats=vsTeam&season=X aggregates by opponent.
-                # For VENUE specifically, use stats=byVenue.
-            except Exception:
-                continue
+        # v43.39 (reviewer-validated perf): dead loop removed. Previously a
+        # `for season in range(N)` loop fetched byDateRange data but never
+        # used the result — `splits` was assigned and immediately discarded.
+        # That meant 3× wasted HTTP calls per batter per slate (~270 batters
+        # × 3 = ~800 useless round-trips on cold cache).
+        # The real venue lookup happens below via statSplits&sitCodes=v{N}.
+        agg = {"pa": 0, "hr": 0, "h": 0, "ab": 0, "seasons": lookback_seasons}
 
-        # Cleaner path: use stats=statSplits with sitCodes for venue
+        # Real path: statSplits with sitCodes for venue
         # That endpoint returns career splits at each venue.
         url = (
             f"https://statsapi.mlb.com/api/v1/people/{batter_id}"
@@ -975,12 +960,23 @@ def get_bat_tracking(season: int = 2025) -> tuple[pd.DataFrame, str]:
     fast_swing_candidates = ["fast_swing_rate", "fast_swing_percent"]
     squared_up_candidates = ["squared_up_rate", "squared_up_per_swing",
                                "squared_up_percent"]
+    # v43.36 (user-requested): Ideal Attack Angle — Statcast bat-tracking
+    # metric: % of competitive swings where attack angle is 5-20°. This is
+    # the "HR launch zone" swing path. League avg ~50-55%, elite ~65%+.
+    # Field name in Savant CSV is uncertain (Statcast schema drifts) —
+    # try several candidates; populates ideal_attack_angle_pct if found.
+    ideal_aa_candidates = [
+        "attack_angle_in_range_pct", "ideal_attack_angle_pct",
+        "attack_angle_ideal", "ideal_swing_pct", "ideal_attack_rate",
+        "attack_angle_in_zone_pct",
+    ]
 
     # Build a selections string that includes ALL candidates — Savant
     # should return whichever ones it has, ignore the rest.
     all_fields = (["player_id", "player_name"]
                   + blast_candidates + bat_speed_candidates
-                  + fast_swing_candidates + squared_up_candidates)
+                  + fast_swing_candidates + squared_up_candidates
+                  + ideal_aa_candidates)
     selections = ",".join(all_fields)
 
     candidate_urls = [
@@ -1027,6 +1023,12 @@ def get_bat_tracking(season: int = 2025) -> tuple[pd.DataFrame, str]:
                           next((c for c in df.columns if "fast_swing" in c.lower()), None))
             sq_col = next((c for c in squared_up_candidates if c in df.columns),
                           next((c for c in df.columns if "squared_up" in c.lower()), None))
+            # v43.36: ideal_attack_angle — try exact candidates, then fall
+            # back to fuzzy match on "attack" + "angle" in column name.
+            iaa_col = next((c for c in ideal_aa_candidates if c in df.columns),
+                           next((c for c in df.columns
+                                 if ("attack" in c.lower() and "angle" in c.lower())
+                                 or "ideal_attack" in c.lower()), None))
 
             # Build output frame with normalized column names
             out = pd.DataFrame()
@@ -1039,6 +1041,12 @@ def get_bat_tracking(season: int = 2025) -> tuple[pd.DataFrame, str]:
                 out["fast_swing_pct"] = pd.to_numeric(df[fs_col], errors="coerce")
             if sq_col:
                 out["squared_up_pct"] = pd.to_numeric(df[sq_col], errors="coerce")
+            # v43.36: ideal_attack_angle_pct (% of swings in the 5-20° HR
+            # launch zone). NaN if Savant didn't return it.
+            if iaa_col:
+                out["ideal_attack_angle_pct"] = pd.to_numeric(
+                    df[iaa_col], errors="coerce"
+                )
 
             # Filter to rows with non-null blast_pct AND valid player_id
             out = out.dropna(subset=["blast_pct", "player_id"])
