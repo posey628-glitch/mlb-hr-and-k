@@ -542,25 +542,40 @@ def get_hitter_handedness_statcast(season: int = CURRENT_SEASON,
 
 def apply_handedness_overrides(matchup_df: pd.DataFrame,
                                  p_throws: str | None,
-                                 min_split_pa: int = 30) -> pd.DataFrame:
-    """Per-game: override season-overall barrel/hard_hit/xwoba/avg_ev/iso
-    with handedness-specific values when available and sample is adequate.
+                                 min_split_pa: int = 30,
+                                 shrinkage_pa: int = 100) -> pd.DataFrame:
+    """Per-game: blend season-overall barrel/hard_hit/xwoba/avg_ev/iso
+    with handedness-specific values, weighted by sample size.
 
-    This addresses the central handedness gap: power_score and hr_form use
-    season-overall contact quality, which over-rates platoon-split hitters
-    against the side they struggle with (and under-rates the reverse).
+    v43.43 (reviewer-validated): the original v43.18 implementation did a
+    HARD REPLACE of season values with handedness values when split_pa >=
+    min_split_pa=30. That let a hitter with 35 PA vs LHP and a flukey ISO
+    fully drive their grade. Reviewer caught this: "tiny-sample splits
+    driving grades — split_confidence warns but doesn't stop the override
+    from affecting the score."
 
-    For each hitter in matchup_df:
-      1. If pitcher's throwing hand is unknown → no change
-      2. If hitter has vs_{X}_pa >= min_split_pa AND vs_{X}_barrel_pct exists
-         → overwrite barrel_pct with vs_{X}_barrel_pct
-         (same for hard_hit, xwoba, avg_ev, iso)
-      3. Else → no change (keeps season-overall)
+    The fix is a Bayesian shrinkage blend:
+      blended = (hand_pa × hand_value + shrinkage_pa × season_value)
+                / (hand_pa + shrinkage_pa)
+
+    With shrinkage_pa=100 (default):
+      30 PA hand sample  → 23% weight to handedness, 77% to season-overall
+      60 PA              → 38% / 62%
+      100 PA             → 50% / 50%
+      200 PA             → 67% / 33%
+      300+ PA            → 75%+ / 25%-
+
+    This means flukey small samples can shift the grade but can't dominate
+    it. Established split hitters (200+ PA) still get most of the override
+    benefit. No hard cutoff — the blend gracefully scales.
+
+    The min_split_pa=30 floor still applies: below 30 PA, no blend at all
+    (just season-overall).
 
     Returns modified matchup_df. Original column values are not preserved
     (they remain in vs_lhp_* / vs_rhp_* for reference). Switch hitters: the
     vs_lhp/vs_rhp splits naturally reflect which side they batted (splits
-    accumulate based on pitcher faced), so the override works the same way.
+    accumulate based on pitcher faced), so the blend works the same way.
     """
     if matchup_df is None or matchup_df.empty:
         return matchup_df
@@ -573,11 +588,11 @@ def apply_handedness_overrides(matchup_df: pd.DataFrame,
         return matchup_df
 
     df = matchup_df.copy()
-    # Boolean mask: hitters with adequate sample on this side
     pa_vals = pd.to_numeric(df[pa_col], errors="coerce")
-    mask = pa_vals >= min_split_pa
+    # Hard floor: below min_split_pa, ignore handedness entirely
+    sufficient_mask = pa_vals >= min_split_pa
 
-    # Override each stat where we have the handedness data and adequate sample
+    # Bayesian blend each stat with shrinkage toward season-overall
     overrides = [
         ("barrel_pct",  f"vs_{side}_barrel_pct"),
         ("hard_hit",    f"vs_{side}_hard_hit"),
@@ -587,10 +602,20 @@ def apply_handedness_overrides(matchup_df: pd.DataFrame,
     ]
     for season_col, hand_col in overrides:
         if season_col in df.columns and hand_col in df.columns:
+            season_vals = pd.to_numeric(df[season_col], errors="coerce")
             hand_vals = pd.to_numeric(df[hand_col], errors="coerce")
-            # Apply override only where mask is True AND hand value is valid
-            row_mask = mask & hand_vals.notna()
-            df.loc[row_mask, season_col] = hand_vals[row_mask]
+            # Apply blend only where: sufficient PA AND both values valid
+            blend_mask = sufficient_mask & hand_vals.notna() & season_vals.notna()
+            if blend_mask.any():
+                # weight_hand = hand_pa / (hand_pa + shrinkage_pa)
+                hand_pa = pa_vals[blend_mask]
+                w_hand = hand_pa / (hand_pa + shrinkage_pa)
+                w_season = 1 - w_hand
+                blended = (
+                    hand_vals[blend_mask] * w_hand
+                    + season_vals[blend_mask] * w_season
+                )
+                df.loc[blend_mask, season_col] = blended
     return df
 
 
