@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.40-gist-error-diagnostic"
+APP_VERSION = "2026.06.10-v43.41-hr-score-unified"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -4461,7 +4461,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.40 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.41 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -6442,14 +6442,17 @@ st.divider()
 # ============================================================================
 st.subheader("🏆 Top 10 Picks of the Day")
 st.caption(
-    "Best HR plays combining: HR Game%, matchup, recent form, power, "
-    "park/weather, pitch-specific match, and lineup confirmation. "
-    "**Note:** A hitter facing an ace (Misiorowski-tier) can still appear "
-    "if they have an elite per-pitch match against that pitcher's arsenal. "
-    "Check the Matchup column — if it's <50, the model is acknowledging the "
-    "tough matchup but other factors are compensating. Max 2 per game; "
-    "max 3 if slate is small."
+    "**HR Score (0-100)** is the primary metric — comprehensive composite of "
+    "8 weighted tiers (HR probability, power, swing mechanics, matchup, form, "
+    "environment, discipline, lineup context). **Rescaled per slate**, so the "
+    "best play of the night reads ~95 and worst ~10. The 🎯 column shows color "
+    "(🟢≥75 / 🟡 50-74 / 🟠 25-49 / 🔴 <25). Use HR Score for primary ranking, "
+    "HR Game% for the raw probability. **Note:** a hitter facing an ace can "
+    "still appear here if they have an elite per-pitch match against that "
+    "pitcher's arsenal — the model acknowledges tough matchups via the Matchup "
+    "column (<50 = pitcher edge). Max 2 per game; max 3 if slate is small."
 )
+
 
 # LINEUP-FILL WARNING (June 2026)
 # Lineups for 7:05 PM games typically post by 4-5 PM ET. If we're past
@@ -6558,11 +6561,21 @@ if all_hitters_for_picks:
     try:
         from models import (
             compute_comprehensive_hr_composite, comprehensive_hr_grade,
+            rescale_composite_to_slate, hr_score_signal,
         )
-        _composite = compute_comprehensive_hr_composite(combined_picks)
-        combined_picks["grade_composite"] = _composite
+        _composite_raw = compute_comprehensive_hr_composite(combined_picks)
+        # v43.41 (user-requested UX simplification): rescale composite per
+        # slate so the distribution spans 10-95. Without this, even elite
+        # hitters score ~70 (regression-to-mean on percentile averages),
+        # making everyone look like B/C. After rescale, the best play of
+        # the slate reads ~95 and users can immediately differentiate.
+        _hr_score = rescale_composite_to_slate(_composite_raw)
+        combined_picks["grade_composite"] = _composite_raw  # raw, for audit
+        combined_picks["hr_score"] = _hr_score              # PRIMARY display number
+        combined_picks["hr_score_signal"] = _hr_score.apply(hr_score_signal)
 
-        # Per-hitter grade with caps applied
+        # Per-hitter letter grade with caps applied (kept for backward compat
+        # with existing snapshots/exports — display will prefer hr_score)
         def _row_grade(row):
             return comprehensive_hr_grade(
                 row.get("grade_composite"),
@@ -6578,24 +6591,20 @@ if all_hitters_for_picks:
             )
         combined_picks["grade"] = combined_picks.apply(_row_grade, axis=1)
 
-        # Back-map: dict of player_id → (composite, grade) so each per-game
-        # matchup_df gets the updated grade for display.
+        # Back-map: dict of player_id → (composite, score, signal, grade)
         _grade_map = {
-            int(pid): (comp, grd)
-            for pid, comp, grd in zip(
+            int(pid): (comp, score, sig, grd)
+            for pid, comp, score, sig, grd in zip(
                 combined_picks["player_id"],
                 combined_picks["grade_composite"],
+                combined_picks["hr_score"],
+                combined_picks["hr_score_signal"],
                 combined_picks["grade"],
             )
             if pid is not None and not pd.isna(pid)
         }
 
-        # Update every matchup_df's "grade" + add "grade_composite"
-        # For hitters IN combined_picks: use the new comprehensive grade
-        # For hitters NOT in combined_picks (bench, sub-PA): preserve the
-        # existing per-matchup grade (from simple hr_grade() during build).
-        # This way bench/unqualified hitters still show their basic grade
-        # rather than "—".
+        # Update every matchup_df's grade columns
         for _gpk, _ctx in game_context_map.items():
             for _side_key in ("away_matchup", "home_matchup",
                                "away_bench_matchup", "home_bench_matchup"):
@@ -6604,38 +6613,43 @@ if all_hitters_for_picks:
                     continue
                 if "player_id" not in _mdf.columns:
                     continue
-                new_grades = []
-                new_composites = []
+                new_grades, new_composites, new_scores, new_sigs = [], [], [], []
                 _existing_grades = _mdf["grade"].tolist() if "grade" in _mdf.columns else [""] * len(_mdf)
                 for _i, _pid in enumerate(_mdf["player_id"]):
                     if _pid is None or pd.isna(_pid):
                         new_grades.append(_existing_grades[_i] if _i < len(_existing_grades) else "—")
                         new_composites.append(None)
+                        new_scores.append(None)
+                        new_sigs.append("⚪")
                         continue
                     info = _grade_map.get(int(_pid))
                     if info:
-                        # In combined_picks → comprehensive grade
                         new_composites.append(info[0])
-                        new_grades.append(info[1])
+                        new_scores.append(info[1])
+                        new_sigs.append(info[2])
+                        new_grades.append(info[3])
                     else:
-                        # Not in combined_picks (bench/unqualified) →
-                        # preserve existing per-matchup grade
                         new_composites.append(None)
+                        new_scores.append(None)
+                        new_sigs.append("⚪")
                         new_grades.append(_existing_grades[_i] if _i < len(_existing_grades) else "—")
                 _mdf["grade_composite"] = new_composites
+                _mdf["hr_score"] = new_scores
+                _mdf["hr_score_signal"] = new_sigs
                 _mdf["grade"] = new_grades
 
-        # Audit info for the user — distribution of new grades
-        _grade_counts = combined_picks["grade"].value_counts().to_dict()
-        st.caption(
-            f"v43.37 comprehensive HR grade · Slate distribution: "
-            + " · ".join(f"{g}={_grade_counts.get(g, 0)}"
-                          for g in ["A+", "A", "B+", "B", "C+", "C", "D", "F"])
-        )
+        # Audit info — distribution of new scores
+        _score_vals = combined_picks["hr_score"].dropna()
+        if len(_score_vals) > 0:
+            st.caption(
+                f"v43.41 HR Score (0-100) · "
+                f"min {_score_vals.min():.0f} · "
+                f"med {_score_vals.median():.0f} · "
+                f"max {_score_vals.max():.0f} · "
+                f"top 10 hitters score ≥ {_score_vals.nlargest(10).min():.0f}"
+            )
     except Exception as _ce:
-        # If anything fails, fall back to existing per-hitter hr_grade
-        # (which is still computed during matchup build). No silent break.
-        st.warning(f"v43.37 comprehensive grade fallback: {_ce}")
+        st.warning(f"v43.41 HR Score fallback: {_ce}")
 
 
 
@@ -10981,16 +10995,49 @@ def _render_wind_diagram(wind_mph, wind_dir_deg, cf_bearing, venue_name=None):
 
 def build_col_config():
     return {
+        # v43.41 — primary HR metric, replaces letter-grade-first display
+        "hr_score_signal": st.column_config.TextColumn(
+            "🎯", width="small",
+            help=(
+                "HR play color (v43.41).\n"
+                "🟢 = Top tier (HR Score ≥ 75) — strong play\n"
+                "🟡 = Above median (50-74) — solid consideration\n"
+                "🟠 = Below median (25-49) — weaker spot\n"
+                "🔴 = Bottom quartile (<25) — avoid for HR props\n"
+                "⚪ = No data / insufficient sample"
+            ),
+        ),
+        "hr_score": st.column_config.NumberColumn(
+            "HR Score",
+            format="%.0f",
+            width="small",
+            help=(
+                "**Primary HR ranking number (0-100).** v43.41.\n\n"
+                "Composite of 8 tiers at honest weights:\n"
+                "  • HR Probability (30%)\n"
+                "  • Power Signals (25%) — barrel, pulled barrels, EV, ISO\n"
+                "  • Swing Mechanics (12%) — pull%, FB%, attack angle\n"
+                "  • Matchup vs Pitcher (12%)\n"
+                "  • Recent Form (10%)\n"
+                "  • Environment (6%)\n"
+                "  • Plate Discipline (3%)\n"
+                "  • Lineup/Context Bonuses (2%)\n\n"
+                "Rescaled per-slate so the BEST play of the night reads ~95, "
+                "worst ~10, median ~50. This makes the spread interpretable: "
+                "a 92 is genuinely the slate's top tier; a 38 is below average. "
+                "Cap layers apply: hostile env / same-side platoon / mechanical "
+                "fail (pull<35 + EV<88) cap the score regardless of other tiers."
+            ),
+        ),
         "alert": st.column_config.TextColumn(
             "Signal", width="small",
             help=(
-                "v43.4+: derived from letter grade.\n"
-                "🟢 = Grade A+/A (HR Game% ≥ 21%) — top-tier HR play\n"
-                "🟡 = Grade B+/B (13-21%) — solid HR consideration\n"
-                "🟠 = Grade C+/C (7-13%) — middle of pack\n"
-                "🔴 = Grade D/F (< 7%) — avoid for HR props\n"
-                "⚪ = INSUFFICIENT SAMPLE — player has too few PA (< threshold) "
-                "for a reliable projection. NOT a sleeper indicator."
+                "Legacy color signal (v43.4+, kept for backward compat).\n"
+                "v43.41: prefer 🎯 (HR Score color) for primary use.\n"
+                "🟢 = Grade A+/A (HR Game% ≥ 21%)\n"
+                "🟡 = Grade B+/B (13-21%)\n"
+                "🟠 = Grade C+/C (7-13%)\n"
+                "🔴 = Grade D/F (< 7%)"
             ),
         ),
         # v43.27: HIT signal — orthogonal to HR signal.
@@ -11457,21 +11504,27 @@ def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
         )
 
     cols_to_show = [c for c in [
-        # HR signal first — primary use case
-        "alert", "grade", "smash_spot", "arsenal_flag", "gb_flag", "day_night_flag",
-        "contact_flag", "split_confidence", "slate_leader_flag",
-        # v43.36 (user-requested): 4-point HR criteria checklist —
-        # display right next to grade so user can see WHY a hitter ranks
-        # high (or doesn't despite a good grade)
-        "hr_profile_grade", "hr_criteria_label",
-        # v43.27: HIT signal — orthogonal to HR signal, visible right after HR signals
-        "hit_alert", "hit_grade",
-        # Identity / lineup
+        # v43.41 UX simplification — HR Score (0-100) is the PRIMARY metric.
+        # Signal emoji + score + raw HR% gives 3 levels of detail at a glance:
+        # color > number > probability. Letter grade kept for backward compat
+        # but moved later in the column order so it's not competing visually.
+        "hr_score_signal", "hr_score", "hr_game_pct",
+        # Identity / lineup (moved up for readability)
         "player_name", "lineup_pos", "bats", "position",
+        # Hit signal — same simplified pattern (color + number + raw)
+        "hit_alert", "hit_game_pct",
+        # 2+ bases (v43.38)
+        "tb_grade", "expected_total_bases",
+        # Smash + flags
+        "smash_spot", "arsenal_flag", "gb_flag", "day_night_flag",
+        "contact_flag", "split_confidence", "slate_leader_flag",
+        # v43.36 criteria — kept as visual checkmarks (NOT a grade)
+        "hr_criteria_label",
+        # Letter grades AFTER scores (backward compat / for those who prefer letters)
+        "grade", "hit_grade",
         "hr_profile_label",
-        # Score composites — HR + hit alongside
+        # Score composites
         "power_score", "lift_score", "matchup_opp",
-        "hr_game_pct", "hit_game_pct",  # v43.27 — both probabilities side-by-side
         "hr_pa_pct", "hit_pa_pct",
         "matchup", "test_score",
         # v43.23: discipline_score visible now (was computed but never displayed)
