@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.35-wind-viz-svg"
+APP_VERSION = "2026.06.10-v43.38-comprehensive-grade-total-bases-slate-forecast"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -4461,7 +4461,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.35 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.38 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -5066,13 +5066,21 @@ for _, game in slate.iterrows():
     # rows missing both K% and BB% — composite returns NaN there and the
     # downstream pct_rank handles it.
     try:
-        from models import add_discipline_score
+        from models import add_discipline_score, add_hr_criteria
         away_matchup = add_discipline_score(away_matchup)
         home_matchup = add_discipline_score(home_matchup)
+        # v43.36 (user-requested): 4-point HR criteria checklist
+        # (pull% ≥40, EV ≥90, barrel% ≥10, IAA ≥60). Display-only —
+        # does NOT modify pick_score or grade. Lets user filter/sort
+        # by how many of the 4 thresholds each hitter meets.
+        away_matchup = add_hr_criteria(away_matchup)
+        home_matchup = add_hr_criteria(home_matchup)
         if not away_bench_matchup.empty:
             away_bench_matchup = add_discipline_score(away_bench_matchup)
+            away_bench_matchup = add_hr_criteria(away_bench_matchup)
         if not home_bench_matchup.empty:
             home_bench_matchup = add_discipline_score(home_bench_matchup)
+            home_bench_matchup = add_hr_criteria(home_bench_matchup)
     except Exception:
         pass
     # NEW (June 2026): batter_hand passes the hitter's bat side ("L", "R", "S")
@@ -5440,6 +5448,9 @@ for _, game in slate.iterrows():
         # picking between HR-friendly and contact-friendly hitters when
         # the question is "hit prop" vs "HR prop."
         hit_pa_list, hit_game_list, hit_grades, hit_signals = [], [], [], []
+        # v43.38 (user-requested): expected total bases per game (excl walks)
+        # — separate signal for "2+ bases this game" plays per team
+        tb_pa_list, tb_game_list, tb_grades = [], [], []
         for _, hr in matchup_df.iterrows():
             row_dict = hr.to_dict()
             # Inject game_type for day/night split adjustment in props.py.
@@ -5616,6 +5627,27 @@ for _, game in slate.iterrows():
             except (NameError, Exception):
                 hit_grades.append("—")
                 hit_signals.append("⚪")
+
+            # v43.38 (user-requested): expected total bases per game
+            # Uses xSLG + pitcher SLG-against. Same fallback pattern as hit signal.
+            try:
+                from props import total_bases_per_pa, total_bases_per_game
+                from props import total_bases_grade as _tb_grade_fn
+                tb_pa_v = total_bases_per_pa(
+                    row_dict, opp_p_row,
+                    park_hits_factor=hitter_park_mult,
+                    platoon_mult=_hit_platoon if '_hit_platoon' in dir() else 1.0,
+                )
+                tb_game_v = total_bases_per_game(tb_pa_v, expected_pa=expected_pa) if tb_pa_v is not None else None
+            except Exception:
+                tb_pa_v = None
+                tb_game_v = None
+            tb_pa_list.append(round(tb_pa_v, 3) if tb_pa_v is not None else None)
+            tb_game_list.append(round(tb_game_v, 2) if tb_game_v is not None else None)
+            try:
+                tb_grades.append(_tb_grade_fn(tb_game_v) if tb_game_v is not None else "—")
+            except (NameError, Exception):
+                tb_grades.append("—")
 
             verdicts.append(hr_verdict(
                 game_pct_val, sample, INSUFFICIENT_PA_THRESHOLD,
@@ -5944,6 +5976,10 @@ for _, game in slate.iterrows():
         matchup_df["hit_game_pct"] = hit_game_list
         matchup_df["hit_grade"] = hit_grades
         matchup_df["hit_alert"] = hit_signals
+        # v43.38: total bases signal — "expected ≥2 bases" indicator
+        matchup_df["tb_pa"] = tb_pa_list
+        matchup_df["expected_total_bases"] = tb_game_list
+        matchup_df["tb_grade"] = tb_grades
         matchup_df["verdict"] = verdicts
         matchup_df["alert"] = signals
         matchup_df["grade"] = grades
@@ -6401,6 +6437,118 @@ st.divider()
 
 
 # ============================================================================
+# v43.38 — SLATE FORECAST + 2+ BASES PER TEAM (user-requested)
+# ============================================================================
+# Two new top-of-page sections:
+#   1. Expected total HRs across the slate (sum of game-HR probabilities)
+#   2. Top 3 hitters per team most likely to get ≥2 total bases (excl walks)
+# ============================================================================
+if combined_picks is not None and not combined_picks.empty:
+    # ---- Slate HR forecast ----
+    try:
+        hr_pcts = pd.to_numeric(
+            combined_picks.get("hr_game_pct", pd.Series(dtype=float)),
+            errors="coerce",
+        )
+        if hr_pcts.notna().any():
+            # Sum probabilities = expected count of hitters who homer.
+            # Add ~5% upward adjustment for multi-HR games (Schwarber-tier
+            # multi-HR rate is ~3-5% of HR-game outcomes).
+            expected_hrs = float(hr_pcts.sum() / 100.0) * 1.05
+            import math
+            # Poisson approximation: var = mean, 2σ window ≈ ±2√mean
+            spread = 2 * math.sqrt(expected_hrs)
+            low = max(0, int(round(expected_hrs - spread)))
+            high = int(round(expected_hrs + spread))
+
+            col_a, col_b, col_c = st.columns(3)
+            with col_a:
+                st.metric(
+                    "📊 Expected HRs (slate)",
+                    f"{expected_hrs:.1f}",
+                    f"range {low}–{high}",
+                    delta_color="off",
+                )
+            with col_b:
+                n_qual = int(hr_pcts.notna().sum())
+                st.metric(
+                    "Hitters with projection",
+                    f"{n_qual}",
+                    f"of {len(combined_picks)} on slate",
+                    delta_color="off",
+                )
+            with col_c:
+                # Avg HR Game% per qualified hitter
+                avg_hr = float(hr_pcts.mean())
+                st.metric(
+                    "Avg HR Game% (qualified)",
+                    f"{avg_hr:.1f}%",
+                    "vs ~12.5% slate baseline",
+                    delta_color="off",
+                )
+            st.caption(
+                "📐 *Forecast = sum of per-hitter game-HR probabilities × 1.05 "
+                "(slight upward for multi-HR games). Range = ±2σ Poisson interval — "
+                "actual total falls in this window ~95% of nights.*"
+            )
+    except Exception:
+        pass
+
+    # ---- Top 3 per team likely to get ≥2 total bases ----
+    try:
+        if ("expected_total_bases" in combined_picks.columns
+                and "team" in combined_picks.columns
+                and combined_picks["expected_total_bases"].notna().any()):
+            tb = combined_picks.dropna(subset=["expected_total_bases", "team"]).copy()
+            tb["expected_total_bases"] = pd.to_numeric(
+                tb["expected_total_bases"], errors="coerce"
+            )
+            # Threshold: only flag hitters with expected_bases ≥ 1.5 (above
+            # league avg ~1.55 — meaningful "2+ bases play")
+            tb = tb[tb["expected_total_bases"] >= 1.5]
+            if not tb.empty:
+                # Top 3 per team, sorted within team
+                tb_top = tb.sort_values(
+                    ["team", "expected_total_bases"], ascending=[True, False]
+                ).groupby("team").head(3).reset_index(drop=True)
+
+                with st.expander(
+                    f"🎯 2+ Bases Plays — Top 3 per team ({len(tb_top)} hitters)",
+                    expanded=False,
+                ):
+                    st.caption(
+                        "Hitters most likely to total ≥2 bases tonight (excludes walks — "
+                        "SLG is TB/AB by definition). Uses xSLG anchored, adjusted by "
+                        "pitcher SLG-against, park, and platoon. Threshold: expected "
+                        "bases ≥1.5. Only top 3 per team — many teams will have fewer."
+                    )
+                    # Display columns
+                    show_cols = [c for c in (
+                        "team", "player_name", "opp_pitcher",
+                        "tb_grade", "expected_total_bases",
+                        "hr_game_pct", "hit_game_pct",
+                        "slg", "xslg",
+                    ) if c in tb_top.columns]
+                    st.dataframe(
+                        tb_top[show_cols], hide_index=True, use_container_width=True,
+                        column_config={
+                            "team": st.column_config.TextColumn("Team", width="small"),
+                            "tb_grade": st.column_config.TextColumn("TB Grade", width="small"),
+                            "expected_total_bases": st.column_config.NumberColumn(
+                                "Exp Bases", format="%.2f",
+                                help="Expected total bases this game (excludes walks)",
+                            ),
+                            "hr_game_pct": st.column_config.NumberColumn("HR%", format="%.1f%%"),
+                            "hit_game_pct": st.column_config.NumberColumn("Hit%", format="%.1f%%"),
+                            "slg": st.column_config.NumberColumn("SLG", format="%.3f"),
+                            "xslg": st.column_config.NumberColumn("xSLG", format="%.3f"),
+                        },
+                    )
+    except Exception:
+        pass
+
+
+# ============================================================================
 # TOP 5 PICKS OF THE DAY — combined HR signal across all factors
 # ============================================================================
 st.subheader("🏆 Top 10 Picks of the Day")
@@ -6506,6 +6654,99 @@ for gpk, ctx in game_context_map.items():
 
 if all_hitters_for_picks:
     combined_picks = pd.concat(all_hitters_for_picks, ignore_index=True)
+
+    # ====================================================================
+    # v43.37 — COMPREHENSIVE HR GRADE (user-requested rebuild)
+    # ====================================================================
+    # Replace the old single-input grade (HR Game% thresholded) with a
+    # tier-weighted composite of ALL signals at proper weights. A+ now
+    # means "everything aligns" — not just "high HR Game%."
+    #
+    # Compute slate-wide so percentile ranks are normalized across all
+    # hitters in tonight's slate, then back-map to every matchup_df via
+    # player_id so the per-game tables show the new grade.
+    # ====================================================================
+    try:
+        from models import (
+            compute_comprehensive_hr_composite, comprehensive_hr_grade,
+        )
+        _composite = compute_comprehensive_hr_composite(combined_picks)
+        combined_picks["grade_composite"] = _composite
+
+        # Per-hitter grade with caps applied
+        def _row_grade(row):
+            return comprehensive_hr_grade(
+                row.get("grade_composite"),
+                pull_pct=row.get("pull_pct"),
+                avg_ev=row.get("avg_ev"),
+                env_mult=row.get("env_boost"),
+                same_side_platoon=bool(
+                    (row.get("bats") or "").upper() != "S"
+                    and (row.get("bats") or "").upper()
+                        == (row.get("opp_pitcher_throws") or "").upper()
+                ),
+                sample_size=row.get("pa"),
+            )
+        combined_picks["grade"] = combined_picks.apply(_row_grade, axis=1)
+
+        # Back-map: dict of player_id → (composite, grade) so each per-game
+        # matchup_df gets the updated grade for display.
+        _grade_map = {
+            int(pid): (comp, grd)
+            for pid, comp, grd in zip(
+                combined_picks["player_id"],
+                combined_picks["grade_composite"],
+                combined_picks["grade"],
+            )
+            if pid is not None and not pd.isna(pid)
+        }
+
+        # Update every matchup_df's "grade" + add "grade_composite"
+        # For hitters IN combined_picks: use the new comprehensive grade
+        # For hitters NOT in combined_picks (bench, sub-PA): preserve the
+        # existing per-matchup grade (from simple hr_grade() during build).
+        # This way bench/unqualified hitters still show their basic grade
+        # rather than "—".
+        for _gpk, _ctx in game_context_map.items():
+            for _side_key in ("away_matchup", "home_matchup",
+                               "away_bench_matchup", "home_bench_matchup"):
+                _mdf = _ctx.get(_side_key)
+                if _mdf is None or _mdf.empty:
+                    continue
+                if "player_id" not in _mdf.columns:
+                    continue
+                new_grades = []
+                new_composites = []
+                _existing_grades = _mdf["grade"].tolist() if "grade" in _mdf.columns else [""] * len(_mdf)
+                for _i, _pid in enumerate(_mdf["player_id"]):
+                    if _pid is None or pd.isna(_pid):
+                        new_grades.append(_existing_grades[_i] if _i < len(_existing_grades) else "—")
+                        new_composites.append(None)
+                        continue
+                    info = _grade_map.get(int(_pid))
+                    if info:
+                        # In combined_picks → comprehensive grade
+                        new_composites.append(info[0])
+                        new_grades.append(info[1])
+                    else:
+                        # Not in combined_picks (bench/unqualified) →
+                        # preserve existing per-matchup grade
+                        new_composites.append(None)
+                        new_grades.append(_existing_grades[_i] if _i < len(_existing_grades) else "—")
+                _mdf["grade_composite"] = new_composites
+                _mdf["grade"] = new_grades
+
+        # Audit info for the user — distribution of new grades
+        _grade_counts = combined_picks["grade"].value_counts().to_dict()
+        st.caption(
+            f"v43.37 comprehensive HR grade · Slate distribution: "
+            + " · ".join(f"{g}={_grade_counts.get(g, 0)}"
+                          for g in ["A+", "A", "B+", "B", "C+", "C", "D", "F"])
+        )
+    except Exception as _ce:
+        # If anything fails, fall back to existing per-hitter hr_grade
+        # (which is still computed during matchup build). No silent break.
+        st.warning(f"v43.37 comprehensive grade fallback: {_ce}")
 
     # ====================================================================
     # SLATE LEADERS — who's #1 in each meaningful category across the slate
@@ -10776,6 +11017,35 @@ def build_col_config():
                  "adjusted for pitcher BAA, park, platoon, K%). "
                  "League average ~65%.",
         ),
+        # v43.36 (user-requested): HR Profile Criteria — 4-point checklist
+        "hr_profile_grade": st.column_config.TextColumn(
+            "HR Profile",
+            width="small",
+            help=(
+                "v43.36: Letter grade based on how many of 4 HR-friendly "
+                "thresholds the hitter meets:\n"
+                "  1. Pull % ≥ 40 (66% of HRs are pulled)\n"
+                "  2. Avg EV ≥ 90 mph (below caps HR ceiling)\n"
+                "  3. Barrel % ≥ 10 (80-86% of HRs ARE barreled)\n"
+                "  4. Ideal Attack Angle ≥ 60% (swing path in 5-20° "
+                "launch zone — may show '·' if Statcast bat-tracking "
+                "endpoint hasn't returned it for this hitter)\n\n"
+                "A+ = all 4 met · A = 3/4 · B = 2/4 · C = 1/4 · F = 0\n"
+                "Grade is based on FRACTION met of criteria with data, "
+                "so a hitter missing IAA data isn't penalized — they're "
+                "graded on the 3 criteria we DO have."
+            ),
+        ),
+        "hr_criteria_label": st.column_config.TextColumn(
+            "✓✗ Pull/EV/Brl/IAA",
+            width="medium",
+            help=(
+                "Visual checklist showing which HR thresholds the hitter meets. "
+                "Order: Pull%/EV/Barrel%/IdealAttackAngle.\n"
+                "✓ = meets threshold · ✗ = below threshold · · = no data\n"
+                "Followed by 'X/Y' = met / total-with-data."
+            ),
+        ),
         # v43.23: discipline score (K%/BB% composite). Powers ps_discipline
         # in pick_score (6% weight). Higher = better contact/discipline.
         "discipline_score": st.column_config.NumberColumn(
@@ -11189,6 +11459,10 @@ def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
         # HR signal first — primary use case
         "alert", "grade", "smash_spot", "arsenal_flag", "gb_flag", "day_night_flag",
         "contact_flag", "split_confidence", "slate_leader_flag",
+        # v43.36 (user-requested): 4-point HR criteria checklist —
+        # display right next to grade so user can see WHY a hitter ranks
+        # high (or doesn't despite a good grade)
+        "hr_profile_grade", "hr_criteria_label",
         # v43.27: HIT signal — orthogonal to HR signal, visible right after HR signals
         "hit_alert", "hit_grade",
         # Identity / lineup
