@@ -1234,6 +1234,341 @@ def add_discipline_score(matchup_df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+# ============================================================================
+# v43.36 — HR PROFILE CRITERIA (user-requested framework)
+# ============================================================================
+# Concrete thresholds from a real data source: a hitter is HR-likely if they
+# clear these four bars (over the last two weeks / season-aware sample):
+#
+#   1. Pull % ≥ 40       — 66% of HRs are pulled; hitters who pull a lot
+#                          have HR profiles. (Outliers: Ohtani, Wood etc.
+#                          who hit power to all fields — handled separately
+#                          via raw barrel/EV strength.)
+#   2. Avg EV ≥ 90 mph   — harder ball, further travel; below 90 caps HR
+#                          ceiling regardless of swing path.
+#   3. Barrel % ≥ 10     — 80-86% of HRs ARE barreled (Statcast). A hitter
+#                          who barrels ≥10% of contact has elite HR rate.
+#   4. Ideal Attack Angle ≥ 60% — % of swings in the 5-20° launch zone.
+#                          League avg ~50-55%; 60%+ means consistent
+#                          power-friendly swing path (Statcast bat tracking,
+#                          may be empty if Savant endpoint drift).
+#
+# This is a DISPLAY checklist — does NOT modify pick_score or grades.
+# Hitters can be sorted/filtered by how many criteria they meet (0-4).
+# ============================================================================
+
+HR_CRITERIA_THRESHOLDS = {
+    "pull_pct": 40.0,
+    "avg_ev": 90.0,
+    "barrel_pct": 10.0,
+    "ideal_attack_angle_pct": 60.0,
+}
+
+
+def add_hr_criteria(df: pd.DataFrame) -> pd.DataFrame:
+    """Mark each hitter against the 4-point HR-profile checklist.
+
+    Adds the following columns:
+      - hr_crit_pull        bool|None — meets pull_pct ≥ 40
+      - hr_crit_ev          bool|None — meets avg_ev ≥ 90
+      - hr_crit_barrel      bool|None — meets barrel_pct ≥ 10
+      - hr_crit_iaa         bool|None — meets ideal_attack_angle_pct ≥ 60
+      - hr_criteria_met     int       — count of criteria met (0-4)
+      - hr_criteria_total   int       — count of criteria with data (0-4)
+      - hr_criteria_label   str       — visual: "✓✓✓✗" or "3/4"
+      - hr_profile_grade    str       — A+ (4/4) / A (3/4) / B (2/4) / C (1/4) / F (0)
+                                        also "—" if no data on any criterion
+
+    None values for individual criteria indicate "data not available"
+    (vs False meaning "data available, threshold not met"). This matters
+    because ideal_attack_angle data may not be present for every hitter
+    if Savant's bat-tracking endpoint isn't returning that field.
+    """
+    if df is None or df.empty:
+        return df
+
+    def _check(val, threshold):
+        if val is None or pd.isna(val):
+            return None
+        try:
+            return float(val) >= threshold
+        except (TypeError, ValueError):
+            return None
+
+    # Pull % — prefer pull_pct (raw % of contact pulled). Fall back to
+    # pull_air_pct as a proxy if pull_pct missing. They're different but
+    # both correlate with HR-profile pull tendency.
+    pull_col = "pull_pct" if "pull_pct" in df.columns else (
+        "pull_air_pct" if "pull_air_pct" in df.columns else None
+    )
+
+    def _row_criteria(row):
+        c1 = _check(row.get(pull_col) if pull_col else None,
+                    HR_CRITERIA_THRESHOLDS["pull_pct"])
+        c2 = _check(row.get("avg_ev"),
+                    HR_CRITERIA_THRESHOLDS["avg_ev"])
+        c3 = _check(row.get("barrel_pct"),
+                    HR_CRITERIA_THRESHOLDS["barrel_pct"])
+        c4 = _check(row.get("ideal_attack_angle_pct"),
+                    HR_CRITERIA_THRESHOLDS["ideal_attack_angle_pct"])
+        return c1, c2, c3, c4
+
+    crit_lists = {"pull": [], "ev": [], "barrel": [], "iaa": []}
+    for _, row in df.iterrows():
+        c1, c2, c3, c4 = _row_criteria(row)
+        crit_lists["pull"].append(c1)
+        crit_lists["ev"].append(c2)
+        crit_lists["barrel"].append(c3)
+        crit_lists["iaa"].append(c4)
+
+    df["hr_crit_pull"] = crit_lists["pull"]
+    df["hr_crit_ev"] = crit_lists["ev"]
+    df["hr_crit_barrel"] = crit_lists["barrel"]
+    df["hr_crit_iaa"] = crit_lists["iaa"]
+
+    def _summarize(p, e, b, i):
+        crits = [p, e, b, i]
+        met = sum(1 for c in crits if c is True)
+        total = sum(1 for c in crits if c is not None)
+        if total == 0:
+            return 0, 0, "—", "—"
+        # Visual label — ✓ met, ✗ not met, · no data
+        symbols = []
+        for c in crits:
+            if c is True:
+                symbols.append("✓")
+            elif c is False:
+                symbols.append("✗")
+            else:
+                symbols.append("·")
+        label = "".join(symbols) + f" {met}/{total}"
+
+        # Grade based on FRACTION met (not raw count) since IAA may be missing
+        # for everyone — don't penalize for unavailable data
+        if total == 0:
+            grade = "—"
+        else:
+            frac = met / total
+            if frac >= 0.99: grade = "A+"
+            elif frac >= 0.75: grade = "A"
+            elif frac >= 0.50: grade = "B"
+            elif frac >= 0.25: grade = "C"
+            else: grade = "F"
+        return met, total, label, grade
+
+    summaries = [_summarize(p, e, b, i) for p, e, b, i in zip(
+        crit_lists["pull"], crit_lists["ev"],
+        crit_lists["barrel"], crit_lists["iaa"]
+    )]
+    df["hr_criteria_met"] = [s[0] for s in summaries]
+    df["hr_criteria_total"] = [s[1] for s in summaries]
+    df["hr_criteria_label"] = [s[2] for s in summaries]
+    df["hr_profile_grade"] = [s[3] for s in summaries]
+
+# ============================================================================
+# v43.37 — COMPREHENSIVE HR GRADE (user-requested rebuild)
+# ============================================================================
+# Replaces the old single-input hr_grade (which just thresholded hr_game_pct
+# with two cap layers) with a TIER-WEIGHTED COMPOSITE incorporating every
+# signal we have at honest weights.
+#
+# A+ now means "everything aligns" — not just "high HR%."
+# F means "structural failure across multiple dimensions."
+#
+# 8 tiers totaling 100%:
+#
+#   30% — HR Probability (calibrated hr_game_pct: park × weather × pitcher
+#         × platoon × ttop × pitch_match × defense × bullpen × day_night)
+#   25% — Power Signals (barrel%, pulled_brl%, avg_ev, iso, max_hit_speed)
+#   12% — Swing Mechanics (pull%, fb_pct, ideal_attack_angle_pct)
+#   12% — Matchup Quality (matchup_opp, pitch_hr_score)
+#   10% — Form / Recency (recent_hr_weighted_rate, hr_streak_games, hr_form)
+#   6%  — Environment (env_boost — small weight to avoid double-count with
+#         hr_game_pct which already includes env)
+#   3%  — Plate Discipline (discipline_score)
+#   2%  — Context Bonuses (confirmed lineup, recent pitcher HR streak)
+#
+# Composite range: 0-100 (weighted average of percentile ranks across tiers).
+# Grade thresholds:
+#   A+ ≥ 80  (top ~5% of slate — everything aligns)
+#   A  ≥ 70
+#   B+ ≥ 60
+#   B  ≥ 50
+#   C+ ≥ 40
+#   C  ≥ 30
+#   D  ≥ 20
+#   F  < 20
+#
+# Cap layers (applied AFTER threshold):
+#   Mechanical fail (pull<35 AND ev<88):       max grade B
+#   Hostile env (env_boost<0.85):              one tier down
+#   Same-side platoon (LvL/RvR with no break): one tier down
+#   Insufficient sample (PA<25):               returns "—"
+# ============================================================================
+
+GRADE_TIER_WEIGHTS = {
+    "hr_prob":     0.30,
+    "power":       0.25,
+    "mechanics":   0.12,
+    "matchup":     0.12,
+    "form":        0.10,
+    "env":         0.06,
+    "discipline":  0.03,
+    "context":     0.02,
+}
+
+GRADE_TIER_COLUMNS = {
+    "hr_prob":    ["hr_game_pct"],
+    "power":      ["barrel_pct", "pulled_brl_pct", "avg_ev", "iso", "max_hit_speed"],
+    "mechanics":  ["pull_pct", "fb_pct", "ideal_attack_angle_pct"],
+    "matchup":    ["matchup_opp", "pitch_hr_score"],
+    "form":       ["recent_hr_weighted_rate", "hr_streak_games", "hr_form"],
+    "env":        ["env_boost"],
+    "discipline": ["discipline_score"],
+}
+
+
+def compute_comprehensive_hr_composite(slate_df: pd.DataFrame) -> pd.Series:
+    """Compute the 0-100 weighted composite score for HR grade.
+
+    Slate-wide percentile ranks each input within each tier, averages
+    inputs within tier, then weights tiers per GRADE_TIER_WEIGHTS.
+    Renormalizes when a tier has no data (so a hitter missing IAA isn't
+    penalized for the swing-mechanics tier — they're scored on pull% and
+    fb_pct alone).
+
+    Returns a Series indexed by slate_df's index. NaN where no tier had
+    any data.
+    """
+    if slate_df is None or slate_df.empty:
+        return pd.Series(dtype=float)
+
+    composite = pd.Series(0.0, index=slate_df.index)
+    weight_total = pd.Series(0.0, index=slate_df.index)
+
+    for tier_name, weight in GRADE_TIER_WEIGHTS.items():
+        if tier_name == "context":
+            continue  # handled separately (binary signals)
+
+        cols = GRADE_TIER_COLUMNS.get(tier_name, [])
+        available = [c for c in cols if c in slate_df.columns]
+        if not available:
+            continue
+
+        # Compute percentile rank for each column in tier
+        ranks = []
+        for c in available:
+            col = pd.to_numeric(slate_df[c], errors="coerce")
+            if col.isna().all():
+                continue
+            r = col.rank(pct=True, na_option="keep") * 100
+            ranks.append(r)
+
+        if not ranks:
+            continue
+
+        # Average across columns in the tier (skipping NaN per-row)
+        tier_df = pd.concat(ranks, axis=1)
+        tier_score = tier_df.mean(axis=1, skipna=True)
+        # Row mask: only contributes weight where tier produced a value
+        mask = tier_score.notna()
+        composite = composite.add(tier_score.fillna(0) * weight, fill_value=0)
+        weight_total = weight_total + mask.astype(float) * weight
+
+    # Context tier — binary signals from existing pick_score bonuses
+    context_weight = GRADE_TIER_WEIGHTS["context"]
+    context_score = pd.Series(50.0, index=slate_df.index)  # neutral
+    has_context = False
+    if "ps_bonus_lineup" in slate_df.columns:
+        # +3 confirmed → +24, -2 fill → -16, total range ~50±24
+        bonus = pd.to_numeric(slate_df["ps_bonus_lineup"], errors="coerce").fillna(0)
+        context_score = context_score + bonus * 8
+        has_context = True
+    if "ps_bonus_recent_hr" in slate_df.columns:
+        # +3 → +15, +1.5 → +7.5
+        bonus = pd.to_numeric(slate_df["ps_bonus_recent_hr"], errors="coerce").fillna(0)
+        context_score = context_score + bonus * 5
+        has_context = True
+    if has_context:
+        context_score = context_score.clip(0, 100)
+        composite = composite.add(context_score * context_weight, fill_value=0)
+        weight_total = weight_total + context_weight
+
+    # Final composite: normalize by total weight that contributed
+    final = composite / weight_total.replace(0, np.nan)
+    return final.round(1)
+
+
+def comprehensive_hr_grade(composite, pull_pct=None, avg_ev=None,
+                             env_mult=None, same_side_platoon=False,
+                             sample_size=None, pa_threshold=25):
+    """Convert composite (0-100) to letter grade with cap layers.
+
+    Composite thresholds:
+      A+ ≥ 80  (top ~5% of slate — everything aligns)
+      A  ≥ 70
+      B+ ≥ 60
+      B  ≥ 50
+      C+ ≥ 40
+      C  ≥ 30
+      D  ≥ 20
+      F  < 20
+
+    Cap layers (applied AFTER threshold):
+      Mechanical fail (pull_pct<35 AND avg_ev<88):  capped at B
+      Hostile env (env_mult<0.85):                  one tier down
+      Same-side platoon:                            one tier down
+      Sample<25 PA:                                 returns "—"
+    """
+    if composite is None or pd.isna(composite):
+        return "—"
+    if sample_size is not None and not pd.isna(sample_size):
+        try:
+            if float(sample_size) < pa_threshold:
+                return "—"
+        except (TypeError, ValueError):
+            pass
+
+    if composite >= 80: raw = "A+"
+    elif composite >= 70: raw = "A"
+    elif composite >= 60: raw = "B+"
+    elif composite >= 50: raw = "B"
+    elif composite >= 40: raw = "C+"
+    elif composite >= 30: raw = "C"
+    elif composite >= 20: raw = "D"
+    else: raw = "F"
+
+    # Mechanical fail cap: BOTH pull<35 AND ev<88
+    mech_fail = False
+    try:
+        pp = float(pull_pct) if pull_pct is not None and not pd.isna(pull_pct) else None
+        ev = float(avg_ev) if avg_ev is not None and not pd.isna(avg_ev) else None
+        if pp is not None and ev is not None and pp < 35 and ev < 88:
+            mech_fail = True
+    except (TypeError, ValueError):
+        pass
+    if mech_fail:
+        _CAP = {"A+": "B", "A": "B", "B+": "B"}
+        raw = _CAP.get(raw, raw)
+
+    # Hostile env cap
+    try:
+        if env_mult is not None and not pd.isna(env_mult):
+            env_f = float(env_mult)
+            if env_f < 0.85:
+                _CAP = {"A+": "A", "A": "B+", "B+": "B", "B": "C+"}
+                raw = _CAP.get(raw, raw)
+    except (TypeError, ValueError):
+        pass
+
+    # Same-side platoon cap
+    if same_side_platoon:
+        _CAP = {"A+": "A", "A": "B+", "B+": "B"}
+        raw = _CAP.get(raw, raw)
+
+    return raw
+
+
 def _season_phase(slate_date=None) -> str:
     """v43.18 (reviewer-validated): shared season-phase helper. Both
     pa_threshold_for_date (app.py) and _season_thresholds (models.py) used
