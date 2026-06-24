@@ -38,6 +38,68 @@ HEADERS = {
 CURRENT_SEASON = datetime.now().year
 
 
+# ============================================================================
+# v43.49 — apply_to_all_matchup_frames helper (reviewer-recommended)
+# ============================================================================
+# Bench frames have been forgotten in features multiple times (v42m, v43.12,
+# the smash override before v43.43, etc) because there's no single
+# "apply to all matchup frames" abstraction. Each feature has to remember
+# the four frames: away_matchup, home_matchup, away_bench_matchup,
+# home_bench_matchup. Missing the bench frames is a recurring bug class.
+#
+# Reviewer recommendation: "A helper like `for mdf in all_matchup_frames(ctx)`
+# would eliminate a whole bug class."
+#
+# Usage (for new code — does NOT retrofit existing call sites, that's a
+# separate larger refactor):
+#
+#   for frame_name, mdf in all_matchup_frames(ctx):
+#       # Code here will run for all 4 frames (when non-empty) automatically.
+#       # No way to forget the bench frames anymore.
+#       mdf["my_new_column"] = ...
+#
+# Or for read-only:
+#   for frame_name, mdf in all_matchup_frames(ctx, include_empty=True):
+#       # include_empty=True yields even empty frames (useful if you need
+#       # to assign columns to maintain schema parity)
+# ============================================================================
+
+ALL_MATCHUP_FRAME_KEYS = (
+    "away_matchup",
+    "home_matchup",
+    "away_bench_matchup",
+    "home_bench_matchup",
+)
+
+
+def all_matchup_frames(ctx: dict, include_empty: bool = False):
+    """Yield (frame_name, dataframe) for every matchup frame in a game ctx.
+
+    Args:
+        ctx: a game_context_map[gamePk] dict containing the four frames
+        include_empty: if True, yield even None/empty frames; if False (default),
+                       skip them. False is what you usually want — it lets you
+                       write "for _, mdf in all_matchup_frames(ctx): mdf[...] = X"
+                       without worrying about NoneType or empty frames.
+
+    Yields:
+        (frame_name, dataframe) tuples
+    """
+    for name in ALL_MATCHUP_FRAME_KEYS:
+        frame = ctx.get(name) if ctx else None
+        if frame is None:
+            if include_empty:
+                yield name, frame
+            continue
+        try:
+            if not include_empty and frame.empty:
+                continue
+        except AttributeError:
+            # Not a DataFrame (None already handled above, but defensive)
+            continue
+        yield name, frame
+
+
 # ---------------------------------------------------------------------------
 # Umpire K-rate tendencies
 # ---------------------------------------------------------------------------
