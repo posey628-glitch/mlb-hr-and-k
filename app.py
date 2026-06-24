@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.49-matchup-frames-helper"
+APP_VERSION = "2026.06.10-v43.50-remove-park-history"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -1516,11 +1516,11 @@ with st.sidebar:
             "• Park history (career venue stats) — another ~270 API calls\n\n"
             "With fast load OFF (default): both run in parallel (~5-7s each "
             "on cold cache, instant when cached). Pick_score still includes "
-            "BvP and park-history bonuses.\n\n"
-            "With fast load ON: both are skipped entirely. BvP and park-history "
-            "bonuses don't fire (ps_bvp=0, ps_park_history=0). Pick_score still "
-            "works using all OTHER signals. Use this for quick exploration or "
-            "when APIs are slow/down. Toggle OFF after to get full bonuses."
+            "BvP bonuses.\n\n"
+            "With fast load ON: BvP is skipped entirely. ps_bvp=0. "
+            "Pick_score still works using all OTHER signals. Use this for "
+            "quick exploration or when APIs are slow/down. Toggle OFF after "
+            "to get full bonuses."
         ),
     )
 
@@ -4495,7 +4495,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.49 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.50 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -5910,98 +5910,14 @@ for _, game in slate.iterrows():
         for k, v in bvp_data_lists.items():
             matchup_df[k] = v
 
-        # v43.26 (user-requested): batter-park history bonus.
-        # Park-AVERAGE HR factors are already in park_hand_factor (used as
-        # a multiplier on every projection). What this adds is the RESIDUAL:
-        # does THIS hitter outperform OR underperform what an average hitter
-        # of their handedness does at this specific venue?
-        #
-        # Sample-gated at 40 PA minimum (smaller samples are noise, and we
-        # have park_hand_factor handling the bulk effect anyway).
-        # Capped at ±3 points — intentionally smaller than BvP (±5) because
-        # we don't want overlap with the park multiplier we already apply.
-        #
-        # The expected-rate denominator (league × park_hand_factor) avoids
-        # double-counting: if Yankee Stadium boosts LHB 1.20×, every LHB's
-        # "expected" HR rate there is 3.6%, and we only flag if THIS LHB
-        # exceeds that.
-        bp_points = []
-        bp_flags = []
-        bp_data_lists = {"bp_pa": [], "bp_hr": [], "bp_hr_per_pa": []}
-        try:
-            # v43.32: Fast Load Mode short-circuit — skip park-history.
-            if globals().get("fast_load_mode", False):
-                raise StopIteration
+        # v43.50 (reviewer-validated removal): the v43.26 park history
+        # feature is removed. The MLB Stats API rejected stats=byVenue
+        # with HTTP 400 ('Invalid Request with value: byVenue') for every
+        # call. Two ships shipped without verifying the endpoint worked.
+        # The feature contributed ~0.04% to HR Score even when working
+        # (2% of context tier × 2% of comprehensive grade). Removed cleanly
+        # — column drops happen at display + export level too.
 
-            from data_fetcher import (
-                get_batter_park_history, park_history_score_adjustment,
-            )
-            from concurrent.futures import ThreadPoolExecutor
-            venue_id_for_bp = game.get("venue_id")
-
-            # v43.32 (performance): batch-prefetch park history for all
-            # batters in parallel. Was the biggest cold-load bottleneck
-            # introduced in v43.26 — 270-450 sequential HTTP calls across
-            # a 15-game slate = 1-3 min added load. Parallel: ~5-7s.
-            _bp_cache = {}
-            if venue_id_for_bp is not None and not pd.isna(venue_id_for_bp):
-                _valid_bids = [
-                    int(bid) for bid in matchup_df["player_id"]
-                    if bid is not None and not pd.isna(bid)
-                ]
-                if _valid_bids:
-                    def _one_bp(bid):
-                        try:
-                            return bid, get_batter_park_history(bid, int(venue_id_for_bp))
-                        except Exception:
-                            return bid, {}
-                    try:
-                        with ThreadPoolExecutor(max_workers=15) as ex:
-                            for bid, bp in ex.map(_one_bp, _valid_bids):
-                                _bp_cache[bid] = bp
-                    except Exception:
-                        for bid in _valid_bids:
-                            _, bp = _one_bp(bid)
-                            _bp_cache[bid] = bp
-
-            for _, row in matchup_df.iterrows():
-                bid = row.get("player_id")
-                bats = safe_str(row.get("bats")).upper()[:1] if row.get("bats") else None
-                if (bid is None or pd.isna(bid)
-                        or venue_id_for_bp is None or pd.isna(venue_id_for_bp)):
-                    bp_points.append(0.0)
-                    bp_flags.append("")
-                    for k in bp_data_lists:
-                        bp_data_lists[k].append(None)
-                    continue
-                bp = _bp_cache.get(int(bid), {})
-                # Use THIS hitter's hand-aware park factor as the expected
-                # denominator. Falls back to 1.0 if we can't read it.
-                this_park_factor = 1.0
-                if bats in ("L", "R"):
-                    try:
-                        this_park_factor = float(
-                            get_park_hand_factor(venue_name, bats) or 1.0
-                        )
-                    except Exception:
-                        pass
-                pts, flag = park_history_score_adjustment(
-                    bp, park_hand_factor=this_park_factor,
-                )
-                bp_points.append(pts)
-                bp_flags.append(flag)
-                for k in bp_data_lists:
-                    bp_data_lists[k].append(bp.get(k))
-        except Exception:
-            bp_points = [0.0] * len(matchup_df)
-            bp_flags = [""] * len(matchup_df)
-            for k in bp_data_lists:
-                bp_data_lists[k] = [None] * len(matchup_df)
-
-        matchup_df["park_history_adjust"] = bp_points
-        matchup_df["park_history_flag"] = bp_flags
-        for k, v in bp_data_lists.items():
-            matchup_df[k] = v
 
         matchup_df["hr_pa_pct"] = hr_pa
         matchup_df["hr_game_pct"] = hr_game
@@ -7166,73 +7082,6 @@ if combined_picks is not None and not combined_picks.empty:
     except Exception:
         pass
 
-    # v43.46: park history fetch diagnostic. Shipped v43.42's byVenue fix
-    # without verifying — user reported still empty. Now we track each
-    # fetch outcome so the UI can pinpoint exactly where the chain breaks:
-    # HTTP failure, no splits returned, venue ID mismatch, etc.
-    try:
-        from data_fetcher import last_park_history_stats
-        _ph = last_park_history_stats()
-        if _ph.get("attempts", 0) > 0:
-            attempts = _ph["attempts"]
-            http_ok = _ph["http_ok"]
-            has_splits = _ph["has_splits"]
-            matched = _ph["venue_matched"]
-            # Render a single line with all 3 funnel stages
-            _pct = lambda n: f"{100 * n / max(1, attempts):.0f}%"
-            st.caption(
-                f"v43.46 Park history fetch funnel ({attempts} batters) · "
-                f"HTTP 200: {http_ok} ({_pct(http_ok)}) · "
-                f"has venue splits: {has_splits} ({_pct(has_splits)}) · "
-                f"target venue matched: {matched} ({_pct(matched)})"
-                + ("  ✅ pipeline working" if matched > 0 else
-                   "  ❌ pipeline broken — see details below")
-            )
-            # If something broke, surface details
-            if matched == 0:
-                with st.expander("🔧 v43.47 park history diagnostic", expanded=False):
-                    # v43.47: surface the FIRST actual error (HTTP status, URL,
-                    # response body) so we can finally see what the API is saying
-                    err_status = _ph.get("first_error_status")
-                    err_url = _ph.get("first_error_url")
-                    err_body = _ph.get("first_error_body")
-                    if err_status is not None:
-                        st.error(f"**First error: HTTP {err_status}**")
-                        if err_url:
-                            st.code(err_url, language="text")
-                        if err_body:
-                            st.caption("Response body (first 300 chars):")
-                            st.code(err_body, language="json")
-                        st.caption(
-                            "Interpretation guide:\n"
-                            "• HTTP 400 = bad request — `stats=byVenue` likely not a valid stat type\n"
-                            "• HTTP 404 = endpoint path wrong\n"
-                            "• HTTP 422 = parameter combination invalid\n"
-                            "• exception:Timeout = network unreachable\n"
-                            "• exception:ConnectionError = DNS or blocked"
-                        )
-                    elif http_ok == 0:
-                        st.error(
-                            f"All {attempts} HTTP calls failed (errors: "
-                            f"{_ph['http_errors']}, exceptions: {_ph['exceptions']}) "
-                            "but no first_error_status captured — diagnostic bug."
-                        )
-                    elif has_splits == 0:
-                        st.error(
-                            f"All {attempts} responses were 200 but contained "
-                            "no venue splits. `stats=byVenue` may not be a "
-                            "valid stat type at this season scope."
-                        )
-                    elif matched == 0:
-                        st.error(
-                            f"{has_splits} responses had venue splits, but "
-                            "none matched our target venue_id. Schema "
-                            "`split.venue.id` may be wrong, or venue IDs from "
-                            "schedule don't match those in byVenue response."
-                        )
-    except Exception:
-        pass
-
     # v43.44 (reviewer-validated): surface any errors that the bare-except
     # paths in the matchup loop swallowed. Previously these crashed silently
     # for ENTIRE FEATURES (grade_context platoon annotations were dead for a
@@ -7455,17 +7304,10 @@ if combined_picks is not None and not combined_picks.empty:
             else:
                 q["ps_bvp"] = 0.0
 
-            # v43.26 (user-requested): batter-park history bonus.
-            # Capped at ±3 in park_history_score_adjustment. Only fires at
-            # ≥40 PA at this venue. Expected denominator = league × park_hand
-            # factor, so this measures the RESIDUAL after the park multiplier
-            # we already apply elsewhere — no double-count.
-            if "park_history_adjust" in q.columns:
-                bp_adj = pd.to_numeric(q["park_history_adjust"], errors="coerce").fillna(0.0)
-                q["pick_score"] = q["pick_score"] + bp_adj
-                q["ps_park_history"] = bp_adj
-            else:
-                q["ps_park_history"] = 0.0
+            # v43.50 (reviewer-validated removal): the v43.26 park history
+            # bonus is removed. MLB Stats API rejected stats=byVenue with
+            # HTTP 400 — the feature never actually returned data in
+            # production. Removed cleanly from pick_score.
 
             q["pick_score"] = q["pick_score"].round(1)
         else:
@@ -7480,8 +7322,7 @@ if combined_picks is not None and not combined_picks.empty:
                               "ps_lift", "ps_env", "ps_discipline",
                               "ps_bonus_lineup",
                               "ps_bonus_platoon", "ps_bonus_recent_hr",
-                              "ps_penalty_il", "ps_bvp",
-                              "ps_park_history"):  # v43.26
+                              "ps_penalty_il", "ps_bvp"):
                 q[col_name] = np.nan
 
         # Stash per-player audit so combined_all (Hitters export) carries it.
@@ -7492,7 +7333,6 @@ if combined_picks is not None and not combined_picks.empty:
             "ps_discipline",  # v43.23: plate discipline component
             "ps_bonus_lineup", "ps_bonus_platoon", "ps_bonus_recent_hr",
             "ps_penalty_il", "ps_bvp",
-            "ps_park_history",  # v43.26: batter-at-venue residual
         ) if c in q.columns]
         if "player_id" in q.columns:
             pick_audit = q[_ps_cols].drop_duplicates(subset="player_id", keep="first").copy()
@@ -10140,7 +9980,8 @@ if all_hitters:
                     "vs_day_pa", "vs_night_pa", "vs_lhp_pa", "vs_rhp_pa",
                     "vs_lhp_hr", "vs_rhp_hr",
                     "bvp_pa", "bvp_ab", "bvp_hits", "bvp_hr", "bvp_bb", "bvp_k",
-                    "bp_pa", "bp_hr", "bp_h", "bp_ab",  # v43.26 park history
+                    # v43.50: bp_* (park history) columns removed — feature
+                    # was non-functional (MLB Stats API rejected byVenue).
                 )
                 if combined_all is not None and not combined_all.empty:
                     combined_all = _int_cast(combined_all, _INTEGER_COUNT_COLS)
@@ -11404,21 +11245,8 @@ def build_col_config():
                 "the hitter strikes out 30%+ of PA."
             ),
         ),
-        # v43.26: park-history bonus flag — descriptive text showing the
-        # ±3 point adjustment from career venue history.
-        "park_history_flag": st.column_config.TextColumn(
-            "Park Hist",
-            help=(
-                "v43.26: career hits at this venue vs expected.\n"
-                "🏟️💣 = strong over-performance (≥2× expected, +2-3 pts)\n"
-                "🏟️ = moderate over-performance (1.5-2× expected, +1-2 pts)\n"
-                "📉 = under-performance (0.5-0.8× expected, -1 pt)\n"
-                "⚠️🏟️ = strong under-performance (<0.5× expected, -2 pts)\n"
-                "Empty if <40 PA at venue (sample too small).\n"
-                "Measures RESIDUAL beyond park_hand_factor — does THIS hitter "
-                "outperform/underperform what their handedness's average does here?"
-            ),
-        ),
+        # v43.50: park_history_flag column_config removed — feature was
+        # non-functional (MLB Stats API rejected byVenue).
         # v43.29 (user-requested): hitter's per-pitch stats vs the pitcher's
         # top 3 most-thrown pitches. Shows what the hitter is likely to see
         # in this matchup and how they've handled each pitch.
@@ -11823,8 +11651,7 @@ def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
         "matchup", "test_score",
         # v43.23: discipline_score visible now (was computed but never displayed)
         "discipline_score",
-        # v43.26: park_history_flag visible now (was computed but never displayed)
-        "park_history_flag",
+        # v43.50: park_history_flag removed — feature non-functional, see below
         "streak_label",
         "pa", "barrel_pct", "iso", "xwoba", "xwobacon",
         "obp", "slg", "ops",
