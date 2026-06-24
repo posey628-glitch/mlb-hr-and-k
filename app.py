@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.47-park-hist-error-capture"
+APP_VERSION = "2026.06.10-v43.49-matchup-frames-helper"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -4495,7 +4495,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.47 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.49 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -7087,14 +7087,25 @@ if combined_picks is not None and not combined_picks.empty:
                 if p is not None and not pd.isna(p) else ""
             )
 
-            # Back-map smash to every matchup_df via player_id (mirrors
-            # the v43.41 hr_score back-map pattern)
+            # Back-map smash to every matchup_df via player_id.
+            # v43.49: use the all_matchup_frames helper so we can't forget
+            # the bench frames (the reviewer's repeated-bug-class concern).
+            try:
+                from game_context import all_matchup_frames as _all_frames
+            except Exception:
+                _all_frames = None
             for _gpk, _ctx in game_context_map.items():
-                for _side_key in ("away_matchup", "home_matchup",
-                                   "away_bench_matchup", "home_bench_matchup"):
-                    _mdf = _ctx.get(_side_key)
-                    if _mdf is None or _mdf.empty:
-                        continue
+                if _all_frames is not None:
+                    _frame_iter = _all_frames(_ctx)
+                else:
+                    # Fallback to inline iteration if import fails (defensive)
+                    _frame_iter = (
+                        (k, _ctx.get(k)) for k in
+                        ("away_matchup", "home_matchup",
+                         "away_bench_matchup", "home_bench_matchup")
+                        if _ctx.get(k) is not None and not _ctx.get(k).empty
+                    )
+                for _side_key, _mdf in _frame_iter:
                     if "player_id" not in _mdf.columns:
                         continue
                     new_smash = []
@@ -10057,6 +10068,37 @@ if all_hitters:
                     "every redeploy. Set `gist_token` and `gist_id` in Streamlit "
                     "Secrets to enable durable storage."
                 )
+        except Exception:
+            pass
+
+        # v43.48: emergency gist reset — when gist content is corrupt (invalid
+        # JSON from truncation/manual edit), reads fail forever and saves stop.
+        # The two-click confirm prevents accidental wipes; the button only fires
+        # when the user has actively been warned about a read failure.
+        try:
+            from backtest import emergency_reset_gist, durable_storage_configured
+            if durable_storage_configured():
+                with st.expander("🆘 Emergency: reset gist storage", expanded=False):
+                    st.caption(
+                        "Use this ONLY if gist saves are failing with an "
+                        "'invalid JSON' / 'Expecting :' error. Resets the "
+                        "gist back to `{}` — **all prior snapshot history will "
+                        "be permanently lost.** v43.48's size pruning should "
+                        "prevent the corruption from recurring."
+                    )
+                    confirm_reset = st.checkbox(
+                        "I understand this WIPES all backtest history",
+                        key="gist_reset_confirm",
+                    )
+                    if confirm_reset and st.button(
+                        "🆘 Reset gist to empty {}",
+                        key="gist_reset_button",
+                    ):
+                        ok, msg = emergency_reset_gist()
+                        if ok:
+                            st.success(f"✅ {msg}")
+                        else:
+                            st.error(f"❌ {msg}")
         except Exception:
             pass
 
