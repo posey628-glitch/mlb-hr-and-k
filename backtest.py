@@ -250,6 +250,99 @@ def _gist_write_all(snapshots: dict) -> bool:
         return False
 
 
+# v43.48 — gist size management
+# ---------------------------------------------------------------------------
+# Discovered after a "Expecting ':' delimiter at char 921600" error: the
+# gist grew past GitHub's effective per-file limit and got TRUNCATED mid-
+# write, leaving malformed JSON. After that, every read failed → every
+# write aborted (correctly, per v42i data-loss protection) → user lost
+# all snapshot persistence with no automatic recovery.
+#
+# Two fixes:
+#   1. PRUNE old snapshots BEFORE writing, capping the gist at a safe size
+#   2. Detect corruption (JSONDecodeError) on read and offer recovery
+# ---------------------------------------------------------------------------
+
+# GitHub gist soft cap is around 1 MB per file before truncation/perf issues.
+# We target ~700 KB to leave headroom for one write to grow past the cap
+# before pruning catches it.
+_GIST_SIZE_TARGET_BYTES = 700_000
+
+# Keep at minimum this many of the most recent snapshots, regardless of size.
+# Below this, even if the gist is too large, don't prune (something else is
+# wrong — better to surface the error than silently delete real data).
+_MIN_SNAPSHOTS_TO_KEEP = 14
+
+
+def _prune_snapshots_for_size(snapshots: dict) -> tuple[dict, int]:
+    """v43.48: Drop oldest snapshots until serialized size is under target.
+
+    Snapshot keys are date-hour strings like '2026-06-23T19' — sortable as
+    strings. We drop oldest first, keeping the most recent N at minimum.
+
+    Returns (pruned_dict, n_dropped).
+    """
+    if not snapshots or len(snapshots) <= _MIN_SNAPSHOTS_TO_KEEP:
+        return snapshots, 0
+
+    serialized = json.dumps(snapshots, default=str, indent=2)
+    if len(serialized.encode("utf-8")) <= _GIST_SIZE_TARGET_BYTES:
+        return snapshots, 0
+
+    # Sort keys oldest-first. Drop oldest one at a time until under target,
+    # but never go below _MIN_SNAPSHOTS_TO_KEEP.
+    sorted_keys = sorted(snapshots.keys())
+    pruned = dict(snapshots)
+    n_dropped = 0
+    while len(pruned) > _MIN_SNAPSHOTS_TO_KEEP:
+        # Drop the single oldest key
+        oldest = sorted_keys[n_dropped]
+        del pruned[oldest]
+        n_dropped += 1
+        # Check size again
+        if len(json.dumps(pruned, default=str, indent=2).encode("utf-8")) <= _GIST_SIZE_TARGET_BYTES:
+            break
+
+    return pruned, n_dropped
+
+
+def emergency_reset_gist() -> tuple[bool, str]:
+    """v43.48: Wipe the gist back to '{}' for recovery from corruption.
+
+    Use case: gist content is invalid JSON (truncated mid-write, manually
+    edited, etc.) — all reads fail forever, blocking future saves. This
+    function resets the gist to an empty dict so saves can resume.
+
+    Returns (ok, message). On success, all prior snapshots are LOST — only
+    call this when the gist is unreadable and there's no other option.
+    """
+    token = _gist_token()
+    gist_id = _gist_id()
+    if not token or not gist_id:
+        return False, "Gist not configured"
+    try:
+        payload = {
+            "files": {
+                GIST_FILENAME: {"content": "{}"}
+            }
+        }
+        r = requests.patch(
+            f"{GIST_API}/{gist_id}",
+            headers={
+                "Authorization": f"token {token}",
+                "Accept": "application/vnd.github.v3+json",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=15,
+        )
+        if r.status_code in (200, 201):
+            return True, "Gist reset to empty {}. Future saves should now succeed."
+        return False, f"Reset failed with HTTP {r.status_code}: {r.text[:200]}"
+    except Exception as e:
+        return False, f"Reset exception: {type(e).__name__}: {e}"
+
+
 def _save_snapshot_to_gist(snapshot_date, payload: dict) -> tuple[bool, str | None]:
     """Upsert one snapshot into the gist. Read-modify-write the dict.
 
@@ -263,6 +356,9 @@ def _save_snapshot_to_gist(snapshot_date, payload: dict) -> tuple[bool, str | No
 
     v43.40: error message now includes the specific HTTP status / cause
     from _gist_read_all so the user knows exactly what to fix.
+
+    v43.48: prune old snapshots BEFORE writing to keep gist under
+    ~700 KB. Prevents the corruption-from-truncation failure mode.
     """
     if not durable_storage_configured():
         return False, "Gist not configured (gist_token/gist_id missing in secrets)"
@@ -274,9 +370,21 @@ def _save_snapshot_to_gist(snapshot_date, payload: dict) -> tuple[bool, str | No
             specific = last_gist_read_error() or "unknown read failure"
             return False, f"Gist read failed — write aborted to protect existing data. Reason: {specific}"
         all_snaps[str(snapshot_date)] = payload
+
+        # v43.48: prune oldest snapshots if total size would exceed ~700 KB.
+        # Without this, the gist eventually exceeds GitHub's per-file limit
+        # and gets truncated mid-write → invalid JSON → all subsequent reads
+        # fail → snapshots stop persisting forever (only fixed by manual reset).
+        pruned, n_dropped = _prune_snapshots_for_size(all_snaps)
+        if n_dropped > 0:
+            all_snaps = pruned
+
         ok = _gist_write_all(all_snaps)
         if not ok:
             return False, "Gist write API call returned non-2xx (check token permissions, rate limit)"
+        # v43.48: report pruning so the user knows old snapshots were dropped
+        if n_dropped > 0:
+            return True, f"OK (pruned {n_dropped} oldest snapshot{'s' if n_dropped != 1 else ''} to stay under size limit)"
         return True, None
     except Exception as e:
         return False, f"Gist save exception: {type(e).__name__}: {e}"
