@@ -847,13 +847,25 @@ def get_bat_tracking(season: int = 2025) -> tuple[pd.DataFrame, str]:
       - squared_up_rate, squared_up_per_swing
     """
     # Field name variants — try each, take whichever returns data
+    # v43.58 (production-validated): updated based on actual Savant column
+    # list observed June 2026: id, name, swings_competitive,
+    # percent_swings_competitive, contact, avg_bat_speed, hard_swing_rate,
+    # squared_up_per_bat_contact, squared_up_per_swing, blast_per_bat_contact,
+    # blast_per_swing, swing_length, swords, batter_run_value, whiffs,
+    # whiff_per_swing, batted_ball_events, batted_ball_event_per_swing.
+    # Notably: Savant uses "hard_swing_rate" (not fast_swing*),
+    # "blast_per_swing" / "blast_per_bat_contact" (not blast_rate*), and
+    # has NO ideal-attack-angle column at all in this endpoint.
     blast_candidates = ["blast_rate", "blasts_per_swing", "blast_percent",
-                          "blasts_per_bbe"]
+                          "blasts_per_bbe",
+                          "blast_per_swing", "blast_per_bat_contact"]
     bat_speed_candidates = ["avg_bat_speed", "bat_speed_avg", "swing_speed",
                               "bat_speed"]
-    fast_swing_candidates = ["fast_swing_rate", "fast_swing_percent"]
+    fast_swing_candidates = ["fast_swing_rate", "fast_swing_percent",
+                              "hard_swing_rate"]
     squared_up_candidates = ["squared_up_rate", "squared_up_per_swing",
-                               "squared_up_percent"]
+                               "squared_up_percent",
+                               "squared_up_per_bat_contact"]
     # v43.36 (user-requested): Ideal Attack Angle — Statcast bat-tracking
     # metric: % of competitive swings where attack angle is 5-20°. This is
     # the "HR launch zone" swing path. League avg ~50-55%, elite ~65%+.
@@ -960,7 +972,19 @@ def get_bat_tracking(season: int = 2025) -> tuple[pd.DataFrame, str]:
                 out["player_id"] = pd.to_numeric(df[pid_col], errors="coerce")
             else:
                 out["player_id"] = pd.Series(dtype="float64")  # all NaN
-            out["player_name"] = df.get("player_name") or df.get("name") or df.get("Name")
+            # v43.58 (critical fix): the previous `df.get("player_name") or
+            # df.get("name") or df.get("Name")` chain raised ValueError
+            # ("truth value of Series is ambiguous") when player_name was
+            # missing but name was present. The `or` operator evaluates
+            # bool() on each Series, which pandas refuses for len > 1.
+            # ValueError got caught by outer except → continue → next URL
+            # → same bug → "all endpoints failed". Use explicit None checks.
+            for _name_col in ("player_name", "name", "Name"):
+                if _name_col in df.columns:
+                    out["player_name"] = df[_name_col]
+                    break
+            else:
+                out["player_name"] = pd.Series(dtype="object")
             out["blast_pct"] = pd.to_numeric(df[blast_col], errors="coerce")
             if bs_col:
                 out["bat_speed"] = pd.to_numeric(df[bs_col], errors="coerce")
