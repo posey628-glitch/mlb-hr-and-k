@@ -945,8 +945,11 @@ def build_matchup_table(
     # not a regression.
     #
     # NOTE: this catches DROPPED columns (column existed in df before the
-    # whitelist filter). It can't catch columns that were never produced
-    # upstream (those need a different audit at the fetcher level).
+    # whitelist filter). It also catches NEVER-PRODUCED columns (column
+    # missing from df entirely) for a small subset of "always-expected"
+    # columns — see ALWAYS_EXPECTED_COLUMNS below. v43.54 (reviewer fix):
+    # added ALWAYS_EXPECTED_COLUMNS to catch the IAA-never-fetched case
+    # which the produced-then-dropped check couldn't catch.
     # ========================================================================
     KNOWN_CONSUMED_COLUMNS = [
         # HR-criteria checklist inputs (add_hr_criteria)
@@ -968,6 +971,22 @@ def build_matchup_table(
         # Grade context platoon annotations (grade_context block)
         "bats", "opp_pitcher_throws", "platoon_hitter_flag",
     ]
+    # v43.54: subset that MUST be produced upstream (not just survive the
+    # whitelist). The drop-only assertion can't catch these; need a
+    # separate "missing from df entirely" check.
+    ALWAYS_EXPECTED_COLUMNS = {
+        # HR-criteria inputs that should always be in hitter_stats
+        "pull_pct": "build_matchup_table rename of pull_percent",
+        "avg_ev": "Savant hitter_stats — required for grade caps",
+        "barrel_pct": "Savant hitter_stats — required for composite",
+        "ideal_attack_angle_pct": (
+            "bat tracking fetch (📡 toggle in sidebar). If '📡 Fetch bat "
+            "tracking' is OFF in the sidebar, this column is missing AND "
+            "HR Criteria #4 will be unmet for every hitter. Turn it on."
+        ),
+        # Handedness pitcher splits
+        "opp_pitcher_throws": "build_matchup_table — required for platoon",
+    }
     try:
         # Find columns that existed in df BEFORE the whitelist but didn't
         # make the whitelist cut. If any are known-consumed downstream,
@@ -976,18 +995,31 @@ def build_matchup_table(
             c for c in KNOWN_CONSUMED_COLUMNS
             if c in df.columns and c not in keep
         ]
-        if produced_but_dropped:
+        # v43.54: find columns that were never produced upstream at all
+        never_produced = [
+            (c, reason) for c, reason in ALWAYS_EXPECTED_COLUMNS.items()
+            if c not in df.columns
+        ]
+        if produced_but_dropped or never_produced:
             import streamlit as _st
             try:
                 _warn = _st.session_state.setdefault(
                     "_column_coverage_warnings", []
                 )
-                _msg = (
-                    "build_matchup_table dropped known-consumed columns "
-                    "from display_cols: " + ", ".join(produced_but_dropped)
-                )
-                if _msg not in _warn:
-                    _warn.append(_msg)
+                if produced_but_dropped:
+                    _msg = (
+                        "build_matchup_table dropped known-consumed columns "
+                        "from display_cols: " + ", ".join(produced_but_dropped)
+                    )
+                    if _msg not in _warn:
+                        _warn.append(_msg)
+                for col, reason in never_produced:
+                    _msg = (
+                        f"Always-expected column '{col}' was NEVER PRODUCED "
+                        f"upstream. Cause: {reason}"
+                    )
+                    if _msg not in _warn:
+                        _warn.append(_msg)
             except Exception:
                 pass
     except Exception:
@@ -1675,7 +1707,8 @@ def hr_score_signal(hr_score):
 
 def comprehensive_hr_grade(composite, pull_pct=None, avg_ev=None,
                              env_mult=None, same_side_platoon=False,
-                             sample_size=None, pa_threshold=25):
+                             sample_size=None, pa_threshold=25,
+                             barrel_pct=None, iso=None):
     """Convert composite (0-100) to letter grade with cap layers.
 
     Composite thresholds:
@@ -1688,11 +1721,27 @@ def comprehensive_hr_grade(composite, pull_pct=None, avg_ev=None,
       D  ≥ 20
       F  < 20
 
-    Cap layers (applied AFTER threshold):
+    Cap layers (v43.54 — reviewer-validated non-stacking):
       Mechanical fail (pull_pct<35 AND avg_ev<88):  capped at B
       Hostile env (env_mult<0.85):                  one tier down
       Same-side platoon:                            one tier down
+      Absolute power floor for A+/A:                requires real elite power
       Sample<25 PA:                                 returns "—"
+
+    v43.54 #8 (reviewer fix): caps no longer STACK. Previously, all three caps
+    were applied sequentially — a hitter at A+ with all three flags could
+    drop A+ → B → C+ → C+ (effectively 3 tiers). Now each cap independently
+    proposes a result and we take the WORST single cap (max 2 tiers down).
+    The original docs said "one tier down" — triple-stacking was a bug, not
+    intent.
+
+    v43.54 #9 (reviewer fix): the v43.51 switch from grade_composite to
+    hr_score (slate-rescaled) made A+/A purely slate-relative — every slate
+    produces ~5% A+ regardless of absolute quality. Added an ABSOLUTE POWER
+    FLOOR: A+/A also requires real elite contact (barrel_pct ≥ 10% OR
+    avg_ev ≥ 90 OR iso ≥ .200). Without that, demote one tier. Mech-fail
+    is still its own separate (harsher) check. This keeps "A+ means
+    something" while preserving the slate-relative ranking.
     """
     if composite is None or pd.isna(composite):
         return "—"
@@ -1712,35 +1761,68 @@ def comprehensive_hr_grade(composite, pull_pct=None, avg_ev=None,
     elif composite >= 20: raw = "D"
     else: raw = "F"
 
-    # Mechanical fail cap: BOTH pull<35 AND ev<88
-    mech_fail = False
+    # ------------------------------------------------------------------
+    # v43.54: Compute each cap independently — non-stacking
+    # ------------------------------------------------------------------
+    # Each cap returns a CANDIDATE grade. We then take the WORST candidate
+    # (the most restrictive) as the final grade — preserving "one tier
+    # down per flag" semantics WITHOUT compounding across flags.
+    # ------------------------------------------------------------------
+    candidates = [raw]  # base case: no cap
+
+    # 1. Mechanical fail cap: BOTH pull<35 AND ev<88 → caps to B
     try:
         pp = float(pull_pct) if pull_pct is not None and not pd.isna(pull_pct) else None
         ev = float(avg_ev) if avg_ev is not None and not pd.isna(avg_ev) else None
         if pp is not None and ev is not None and pp < 35 and ev < 88:
-            mech_fail = True
+            _CAP_MECH = {"A+": "B", "A": "B", "B+": "B"}
+            candidates.append(_CAP_MECH.get(raw, raw))
     except (TypeError, ValueError):
         pass
-    if mech_fail:
-        _CAP = {"A+": "B", "A": "B", "B+": "B"}
-        raw = _CAP.get(raw, raw)
 
-    # Hostile env cap
+    # 2. Hostile env cap: env_mult < 0.85 → one tier down
     try:
         if env_mult is not None and not pd.isna(env_mult):
             env_f = float(env_mult)
             if env_f < 0.85:
-                _CAP = {"A+": "A", "A": "B+", "B+": "B", "B": "C+"}
-                raw = _CAP.get(raw, raw)
+                _CAP_ENV = {"A+": "A", "A": "B+", "B+": "B", "B": "C+"}
+                candidates.append(_CAP_ENV.get(raw, raw))
     except (TypeError, ValueError):
         pass
 
-    # Same-side platoon cap
+    # 3. Same-side platoon cap: one tier down
     if same_side_platoon:
-        _CAP = {"A+": "A", "A": "B+", "B+": "B"}
-        raw = _CAP.get(raw, raw)
+        _CAP_PLAT = {"A+": "A", "A": "B+", "B+": "B"}
+        candidates.append(_CAP_PLAT.get(raw, raw))
 
-    return raw
+    # 4. v43.54 #9: Absolute power floor for A+/A
+    #    The base grade is slate-relative now (via hr_score rescale). A+/A
+    #    grades should ALSO require real power markers. If neither barrel%
+    #    nor avg_ev nor ISO crosses the absolute threshold, demote one tier.
+    if raw in ("A+", "A"):
+        has_elite_power = False
+        try:
+            if barrel_pct is not None and not pd.isna(barrel_pct):
+                if float(barrel_pct) >= 10.0:
+                    has_elite_power = True
+            if not has_elite_power and avg_ev is not None and not pd.isna(avg_ev):
+                if float(avg_ev) >= 90.0:
+                    has_elite_power = True
+            if not has_elite_power and iso is not None and not pd.isna(iso):
+                if float(iso) >= 0.200:
+                    has_elite_power = True
+        except (TypeError, ValueError):
+            # If we can't evaluate, don't apply the floor — defensive.
+            has_elite_power = True
+        if not has_elite_power:
+            _CAP_POWER = {"A+": "A", "A": "B+"}
+            candidates.append(_CAP_POWER.get(raw, raw))
+
+    # Take the WORST candidate (most restrictive grade)
+    _GRADE_ORDER = ["A+", "A", "B+", "B", "C+", "C", "D", "F"]
+    _grade_rank = {g: i for i, g in enumerate(_GRADE_ORDER)}
+    worst = max(candidates, key=lambda g: _grade_rank.get(g, 999))
+    return worst
 
 
 def _season_phase(slate_date=None) -> str:
