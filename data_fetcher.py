@@ -939,10 +939,28 @@ def get_bat_tracking(season: int = 2025) -> tuple[pd.DataFrame, str]:
                 global _LAST_BAT_TRACKING_COLS
                 _LAST_BAT_TRACKING_COLS = list(df.columns)
 
+            # v43.57: hardier player_id detection — Savant may use a
+            # different column name (mlbam_id, id, player, etc) depending on
+            # endpoint. Previously we read df.get("player_id") which
+            # returned None silently when the field had any other name,
+            # making every output row's player_id NaN → dropna killed
+            # everything → "no rows after filtering" status.
+            pid_candidates = ["player_id", "mlbam_id", "id", "playerid",
+                              "MLBAMID", "key_mlbam", "Player ID"]
+            pid_col = next((c for c in pid_candidates if c in df.columns),
+                           # Fuzzy match: any column with "id" or "mlbam" in lower
+                           next((c for c in df.columns
+                                 if "mlbam" in c.lower()
+                                 or (c.lower().endswith("_id") and "team" not in c.lower())
+                                 or c.lower() == "id"), None))
+
             # Build output frame with normalized column names
             out = pd.DataFrame()
-            out["player_id"] = pd.to_numeric(df.get("player_id"), errors="coerce")
-            out["player_name"] = df.get("player_name")
+            if pid_col:
+                out["player_id"] = pd.to_numeric(df[pid_col], errors="coerce")
+            else:
+                out["player_id"] = pd.Series(dtype="float64")  # all NaN
+            out["player_name"] = df.get("player_name") or df.get("name") or df.get("Name")
             out["blast_pct"] = pd.to_numeric(df[blast_col], errors="coerce")
             if bs_col:
                 out["bat_speed"] = pd.to_numeric(df[bs_col], errors="coerce")
@@ -950,19 +968,36 @@ def get_bat_tracking(season: int = 2025) -> tuple[pd.DataFrame, str]:
                 out["fast_swing_pct"] = pd.to_numeric(df[fs_col], errors="coerce")
             if sq_col:
                 out["squared_up_pct"] = pd.to_numeric(df[sq_col], errors="coerce")
-            # v43.36: ideal_attack_angle_pct (% of swings in the 5-20° HR
-            # launch zone). NaN if Savant didn't return it.
             if iaa_col:
                 out["ideal_attack_angle_pct"] = pd.to_numeric(
                     df[iaa_col], errors="coerce"
                 )
+
+            # v43.57: capture pre-dropna shape so a "no rows after filtering"
+            # status tells us WHY. Without this, we knew the filter killed
+            # everything but not what the input looked like.
+            _pre_drop_rows = len(out)
+            _pre_drop_pid_valid = int(out["player_id"].notna().sum()) if not out.empty else 0
+            _pre_drop_blast_valid = int(out["blast_pct"].notna().sum()) if not out.empty else 0
 
             # Filter to rows with non-null blast_pct AND valid player_id
             out = out.dropna(subset=["blast_pct", "player_id"])
             out["player_id"] = out["player_id"].astype("Int64")
 
             if out.empty:
-                return pd.DataFrame(), "❌ no rows after filtering"
+                # v43.57: log column-level failure detail so the app can
+                # surface it via last_bat_tracking_columns(). The `global`
+                # statement is already at the top of this function.
+                _LAST_BAT_TRACKING_COLS = list(df.columns)
+                _pid_matched = pid_col if pid_col else "(none — no MLBAM-like column found)"
+                _reason = (
+                    f"pre-dropna: {_pre_drop_rows} rows, "
+                    f"player_id valid: {_pre_drop_pid_valid}, "
+                    f"blast_pct valid: {_pre_drop_blast_valid}. "
+                    f"Matched player_id col: '{_pid_matched}'. "
+                    f"Matched blast col: '{blast_col}'."
+                )
+                return pd.DataFrame(), f"❌ no rows after filtering — {_reason}"
             return out, f"✅ {len(out)} hitters"
         except Exception as e:
             # Try next URL
