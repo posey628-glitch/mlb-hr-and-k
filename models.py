@@ -974,6 +974,10 @@ def build_matchup_table(
     # v43.54: subset that MUST be produced upstream (not just survive the
     # whitelist). The drop-only assertion can't catch these; need a
     # separate "missing from df entirely" check.
+    # v43.55 (false-positive fix): removed opp_pitcher_throws — it's added
+    # to matchup_df by app.py AFTER build_matchup_table returns (see app.py
+    # ~line 6071: matchup_df["opp_pitcher_throws"] = opp_throws). Catching
+    # it as "never produced" was a timing false positive, not a real bug.
     ALWAYS_EXPECTED_COLUMNS = {
         # HR-criteria inputs that should always be in hitter_stats
         "pull_pct": "build_matchup_table rename of pull_percent",
@@ -984,8 +988,6 @@ def build_matchup_table(
             "tracking' is OFF in the sidebar, this column is missing AND "
             "HR Criteria #4 will be unmet for every hitter. Turn it on."
         ),
-        # Handedness pitcher splits
-        "opp_pitcher_throws": "build_matchup_table — required for platoon",
     }
     try:
         # Find columns that existed in df BEFORE the whitelist but didn't
