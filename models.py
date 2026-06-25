@@ -1586,6 +1586,17 @@ def add_hr_criteria(df: pd.DataFrame) -> pd.DataFrame:
 #   Insufficient sample (PA<25):               returns "—"
 # ============================================================================
 
+# v43.61 (reviewer-validated, deferred from prior review #7): the "context"
+# tier was inactive in production because compute_comprehensive_hr_composite
+# runs on combined_picks BEFORE ps_bonus_lineup / ps_bonus_recent_hr are
+# attached (they're only added to the filtered q frame later). So
+# has_context was always False and the 2% tier weight contributed 0 to every
+# hitter. Removing the tier entirely is cleaner than reordering the pipeline
+# (which has cascading downstream effects). The remaining 7 tiers sum to
+# 0.98; the existing weight_total normalization in compute_comprehensive_hr_composite
+# scales output to 0-100 regardless. The "context" signals (confirmed lineup,
+# recent HR) are STILL captured in pick_score via ps_bonus_* — they're not
+# lost, just no longer double-counted into the comprehensive grade.
 GRADE_TIER_WEIGHTS = {
     "hr_prob":     0.30,
     "power":       0.25,
@@ -1594,7 +1605,6 @@ GRADE_TIER_WEIGHTS = {
     "form":        0.10,
     "env":         0.06,
     "discipline":  0.03,
-    "context":     0.02,
 }
 
 GRADE_TIER_COLUMNS = {
@@ -1627,9 +1637,6 @@ def compute_comprehensive_hr_composite(slate_df: pd.DataFrame) -> pd.Series:
     weight_total = pd.Series(0.0, index=slate_df.index)
 
     for tier_name, weight in GRADE_TIER_WEIGHTS.items():
-        if tier_name == "context":
-            continue  # handled separately (binary signals)
-
         cols = GRADE_TIER_COLUMNS.get(tier_name, [])
         available = [c for c in cols if c in slate_df.columns]
         if not available:
@@ -1655,24 +1662,9 @@ def compute_comprehensive_hr_composite(slate_df: pd.DataFrame) -> pd.Series:
         composite = composite.add(tier_score.fillna(0) * weight, fill_value=0)
         weight_total = weight_total + mask.astype(float) * weight
 
-    # Context tier — binary signals from existing pick_score bonuses
-    context_weight = GRADE_TIER_WEIGHTS["context"]
-    context_score = pd.Series(50.0, index=slate_df.index)  # neutral
-    has_context = False
-    if "ps_bonus_lineup" in slate_df.columns:
-        # +3 confirmed → +24, -2 fill → -16, total range ~50±24
-        bonus = pd.to_numeric(slate_df["ps_bonus_lineup"], errors="coerce").fillna(0)
-        context_score = context_score + bonus * 8
-        has_context = True
-    if "ps_bonus_recent_hr" in slate_df.columns:
-        # +3 → +15, +1.5 → +7.5
-        bonus = pd.to_numeric(slate_df["ps_bonus_recent_hr"], errors="coerce").fillna(0)
-        context_score = context_score + bonus * 5
-        has_context = True
-    if has_context:
-        context_score = context_score.clip(0, 100)
-        composite = composite.add(context_score * context_weight, fill_value=0)
-        weight_total = weight_total + context_weight
+    # v43.61: Context tier (binary signals from ps_bonus_*) removed.
+    # See GRADE_TIER_WEIGHTS docstring above. Bonuses still flow through
+    # pick_score; just no longer double-counted into the comprehensive grade.
 
     # Final composite: normalize by total weight that contributed
     final = composite / weight_total.replace(0, np.nan)
