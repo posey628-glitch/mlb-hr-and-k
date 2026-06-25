@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.52-xslg-coverage-fix"
+APP_VERSION = "2026.06.10-v43.53-tools-diagnostics-consolidation"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -925,6 +925,32 @@ def safe_str(val) -> str:
         # Some non-numeric values throw on pd.isna — treat as string
         pass
     return str(val)
+
+
+def stash_diagnostic(category: str, message: str, level: str = "caption") -> None:
+    """v43.53: Stash a diagnostic message to session_state so it can be
+    rendered in the consolidated 'Tools & Diagnostics' section at the
+    bottom of the page instead of inline.
+
+    Args:
+        category: bucket name — 'slate_audit', 'pipeline_health', 'admin', etc.
+        message: the text to display
+        level: 'caption' / 'info' / 'warning' / 'error' / 'success'
+
+    Why this exists: diagnostic captions (HR Score distribution, smash counts,
+    handedness coverage, column-coverage warnings, silent errors) were
+    rendered INLINE at compute time, cluttering the picks section. This
+    helper lets compute code stash the messages, and a single bottom section
+    renders them all in one place. User-requested reorganization.
+    """
+    try:
+        bucket = st.session_state.setdefault("_diagnostics", {})
+        cat_list = bucket.setdefault(category, [])
+        # Dedupe — same message in same category gets stashed once per run
+        if not any(d.get("message") == message for d in cat_list):
+            cat_list.append({"message": message, "level": level})
+    except Exception:
+        pass
 
 
 def safe_float(val) -> Optional[float]:
@@ -4502,7 +4528,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.52 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.53 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -6652,18 +6678,16 @@ if all_hitters_for_picks:
         # Audit info — distribution of new scores
         _score_vals = combined_picks["hr_score"].dropna()
         if len(_score_vals) > 0:
-            st.caption(
-                f"v43.42 HR Score (0-95) · "
-                f"min {_score_vals.min():.0f} · "
-                f"med {_score_vals.median():.0f} · "
-                f"max {_score_vals.max():.0f} · "
-                f"top 10 hitters score ≥ {_score_vals.nlargest(10).min():.0f}"
+            stash_diagnostic(
+                "slate_audit",
+                f"**HR Score (0-95)** · min {_score_vals.min():.0f} · "
+                f"med {_score_vals.median():.0f} · max {_score_vals.max():.0f} · "
+                f"top 10 hitters score ≥ {_score_vals.nlargest(10).min():.0f}",
             )
 
         # v43.42: IAA diagnostic — if ideal_attack_angle_pct is empty for
         # EVERYONE, surface what columns Savant actually returned so we can
-        # add the right field name next ship. (Only shows when truly empty
-        # — if some hitters have IAA, the field IS being matched.)
+        # add the right field name next ship.
         if "ideal_attack_angle_pct" in combined_picks.columns:
             _iaa_nonempty = combined_picks["ideal_attack_angle_pct"].notna().sum()
         else:
@@ -6673,34 +6697,24 @@ if all_hitters_for_picks:
                 from data_fetcher import last_bat_tracking_columns
                 _cols = last_bat_tracking_columns()
                 if _cols:
-                    # Filter to interesting candidates (contain "attack" or "angle"
-                    # or "ideal" so the user/me can spot the right name fast)
                     _interesting = [c for c in _cols if any(
                         k in c.lower() for k in ("attack", "angle", "ideal", "swing")
                     )]
-                    with st.expander(
-                        "🔧 v43.42 diagnostic: Ideal Attack Angle column not found in Savant response",
-                        expanded=False,
-                    ):
-                        st.caption(
-                            "The IAA criterion in the HR Profile checklist (criterion 4) "
-                            "is showing as '·' (no data) for all hitters because none of "
-                            "the candidate field names match what Savant returned. "
-                            "The columns most likely to contain IAA-related data are:"
-                        )
-                        if _interesting:
-                            st.code("\n".join(_interesting))
-                        else:
-                            st.code("(no columns containing attack/angle/ideal/swing)")
-                        st.caption(
-                            f"Full Savant column list ({len(_cols)} cols): "
-                            + ", ".join(_cols[:30])
-                            + (" ... (truncated)" if len(_cols) > 30 else "")
-                        )
+                    _msg = (
+                        "**IAA column not found in Savant response.** "
+                        "HR Criteria #4 shows '·' for all hitters. "
+                        "Candidates containing attack/angle/ideal/swing: "
+                        + (", ".join(_interesting) if _interesting else "(none)")
+                        + f". Full Savant column list ({len(_cols)} cols): "
+                        + ", ".join(_cols[:30])
+                        + (" ... (truncated)" if len(_cols) > 30 else "")
+                    )
+                    stash_diagnostic("pipeline_health", _msg, level="warning")
             except Exception:
                 pass
     except Exception as _ce:
-        st.warning(f"v43.42 HR Score fallback: {_ce}")
+        stash_diagnostic("pipeline_health",
+                         f"HR Score fallback: {_ce}", level="warning")
 
 
 
@@ -7072,16 +7086,16 @@ if combined_picks is not None and not combined_picks.empty:
             _strong_n = _smash_counts.get("🔥🔥 STRONG", 0)
             _smash_n = _smash_counts.get("🔥 SMASH", 0)
             _total = _elite_n + _strong_n + _smash_n
-            st.caption(
-                f"v43.43 Smash distribution · "
-                f"🔥🔥🔥 ELITE: {_elite_n} · "
-                f"🔥🔥 STRONG: {_strong_n} · "
-                f"🔥 SMASH: {_smash_n} · "
+            stash_diagnostic(
+                "slate_audit",
+                f"**Smash distribution** · 🔥🔥🔥 ELITE: {_elite_n} · "
+                f"🔥🔥 STRONG: {_strong_n} · 🔥 SMASH: {_smash_n} · "
                 f"Total: {_total} / {len(combined_picks)} hitters "
-                f"(gated by pitcher quality + env, not just HR Score)"
+                f"(gated by pitcher quality + env, not just HR Score)",
             )
     except Exception as _se:
-        st.warning(f"v43.43 smash override fallback: {_se}")
+        stash_diagnostic("pipeline_health",
+                         f"Smash override fallback: {_se}", level="warning")
 
     # v43.44 (reviewer-validated coverage check): handedness splits are called
     # "the single biggest accuracy gap" the model addresses. A silent failure
@@ -7108,58 +7122,49 @@ if combined_picks is not None and not combined_picks.empty:
             cov_pieces.append(f"Pitcher vs RHB: {n_prhb}/{n_total} ({100*n_prhb/max(1,n_total):.0f}%)")
 
         if cov_pieces:
-            st.caption(
-                "v43.44 Handedness-split coverage · " + " · ".join(cov_pieces)
-                + "  ← if these are 0% or near it, the splits endpoint isn't"
-                + " returning data and the handedness-blend feature is dead."
+            stash_diagnostic(
+                "pipeline_health",
+                "**Handedness-split coverage** · " + " · ".join(cov_pieces)
+                + "  ← if 0% / near it, splits endpoint not returning data "
+                + "and the handedness-blend feature is dead.",
             )
     except Exception:
         pass
 
-    # v43.44 (reviewer-validated): surface any errors that the bare-except
-    # paths in the matchup loop swallowed. Previously these crashed silently
-    # for ENTIRE FEATURES (grade_context platoon annotations were dead for a
-    # whole ship before the reviewer caught it). Now they show up in a
-    # collapsed expander so the user / reviewer can see if anything is failing
-    # silently next time.
+    # v43.53: silent scoring errors and column-coverage warnings now stash
+    # to pipeline_health bucket and render in the bottom Tools & Diagnostics
+    # section. Previously these rendered inline above picks.
     _silent_errs = st.session_state.get("_silent_scoring_errors", [])
     if _silent_errs:
-        with st.expander(
-            f"🔧 v43.44 diagnostic: {len(_silent_errs)} silent scoring error(s) detected this run",
-            expanded=False,
-        ):
-            st.caption(
-                "These exceptions were caught by defensive `try/except` blocks "
-                "in the scoring pipeline. The app didn't crash, but a feature "
-                "may have silently fallen back to a default value. If anything "
-                "looks empty or stale in the output, the cause is likely here."
-            )
-            for _err in _silent_errs:
-                st.code(_err)
-        # Clear after surfacing so we only show this run's errors
+        _msg = (
+            f"**{len(_silent_errs)} silent scoring error(s) caught this run.** "
+            "These exceptions were swallowed by defensive try/except blocks. "
+            "The app didn't crash, but features may have fallen back to "
+            "defaults. Details: " + " | ".join(_silent_errs)
+        )
+        stash_diagnostic("pipeline_health", _msg, level="warning")
         st.session_state["_silent_scoring_errors"] = []
 
-    # v43.51 (reviewer-validated): surface column-coverage warnings from
-    # build_matchup_table. If a known-consumed column was produced upstream
-    # but dropped from display_cols, that's the rename/whitelist bug class
-    # the reviewer documented. The assertion catches it at build time; this
-    # makes it visible.
     _coverage_warnings = st.session_state.get("_column_coverage_warnings", [])
     if _coverage_warnings:
-        with st.expander(
-            f"🔧 v43.51 column-coverage warning: "
-            f"{len(_coverage_warnings)} column(s) dropped that downstream needs",
-            expanded=False,
-        ):
-            st.caption(
-                "build_matchup_table's display_cols whitelist filtered out "
-                "columns that downstream scoring code reads. The scoring "
-                "function silently sees None and degrades. Add the missing "
-                "column(s) to display_cols in models.py to fix."
-            )
-            for _w in _coverage_warnings:
-                st.code(_w)
+        _msg = (
+            f"**{len(_coverage_warnings)} column(s) dropped that downstream needs.** "
+            "build_matchup_table's display_cols whitelist filtered out columns "
+            "that scoring code reads — features silently degrade. Add the missing "
+            "column(s) to display_cols in models.py to fix. Details: "
+            + " | ".join(_coverage_warnings)
+        )
+        stash_diagnostic("pipeline_health", _msg, level="warning")
         st.session_state["_column_coverage_warnings"] = []
+    else:
+        # When the assertion runs clean, stash a positive caption so user
+        # can see "no warnings" instead of guessing whether it's empty or broken
+        if combined_picks is not None and not combined_picks.empty:
+            stash_diagnostic(
+                "pipeline_health",
+                "**Column-coverage assertion:** ✅ clean — all known-consumed "
+                "columns survived display_cols filter."
+            )
 
     if "pa" in combined_picks.columns and "hr_game_pct" in combined_picks.columns:
         q = combined_picks[
@@ -9967,36 +9972,6 @@ if all_hitters:
         except Exception:
             pass
 
-        # v43.48: emergency gist reset — when gist content is corrupt (invalid
-        # JSON from truncation/manual edit), reads fail forever and saves stop.
-        # The two-click confirm prevents accidental wipes; the button only fires
-        # when the user has actively been warned about a read failure.
-        try:
-            from backtest import emergency_reset_gist, durable_storage_configured
-            if durable_storage_configured():
-                with st.expander("🆘 Emergency: reset gist storage", expanded=False):
-                    st.caption(
-                        "Use this ONLY if gist saves are failing with an "
-                        "'invalid JSON' / 'Expecting :' error. Resets the "
-                        "gist back to `{}` — **all prior snapshot history will "
-                        "be permanently lost.** v43.48's size pruning should "
-                        "prevent the corruption from recurring."
-                    )
-                    confirm_reset = st.checkbox(
-                        "I understand this WIPES all backtest history",
-                        key="gist_reset_confirm",
-                    )
-                    if confirm_reset and st.button(
-                        "🆘 Reset gist to empty {}",
-                        key="gist_reset_button",
-                    ):
-                        ok, msg = emergency_reset_gist()
-                        if ok:
-                            st.success(f"✅ {msg}")
-                        else:
-                            st.error(f"❌ {msg}")
-        except Exception:
-            pass
 
     with snap_col2:
         # Build combined export - try Excel, fall back to CSV-bundle
@@ -10641,213 +10616,6 @@ if all_hitters:
     # underlying gs_score column is no longer computed.
 else:
     st.caption("Waiting for matchup data to populate.")
-
-st.divider()
-
-
-# ============================================================================
-# CUSTOM GRADE BUILDER (v43.31) — user-requested
-# ============================================================================
-# Lets the user select any subset of metrics from combined_all, optionally
-# weight them, and get a custom letter grade for every hitter on the slate
-# based on those user-chosen criteria. Purely additive — does NOT touch
-# pick_score, hr_grade, hit_grade, or any existing scoring. Read-only on
-# combined_all.
-#
-# Use cases:
-#   - "What if I only care about barrel% and pulled_brl%?"
-#   - "Show me hitters that profile well on FB% + hard_hit + xwOBA"
-#   - "Rank by recent form + plate discipline only"
-#   - "Sort by ISO + recent HR streak — pure power play"
-# ============================================================================
-if combined_all is not None and not combined_all.empty:
-    with st.expander("🎛️ Custom Grade Builder — pick your own metrics", expanded=False):
-        st.markdown(
-            "Build your own composite grade. Pick the stats you care about and "
-            "the model will percentile-rank every hitter across the slate on those "
-            "metrics, then composite them. Adjust weights to emphasize what matters "
-            "most to you. **Purely exploratory — does not change pick_score.**"
-        )
-
-        # Metric catalog — name → (label, lower_is_better, description)
-        # Only metrics that actually live on combined_all show up; we filter below.
-        _METRIC_CATALOG = {
-            # === Power signals ===
-            "barrel_pct":             ("Barrel %",                 False, "Overall barrel rate"),
-            "pulled_brl_pct":         ("Pulled-air Barrel %",      False, "HR-specific (best single HR predictor)"),
-            "iso":                    ("ISO",                      False, "Isolated power (SLG - AVG)"),
-            "slg":                    ("SLG",                      False, "Slugging percentage"),
-            "hard_hit":               ("Hard Hit %",               False, "% of contact ≥95 mph EV"),
-            "avg_ev":                 ("Avg Exit Velocity",        False, "Average exit velocity"),
-            "fb_pct":                 ("Fly Ball %",               False, "FB rate (HRs come from FB)"),
-            "la":                     ("Launch Angle (avg)",       False, "Average launch angle"),
-            "max_hit_speed":          ("Max EV",                   False, "Peak exit velocity (raw power)"),
-            # === Predictive composites ===
-            "xwoba":                  ("xwOBA",                    False, "Expected wOBA (Statcast)"),
-            "xwobacon":               ("xwOBAcon",                 False, "Expected wOBA on contact"),
-            "xba":                    ("xBA",                      False, "Expected batting average"),
-            "ops":                    ("OPS",                      False, "On-base + slugging"),
-            "obp":                    ("OBP",                      False, "On-base percentage"),
-            # === Plate discipline ===
-            "bb_pct":                 ("BB %",                     False, "Walk rate (higher better)"),
-            "k_pct":                  ("K %",                      True,  "Strikeout rate (LOWER better)"),
-            "whiff_pct":              ("Whiff %",                  True,  "Whiff rate (LOWER better)"),
-            "discipline_score":       ("Discipline Score",         False, "K%/BB% composite (existing)"),
-            # === Form / recency ===
-            "recent_hr":              ("Recent HRs (14d)",         False, "HRs in last 14 days"),
-            "recent_hr_weighted_rate": ("Weighted Recent HR Rate",  False, "Recency-weighted HR/PA"),
-            "hr_streak_games":        ("Active HR Streak",         False, "Consecutive games with HR"),
-            "hr_form":                ("HR Form Composite",        False, "Multi-stat form (existing)"),
-            # === Existing composites ===
-            "power_score":            ("Power Score",              False, "Existing power composite"),
-            "matchup_opp":            ("Matchup vs Pitcher",       False, "Hitter advantage vs this pitcher"),
-            "hr_game_pct":            ("HR Game %",                False, "Model's HR probability this game"),
-            "hit_game_pct":           ("Hit Game %",               False, "Model's hit probability this game"),
-            # === Matchup specifics ===
-            "pitch_hr_score":         ("Arsenal HR Score",         False, "Per-pitch HR threat"),
-            "pitch_match_score":      ("Pitch Match Score",        False, "Per-pitch wOBA composite"),
-            "env_boost":              ("Environmental Boost",      False, "Park × weather multiplier"),
-            "park_hand_factor":       ("Park-Hand Factor",         False, "Park factor for this hitter's hand"),
-        }
-
-        # Filter to columns that exist + have data
-        _available = {
-            k: v for k, v in _METRIC_CATALOG.items()
-            if k in combined_all.columns
-            and pd.to_numeric(combined_all[k], errors="coerce").notna().any()
-        }
-
-        if not _available:
-            st.warning("No metrics available — no usable columns in combined_all.")
-        else:
-            # Build label → key map for the multiselect
-            _label_to_key = {f"{v[0]} — {v[2]}": k for k, v in _available.items()}
-
-            _selected_labels = st.multiselect(
-                "Pick metrics to include (1-10 recommended):",
-                options=list(_label_to_key.keys()),
-                default=[],
-                help=(
-                    "Each selected metric is percentile-ranked across the slate "
-                    "(0-100, higher = better; K%/whiff% auto-inverted). The "
-                    "composite is the weighted average of those ranks."
-                ),
-            )
-
-            _selected_keys = [_label_to_key[lbl] for lbl in _selected_labels]
-
-            if not _selected_keys:
-                st.info("Pick at least one metric to see custom grades.")
-            else:
-                # Optional weights — default equal weight.
-                _use_weights = st.checkbox(
-                    "Adjust weights (default: equal weight for all selected)",
-                    value=False,
-                )
-                _weights = {}
-                if _use_weights:
-                    cols = st.columns(min(4, len(_selected_keys)))
-                    for i, k in enumerate(_selected_keys):
-                        with cols[i % len(cols)]:
-                            label = _available[k][0]
-                            _weights[k] = st.slider(
-                                f"{label} weight",
-                                min_value=0.0, max_value=3.0, value=1.0, step=0.25,
-                                key=f"cgb_w_{k}",
-                            )
-                else:
-                    _weights = {k: 1.0 for k in _selected_keys}
-
-                # ====================================================
-                # COMPUTE CUSTOM COMPOSITE
-                # ====================================================
-                # For each metric: numeric → percentile-rank (NaN preserved)
-                # → invert if lower_is_better → multiply by user weight
-                # → sum per row, normalize by total weight from contributing
-                # (non-NaN) metrics for that row.
-                _custom_sum = pd.Series(0.0, index=combined_all.index)
-                _weight_total = pd.Series(0.0, index=combined_all.index)
-
-                for k in _selected_keys:
-                    col = pd.to_numeric(combined_all[k], errors="coerce")
-                    if col.isna().all():
-                        continue
-                    pct = col.rank(pct=True, na_option="keep") * 100
-                    lower_better = _available[k][1]
-                    if lower_better:
-                        pct = 100 - pct
-                    w = float(_weights.get(k, 1.0))
-                    mask = pct.notna()
-                    _custom_sum = _custom_sum.add((pct.fillna(0) * w), fill_value=0)
-                    _weight_total = _weight_total + (mask.astype(float) * w)
-
-                _custom_score = (_custom_sum / _weight_total.replace(0, np.nan))
-
-                # ====================================================
-                # GRADE FROM PERCENTILE COMPOSITE
-                # ====================================================
-                def _custom_grade(s):
-                    if pd.isna(s):
-                        return "—"
-                    if s >= 90: return "A+"
-                    if s >= 80: return "A"
-                    if s >= 70: return "B+"
-                    if s >= 55: return "B"
-                    if s >= 40: return "C+"
-                    if s >= 25: return "C"
-                    if s >= 10: return "D"
-                    return "F"
-
-                def _custom_emoji(s):
-                    if pd.isna(s):
-                        return "⚪"
-                    if s >= 80: return "🟢"
-                    if s >= 55: return "🟡"
-                    if s >= 25: return "🟠"
-                    return "🔴"
-
-                # ====================================================
-                # DISPLAY
-                # ====================================================
-                _has_score = _custom_score.notna()
-                if not _has_score.any():
-                    st.warning("No hitters have data on any of the selected metrics.")
-                else:
-                    _id_cols = [c for c in ("player_name", "team", "opp_pitcher")
-                                if c in combined_all.columns]
-                    _display = combined_all.loc[_has_score, _id_cols + _selected_keys].copy()
-                    _display["custom_signal"] = _custom_score[_has_score].apply(_custom_emoji)
-                    _display["custom_grade"] = _custom_score[_has_score].apply(_custom_grade)
-                    _display["custom_score"] = _custom_score[_has_score].round(1)
-                    _front = ["custom_signal", "custom_grade", "custom_score"]
-                    _display = _display[_front + [c for c in _display.columns if c not in _front]]
-                    _display = _display.sort_values(
-                        "custom_score", ascending=False, na_position="last",
-                    ).head(30)
-
-                    st.dataframe(
-                        _display, hide_index=True, use_container_width=True,
-                        column_config={
-                            "custom_signal": st.column_config.TextColumn("Sig", width="small"),
-                            "custom_grade":  st.column_config.TextColumn("Grade", width="small"),
-                            "custom_score":  st.column_config.NumberColumn(
-                                "Score (percentile)", format="%.1f",
-                                help="Weighted average of percentile ranks across selected metrics (0-100)",
-                            ),
-                            "player_name":   st.column_config.TextColumn("Hitter"),
-                            "team":          st.column_config.TextColumn("Team", width="small"),
-                            "opp_pitcher":   st.column_config.TextColumn("vs Pitcher"),
-                        },
-                    )
-                    n_qualified = int(_has_score.sum())
-                    weight_str = " (custom weights)" if _use_weights else " (equal weight)"
-                    st.caption(
-                        f"Top 30 of {n_qualified} hitters with data on at least one "
-                        f"selected metric. Composite of {len(_selected_keys)} metric"
-                        f"{'s' if len(_selected_keys) != 1 else ''}{weight_str}. "
-                        f"Grades: A+ ≥90 / A ≥80 / B+ ≥70 / B ≥55 / C+ ≥40 / C ≥25 / "
-                        f"D ≥10 / F <10 (percentile composite)."
-                    )
 
 st.divider()
 
@@ -12821,6 +12589,320 @@ if _valid_games:
         st.divider()
 
 
+
+# ============================================================================
+# v43.53 — TOOLS & DIAGNOSTICS (user-requested consolidation)
+# ============================================================================
+# Single section at the bottom of the page that consolidates everything
+# secondary: custom grade builder, slate audit captions, pipeline health
+# warnings, admin/recovery tools. Previously these were scattered around
+# the page — Custom Grade Builder buried mid-script, diagnostic captions
+# above picks, emergency reset inside snapshot save column.
+#
+# Population: diagnostics use stash_diagnostic() throughout compute code;
+# this section reads from st.session_state['_diagnostics'] and renders.
+# ============================================================================
+
+st.divider()
+st.header("🛠️ Tools & Diagnostics")
+st.caption(
+    "Secondary controls and observability. Build a custom grade, "
+    "inspect slate-wide audits, see pipeline health warnings, "
+    "and access admin/recovery tools."
+)
+
+_diag = st.session_state.get("_diagnostics", {})
+
+
+def _render_diag_list(items, empty_msg):
+    """Render a list of stashed diagnostic dicts with proper level handling."""
+    if not items:
+        st.caption(empty_msg)
+        return
+    for _d in items:
+        _level = _d.get("level", "caption")
+        _msg = _d.get("message", "")
+        if _level == "warning":
+            st.warning(_msg)
+        elif _level == "error":
+            st.error(_msg)
+        elif _level == "success":
+            st.success(_msg)
+        elif _level == "info":
+            st.info(_msg)
+        else:
+            st.markdown(f"· {_msg}")
+
+
+# ----- 📊 Slate Audit -----
+_slate_audit = _diag.get("slate_audit", [])
+_slate_count = len(_slate_audit)
+_slate_label = "📊 Slate Audit (" + str(_slate_count) + " item" + ("s" if _slate_count != 1 else "") + ")"
+with st.expander(_slate_label, expanded=False):
+    st.caption(
+        "Distribution checks on this slate's scoring outputs. "
+        "Sanity-check that HR Scores spread reasonably, smash flags "
+        "aren't over-firing, etc."
+    )
+    _render_diag_list(
+        _slate_audit,
+        "No slate-audit data yet — run a slate to populate."
+    )
+
+
+# ----- 🔧 Pipeline Health -----
+_pipe_health = _diag.get("pipeline_health", [])
+_pipe_count = len(_pipe_health)
+_pipe_has_warnings = any(
+    d.get("level") in ("warning", "error") for d in _pipe_health
+)
+_pipe_icon = "⚠️" if _pipe_has_warnings else "✅"
+_pipe_label = "🔧 Pipeline Health " + _pipe_icon + " (" + str(_pipe_count) + " item" + ("s" if _pipe_count != 1 else "") + ")"
+with st.expander(_pipe_label, expanded=_pipe_has_warnings):
+    st.caption(
+        "Data-quality checks: handedness-split coverage, "
+        "column-coverage assertions, silent scoring errors. "
+        "⚠️ icon = at least one issue this run."
+    )
+    _render_diag_list(
+        _pipe_health,
+        "No pipeline-health data yet — run a slate to populate."
+    )
+
+
+# ----- 🎛️ Custom Grade Builder (moved from mid-script) -----
+with st.expander("🎛️ Custom Grade Builder — pick your own metrics", expanded=False):
+    st.caption(
+        "Build a custom composite by selecting metrics and weights. "
+        "Read-only — does not affect pick_score."
+    )
+    if combined_all is not None and not combined_all.empty:
+        st.markdown(
+            "Build your own composite grade. Pick the stats you care about and "
+            "the model will percentile-rank every hitter across the slate on those "
+            "metrics, then composite them. Adjust weights to emphasize what matters "
+            "most to you. **Purely exploratory — does not change pick_score.**"
+        )
+
+        # Metric catalog — name → (label, lower_is_better, description)
+        # Only metrics that actually live on combined_all show up; we filter below.
+        _METRIC_CATALOG = {
+            # === Power signals ===
+            "barrel_pct":             ("Barrel %",                 False, "Overall barrel rate"),
+            "pulled_brl_pct":         ("Pulled-air Barrel %",      False, "HR-specific (best single HR predictor)"),
+            "iso":                    ("ISO",                      False, "Isolated power (SLG - AVG)"),
+            "slg":                    ("SLG",                      False, "Slugging percentage"),
+            "hard_hit":               ("Hard Hit %",               False, "% of contact ≥95 mph EV"),
+            "avg_ev":                 ("Avg Exit Velocity",        False, "Average exit velocity"),
+            "fb_pct":                 ("Fly Ball %",               False, "FB rate (HRs come from FB)"),
+            "la":                     ("Launch Angle (avg)",       False, "Average launch angle"),
+            "max_hit_speed":          ("Max EV",                   False, "Peak exit velocity (raw power)"),
+            # === Predictive composites ===
+            "xwoba":                  ("xwOBA",                    False, "Expected wOBA (Statcast)"),
+            "xwobacon":               ("xwOBAcon",                 False, "Expected wOBA on contact"),
+            "xba":                    ("xBA",                      False, "Expected batting average"),
+            "ops":                    ("OPS",                      False, "On-base + slugging"),
+            "obp":                    ("OBP",                      False, "On-base percentage"),
+            # === Plate discipline ===
+            "bb_pct":                 ("BB %",                     False, "Walk rate (higher better)"),
+            "k_pct":                  ("K %",                      True,  "Strikeout rate (LOWER better)"),
+            "whiff_pct":              ("Whiff %",                  True,  "Whiff rate (LOWER better)"),
+            "discipline_score":       ("Discipline Score",         False, "K%/BB% composite (existing)"),
+            # === Form / recency ===
+            "recent_hr":              ("Recent HRs (14d)",         False, "HRs in last 14 days"),
+            "recent_hr_weighted_rate": ("Weighted Recent HR Rate",  False, "Recency-weighted HR/PA"),
+            "hr_streak_games":        ("Active HR Streak",         False, "Consecutive games with HR"),
+            "hr_form":                ("HR Form Composite",        False, "Multi-stat form (existing)"),
+            # === Existing composites ===
+            "power_score":            ("Power Score",              False, "Existing power composite"),
+            "matchup_opp":            ("Matchup vs Pitcher",       False, "Hitter advantage vs this pitcher"),
+            "hr_game_pct":            ("HR Game %",                False, "Model's HR probability this game"),
+            "hit_game_pct":           ("Hit Game %",               False, "Model's hit probability this game"),
+            # === Matchup specifics ===
+            "pitch_hr_score":         ("Arsenal HR Score",         False, "Per-pitch HR threat"),
+            "pitch_match_score":      ("Pitch Match Score",        False, "Per-pitch wOBA composite"),
+            "env_boost":              ("Environmental Boost",      False, "Park × weather multiplier"),
+            "park_hand_factor":       ("Park-Hand Factor",         False, "Park factor for this hitter's hand"),
+        }
+
+        # Filter to columns that exist + have data
+        _available = {
+            k: v for k, v in _METRIC_CATALOG.items()
+            if k in combined_all.columns
+            and pd.to_numeric(combined_all[k], errors="coerce").notna().any()
+        }
+
+        if not _available:
+            st.warning("No metrics available — no usable columns in combined_all.")
+        else:
+            # Build label → key map for the multiselect
+            _label_to_key = {f"{v[0]} — {v[2]}": k for k, v in _available.items()}
+
+            _selected_labels = st.multiselect(
+                "Pick metrics to include (1-10 recommended):",
+                options=list(_label_to_key.keys()),
+                default=[],
+                help=(
+                    "Each selected metric is percentile-ranked across the slate "
+                    "(0-100, higher = better; K%/whiff% auto-inverted). The "
+                    "composite is the weighted average of those ranks."
+                ),
+            )
+
+            _selected_keys = [_label_to_key[lbl] for lbl in _selected_labels]
+
+            if not _selected_keys:
+                st.info("Pick at least one metric to see custom grades.")
+            else:
+                # Optional weights — default equal weight.
+                _use_weights = st.checkbox(
+                    "Adjust weights (default: equal weight for all selected)",
+                    value=False,
+                )
+                _weights = {}
+                if _use_weights:
+                    cols = st.columns(min(4, len(_selected_keys)))
+                    for i, k in enumerate(_selected_keys):
+                        with cols[i % len(cols)]:
+                            label = _available[k][0]
+                            _weights[k] = st.slider(
+                                f"{label} weight",
+                                min_value=0.0, max_value=3.0, value=1.0, step=0.25,
+                                key=f"cgb_w_{k}",
+                            )
+                else:
+                    _weights = {k: 1.0 for k in _selected_keys}
+
+                # ====================================================
+                # COMPUTE CUSTOM COMPOSITE
+                # ====================================================
+                # For each metric: numeric → percentile-rank (NaN preserved)
+                # → invert if lower_is_better → multiply by user weight
+                # → sum per row, normalize by total weight from contributing
+                # (non-NaN) metrics for that row.
+                _custom_sum = pd.Series(0.0, index=combined_all.index)
+                _weight_total = pd.Series(0.0, index=combined_all.index)
+
+                for k in _selected_keys:
+                    col = pd.to_numeric(combined_all[k], errors="coerce")
+                    if col.isna().all():
+                        continue
+                    pct = col.rank(pct=True, na_option="keep") * 100
+                    lower_better = _available[k][1]
+                    if lower_better:
+                        pct = 100 - pct
+                    w = float(_weights.get(k, 1.0))
+                    mask = pct.notna()
+                    _custom_sum = _custom_sum.add((pct.fillna(0) * w), fill_value=0)
+                    _weight_total = _weight_total + (mask.astype(float) * w)
+
+                _custom_score = (_custom_sum / _weight_total.replace(0, np.nan))
+
+                # ====================================================
+                # GRADE FROM PERCENTILE COMPOSITE
+                # ====================================================
+                def _custom_grade(s):
+                    if pd.isna(s):
+                        return "—"
+                    if s >= 90: return "A+"
+                    if s >= 80: return "A"
+                    if s >= 70: return "B+"
+                    if s >= 55: return "B"
+                    if s >= 40: return "C+"
+                    if s >= 25: return "C"
+                    if s >= 10: return "D"
+                    return "F"
+
+                def _custom_emoji(s):
+                    if pd.isna(s):
+                        return "⚪"
+                    if s >= 80: return "🟢"
+                    if s >= 55: return "🟡"
+                    if s >= 25: return "🟠"
+                    return "🔴"
+
+                # ====================================================
+                # DISPLAY
+                # ====================================================
+                _has_score = _custom_score.notna()
+                if not _has_score.any():
+                    st.warning("No hitters have data on any of the selected metrics.")
+                else:
+                    _id_cols = [c for c in ("player_name", "team", "opp_pitcher")
+                                if c in combined_all.columns]
+                    _display = combined_all.loc[_has_score, _id_cols + _selected_keys].copy()
+                    _display["custom_signal"] = _custom_score[_has_score].apply(_custom_emoji)
+                    _display["custom_grade"] = _custom_score[_has_score].apply(_custom_grade)
+                    _display["custom_score"] = _custom_score[_has_score].round(1)
+                    _front = ["custom_signal", "custom_grade", "custom_score"]
+                    _display = _display[_front + [c for c in _display.columns if c not in _front]]
+                    _display = _display.sort_values(
+                        "custom_score", ascending=False, na_position="last",
+                    ).head(30)
+
+                    st.dataframe(
+                        _display, hide_index=True, use_container_width=True,
+                        column_config={
+                            "custom_signal": st.column_config.TextColumn("Sig", width="small"),
+                            "custom_grade":  st.column_config.TextColumn("Grade", width="small"),
+                            "custom_score":  st.column_config.NumberColumn(
+                                "Score (percentile)", format="%.1f",
+                                help="Weighted average of percentile ranks across selected metrics (0-100)",
+                            ),
+                            "player_name":   st.column_config.TextColumn("Hitter"),
+                            "team":          st.column_config.TextColumn("Team", width="small"),
+                            "opp_pitcher":   st.column_config.TextColumn("vs Pitcher"),
+                        },
+                    )
+                    n_qualified = int(_has_score.sum())
+                    weight_str = " (custom weights)" if _use_weights else " (equal weight)"
+                    st.caption(
+                        f"Top 30 of {n_qualified} hitters with data on at least one "
+                        f"selected metric. Composite of {len(_selected_keys)} metric"
+                        f"{'s' if len(_selected_keys) != 1 else ''}{weight_str}. "
+                        f"Grades: A+ ≥90 / A ≥80 / B+ ≥70 / B ≥55 / C+ ≥40 / C ≥25 / "
+                        f"D ≥10 / F <10 (percentile composite)."
+                    )
+    else:
+        st.caption("No slate data loaded yet.")
+
+
+# ----- 🆘 Admin & Recovery -----
+with st.expander("🆘 Admin & Recovery — emergency tools", expanded=False):
+    st.caption(
+        "Use these only when the normal flow is broken. "
+        "Emergency gist reset wipes all backtest history — last resort."
+    )
+    # v43.48: emergency gist reset — when gist content is corrupt (invalid
+    # JSON from truncation/manual edit), reads fail forever and saves stop.
+    # The two-click confirm prevents accidental wipes; the button only fires
+    # when the user has actively been warned about a read failure.
+    try:
+        from backtest import emergency_reset_gist, durable_storage_configured
+        if durable_storage_configured():
+            with st.expander("🆘 Emergency: reset gist storage", expanded=False):
+                st.caption(
+                    "Use this ONLY if gist saves are failing with an "
+                    "'invalid JSON' / 'Expecting :' error. Resets the "
+                    "gist back to `{}` — **all prior snapshot history will "
+                    "be permanently lost.** v43.48's size pruning should "
+                    "prevent the corruption from recurring."
+                )
+                confirm_reset = st.checkbox(
+                    "I understand this WIPES all backtest history",
+                    key="gist_reset_confirm",
+                )
+                if confirm_reset and st.button(
+                    "🆘 Reset gist to empty {}",
+                    key="gist_reset_button",
+                ):
+                    ok, msg = emergency_reset_gist()
+                    if ok:
+                        st.success(f"✅ {msg}")
+                    else:
+                        st.error(f"❌ {msg}")
+    except Exception:
+        pass
 st.caption(
     f"Built {datetime.now().strftime('%Y-%m-%d %H:%M')} · "
     f"Sources: MLB Stats API, Baseball Savant, Open-Meteo · "
