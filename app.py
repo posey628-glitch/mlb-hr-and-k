@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.50-remove-park-history"
+APP_VERSION = "2026.06.10-v43.51-rename-whitelist-fixes-and-assertion"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -2096,7 +2096,14 @@ if use_bat_tracking:
             # "average swing quality" rather than "scored on a different
             # denominator."
             _keep_cols = ["player_id", "blast_pct"]
-            for _c in ("bat_speed", "fast_swing_pct", "squared_up_pct"):
+            # v43.51 (reviewer-validated): explicitly include ideal_attack_angle_pct
+            # so it survives the merge into hitter_stats. Previously the loop
+            # below only added bat_speed/fast_swing/squared_up, so IAA was
+            # dropped here even when get_bat_tracking found it — making the
+            # v43.42 diagnostic blame Savant schema drift when the real bug
+            # was app-side filtering.
+            for _c in ("bat_speed", "fast_swing_pct", "squared_up_pct",
+                        "ideal_attack_angle_pct"):
                 if _c in bat_track_df.columns:
                     _keep_cols.append(_c)
             hitter_stats = hitter_stats.merge(
@@ -4495,7 +4502,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.50 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.51 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -6545,9 +6552,16 @@ if all_hitters_for_picks:
 
         # Per-hitter letter grade with caps applied (kept for backward compat
         # with existing snapshots/exports — display will prefer hr_score)
+        #
+        # v43.51 (reviewer-validated): grade now reads hr_score (the slate-
+        # rescaled 0-95 value), not grade_composite (raw weighted percentile
+        # avg, which clusters at 45-60 because percentile-rank-averaging
+        # regresses to the mean). With the old input, A+ (≥80) was nearly
+        # unreachable — slate's best play would show "HR Score 95" but
+        # "Grade B+". Both now use the same underlying number so they agree.
         def _row_grade(row):
             return comprehensive_hr_grade(
-                row.get("grade_composite"),
+                row.get("hr_score"),
                 pull_pct=row.get("pull_pct"),
                 avg_ev=row.get("avg_ev"),
                 env_mult=row.get("env_boost"),
@@ -6606,6 +6620,26 @@ if all_hitters_for_picks:
                 _mdf["hr_score"] = new_scores
                 _mdf["hr_score_signal"] = new_sigs
                 _mdf["grade"] = new_grades
+
+                # v43.51 (reviewer-validated): recompute alert (Signal emoji)
+                # from the back-mapped grade so Signal and Grade can't diverge.
+                # Previously alert was derived from hr_game_pct via hr_grade()
+                # in the matchup loop, but v43.41 then overwrote grade with
+                # comprehensive_hr_grade(hr_score). After that, Signal (still
+                # keyed to OLD hr_game_pct grade) and Grade (comprehensive)
+                # disagreed for any hitter where the two diverged. This is the
+                # exact bug v43.4 was supposed to fix; v43.41 re-introduced it.
+                if "alert" in _mdf.columns:
+                    _GRADE_TO_EMOJI = {
+                        "A+": "🟢", "A":  "🟢",
+                        "B+": "🟡", "B":  "🟡",
+                        "C+": "🟠", "C":  "🟠",
+                        "D":  "🔴", "F":  "🔴",
+                        "—":  "⚪",
+                    }
+                    _mdf["alert"] = [
+                        _GRADE_TO_EMOJI.get(g, "⚪") for g in new_grades
+                    ]
 
                 # v43.43 (reviewer-validated): the v43.42 smash override
                 # used to live here, deriving smash purely from hr_score
@@ -7104,6 +7138,28 @@ if combined_picks is not None and not combined_picks.empty:
                 st.code(_err)
         # Clear after surfacing so we only show this run's errors
         st.session_state["_silent_scoring_errors"] = []
+
+    # v43.51 (reviewer-validated): surface column-coverage warnings from
+    # build_matchup_table. If a known-consumed column was produced upstream
+    # but dropped from display_cols, that's the rename/whitelist bug class
+    # the reviewer documented. The assertion catches it at build time; this
+    # makes it visible.
+    _coverage_warnings = st.session_state.get("_column_coverage_warnings", [])
+    if _coverage_warnings:
+        with st.expander(
+            f"🔧 v43.51 column-coverage warning: "
+            f"{len(_coverage_warnings)} column(s) dropped that downstream needs",
+            expanded=False,
+        ):
+            st.caption(
+                "build_matchup_table's display_cols whitelist filtered out "
+                "columns that downstream scoring code reads. The scoring "
+                "function silently sees None and degrades. Add the missing "
+                "column(s) to display_cols in models.py to fix."
+            )
+            for _w in _coverage_warnings:
+                st.code(_w)
+        st.session_state["_column_coverage_warnings"] = []
 
     if "pa" in combined_picks.columns and "hr_game_pct" in combined_picks.columns:
         q = combined_picks[
