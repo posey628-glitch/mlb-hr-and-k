@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.54-reviewer-ship-9-fixes"
+APP_VERSION = "2026.06.10-v43.55-assertion-false-positive-and-pitcher-cascade-diag"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -4524,7 +4524,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.54 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.55 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -7176,17 +7176,50 @@ if combined_picks is not None and not combined_picks.empty:
             else:
                 coverage_audits.append(f"{label}: ❌ column missing")
 
-        # Pitcher-side SLG-allowed coverage (for total_bases_per_pa)
-        for p_col, label in [
-            ("opp_pitcher_vs_lhb_slg", "Pitcher vs_lhb_slg"),
-            ("opp_pitcher_vs_rhb_slg", "Pitcher vs_rhb_slg"),
-            ("opp_pitcher_xwoba_allowed", "Pitcher xwoba_allowed (fallback)"),
-        ]:
-            if p_col in combined_picks.columns:
-                n = combined_picks[p_col].notna().sum()
-                pct = 100 * n / n_total
-                icon = "⚠️" if pct < 50 else ""
-                coverage_audits.append(f"{label}: {n}/{n_total} ({pct:.0f}%) {icon}")
+        # Pitcher-side SLG-allowed coverage (for total_bases_per_pa).
+        # v43.55 (fix B): the previous check looked at combined_picks for
+        # opp_pitcher_* columns — but those columns aren't merged onto the
+        # hitter frame. They live on pitcher_stats (the raw pitcher frame
+        # that opp_p_row is built from). Check that frame directly. Filter
+        # to slate pitchers only so the % reflects the actual slate.
+        try:
+            # Find slate pitcher IDs from combined_picks
+            slate_p_ids = set()
+            for col in ("opp_pitcher_id", "pitcher_id"):
+                if col in combined_picks.columns:
+                    slate_p_ids.update(
+                        int(p) for p in combined_picks[col].dropna()
+                        if pd.notna(p)
+                    )
+            if slate_p_ids and "pitcher_stats" in globals():
+                _ps = globals()["pitcher_stats"]
+                if _ps is not None and not _ps.empty and "player_id" in _ps.columns:
+                    _slate_pitchers = _ps[_ps["player_id"].isin(slate_p_ids)]
+                    n_p = max(1, len(_slate_pitchers))
+                    pitcher_priority_status = []
+                    for p_col, label in [
+                        ("vs_lhb_slg", "P1 vs_lhb_slg"),
+                        ("vs_rhb_slg", "P1 vs_rhb_slg"),
+                        ("xwoba", "P2 xwoba_allowed"),
+                        ("barrel_batted_rate", "P3 barrel_allowed"),
+                    ]:
+                        if p_col in _slate_pitchers.columns:
+                            n = _slate_pitchers[p_col].notna().sum()
+                            pct = 100 * n / n_p
+                            icon = "⚠️" if pct < 50 else "✅"
+                            pitcher_priority_status.append(
+                                f"{label}: {n}/{n_p} ({pct:.0f}%) {icon}"
+                            )
+                        else:
+                            pitcher_priority_status.append(
+                                f"{label}: ❌ column missing"
+                            )
+                    coverage_audits.append(
+                        "**Pitcher SLG-allowed cascade** (total_bases_per_pa, "
+                        f"{n_p} slate pitchers): " + " · ".join(pitcher_priority_status)
+                    )
+        except Exception:
+            pass
 
         if coverage_audits:
             stash_diagnostic(
