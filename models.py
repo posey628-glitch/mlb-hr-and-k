@@ -983,11 +983,18 @@ def build_matchup_table(
         "pull_pct": "build_matchup_table rename of pull_percent",
         "avg_ev": "Savant hitter_stats — required for grade caps",
         "barrel_pct": "Savant hitter_stats — required for composite",
-        "ideal_attack_angle_pct": (
+        # v43.58: changed primary swing-quality column from
+        # ideal_attack_angle_pct (which Savant doesn't expose in the
+        # current endpoint) to blast_pct (which Savant DOES return). HR
+        # Criteria #4 falls back to blast_pct when IAA is missing — see
+        # add_hr_criteria. Listing blast_pct here means we still get a
+        # warning if EITHER IAA fetch OR blast_pct fetch fails, which is
+        # what we want.
+        "blast_pct": (
             "bat tracking fetch (📡 toggle in sidebar). If the toggle is OFF, "
             "turn it on. If the toggle is ON, check the 'Bat tracking fetch' "
-            "status line above this warning — the fetcher may have returned "
-            "empty (Savant schema drift) or the IAA field name may have changed."
+            "status line above this warning. With blast_pct missing, HR "
+            "Criteria #4 will be '·' for every hitter (no fallback signal)."
         ),
     }
     try:
@@ -1406,6 +1413,13 @@ HR_CRITERIA_THRESHOLDS = {
     "avg_ev": 90.0,
     "barrel_pct": 10.0,
     "ideal_attack_angle_pct": 60.0,
+    # v43.58: blast_pct fallback for HR Criteria #4. Savant's June 2026
+    # bat-tracking endpoint doesn't expose ideal_attack_angle_pct directly
+    # (verified: 18 cols returned, none are IAA). blast_pct measures swings
+    # that are BOTH fast AND squared-up — the closest available signal
+    # for "elite swing execution" that we already fetch. League ~3-4%,
+    # elite ~7%+. Criterion #4 falls back to this when IAA is missing.
+    "blast_pct": 5.0,
 }
 
 
@@ -1417,6 +1431,7 @@ def add_hr_criteria(df: pd.DataFrame) -> pd.DataFrame:
       - hr_crit_ev          bool|None — meets avg_ev ≥ 90
       - hr_crit_barrel      bool|None — meets barrel_pct ≥ 10
       - hr_crit_iaa         bool|None — meets ideal_attack_angle_pct ≥ 60
+                                         OR blast_pct ≥ 5 (v43.58 fallback)
       - hr_criteria_met     int       — count of criteria met (0-4)
       - hr_criteria_total   int       — count of criteria with data (0-4)
       - hr_criteria_label   str       — visual: "✓✓✓✗" or "3/4"
@@ -1427,6 +1442,12 @@ def add_hr_criteria(df: pd.DataFrame) -> pd.DataFrame:
     (vs False meaning "data available, threshold not met"). This matters
     because ideal_attack_angle data may not be present for every hitter
     if Savant's bat-tracking endpoint isn't returning that field.
+
+    v43.58 (production data-driven): Savant's current bat-tracking endpoint
+    doesn't expose IAA — criterion #4 was permanently '·' for every hitter.
+    Now falls back to blast_pct (which Savant DOES return) when IAA is
+    missing. blast_pct measures "fast AND squared-up" swings — same
+    semantic family as IAA (good swing execution), different metric.
     """
     if df is None or df.empty:
         return df
@@ -1453,8 +1474,15 @@ def add_hr_criteria(df: pd.DataFrame) -> pd.DataFrame:
                     HR_CRITERIA_THRESHOLDS["avg_ev"])
         c3 = _check(row.get("barrel_pct"),
                     HR_CRITERIA_THRESHOLDS["barrel_pct"])
-        c4 = _check(row.get("ideal_attack_angle_pct"),
-                    HR_CRITERIA_THRESHOLDS["ideal_attack_angle_pct"])
+        # v43.58: criterion #4 — IAA primary, blast_pct fallback
+        iaa_val = row.get("ideal_attack_angle_pct")
+        if iaa_val is not None and not pd.isna(iaa_val):
+            c4 = _check(iaa_val,
+                        HR_CRITERIA_THRESHOLDS["ideal_attack_angle_pct"])
+        else:
+            # Fall back to blast_pct (closest available signal)
+            c4 = _check(row.get("blast_pct"),
+                        HR_CRITERIA_THRESHOLDS["blast_pct"])
         return c1, c2, c3, c4
 
     crit_lists = {"pull": [], "ev": [], "barrel": [], "iaa": []}
