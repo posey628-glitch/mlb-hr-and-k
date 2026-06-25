@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.55-assertion-false-positive-and-pitcher-cascade-diag"
+APP_VERSION = "2026.06.10-v43.56-bat-tracking-visibility"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -2143,6 +2143,29 @@ if use_bat_tracking:
                 pass
     except Exception as _bt_err:
         _bat_tracking_status = f"❌ error: {type(_bt_err).__name__}"
+
+# v43.56: stash bat tracking outcome to Pipeline Health so the user can see
+# fetch result alongside the ALWAYS_EXPECTED_COLUMNS warning. Without this,
+# when IAA is missing but the toggle is ON, the assertion says "turn it on"
+# (misleading) and there's no signal about WHY the data isn't flowing. Now
+# the status appears in pipeline_health, with context:
+#   ✅ N hitters         = fetcher succeeded and merged
+#   ❌ error / no rows   = fetcher returned empty (Savant schema drift / API)
+#   ⏸️ disabled          = toggle is off
+try:
+    _bt_msg = f"**Bat tracking fetch:** `{_bat_tracking_status}`"
+    if "✅" in str(_bat_tracking_status):
+        _bt_msg += "  ← if HR Criteria #4 still '·' for everyone, IAA field wasn't returned (see below)"
+    elif "❌" in str(_bat_tracking_status):
+        _bt_msg += (
+            "  ← fetcher failed. IAA + blast_pct will both be missing. "
+            "Check the IAA column-list diagnostic if it appears below."
+        )
+    elif "⏸️" in str(_bat_tracking_status):
+        _bt_msg += "  ← toggle is off. HR Criteria #4 will be '·' for everyone."
+    stash_diagnostic("pipeline_health", _bt_msg)
+except Exception:
+    pass
 
 # HAND-SPLIT ARSENALS (June 2026)
 # Pitchers throw very different pitch mixes vs LHB vs RHB. A RHP might throw
@@ -4524,7 +4547,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.55 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.56 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -6712,6 +6735,8 @@ if all_hitters_for_picks:
                 from data_fetcher import last_bat_tracking_columns
                 _cols = last_bat_tracking_columns()
                 if _cols:
+                    # Fetcher REACHED the inner block but didn't find IAA —
+                    # field name has drifted. Show actual columns Savant returned.
                     _interesting = [c for c in _cols if any(
                         k in c.lower() for k in ("attack", "angle", "ideal", "swing")
                     )]
@@ -6725,6 +6750,26 @@ if all_hitters_for_picks:
                         + (" ... (truncated)" if len(_cols) > 30 else "")
                     )
                     stash_diagnostic("pipeline_health", _msg, level="warning")
+                else:
+                    # v43.56: fetcher returned empty / all endpoints failed.
+                    # The toggle may be ON but get_bat_tracking didn't return
+                    # any data. Surface this explicitly so the user knows
+                    # the fix isn't "turn on the toggle" — they need to check
+                    # the bat-tracking status caption above.
+                    _bt_now = globals().get("_bat_tracking_status", "unknown")
+                    if "❌" in str(_bt_now) or "no rows" in str(_bt_now):
+                        stash_diagnostic(
+                            "pipeline_health",
+                            f"**Bat tracking fetcher returned empty.** "
+                            f"Status: `{_bt_now}`. The toggle IS on, but "
+                            "Savant didn't return data. Likely causes: "
+                            "(1) Savant endpoint changed URL/schema, "
+                            "(2) min_pa filter excluded everyone (early "
+                            "season), (3) Savant is briefly down. HR "
+                            "Criteria #4 will be '·' for all hitters until "
+                            "this resolves.",
+                            level="warning"
+                        )
             except Exception:
                 pass
     except Exception as _ce:
