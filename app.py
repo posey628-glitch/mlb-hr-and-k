@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.59-populated-column-picker"
+APP_VERSION = "2026.06.10-v43.60-iaa-diagnostic-accuracy"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -4547,7 +4547,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.59 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.60 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -6735,21 +6735,47 @@ if all_hitters_for_picks:
                 from data_fetcher import last_bat_tracking_columns
                 _cols = last_bat_tracking_columns()
                 if _cols:
-                    # Fetcher REACHED the inner block but didn't find IAA —
-                    # field name has drifted. Show actual columns Savant returned.
+                    # v43.60: check whether the v43.58 blast_pct fallback
+                    # is active. If blast_pct is populated, criterion #4 IS
+                    # being evaluated (via fallback) — just not via IAA. The
+                    # old message "shows '·' for all hitters" was wrong in
+                    # that case. Now: informational note if fallback works,
+                    # warning only if BOTH IAA and blast_pct are missing.
+                    _blast_alive = (
+                        "blast_pct" in combined_picks.columns
+                        and combined_picks["blast_pct"].notna().any()
+                    )
                     _interesting = [c for c in _cols if any(
                         k in c.lower() for k in ("attack", "angle", "ideal", "swing")
                     )]
-                    _msg = (
-                        "**IAA column not found in Savant response.** "
-                        "HR Criteria #4 shows '·' for all hitters. "
-                        "Candidates containing attack/angle/ideal/swing: "
-                        + (", ".join(_interesting) if _interesting else "(none)")
-                        + f". Full Savant column list ({len(_cols)} cols): "
-                        + ", ".join(_cols[:30])
-                        + (" ... (truncated)" if len(_cols) > 30 else "")
-                    )
-                    stash_diagnostic("pipeline_health", _msg, level="warning")
+                    if _blast_alive:
+                        # Informational note — fallback is doing its job
+                        _msg = (
+                            "**IAA not in this Savant endpoint** (informational). "
+                            "HR Criteria #4 is using the **blast_pct fallback** "
+                            f"(threshold ≥ 5), which is alive for "
+                            f"{int(combined_picks['blast_pct'].notna().sum())} hitters. "
+                            "Criterion #4 IS being evaluated — just not via IAA. "
+                            "If you want true IAA back, Savant would need to add "
+                            "that field to this endpoint. Candidates seen: "
+                            + (", ".join(_interesting[:8])
+                               if _interesting else "(none)")
+                            + f". Full list ({len(_cols)} cols)."
+                        )
+                        stash_diagnostic("pipeline_health", _msg)  # info-level (not warning)
+                    else:
+                        # Real problem — IAA missing AND blast_pct missing
+                        _msg = (
+                            "**Both IAA and blast_pct missing.** "
+                            "HR Criteria #4 will be '·' for all hitters "
+                            "(no fallback signal available). "
+                            "Candidates containing attack/angle/ideal/swing: "
+                            + (", ".join(_interesting) if _interesting else "(none)")
+                            + f". Full Savant column list ({len(_cols)} cols): "
+                            + ", ".join(_cols[:30])
+                            + (" ... (truncated)" if len(_cols) > 30 else "")
+                        )
+                        stash_diagnostic("pipeline_health", _msg, level="warning")
                 else:
                     # v43.56: fetcher returned empty / all endpoints failed.
                     # The toggle may be ON but get_bat_tracking didn't return
