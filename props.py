@@ -846,23 +846,79 @@ def total_bases_per_pa(hitter_row, pitcher_row,
 
     base = hitter_slg * ab_per_pa
 
-    # Pitcher adjustment — SLG-against or BAA proxy
+    # Pitcher adjustment — SLG-against or proxy
+    # v43.54 (reviewer-validated CRITICAL fix): pitcher rows from
+    # build_pitcher_slate DO NOT have "slg_against" or "slg" columns.
+    # What they DO have:
+    #   - vs_lhb_slg / vs_rhb_slg (handedness-split SLG ALLOWED — copied
+    #     from raw pitcher_stats via the explicit vs_lhb_*/vs_rhb_* loop)
+    #   - xwoba_allowed (expected wOBA the pitcher has allowed)
+    #   - barrel_allowed, hard_hit_allowed (Statcast contact-quality allowed)
+    # Previously this function read non-existent "slg_against"/"slg", got
+    # None, fell to BAA branch (also non-existent on pitcher rows from
+    # build_pitcher_slate), got None — pitcher_mult always = 1.0. Total
+    # bases was pitcher-blind for every hitter on every slate.
     pitcher_mult = 1.0
     if pitcher_row is not None:
         try:
-            p_slg = (pitcher_row.get("slg_against") or pitcher_row.get("slg")
-                     or pitcher_row.get("SLG_against"))
+            # Priority 1: handedness-specific SLG-allowed. This is the
+            # closest direct match to "what does this pitcher give up
+            # when facing THIS hitter's handedness". Use the hitter's bats.
+            bats = (hitter_row.get("bats") or "R")
+            try:
+                bats = str(bats).upper()
+            except Exception:
+                bats = "R"
+            p_slg = None
+            if bats == "L":
+                p_slg = pitcher_row.get("vs_lhb_slg")
+            elif bats == "R":
+                p_slg = pitcher_row.get("vs_rhb_slg")
+            elif bats == "S":
+                # Switch hitter — average the two
+                lhb = pitcher_row.get("vs_lhb_slg")
+                rhb = pitcher_row.get("vs_rhb_slg")
+                vals = [v for v in (lhb, rhb)
+                        if v is not None and not pd.isna(v)]
+                if vals:
+                    p_slg = sum(float(v) for v in vals) / len(vals)
+            # If handedness-specific missing, use combined-handedness fallback
+            # (very rare for pitchers with any sample, but defensive).
+            if p_slg is None or (isinstance(p_slg, float) and pd.isna(p_slg)):
+                # Try the two and average if either present
+                lhb = pitcher_row.get("vs_lhb_slg")
+                rhb = pitcher_row.get("vs_rhb_slg")
+                vals = [v for v in (lhb, rhb)
+                        if v is not None and not pd.isna(v)]
+                if vals:
+                    p_slg = sum(float(v) for v in vals) / len(vals)
+
             if p_slg is not None and not pd.isna(p_slg):
                 p_f = float(p_slg)
                 if 0.250 < p_f < 0.700:
                     pitcher_mult = p_f / LEAGUE_SLG
             else:
-                p_baa = (pitcher_row.get("baa") or pitcher_row.get("BAA")
-                         or pitcher_row.get("batting_avg"))
-                if p_baa is not None and not pd.isna(p_baa):
-                    p_baa_f = float(p_baa)
-                    if 0.150 < p_baa_f < 0.400:
-                        pitcher_mult = (p_baa_f * 1.7) / LEAGUE_SLG
+                # Priority 2: xwoba_allowed as proxy. xwOBA→SLG isn't
+                # 1:1 but they correlate ~0.85. Empirically across the
+                # league SLG ≈ xwOBA × 1.28 (league xwOBA ~0.320,
+                # league SLG ~0.410). Use that ratio to project SLG-against.
+                p_xwoba = pitcher_row.get("xwoba_allowed")
+                if p_xwoba is not None and not pd.isna(p_xwoba):
+                    p_xw_f = float(p_xwoba)
+                    if 0.250 < p_xw_f < 0.500:
+                        proj_slg = p_xw_f * 1.28
+                        pitcher_mult = proj_slg / LEAGUE_SLG
+                else:
+                    # Priority 3: barrel_allowed as last-resort proxy.
+                    # League ~7-8% barrel. Each +1% barrel → ~+0.020 SLG.
+                    # Anchor at .410 SLG = 7.5% barrel.
+                    p_brl = pitcher_row.get("barrel_allowed")
+                    if p_brl is not None and not pd.isna(p_brl):
+                        p_brl_f = float(p_brl)
+                        if 0 <= p_brl_f <= 25:
+                            proj_slg = 0.410 + (p_brl_f - 7.5) * 0.020
+                            if 0.250 < proj_slg < 0.700:
+                                pitcher_mult = proj_slg / LEAGUE_SLG
         except (TypeError, ValueError):
             pass
     pitcher_mult = max(0.70, min(1.35, pitcher_mult))
