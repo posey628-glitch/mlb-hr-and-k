@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.53-tools-diagnostics-consolidation"
+APP_VERSION = "2026.06.10-v43.54-reviewer-ship-9-fixes"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -482,21 +482,7 @@ COLUMN_HELP = {
 }
 
 
-def _enrich_config(config_dict: dict) -> dict:
-    """Add help text from COLUMN_HELP to an existing column_config dict.
 
-    Pass the existing config dict; returns a new dict with help injected
-    wherever the column key exists in COLUMN_HELP. Safe to call on any
-    config — columns not in COLUMN_HELP pass through unchanged.
-
-    Note: Streamlit's column_config objects are tricky — we can't just
-    mutate them, we need to rebuild with help=. This helper attempts
-    that safely; if it fails it returns the original dict unmodified.
-    """
-    # Without rebuilding every config object, we just return as-is.
-    # The cleaner path is to add help= at config creation site. This
-    # helper exists for future expansion.
-    return config_dict
 
 
 # ============================================================================
@@ -967,24 +953,23 @@ def pa_threshold_for_date(d: date) -> int:
 
     v43.18 (reviewer-validated): uses shared _season_phase from models.py
     so this and _season_thresholds stay in lockstep on date logic.
+
+    v43.54 (reviewer fix #3): the previous except-fallback re-implemented
+    the month→phase switch inline, which would drift from _season_phase
+    if MLB ever shifts to a March opener. Now if _season_phase import
+    fails, we use a single safe default ("june") and surface the failure.
+    Single source of truth — no parallel logic to maintain.
     """
     try:
         from models import _season_phase
         phase = _season_phase(d)
     except Exception:
+        # Defensive: if _season_phase is unavailable for any reason,
+        # default to mid-season threshold (june → 120 PA). This is the
+        # SAFEST default for an unknown phase. The only cost: an October
+        # slate during an import-broken state gets 120 PA instead of 280.
+        # Better than maintaining a drift-prone month-switch duplicate.
         phase = "june"
-        try:
-            month = d.month
-            if month <= 4: phase = "early"
-            elif month == 5: phase = "may"
-            elif month == 6: phase = "june"
-            elif month == 7: phase = "july"
-            elif month == 8: phase = "august"
-            elif month == 9: phase = "september"
-            elif month == 10: phase = "october"
-            else: phase = "offseason"
-        except Exception:
-            pass
     return {
         "early": 40, "may": 80, "june": 120,
         "july": 160, "august": 200,
@@ -1486,9 +1471,13 @@ with st.sidebar:
     st.subheader("Data sources")
     use_recent_form = st.checkbox("Recent form (L15)", value=True)
     use_pitch_match = st.checkbox("Pitch match score", value=HAVE_PITCH_MATCH)
-    # BvP checkbox removed (was dead UI — the get_career_bvp_aggregate
-    # function was never actually called in the data flow, only the arsenal
-    # block ran). Per-pitch matchup is captured by pitch_match_score.
+    # v43.54 (reviewer cleanup L2): clarify what this flag actually controls.
+    # The OLD checkbox toggled get_career_bvp_aggregate (lifetime BvP) which
+    # was never actually called downstream — that's dead. But get_bvp_for_matchup
+    # (per-pitcher BvP that DOES feed ps_bvp in pick_score) runs unconditionally
+    # from the matchup loop. It's gated only by the fast_load_mode toggle below.
+    # So setting use_bvp = False here is a no-op; kept for compatibility with
+    # any conditional branches that may still reference it.
     use_bvp = False
     use_weather = st.checkbox("Weather + park factors", value=True)
     # Catcher framing remains disabled — was fetched but never wired into
@@ -1916,20 +1905,27 @@ hide_started = st.sidebar.checkbox(
 # so it can lift hitters with elite swing quality without overpowering
 # season-long power signals like barrel%.
 use_bat_tracking = st.sidebar.checkbox(
-    "📡 Fetch bat tracking (Blast %) — opt-in",
-    value=False,
+    "📡 Fetch bat tracking (Blast % + IAA)",
+    value=True,  # v43.54: default True so IAA-driven HR Criteria #4 actually
+                  # populates. Previously False — meant ideal_attack_angle_pct
+                  # was empty for every hitter on every default-config slate,
+                  # making criterion 4 permanently '·' (unmet) and silently
+                  # degrading the HR Profile checklist. Bat tracking has been
+                  # in Savant for 18+ months — field-name drift concern is
+                  # much lower than it was when the opt-in default was set.
     help=(
-        "Statcast added bat tracking in 2024. 'Blast' = swing that's both "
-        "squared-up AND fast (≥75 mph bat speed). Captures swing quality "
-        "at the SWING level vs barrel% which is BBE-level only.\n\n"
-        "WHY OPT-IN: Savant has changed bat-tracking field names between "
-        "the 2024 beta and 2025 production. If field names drift again, "
-        "the fetch returns empty. The caption below this checkbox shows "
-        "live fetch status — if it says ❌, blast_pct isn't blended into "
-        "hr_form for this run (no silent degradation).\n\n"
-        "WHEN ENABLED: blast_pct gets a small (0.05) weight in hr_form. "
-        "barrel_pct already covers ~70% of what blast_pct measures, so "
-        "expect modest score changes, not dramatic ones."
+        "Statcast bat-tracking data. Two fields used downstream:\n"
+        "  • blast_pct — swing that's squared-up AND fast (≥75 mph bat speed). "
+        "Gets a small (0.05) weight in hr_form.\n"
+        "  • ideal_attack_angle_pct (IAA) — % of swings on the ideal launch "
+        "angle for the pitch type. This is HR Criteria #4 in the HR Profile "
+        "checklist.\n\n"
+        "TURN OFF to skip the fetch (slightly faster page load). When off, "
+        "HR Criteria #4 will be '·' for every hitter (no IAA data), and "
+        "hr_form falls back to v43.16 weights (no blast component). "
+        "No silent degradation — the status caption shows what happened.\n\n"
+        "Savant has changed field names before — if the fetch returns empty, "
+        "the status caption goes ❌ and the features above gracefully turn off."
     ),
 )
 if hide_started and selected_date == datetime.now().date():
@@ -2455,13 +2451,13 @@ if not hitter_stats.empty:
                     la_status.warning(
                         f"⚠️ LA fill partial: {n_total_after - n_missing_after}/{n_total_after} "
                         f"have LA ({pct_after:.0f}% still missing, {elapsed:.1f}s). "
-                        f"See LA diagnostic expander below."
+                        f"Enable 'Show data diagnostic' in sidebar for endpoint details."
                     )
                 else:
                     la_status.error(
                         f"❌ LA fill failed mostly: only {n_total_after - n_missing_after}/{n_total_after} "
                         f"have LA ({pct_after:.0f}% still missing). "
-                        f"Open the LA diagnostic expander below to see endpoint errors."
+                        f"Enable 'Show data diagnostic' in sidebar to see endpoint errors."
                     )
             else:
                 st.session_state["_la_missing_pct_after"] = 100.0
@@ -4528,7 +4524,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.53 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.54 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -5526,6 +5522,15 @@ for _, game in slate.iterrows():
             # opp_p_row gets game_type too (defensive)
             if isinstance(opp_p_row, dict) and "game_type" not in opp_p_row:
                 opp_p_row["game_type"] = game_type
+            # v43.54 (reviewer-validated CRITICAL fix): explicit per-iteration
+            # reset of _hit_platoon. The variable was previously assigned
+            # ONLY inside a try block (line 5675) with no top-level reset.
+            # If iteration N succeeded but iteration N+1's try raised BEFORE
+            # the _hit_platoon assignment, `'_hit_platoon' in dir()` still
+            # returned True (it leaked from iteration N's scope), so the
+            # WRONG batter's platoon multiplier was applied to total_bases.
+            # Reset to 1.0 here so failure paths can't leak.
+            _hit_platoon = 1.0
             pa = safe_float(row_dict.get("pa"))
             sample = int(pa) if pa is not None else None
             bats = row_dict.get("bats", "R") or "R"
@@ -5703,7 +5708,11 @@ for _, game in slate.iterrows():
                 tb_pa_v = total_bases_per_pa(
                     row_dict, opp_p_row,
                     park_hits_factor=hitter_park_mult,
-                    platoon_mult=_hit_platoon if '_hit_platoon' in dir() else 1.0,
+                    # v43.54: _hit_platoon is now reset to 1.0 at the top of
+                    # every iteration, so the brittle `'_hit_platoon' in dir()`
+                    # guard is no longer needed — the variable is always defined.
+                    # On the hit try-block failure path, it stays 1.0.
+                    platoon_mult=_hit_platoon,
                 )
                 tb_game_v = total_bases_per_game(tb_pa_v, expected_pa=expected_pa) if tb_pa_v is not None else None
             except Exception:
@@ -6597,6 +6606,12 @@ if all_hitters_for_picks:
                         == safe_str(row.get("opp_pitcher_throws")).upper()
                 ),
                 sample_size=row.get("pa"),
+                # v43.54 #9 (reviewer fix): pass barrel% and ISO so the
+                # absolute power floor can demote A+/A grades that only
+                # earned the letter via slate-relative ranking, not real
+                # elite contact.
+                barrel_pct=row.get("barrel_pct"),
+                iso=row.get("iso"),
             )
         combined_picks["grade"] = combined_picks.apply(_row_grade, axis=1)
 
@@ -7127,6 +7142,60 @@ if combined_picks is not None and not combined_picks.empty:
                 "**Handedness-split coverage** · " + " · ".join(cov_pieces)
                 + "  ← if 0% / near it, splits endpoint not returning data "
                 + "and the handedness-blend feature is dead.",
+            )
+    except Exception:
+        pass
+
+    # v43.54 (reviewer-validated #7): extend coverage-style audits to
+    # discipline_score and pitcher-side total-bases inputs. The reviewer
+    # noted that ps_discipline contributes 6% to pick_score "made room for"
+    # by trimming other components — if discipline goes NaN slate-wide, the
+    # weight isn't redistributed and pick_score silently loses 6% of signal.
+    # Surface coverage so we can see it.
+    try:
+        n_total = max(1, len(combined_picks))
+        coverage_audits = []
+        # discipline_score coverage
+        if "discipline_score" in combined_picks.columns:
+            n_disc = combined_picks["discipline_score"].notna().sum()
+            pct = 100 * n_disc / n_total
+            icon = "⚠️" if pct < 60 else ""
+            coverage_audits.append(
+                f"discipline_score: {n_disc}/{n_total} ({pct:.0f}%) {icon}"
+            )
+        else:
+            coverage_audits.append("discipline_score: ❌ column missing")
+
+        # total bases inputs (xslg + slg)
+        for tb_col, label in [("xslg", "xslg"), ("slg", "slg")]:
+            if tb_col in combined_picks.columns:
+                n = combined_picks[tb_col].notna().sum()
+                pct = 100 * n / n_total
+                icon = "⚠️" if pct < 80 else ""
+                coverage_audits.append(f"{label}: {n}/{n_total} ({pct:.0f}%) {icon}")
+            else:
+                coverage_audits.append(f"{label}: ❌ column missing")
+
+        # Pitcher-side SLG-allowed coverage (for total_bases_per_pa)
+        for p_col, label in [
+            ("opp_pitcher_vs_lhb_slg", "Pitcher vs_lhb_slg"),
+            ("opp_pitcher_vs_rhb_slg", "Pitcher vs_rhb_slg"),
+            ("opp_pitcher_xwoba_allowed", "Pitcher xwoba_allowed (fallback)"),
+        ]:
+            if p_col in combined_picks.columns:
+                n = combined_picks[p_col].notna().sum()
+                pct = 100 * n / n_total
+                icon = "⚠️" if pct < 50 else ""
+                coverage_audits.append(f"{label}: {n}/{n_total} ({pct:.0f}%) {icon}")
+
+        if coverage_audits:
+            stash_diagnostic(
+                "pipeline_health",
+                "**Scoring-input coverage** · " + " · ".join(coverage_audits)
+                + "  ← ⚠️ icon means likely silent weight loss / pitcher-blind. "
+                + "discipline_score below 60% means ps_discipline (6% of pick_score) "
+                + "is mostly NaN-fallback. Pitcher SLG-allowed below 50% means "
+                + "total_bases_per_pa is falling back to xwoba/barrel proxies."
             )
     except Exception:
         pass
@@ -11194,10 +11263,10 @@ def build_col_config():
                 "Used as input to sleeper_score percentile rank."
             ),
         ),
-        "hr_prob": st.column_config.NumberColumn(
-            "HR Score (alias)", format="%.1f",
-            help="Same value as HR Score - kept for backward compatibility.",
-        ),
+        # v43.54 (reviewer cleanup L3): hr_prob column_config removed.
+        # `hr_prob` is dropped from combined_all (see line ~9792), so this
+        # config never renders. Was an alias for HR Score from the v43.41
+        # transition period.
         "matchup": st.column_config.NumberColumn(
             "Matchup", format="%.1f",
             help=(
