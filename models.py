@@ -353,6 +353,14 @@ def build_matchup_table(
         "isolated_power": "iso",
         "iso_power": "iso",
         "pull_air_percent": "pull_air_pct",
+        # v43.51 (reviewer-validated): missing rename caused 3 features to be
+        # silently inert. add_hr_criteria's pull≥40 check, the mechanics tier
+        # of comprehensive grade, and the mechanical-fail cap (pull<35 AND
+        # ev<88) all read pull_pct, but build_matchup_table only produced
+        # pull_percent. The v43.39 fix added pull_percent to display_cols
+        # whitelist but didn't add the rename, so pull_pct stayed None
+        # everywhere downstream. Adding the rename here fixes all three.
+        "pull_percent": "pull_pct",
     }
     df = df.rename(columns=rename)
 
@@ -548,7 +556,11 @@ def build_matchup_table(
     def _gb_type_flag(row):
         try:
             gb = float(row.get("gb_pct")) if not pd.isna(row.get("gb_pct")) else None
-            pull = float(row.get("pull_percent")) if not pd.isna(row.get("pull_percent")) else None
+            # v43.51: was reading pull_percent — that's now renamed to pull_pct
+            # at line 357. Use pull_pct with fallback to pull_percent for safety
+            # in case any code path bypasses the rename.
+            _pull_raw = row.get("pull_pct") if not pd.isna(row.get("pull_pct", None)) else row.get("pull_percent")
+            pull = float(_pull_raw) if _pull_raw is not None and not pd.isna(_pull_raw) else None
         except (TypeError, ValueError):
             return ""
         if gb is None:
@@ -831,6 +843,13 @@ def build_matchup_table(
         # fetch succeeds. Otherwise NaN, _score_from_weights handles that
         # gracefully and they appear empty in the export.
         "blast_pct", "bat_speed", "fast_swing_pct", "squared_up_pct",
+        # v43.51 (reviewer-validated): IAA was double-filtered — dropped in
+        # the app.py merge AND missing from display_cols. Now wired in both
+        # places. If Savant still doesn't return it, the column is just NaN
+        # everywhere and the HR Criteria checklist shows '·' for everyone
+        # (graceful degradation), not silently dropping it before it can be
+        # checked.
+        "ideal_attack_angle_pct",
         # v42k: pull_air_pct (derived from pull_percent × fb_pct when Savant's
         # native column is empty). Was being computed in _normalize_player_df
         # but dropped here, so never reached combined_all — the H2H comparison
@@ -882,6 +901,15 @@ def build_matchup_table(
         "vs_rhp_pa", "vs_rhp_avg", "vs_rhp_obp", "vs_rhp_slg",
         "vs_rhp_iso", "vs_rhp_ops", "vs_rhp_hr", "vs_rhp_hr_per_pa",
         "vs_rhp_k_percent", "vs_rhp_bb_percent",
+        # v43.51 (reviewer-validated): the Savant-sourced handedness contact-
+        # quality columns were missing from this whitelist, so
+        # apply_handedness_overrides could only blend ISO (which comes from
+        # the MLB Stats API split path). The four other stats it tries to
+        # blend (barrel_pct, hard_hit, xwoba, avg_ev) were silently being
+        # the season-overall values, NOT the handedness-specific ones. The
+        # v43.5 "central handedness fix" was 4/5 inert. Adding them now.
+        "vs_lhp_barrel_pct", "vs_lhp_hard_hit", "vs_lhp_xwoba", "vs_lhp_avg_ev",
+        "vs_rhp_barrel_pct", "vs_rhp_hard_hit", "vs_rhp_xwoba", "vs_rhp_avg_ev",
         # HR PROFILE — avg HR distance + max exit velo (June 2026)
         "avg_hr_distance", "max_hit_speed",
         "hr_profile", "hr_profile_label",
@@ -891,6 +919,73 @@ def build_matchup_table(
         "likely_hr_pct",
     ]
     keep = [c for c in display_cols if c in df.columns]
+
+    # ========================================================================
+    # v43.51 (reviewer-validated structural defense): COLUMN-COVERAGE ASSERTION
+    # ========================================================================
+    # The single most recurrent bug class in this codebase: a column is
+    # produced upstream under one name, then renamed/dropped/whitelisted
+    # away in build_matchup_table, so downstream scoring functions read
+    # None and silently degrade. v43.5 (handedness Statcast overrides),
+    # v43.36 (HR criteria pull threshold), v43.5 (pull_pct rename), and
+    # IAA exclusion were all the same shape.
+    #
+    # This assertion catches the bug class STRUCTURALLY at build time. It
+    # checks each column that downstream scoring depends on, and if any
+    # known-consumed column was produced upstream but then dropped here,
+    # surfaces a warning in session_state for the diagnostic panel. It
+    # never crashes — only reports — so a missing column is information,
+    # not a regression.
+    #
+    # NOTE: this catches DROPPED columns (column existed in df before the
+    # whitelist filter). It can't catch columns that were never produced
+    # upstream (those need a different audit at the fetcher level).
+    # ========================================================================
+    KNOWN_CONSUMED_COLUMNS = [
+        # HR-criteria checklist inputs (add_hr_criteria)
+        "pull_pct", "avg_ev", "barrel_pct", "ideal_attack_angle_pct",
+        # Comprehensive HR composite (compute_comprehensive_hr_composite)
+        "hr_game_pct", "pulled_brl_pct", "iso", "max_hit_speed",
+        "fb_pct", "matchup_opp", "pitch_hr_score",
+        "recent_hr_weighted_rate", "hr_streak_games", "hr_form",
+        "env_boost", "discipline_score",
+        # Mechanical-fail cap (comprehensive_hr_grade)
+        # (pull_pct + avg_ev already listed above)
+        # Handedness override inputs (apply_handedness_overrides)
+        "vs_lhp_pa", "vs_lhp_barrel_pct", "vs_lhp_hard_hit",
+        "vs_lhp_xwoba", "vs_lhp_avg_ev", "vs_lhp_iso",
+        "vs_rhp_pa", "vs_rhp_barrel_pct", "vs_rhp_hard_hit",
+        "vs_rhp_xwoba", "vs_rhp_avg_ev", "vs_rhp_iso",
+        # Total bases (props.total_bases_per_pa) — reads slg/xslg
+        "slg", "xslg",
+        # Grade context platoon annotations (grade_context block)
+        "bats", "opp_pitcher_throws", "platoon_hitter_flag",
+    ]
+    try:
+        # Find columns that existed in df BEFORE the whitelist but didn't
+        # make the whitelist cut. If any are known-consumed downstream,
+        # surface them.
+        produced_but_dropped = [
+            c for c in KNOWN_CONSUMED_COLUMNS
+            if c in df.columns and c not in keep
+        ]
+        if produced_but_dropped:
+            import streamlit as _st
+            try:
+                _warn = _st.session_state.setdefault(
+                    "_column_coverage_warnings", []
+                )
+                _msg = (
+                    "build_matchup_table dropped known-consumed columns "
+                    "from display_cols: " + ", ".join(produced_but_dropped)
+                )
+                if _msg not in _warn:
+                    _warn.append(_msg)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
     return df[keep]
 
 
