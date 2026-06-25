@@ -984,9 +984,10 @@ def build_matchup_table(
         "avg_ev": "Savant hitter_stats — required for grade caps",
         "barrel_pct": "Savant hitter_stats — required for composite",
         "ideal_attack_angle_pct": (
-            "bat tracking fetch (📡 toggle in sidebar). If '📡 Fetch bat "
-            "tracking' is OFF in the sidebar, this column is missing AND "
-            "HR Criteria #4 will be unmet for every hitter. Turn it on."
+            "bat tracking fetch (📡 toggle in sidebar). If the toggle is OFF, "
+            "turn it on. If the toggle is ON, check the 'Bat tracking fetch' "
+            "status line above this warning — the fetcher may have returned "
+            "empty (Savant schema drift) or the IAA field name may have changed."
         ),
     }
     try:
