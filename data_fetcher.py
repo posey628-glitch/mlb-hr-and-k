@@ -838,14 +838,12 @@ def get_bat_tracking(season: int = 2025) -> tuple[pd.DataFrame, str]:
       - "❌ no blast column" — endpoint returned data but expected field
                                 names weren't there (Savant schema drift)
       - "❌ fetch error: ..." — HTTP / parse error
-
-    Tries multiple field name variants (Savant changed names between
-    2024 beta and 2025 prod):
-      - blast_rate, blasts_per_swing, blast_percent
-      - avg_bat_speed, bat_speed_avg
-      - fast_swing_rate, fast_swing_percent
-      - squared_up_rate, squared_up_per_swing
     """
+    # v43.59: declare global at function entry so all assignment sites
+    # downstream (both the v43.57 dropna-failure path and the original
+    # v43.42 iaa-missing path) can write without re-declaring.
+    global _LAST_BAT_TRACKING_COLS
+
     # Field name variants — try each, take whichever returns data
     # v43.58 (production-validated): updated based on actual Savant column
     # list observed June 2026: id, name, swings_competitive,
@@ -917,38 +915,75 @@ def get_bat_tracking(season: int = 2025) -> tuple[pd.DataFrame, str]:
             if df.empty:
                 continue
 
-            # Find which blast field came back
-            blast_col = next(
-                (c for c in blast_candidates if c in df.columns), None
-            )
-            if blast_col is None:
-                # Try contains match for any column with "blast" in name
-                blast_col = next(
-                    (c for c in df.columns if "blast" in c.lower()), None
-                )
-            if blast_col is None:
-                continue  # this URL didn't have blast field, try next
+            # v43.59 (production-validated): the previous "first candidate
+            # that's in df.columns" pattern failed because Savant returns
+            # EVERY column we request in selections=..., regardless of
+            # whether the column actually has data populated. In June 2026:
+            # `blast_rate` was returned but all 157 values were NaN; the
+            # actually-populated column was a different blast variant.
+            # Switch to "first candidate that exists AND has non-NaN data".
+            def _pick_populated_col(candidates, df):
+                """Return the first candidate that has actual data.
+                Falls back to first existing column even if all-NaN (still
+                better than None for downstream diagnostics).
+                """
+                for c in candidates:
+                    if c in df.columns:
+                        try:
+                            if df[c].notna().any():
+                                return c
+                        except Exception:
+                            continue
+                # Second pass: exists but all NaN — return for diagnostic visibility
+                for c in candidates:
+                    if c in df.columns:
+                        return c
+                return None
 
-            # Find supporting columns
-            bs_col = next((c for c in bat_speed_candidates if c in df.columns),
-                          next((c for c in df.columns if "bat_speed" in c.lower()
-                                or "swing_speed" in c.lower()), None))
-            fs_col = next((c for c in fast_swing_candidates if c in df.columns),
-                          next((c for c in df.columns if "fast_swing" in c.lower()), None))
-            sq_col = next((c for c in squared_up_candidates if c in df.columns),
-                          next((c for c in df.columns if "squared_up" in c.lower()), None))
+            # Find which blast field came back AND has data
+            blast_col = _pick_populated_col(blast_candidates, df)
+            if blast_col is None:
+                # Fuzzy match: any column with "blast" in name
+                _fuzzy = [c for c in df.columns if "blast" in c.lower()]
+                blast_col = _pick_populated_col(_fuzzy, df)
+            if blast_col is None:
+                continue  # no blast column at all, try next URL
+            # If we got the column but it's all-NaN, treat as missing data
+            # and try the NEXT URL (in case another URL returns populated data).
+            if not df[blast_col].notna().any():
+                # blast column exists but empty — this URL is a dud
+                _LAST_BAT_TRACKING_COLS = list(df.columns)
+                continue
+
+            # Find supporting columns (same data-density logic)
+            bs_col = _pick_populated_col(bat_speed_candidates, df)
+            if bs_col is None:
+                _fuzzy = [c for c in df.columns
+                          if "bat_speed" in c.lower() or "swing_speed" in c.lower()]
+                bs_col = _pick_populated_col(_fuzzy, df)
+            fs_col = _pick_populated_col(fast_swing_candidates, df)
+            if fs_col is None:
+                _fuzzy = [c for c in df.columns
+                          if "fast_swing" in c.lower() or "hard_swing" in c.lower()]
+                fs_col = _pick_populated_col(_fuzzy, df)
+            sq_col = _pick_populated_col(squared_up_candidates, df)
+            if sq_col is None:
+                _fuzzy = [c for c in df.columns if "squared_up" in c.lower()]
+                sq_col = _pick_populated_col(_fuzzy, df)
             # v43.36: ideal_attack_angle — try exact candidates, then fall
             # back to fuzzy match on "attack" + "angle" in column name.
-            iaa_col = next((c for c in ideal_aa_candidates if c in df.columns),
-                           next((c for c in df.columns
-                                 if ("attack" in c.lower() and "angle" in c.lower())
-                                 or "ideal_attack" in c.lower()), None))
+            iaa_col = _pick_populated_col(ideal_aa_candidates, df)
+            if iaa_col is None:
+                _fuzzy = [c for c in df.columns
+                          if ("attack" in c.lower() and "angle" in c.lower())
+                          or "ideal_attack" in c.lower()]
+                iaa_col = _pick_populated_col(_fuzzy, df)
 
             # v43.42: when IAA isn't found, log what Savant ACTUALLY returned
             # to a module-level diagnostic so we can verify the field name
             # offline. Without this we keep guessing field names blindly.
+            # v43.59: `global _LAST_BAT_TRACKING_COLS` moved to function entry.
             if not iaa_col:
-                global _LAST_BAT_TRACKING_COLS
                 _LAST_BAT_TRACKING_COLS = list(df.columns)
 
             # v43.57: hardier player_id detection — Savant may use a
