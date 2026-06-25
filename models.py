@@ -866,6 +866,13 @@ def build_matchup_table(
         "k_pct", "bb_pct", "whiff_pct", "swing_percent",
         # Rates
         "obp", "slg", "ops", "babip",
+        # v43.52 (assertion-caught): xslg is consumed by total_bases_per_pa
+        # in props.py — it's blended with slg (xslg weighted higher, 60/40)
+        # for the expected-bases projection. Without xslg in this whitelist,
+        # total_bases was falling back to slg-only, losing the predictive
+        # xSLG signal. The v43.51 column-coverage assertion caught this on
+        # the next run — exactly the bug class it was built to catch.
+        "xslg",
         # v43.29 (reviewer-validated CRITICAL fix): xBA + actual BA were
         # being filtered out by this display_cols whitelist before reaching
         # hit_prob_per_pa, so hit_game_pct fell back to the 0.250 default
