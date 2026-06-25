@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.60-iaa-diagnostic-accuracy"
+APP_VERSION = "2026.06.10-v43.61-deferred-fixes-and-bare-except-audit"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -4547,7 +4547,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.60 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.61 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -5167,8 +5167,21 @@ for _, game in slate.iterrows():
         if not home_bench_matchup.empty:
             home_bench_matchup = add_discipline_score(home_bench_matchup)
             home_bench_matchup = add_hr_criteria(home_bench_matchup)
-    except Exception:
-        pass
+    except Exception as _disc_e:
+        # v43.61 (reviewer-validated audit): converted from silent `pass`.
+        # discipline_score contributes 6% to pick_score (ps_discipline);
+        # HR Criteria #4 is in the checklist. A silent failure here would
+        # kill BOTH features across all 4 matchup frames simultaneously.
+        # Log so we can see it in Pipeline Health.
+        try:
+            stash_diagnostic(
+                "pipeline_health",
+                f"add_discipline_score / add_hr_criteria failed for "
+                f"game {gpk}: {type(_disc_e).__name__}: {_disc_e}",
+                level="warning"
+            )
+        except Exception:
+            pass
     # NEW (June 2026): batter_hand passes the hitter's bat side ("L", "R", "S")
     # so the function can pick the pitcher's arsenal split AGAINST that side.
     # Switch hitters bat opposite the pitcher arm, so for "S" we derive
@@ -5484,12 +5497,18 @@ for _, game in slate.iterrows():
         except Exception:
             _pitcher_grade_by_name = {}
 
-    for matchup_df, opp_p_row, opp_bullpen_hr9, opp_ttop in [
-        (away_matchup, home_p_row, home_bullpen_hr9, home_p_ttop),
-        (home_matchup, away_p_row, away_bullpen_hr9, away_p_ttop),
-        (away_bench_matchup, home_p_row, home_bullpen_hr9, home_p_ttop),
-        (home_bench_matchup, away_p_row, away_bullpen_hr9, away_p_ttop),
+    for matchup_df, opp_p_row, opp_bullpen_hr9, opp_ttop, _is_away_team in [
+        (away_matchup, home_p_row, home_bullpen_hr9, home_p_ttop, True),
+        (home_matchup, away_p_row, away_bullpen_hr9, away_p_ttop, False),
+        (away_bench_matchup, home_p_row, home_bullpen_hr9, home_p_ttop, True),
+        (home_bench_matchup, away_p_row, away_bullpen_hr9, away_p_ttop, False),
     ]:
+        # v43.61 (reviewer-validated, deferred from prior review #8):
+        # `_is_away_team` is now explicit in the tuple, not derived from
+        # `matchup_df is away_matchup`. Identity check WORKED for
+        # away_matchup (primary frame) but FAILED for away_bench_matchup
+        # (different object), so away bench players got the HOME PA offset
+        # (-0.055) instead of +0.055. Tiny effect numerically but wrong.
         if matchup_df is None or matchup_df.empty:
             continue
 
@@ -5654,13 +5673,13 @@ for _, game in slate.iterrows():
             # adds about 0.15-0.30 percentage points to away hitters' HR Game%.
             # Still small enough that it doesn't dominate top-10 selection, but
             # directionally correct and research-backed.
-            is_away_team = (matchup_df is away_matchup)
+            is_away_team = _is_away_team  # v43.61: from loop tuple (handles bench frames correctly)
             ha_offset = 0.055 if is_away_team else -0.055
 
             lp = row_dict.get("lineup_pos")
             is_fill = row_dict.get("is_roster_fill", False)
             game_confirmed = (
-                away_confirmed if matchup_df is away_matchup else home_confirmed
+                away_confirmed if _is_away_team else home_confirmed
             )
             if (lp is not None and not pd.isna(lp)
                     and not is_fill and game_confirmed):
@@ -7301,8 +7320,20 @@ if combined_picks is not None and not combined_picks.empty:
                 + "is mostly NaN-fallback. Pitcher SLG-allowed below 50% means "
                 + "total_bases_per_pa is falling back to xwoba/barrel proxies."
             )
-    except Exception:
-        pass
+    except Exception as _scov_e:
+        # v43.61 (reviewer-validated audit): converted from silent `pass`.
+        # 78-line try-block — typo or runtime error would silently kill
+        # the entire scoring-input coverage diagnostic. Now logs to
+        # pipeline_health so we see the failure rather than silent loss.
+        try:
+            stash_diagnostic(
+                "pipeline_health",
+                f"Scoring-input coverage diagnostic failed: "
+                f"{type(_scov_e).__name__}: {_scov_e}",
+                level="warning"
+            )
+        except Exception:
+            pass
 
     # v43.53: silent scoring errors and column-coverage warnings now stash
     # to pipeline_health bucket and render in the bottom Tools & Diagnostics
@@ -9682,44 +9713,20 @@ if all_hitters:
     # rank #50 slate-wide. Recompute on the full combined frame so percentiles
     # reflect the whole slate (200-300 hitters).
     try:
-        # v43.3 (reviewer-validated): The hr_score values that flow in here
-        # are themselves contaminated — they were computed by sleepers.py
-        # hr_probability() using within-9-lineup percentile ranks. So they're
-        # "best on his team," not "best on the slate." Ranking those slate-wide
-        # mixes two reference frames (same bug we fixed for hr_form in v41a
-        # but never applied to hr_score).
-        #
-        # Fix: recompute hr_score itself using SLATE-WIDE percentile ranks on
-        # combined_all, then multiply by per-game env_boost. This makes
-        # hr_score and sleeper_score apples-to-apples slate quantities.
-        if (("barrel_pct" in combined_all.columns
-             or "iso" in combined_all.columns
-             or "hard_hit" in combined_all.columns)
-            and "env_boost" in combined_all.columns):
-            # Slate-wide percentile ranks of the same components sleepers.py
-            # uses (barrel 0.30, iso 0.20, hard_hit 0.15). Same weights, but
-            # ranks computed on the whole slate.
-            weight_sum = pd.Series(0.0, index=combined_all.index)
-            weighted = pd.Series(0.0, index=combined_all.index)
-            for col, w in [("barrel_pct", 0.30), ("iso", 0.20), ("hard_hit", 0.15)]:
-                if col in combined_all.columns:
-                    r = combined_all[col].rank(pct=True) * 100
-                    mask = r.notna()
-                    weight_sum[mask] += w
-                    weighted[mask] += r[mask] * w
-            # Normalize to 0-100 (assuming all three present = 0.65 total weight)
-            slate_hr_base = (weighted / weight_sum.replace(0, np.nan)).clip(0, 100)
-            # Apply per-game env_boost (already-computed per row)
-            env_b = pd.to_numeric(combined_all["env_boost"], errors="coerce").fillna(1.0)
-            # Slate-wide hr_score: base × env multiplier (capped same as sleepers.py)
-            slate_hr_score = (slate_hr_base * env_b).clip(0, 100).round(1)
-            # Only overwrite where we have a valid base; otherwise keep original
-            mask = slate_hr_base.notna()
-            if mask.any():
-                if "hr_score" in combined_all.columns:
-                    combined_all.loc[mask, "hr_score"] = slate_hr_score[mask]
-                else:
-                    combined_all["hr_score"] = slate_hr_score
+        # v43.61 (reviewer-validated, deferred from prior review #5):
+        # hr_score recompute block REMOVED. The v43.3 logic re-derived
+        # hr_score from a barrel/iso/hard_hit × env_boost formula and
+        # overwrote the value here. That was the right fix in v43.3 when
+        # hr_score came from sleepers.hr_probability() using within-9-lineup
+        # ranks ("best on team", not "best on slate"). After v43.41, hr_score
+        # IS the comprehensive composite rescaled SLATE-WIDE — already
+        # apples-to-apples across the whole slate. The overwrite became a
+        # SECOND source of truth competing with the canonical comprehensive
+        # rescale: pick_score used the comprehensive value (computed earlier),
+        # but the DISPLAYED/EXPORTED hr_score was the barrel/iso/hard_hit
+        # value. Same player, two different scores depending on where viewed.
+        # Removing the recompute leaves the comprehensive-rescaled hr_score
+        # as the single canonical value for everything downstream.
 
         score_col = "hr_score" if "hr_score" in combined_all.columns else (
             "hr_prob" if "hr_prob" in combined_all.columns else None
@@ -9756,8 +9763,21 @@ if all_hitters:
                 & _iso.notna() & (_iso < 0.100)
             )
             combined_all.loc[_below_floor, "sleeper_score"] = np.nan
-    except Exception:
-        pass
+    except Exception as _sleep_e:
+        # v43.61 (reviewer-validated audit): converted from silent `pass`.
+        # 75-line try-block doing slate-wide hr_form/hr_score/sleeper
+        # recompute. The v43.3 hr_score dual-source-of-truth issue lives
+        # here — a typo would silently leave hr_score in the contaminated
+        # per-lineup state. Now logs.
+        try:
+            stash_diagnostic(
+                "pipeline_health",
+                f"Slate-wide sleeper recompute failed: "
+                f"{type(_sleep_e).__name__}: {_sleep_e}",
+                level="warning"
+            )
+        except Exception:
+            pass
 
     # ====================================================================
     # 🌱 BREAKOUT CANDIDATES (v42) — low-PA hitters with elite contact
