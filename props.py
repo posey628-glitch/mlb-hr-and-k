@@ -236,8 +236,21 @@ def hr_prob_per_pa(
                 split_mult_shrunk = 1.0 + (split_mult_raw - 1.0) * split_w
                 split_mult_shrunk = max(0.5, min(2.0, split_mult_shrunk))
                 h_base = h_base * split_mult_shrunk
+                # v43.65 (reviewer fix P-B): mark that the hitter-split was
+                # applied so the platoon block downstream knows to dampen.
+                # Previously only `split_hr_per_pa` (pitcher-split) gated the
+                # dampener — but hitter-splits are 15× more common than
+                # pitcher-splits in production (404 vs 27 in the export
+                # the reviewer checked), so the typical case got full platoon
+                # multiplier ON TOP of the already-applied hitter-split.
+                # Now either flag triggers dampening.
+                _hitter_split_applied = True
             except (TypeError, ValueError, ZeroDivisionError):
-                pass
+                _hitter_split_applied = False
+        else:
+            _hitter_split_applied = False
+    else:
+        _hitter_split_applied = False
 
     # NEW: RECENCY ADJUSTMENT - blend in recent-form hot/cold signal.
     # recent_hr_weighted_rate gives last-3 games triple-weight, weighted across
@@ -569,12 +582,25 @@ def hr_prob_per_pa(
     # NOTE: If we're already using a HANDEDNESS-SPLIT pitcher_mult above,
     # we should dampen the platoon mult to avoid double-counting.
     # Real splits already encode the platoon effect in the data.
+    # v43.65 (reviewer fix P-B): the dampener now triggers when EITHER
+    # the hitter-split OR the pitcher-split has been applied. Previously
+    # only watched split_hr_per_pa (pitcher-split), so when the hitter-split
+    # was applied (block 1, line ~238) but pitcher-split was absent, the
+    # full platoon multiplier got stacked on top of the already-applied
+    # hitter-split. Hitter-splits are ~15× more common than pitcher-splits
+    # in production (the reviewer's export showed 404 vs 27), so this was
+    # the dominant code path. Now either signal triggers dampening.
+    _any_split_applied = (
+        split_hr_per_pa is not None
+        or globals().get("_hitter_split_applied", False)  # local lookup
+        or _hitter_split_applied
+    )
     platoon_mult = 1.0
     p_throws = (pitcher_row.get("p_throws") or pitcher_row.get("throws") or "").upper() if pitcher_row else ""
     if h_bats and p_throws and h_bats != "S":
-        # If we have real splits, the data already shows the platoon effect.
-        # Use a smaller residual platoon adjustment.
-        if split_hr_per_pa is not None:
+        # If we have real splits (either side), the data already shows the
+        # platoon effect. Use a smaller residual platoon adjustment.
+        if _any_split_applied:
             # Splits used - reduce platoon impact to 1/3 to capture league avg residual
             if h_bats != p_throws:
                 platoon_mult = 1.025 if h_bats == "L" else 1.020
@@ -591,7 +617,7 @@ def hr_prob_per_pa(
         # the platoon advantage. If we already pulled the opposite-side split
         # above (the typical case now), the data encodes it — use a small residual.
         # If no splits available, give the full opposite-side bonus.
-        if split_hr_per_pa is not None:
+        if _any_split_applied:
             # Residual after splits already applied (smaller)
             platoon_mult = 1.022  # avg of L/R favorable values
         else:
@@ -754,7 +780,17 @@ def hit_prob_per_pa(
 
     # Convert BA to hit-per-PA: BA × (AB/PA). For most hitters AB/PA ≈ 0.91
     # (subtracting BB/HBP/SH/SF). Use the hitter's actual if available.
-    bb_pct = hitter_row.get("bb_pct") or hitter_row.get("bb_percent") or 8.0
+    # v43.65 (reviewer fix P-A): _first_non_null is NaN-safe; the previous
+    # `or` chain short-circuited on NaN (which is truthy in Python's bool
+    # context). The default value 8.0 was unreachable when bb_pct was NaN
+    # — it landed at the float() conversion below which then caught the
+    # NaN and fell to except. Same logic, but cleaner: now the fallback
+    # actually runs at the picker step.
+    bb_pct = _first_non_null(
+        hitter_row.get("bb_pct"),
+        hitter_row.get("bb_percent"),
+        8.0,
+    )
     try:
         bb_f = float(bb_pct)
     except (TypeError, ValueError):
@@ -767,8 +803,12 @@ def hit_prob_per_pa(
     # never reaches their xBA in practice because 30% of PAs end without
     # contact at all. Already implicit in xBA but apply a small additional
     # correction for extreme cases.
-    k_pct = hitter_row.get("k_pct") or hitter_row.get("k_percent")
-    if k_pct is not None and not pd.isna(k_pct):
+    # v43.65 (reviewer fix P-A): NaN-safe lookup, same reasoning as bb_pct above.
+    k_pct = _first_non_null(
+        hitter_row.get("k_pct"),
+        hitter_row.get("k_percent"),
+    )
+    if k_pct is not None:
         try:
             k_f = float(k_pct)
             # If K > 28%, apply a small dampener (5-10%)
@@ -929,7 +969,13 @@ def total_bases_per_pa(hitter_row, pitcher_row,
     else:
         hitter_slg = LEAGUE_SLG
 
-    bb_pct = hitter_row.get("bb_pct") or hitter_row.get("bb_percent") or 8.0
+    # v43.65 (reviewer fix P-A): _first_non_null is NaN-safe; same fix as
+    # in hit_prob_per_pa above.
+    bb_pct = _first_non_null(
+        hitter_row.get("bb_pct"),
+        hitter_row.get("bb_percent"),
+        8.0,
+    )
     try:
         bb_f = float(bb_pct)
     except (TypeError, ValueError):
