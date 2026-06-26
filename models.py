@@ -226,6 +226,51 @@ def _classify_role(row, min_ip: float, min_gs: int, full_ip: float) -> str:
     return rookie_prefix + "✓" if rookie_prefix else "✓"
 
 
+# ============================================================================
+# v43.63 (test-harness support): module-level column-coverage constants
+# ----------------------------------------------------------------------------
+# These were locals inside build_matchup_table — fine for runtime, but
+# unreachable from the pytest harness that wants to assert "every column
+# in this list survives the function on synthetic input." Lifting to module
+# level makes them accessible to tests AND preserves all runtime behavior
+# (build_matchup_table now references the module-level names).
+# ============================================================================
+KNOWN_CONSUMED_COLUMNS = [
+    # HR-criteria checklist inputs (add_hr_criteria)
+    "pull_pct", "avg_ev", "barrel_pct", "ideal_attack_angle_pct",
+    # Comprehensive HR composite (compute_comprehensive_hr_composite)
+    "hr_game_pct", "pulled_brl_pct", "iso", "max_hit_speed",
+    "fb_pct", "matchup_opp", "pitch_hr_score",
+    "recent_hr_weighted_rate", "hr_streak_games", "hr_form",
+    "env_boost", "discipline_score",
+    # Handedness override inputs (apply_handedness_overrides)
+    "vs_lhp_pa", "vs_lhp_barrel_pct", "vs_lhp_hard_hit",
+    "vs_lhp_xwoba", "vs_lhp_avg_ev", "vs_lhp_iso",
+    "vs_rhp_pa", "vs_rhp_barrel_pct", "vs_rhp_hard_hit",
+    "vs_rhp_xwoba", "vs_rhp_avg_ev", "vs_rhp_iso",
+    # Total bases (props.total_bases_per_pa) — reads slg/xslg
+    "slg", "xslg",
+    # Grade context platoon annotations (grade_context block)
+    "bats", "opp_pitcher_throws", "platoon_hitter_flag",
+]
+
+ALWAYS_EXPECTED_COLUMNS = {
+    # HR-criteria inputs that should always be in hitter_stats
+    "pull_pct": "build_matchup_table rename of pull_percent",
+    "avg_ev": "Savant hitter_stats — required for grade caps",
+    "barrel_pct": "Savant hitter_stats — required for composite",
+    # v43.58: blast_pct is the primary swing-quality signal we expect now
+    # (replaces ideal_attack_angle_pct which Savant doesn't expose in the
+    # current endpoint). HR Criteria #4 falls back to blast_pct.
+    "blast_pct": (
+        "bat tracking fetch (📡 toggle in sidebar). If the toggle is OFF, "
+        "turn it on. If the toggle is ON, check the 'Bat tracking fetch' "
+        "status line above this warning. With blast_pct missing, HR "
+        "Criteria #4 will be '·' for every hitter (no fallback signal)."
+    ),
+}
+
+
 def build_matchup_table(
     lineup: list[dict],
     pitcher_row: pd.Series | None,
@@ -963,53 +1008,10 @@ def build_matchup_table(
     # columns — see ALWAYS_EXPECTED_COLUMNS below. v43.54 (reviewer fix):
     # added ALWAYS_EXPECTED_COLUMNS to catch the IAA-never-fetched case
     # which the produced-then-dropped check couldn't catch.
+    # v43.63: KNOWN_CONSUMED_COLUMNS + ALWAYS_EXPECTED_COLUMNS are now
+    # module-level (so the pytest harness can verify column coverage at
+    # commit time, not just at runtime).
     # ========================================================================
-    KNOWN_CONSUMED_COLUMNS = [
-        # HR-criteria checklist inputs (add_hr_criteria)
-        "pull_pct", "avg_ev", "barrel_pct", "ideal_attack_angle_pct",
-        # Comprehensive HR composite (compute_comprehensive_hr_composite)
-        "hr_game_pct", "pulled_brl_pct", "iso", "max_hit_speed",
-        "fb_pct", "matchup_opp", "pitch_hr_score",
-        "recent_hr_weighted_rate", "hr_streak_games", "hr_form",
-        "env_boost", "discipline_score",
-        # Mechanical-fail cap (comprehensive_hr_grade)
-        # (pull_pct + avg_ev already listed above)
-        # Handedness override inputs (apply_handedness_overrides)
-        "vs_lhp_pa", "vs_lhp_barrel_pct", "vs_lhp_hard_hit",
-        "vs_lhp_xwoba", "vs_lhp_avg_ev", "vs_lhp_iso",
-        "vs_rhp_pa", "vs_rhp_barrel_pct", "vs_rhp_hard_hit",
-        "vs_rhp_xwoba", "vs_rhp_avg_ev", "vs_rhp_iso",
-        # Total bases (props.total_bases_per_pa) — reads slg/xslg
-        "slg", "xslg",
-        # Grade context platoon annotations (grade_context block)
-        "bats", "opp_pitcher_throws", "platoon_hitter_flag",
-    ]
-    # v43.54: subset that MUST be produced upstream (not just survive the
-    # whitelist). The drop-only assertion can't catch these; need a
-    # separate "missing from df entirely" check.
-    # v43.55 (false-positive fix): removed opp_pitcher_throws — it's added
-    # to matchup_df by app.py AFTER build_matchup_table returns (see app.py
-    # ~line 6071: matchup_df["opp_pitcher_throws"] = opp_throws). Catching
-    # it as "never produced" was a timing false positive, not a real bug.
-    ALWAYS_EXPECTED_COLUMNS = {
-        # HR-criteria inputs that should always be in hitter_stats
-        "pull_pct": "build_matchup_table rename of pull_percent",
-        "avg_ev": "Savant hitter_stats — required for grade caps",
-        "barrel_pct": "Savant hitter_stats — required for composite",
-        # v43.58: changed primary swing-quality column from
-        # ideal_attack_angle_pct (which Savant doesn't expose in the
-        # current endpoint) to blast_pct (which Savant DOES return). HR
-        # Criteria #4 falls back to blast_pct when IAA is missing — see
-        # add_hr_criteria. Listing blast_pct here means we still get a
-        # warning if EITHER IAA fetch OR blast_pct fetch fails, which is
-        # what we want.
-        "blast_pct": (
-            "bat tracking fetch (📡 toggle in sidebar). If the toggle is OFF, "
-            "turn it on. If the toggle is ON, check the 'Bat tracking fetch' "
-            "status line above this warning. With blast_pct missing, HR "
-            "Criteria #4 will be '·' for every hitter (no fallback signal)."
-        ),
-    }
     try:
         # Find columns that existed in df BEFORE the whitelist but didn't
         # make the whitelist cut. If any are known-consumed downstream,
