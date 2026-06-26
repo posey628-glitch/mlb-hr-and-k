@@ -236,6 +236,19 @@ def build_matchup_table(
 ) -> pd.DataFrame:
     """
     Build the matchup table with ALL columns from the screenshots.
+
+    v43.62 (reviewer doc fix #1.8) — IMPORTANT scope note:
+    This function builds ONE lineup's table at a time (typically 9 starters,
+    plus separately the bench frame). Any column produced by ranking inside
+    this function — `matchup`, `ceiling`, `hr_form` — is therefore a
+    **per-lineup percentile** (rank within those 9 rows), NOT a slate-wide
+    quantity. Comparing those values across games will mislead: the #1 hitter
+    in a weak lineup looks the same as the #1 in a stacked lineup.
+
+    Use absolute columns (`matchup_opp`, `hr_score`, `hr_game_pct`) for
+    cross-game comparisons. `pick_score` was rebuilt in v41 specifically
+    to use absolute `matchup_opp` — keep new cross-game features on that
+    path, not the per-lineup ranks.
     """
     if not lineup:
         return pd.DataFrame()
