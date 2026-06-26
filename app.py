@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.63-pytest-harness-and-starter-bench-coverage"
+APP_VERSION = "2026.06.10-v43.65-export-validated-fixes"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -176,6 +176,35 @@ from models import build_matchup_table, build_pitcher_slate
 from sleepers import hr_probability, find_sleepers
 # Props - core functions are required, verdict_color is optional
 from props import hr_prob_per_pa, k_total_projection
+# v43.64 (reviewer fix #7): hoist hit/total-bases functions to module
+# scope. Previously imported INSIDE the per-hitter loop (~5749), running
+# once per row of every game. Python caches but the import-in-loop pattern
+# also masks ImportError — if a props function gets renamed or removed,
+# every row silently degrades to "—" instead of erroring loudly. At module
+# scope an actual ImportError fires once at startup and we see it.
+try:
+    from props import (
+        hit_prob_per_pa,
+        hit_prob_full_game,
+        hit_grade as _HIT_GRADE_FN,
+        hit_signal_emoji as _HIT_SIG_FN,
+        total_bases_per_pa,
+        total_bases_per_game,
+        total_bases_grade as _TB_GRADE_FN,
+    )
+    _PROPS_HIT_TB_AVAILABLE = True
+except ImportError as _props_import_err:
+    # If props.py is missing any of these, surface ONCE clearly rather
+    # than silently producing "—" for every hitter, every slate.
+    _PROPS_HIT_TB_AVAILABLE = False
+    hit_prob_per_pa = None
+    hit_prob_full_game = None
+    _HIT_GRADE_FN = None
+    _HIT_SIG_FN = None
+    total_bases_per_pa = None
+    total_bases_per_game = None
+    _TB_GRADE_FN = None
+    _PROPS_IMPORT_ERR_MSG = str(_props_import_err)
 try:
     from props import BARREL_TO_XHR_PER_PA
 except ImportError:
@@ -970,6 +999,13 @@ def pa_threshold_for_date(d: date) -> int:
         # slate during an import-broken state gets 120 PA instead of 280.
         # Better than maintaining a drift-prone month-switch duplicate.
         phase = "june"
+    # v43.64 (reviewer doc fix #6): the .get(phase, 200) default below is
+    # defensive but unreachable in practice — _season_phase only ever
+    # returns one of the 8 dict keys. Kept as belt-and-suspenders in case
+    # _season_phase grows new phases in the future. "june fallback (120)"
+    # above and "dict-default fallback (200)" here are two different
+    # defenses for two different failure modes (import-broken vs. unknown
+    # phase string from a future schema), not redundant safety nets.
     return {
         "early": 40, "may": 80, "june": 120,
         "july": 160, "august": 200,
@@ -1930,11 +1966,13 @@ use_bat_tracking = st.sidebar.checkbox(
 )
 if hide_started and selected_date == datetime.now().date():
     try:
-        # v43.43 (reviewer-validated bias fix): preserve the pre-filter slate
-        # so the snapshot payload can record which games were dropped. Backtest
-        # aggregator uses this to detect biased snapshots (afternoon games
-        # excluded → calibration data non-representative of full slate).
-        slate_unfiltered = slate.copy()
+        # v43.43 (reviewer-validated bias fix): the snapshot payload records
+        # which games were dropped via dropped_gamepks / n_filtered (set
+        # later in the bias metadata block). We previously stashed a full
+        # slate.copy() here under the name `slate_unfiltered`, but it was
+        # never actually read — v43.64 removed the dead variable. If a
+        # future feature needs the full pre-filter frame for diff/audit,
+        # add it back at that point.
         # v42r: use Timestamp.now(tz="UTC") instead of utcnow().tz_localize().
         # On older pandas versions utcnow() returns naive UTC and then
         # tz_localize behaves correctly, but on newer pandas utcnow() returns
@@ -4557,7 +4595,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.63 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.65 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -4867,18 +4905,34 @@ for _, game in slate.iterrows():
     # TBD pitcher fallback - if a probable pitcher is missing or unknown,
     # use team-level pitching as a proxy so hitters facing TBD still get
     # a sensible projection (flagged with tbd_proxy=True).
+    #
+    # v43.64 (reviewer-validated): the proxy dict has player_id=None and
+    # player_name="Team Avg (XYZ)". Downstream lookups that use player_id
+    # (pitch_match_score, ttop_for_pitcher, the ID-based grade fallback)
+    # will get cache misses and silently fall through to neutral
+    # projections for hitters facing TBD. The name-based grade map (v43.9)
+    # won't find "Team Avg (XYZ)" either. This is INTENTIONAL degradation —
+    # without a specific pitcher, per-pitch arsenal data doesn't exist —
+    # but it should be VISIBLE. Track and surface the count.
+    _tbd_proxy_used = []  # game_pks where we fell back to proxy
     try:
         from data_fetcher import get_team_pitching_proxy as _tbd_proxy
         if not away_p_row and game.get("away_team_id"):
             proxy = _tbd_proxy(int(game["away_team_id"]))
             if proxy:
                 away_p_row = proxy
+                _tbd_proxy_used.append(("away", game.get("gamePk")))
         if not home_p_row and game.get("home_team_id"):
             proxy = _tbd_proxy(int(game["home_team_id"]))
             if proxy:
                 home_p_row = proxy
+                _tbd_proxy_used.append(("home", game.get("gamePk")))
     except Exception:
         pass
+    # Stash for end-of-loop diagnostic (deferred so we accumulate counts
+    # across all games before emitting a single Pipeline Health entry)
+    if _tbd_proxy_used:
+        st.session_state.setdefault("_tbd_proxy_games", []).extend(_tbd_proxy_used)
 
     # BULLPEN HR/9 for both teams (v37+)
     # Fetched once per game and used for the bullpen-leverage blend in
@@ -5571,9 +5625,17 @@ for _, game in slate.iterrows():
             # Inject game_type for day/night split adjustment in props.py.
             # game_type is the local variable set at the top of this game loop.
             row_dict["game_type"] = game_type
-            # opp_p_row gets game_type too (defensive)
-            if isinstance(opp_p_row, dict) and "game_type" not in opp_p_row:
-                opp_p_row["game_type"] = game_type
+            # v43.64 (reviewer fix #3): use a per-iteration shallow copy of
+            # opp_p_row rather than mutating the cached dict in
+            # game_context_map. The mutation was probably harmless today,
+            # but the snapshot block and the env-adjusted-grade block both
+            # read the cached pitcher rows; injecting fields into the cache
+            # is a latent surprise. Shallow copy is cheap and safe.
+            _opp_p_row_local = (
+                dict(opp_p_row) if isinstance(opp_p_row, dict) else opp_p_row
+            )
+            if isinstance(_opp_p_row_local, dict) and "game_type" not in _opp_p_row_local:
+                _opp_p_row_local["game_type"] = game_type
             # v43.54 (reviewer-validated CRITICAL fix): explicit per-iteration
             # reset of _hit_platoon. The variable was previously assigned
             # ONLY inside a try block (line 5675) with no top-level reset.
@@ -5635,8 +5697,22 @@ for _, game in slate.iterrows():
                 # no longer passed — props.py handles day/night via its
                 # internal h_base shrinkage block (more principled).
                 # day_night_flag remains as a DISPLAY flag only.
+                # v43.64: pass _opp_p_row_local (per-iter shallow copy with
+                # game_type injected) instead of mutating the shared dict.
+                #
+                # v43.64 (reviewer doc fix #11) — coverage caveat: the
+                # day/night adjustment inside props.py relies on
+                # `vs_day_*` / `vs_night_*` columns on opp_p_row, which are
+                # only populated by `_fetch_pitcher_day_night_splits()` and
+                # that fetch is gated on `away_confirmed or home_confirmed`.
+                # So unconfirmed games skip the fetch entirely → props sees
+                # no day/night columns → day/night shrinkage is a no-op
+                # → the `game_type` field we inject is effectively used
+                # only for the DISPLAY flag. This is fine (no double-count
+                # risk, no silent bug) but worth knowing: the day/night
+                # shrinkage only fires on confirmed-lineup slates.
                 p_pa = hr_prob_per_pa(
-                    row_dict, opp_p_row,
+                    row_dict, _opp_p_row_local,
                     park_factor=hitter_park_mult, weather_mult=wx_mult_nowind,
                     pitch_match_score=row_dict.get("pitch_match_score"),
                     bullpen_hr9=opp_bullpen_hr9,
@@ -5649,7 +5725,7 @@ for _, game in slate.iterrows():
                 # Older props.py without ttop_mult param — fall back gracefully
                 try:
                     p_pa = hr_prob_per_pa(
-                        row_dict, opp_p_row,
+                        row_dict, _opp_p_row_local,
                         park_factor=hitter_park_mult, weather_mult=wx_mult_nowind,
                         pitch_match_score=row_dict.get("pitch_match_score"),
                         bullpen_hr9=opp_bullpen_hr9,
@@ -5657,12 +5733,12 @@ for _, game in slate.iterrows():
                 except TypeError:
                     try:
                         p_pa = hr_prob_per_pa(
-                            row_dict, opp_p_row,
+                            row_dict, _opp_p_row_local,
                             park_hr_factor=hitter_park_mult, weather_hr_factor=wx_mult,
                         )
                     except TypeError:
                         try:
-                            p_pa = hr_prob_per_pa(row_dict, opp_p_row)
+                            p_pa = hr_prob_per_pa(row_dict, _opp_p_row_local)
                         except Exception:
                             p_pa = None
             # Lineup-spot-aware expected PA per game
@@ -5716,65 +5792,81 @@ for _, game in slate.iterrows():
             # For now, use hand_park as a proxy (parks that boost HR also
             # tend to boost hits, though magnitude is smaller — the function's
             # internal cap handles that).
-            try:
-                from props import hit_prob_per_pa, hit_prob_full_game
-                from props import hit_grade as _hit_grade_fn
-                from props import hit_signal_emoji as _hit_sig_fn
-                # Platoon for hits is weaker than for HR. Use a softer cap.
-                # Compute same-side inline (don't reference a helper that doesn't exist).
-                _h_bats_now = safe_str(row_dict.get("bats")).upper()
-                _p_thr_now = safe_str(opp_p_row.get("p_throws") or opp_p_row.get("throws")).upper() if opp_p_row else ""
-                _ss_for_hit = bool(
-                    _h_bats_now and _p_thr_now
-                    and _h_bats_now != "S"
-                    and _h_bats_now == _p_thr_now
-                )
-                _hit_platoon = 0.95 if _ss_for_hit else 1.02
-                hit_pa = hit_prob_per_pa(
-                    row_dict, opp_p_row,
-                    park_hits_factor=hitter_park_mult,
-                    platoon_mult=_hit_platoon,
-                )
-                hit_game = hit_prob_full_game(hit_pa, expected_pa=expected_pa) if hit_pa is not None else None
-            except Exception:
+            # v43.64: props functions are now imported at module scope; no
+            # need to re-import per-row. _PROPS_HIT_TB_AVAILABLE is False
+            # only if props.py is broken (surfaced ONCE at startup).
+            if _PROPS_HIT_TB_AVAILABLE:
+                try:
+                    # Platoon for hits is weaker than for HR. Use a softer cap.
+                    _h_bats_now = safe_str(row_dict.get("bats")).upper()
+                    _p_thr_now = safe_str(
+                        _opp_p_row_local.get("p_throws") or _opp_p_row_local.get("throws")
+                    ).upper() if _opp_p_row_local else ""
+                    _ss_for_hit = bool(
+                        _h_bats_now and _p_thr_now
+                        and _h_bats_now != "S"
+                        and _h_bats_now == _p_thr_now
+                    )
+                    _hit_platoon = 0.95 if _ss_for_hit else 1.02
+                    hit_pa = hit_prob_per_pa(
+                        row_dict, _opp_p_row_local,
+                        park_hits_factor=hitter_park_mult,
+                        platoon_mult=_hit_platoon,
+                    )
+                    hit_game = hit_prob_full_game(hit_pa, expected_pa=expected_pa) if hit_pa is not None else None
+                except Exception:
+                    hit_pa = None
+                    hit_game = None
+            else:
                 hit_pa = None
                 hit_game = None
 
             hit_game_pct_val = round(hit_game * 100, 2) if hit_game is not None else None
             hit_pa_list.append(round(hit_pa * 100, 2) if hit_pa is not None else None)
             hit_game_list.append(hit_game_pct_val)
-            # Defensive: _hit_grade_fn/_hit_sig_fn may not be defined if the
-            # try block above failed at import — fall back gracefully.
+            # v43.64 fix: was `except (NameError, Exception)` which is
+            # equivalent to `except Exception` (NameError is a subclass).
+            # Now uses Exception alone; module-level imports mean NameError
+            # can't fire here anyway.
             try:
-                hit_grades.append(_hit_grade_fn(hit_game_pct_val) if hit_game is not None else "—")
-                hit_signals.append(_hit_sig_fn(hit_game_pct_val))
-            except (NameError, Exception):
+                if _HIT_GRADE_FN is not None:
+                    hit_grades.append(_HIT_GRADE_FN(hit_game_pct_val) if hit_game is not None else "—")
+                    hit_signals.append(_HIT_SIG_FN(hit_game_pct_val))
+                else:
+                    hit_grades.append("—")
+                    hit_signals.append("⚪")
+            except Exception:
                 hit_grades.append("—")
                 hit_signals.append("⚪")
 
             # v43.38 (user-requested): expected total bases per game
             # Uses xSLG + pitcher SLG-against. Same fallback pattern as hit signal.
-            try:
-                from props import total_bases_per_pa, total_bases_per_game
-                from props import total_bases_grade as _tb_grade_fn
-                tb_pa_v = total_bases_per_pa(
-                    row_dict, opp_p_row,
-                    park_hits_factor=hitter_park_mult,
-                    # v43.54: _hit_platoon is now reset to 1.0 at the top of
-                    # every iteration, so the brittle `'_hit_platoon' in dir()`
-                    # guard is no longer needed — the variable is always defined.
-                    # On the hit try-block failure path, it stays 1.0.
-                    platoon_mult=_hit_platoon,
-                )
-                tb_game_v = total_bases_per_game(tb_pa_v, expected_pa=expected_pa) if tb_pa_v is not None else None
-            except Exception:
+            if _PROPS_HIT_TB_AVAILABLE:
+                try:
+                    tb_pa_v = total_bases_per_pa(
+                        row_dict, _opp_p_row_local,
+                        park_hits_factor=hitter_park_mult,
+                        # v43.54: _hit_platoon is now reset to 1.0 at the top of
+                        # every iteration, so the brittle `'_hit_platoon' in dir()`
+                        # guard is no longer needed — the variable is always defined.
+                        # On the hit try-block failure path, it stays 1.0.
+                        platoon_mult=_hit_platoon,
+                    )
+                    tb_game_v = total_bases_per_game(tb_pa_v, expected_pa=expected_pa) if tb_pa_v is not None else None
+                except Exception:
+                    tb_pa_v = None
+                    tb_game_v = None
+            else:
                 tb_pa_v = None
                 tb_game_v = None
             tb_pa_list.append(round(tb_pa_v, 3) if tb_pa_v is not None else None)
             tb_game_list.append(round(tb_game_v, 2) if tb_game_v is not None else None)
             try:
-                tb_grades.append(_tb_grade_fn(tb_game_v) if tb_game_v is not None else "—")
-            except (NameError, Exception):
+                if _TB_GRADE_FN is not None:
+                    tb_grades.append(_TB_GRADE_FN(tb_game_v) if tb_game_v is not None else "—")
+                else:
+                    tb_grades.append("—")
+            except Exception:
                 tb_grades.append("—")
 
             verdicts.append(hr_verdict(
@@ -6850,8 +6942,39 @@ if all_hitters_for_picks:
             except Exception:
                 pass
     except Exception as _ce:
-        stash_diagnostic("pipeline_health",
-                         f"HR Score fallback: {_ce}", level="warning")
+        # v43.64 (reviewer fix #4): if compute_comprehensive_hr_composite or
+        # the rescale chain fails, the previous fallback only logged. But
+        # the matchup tables, hr_score_signal, the export, and the back-map
+        # all read combined_picks["hr_score"] — without a value, the UI
+        # silently loses its primary metric and "alert" stays keyed to the
+        # stale hr_game_pct grade. Set a fallback hr_score derived from
+        # hr_game_pct so downstream code has SOMETHING to display.
+        # hr_game_pct is a 0-100ish % so it's already in the right scale.
+        try:
+            if ("hr_score" not in combined_picks.columns
+                    and "hr_game_pct" in combined_picks.columns):
+                combined_picks["hr_score"] = pd.to_numeric(
+                    combined_picks["hr_game_pct"], errors="coerce"
+                ).clip(0, 95).round(1)
+                # Also compute signal from this fallback hr_score so the
+                # 🎯 column doesn't go all-grey
+                from models import hr_score_signal as _hss
+                combined_picks["hr_score_signal"] = combined_picks["hr_score"].apply(_hss)
+                _fallback_note = (
+                    " (fell back to hr_score = hr_game_pct, clipped 0-95). "
+                    "Picks may be slightly miscalibrated vs. normal "
+                    "comprehensive-composite scoring."
+                )
+            else:
+                _fallback_note = ""
+        except Exception:
+            _fallback_note = " (no fallback available either)"
+        stash_diagnostic(
+            "pipeline_health",
+            f"**HR Score composite failed:** {type(_ce).__name__}: {_ce}."
+            + _fallback_note,
+            level="warning",
+        )
 
 
 
@@ -7233,6 +7356,28 @@ if combined_picks is not None and not combined_picks.empty:
     except Exception as _se:
         stash_diagnostic("pipeline_health",
                          f"Smash override fallback: {_se}", level="warning")
+
+    # v43.64 (reviewer fix #1): surface TBD-proxy degradation. When a starter
+    # is TBD, the proxy dict lacks player_id, so pitch-match / ttop /
+    # ID-based grade silently fall through to neutral. Track count so
+    # users know which games are getting reduced-fidelity projections.
+    try:
+        _tbd_games = st.session_state.get("_tbd_proxy_games", [])
+        if _tbd_games:
+            _n_tbd = len(_tbd_games)
+            stash_diagnostic(
+                "pipeline_health",
+                f"**TBD pitcher proxy used in {_n_tbd} matchup(s).** "
+                "Hitters in these games get a reduced-fidelity projection: "
+                "pitch-match score, TTOP penalty, and arsenal flags are "
+                "silently neutralized because the proxy has no player_id. "
+                "HR Game% and grade still compute (via team pitching averages). "
+                "This is expected for TBD games but worth knowing.",
+            )
+            # Clear so the next slate doesn't accumulate
+            st.session_state["_tbd_proxy_games"] = []
+    except Exception:
+        pass
 
     # v43.44 (reviewer-validated coverage check): handedness splits are called
     # "the single biggest accuracy gap" the model addresses. A silent failure
@@ -10273,7 +10418,10 @@ if all_hitters:
                     "recent_ab_5", "recent_ab_10", "recent_h_10", "recent_hr_5", "recent_hr_10",
                     "vs_day_pa", "vs_night_pa", "vs_lhp_pa", "vs_rhp_pa",
                     "vs_lhp_hr", "vs_rhp_hr",
-                    "bvp_pa", "bvp_ab", "bvp_hits", "bvp_hr", "bvp_bb", "bvp_k",
+                    # v43.64 fix #12: was "bvp_hits" (stale name), the actual
+                    # column produced by bvp_data_lists is "bvp_h". The old
+                    # entry silently no-op'd.
+                    "bvp_pa", "bvp_ab", "bvp_h", "bvp_hr", "bvp_bb", "bvp_k",
                     # v43.50: bp_* (park history) columns removed — feature
                     # was non-functional (MLB Stats API rejected byVenue).
                 )
