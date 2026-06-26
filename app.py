@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.62-two-reviews-comprehensive-pass"
+APP_VERSION = "2026.06.10-v43.63-pytest-harness-and-starter-bench-coverage"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -4557,7 +4557,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.62 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.63 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -7240,30 +7240,44 @@ if combined_picks is not None and not combined_picks.empty:
     # shows the actual coverage so we know if the endpoint is returning data.
     try:
         n_total = len(combined_picks)
-        # Hitter handedness columns (vs_lhp_pa / vs_rhp_pa are populated when
-        # the splits fetcher returned per-hand stats)
+        # v43.63: split starter vs bench for accurate signal
+        _is_bench = (
+            combined_picks["is_roster_fill"]
+            if "is_roster_fill" in combined_picks.columns
+            else pd.Series([False] * n_total, index=combined_picks.index)
+        )
+        _starters = combined_picks[~_is_bench]
+        _bench = combined_picks[_is_bench]
+        n_st = max(1, len(_starters))
+        n_bn = len(_bench)
+
+        def _hand_cov(col, label):
+            if col not in combined_picks.columns:
+                return None
+            st_n = _starters[col].notna().sum() if len(_starters) else 0
+            line = f"{label}: starters {st_n}/{n_st} ({100*st_n/n_st:.0f}%)"
+            if n_bn > 0:
+                bn_n = _bench[col].notna().sum()
+                line += f", bench {bn_n}/{n_bn} ({100*bn_n/n_bn:.0f}%)"
+            return line
+
         cov_pieces = []
-        if "vs_lhp_pa" in combined_picks.columns:
-            n_lhp = combined_picks["vs_lhp_pa"].notna().sum()
-            cov_pieces.append(f"vs LHP: {n_lhp}/{n_total} ({100*n_lhp/max(1,n_total):.0f}%)")
-        if "vs_rhp_pa" in combined_picks.columns:
-            n_rhp = combined_picks["vs_rhp_pa"].notna().sum()
-            cov_pieces.append(f"vs RHP: {n_rhp}/{n_total} ({100*n_rhp/max(1,n_total):.0f}%)")
-        # Pitcher split columns (vs_lhb_pa / vs_rhb_pa on p_slate were mapped
-        # onto combined_picks as opp_pitcher_vs_lhb_pa etc.)
-        if "opp_pitcher_vs_lhb_pa" in combined_picks.columns:
-            n_plhb = combined_picks["opp_pitcher_vs_lhb_pa"].notna().sum()
-            cov_pieces.append(f"Pitcher vs LHB: {n_plhb}/{n_total} ({100*n_plhb/max(1,n_total):.0f}%)")
-        if "opp_pitcher_vs_rhb_pa" in combined_picks.columns:
-            n_prhb = combined_picks["opp_pitcher_vs_rhb_pa"].notna().sum()
-            cov_pieces.append(f"Pitcher vs RHB: {n_prhb}/{n_total} ({100*n_prhb/max(1,n_total):.0f}%)")
+        for col, label in [
+            ("vs_lhp_pa", "vs LHP"),
+            ("vs_rhp_pa", "vs RHP"),
+            ("opp_pitcher_vs_lhb_pa", "Pitcher vs LHB"),
+            ("opp_pitcher_vs_rhb_pa", "Pitcher vs RHB"),
+        ]:
+            line = _hand_cov(col, label)
+            if line:
+                cov_pieces.append(line)
 
         if cov_pieces:
             stash_diagnostic(
                 "pipeline_health",
                 "**Handedness-split coverage** · " + " · ".join(cov_pieces)
-                + "  ← if 0% / near it, splits endpoint not returning data "
-                + "and the handedness-blend feature is dead.",
+                + "  ← bench naturally has lower coverage (no recent PA); "
+                + "starter % is the meaningful one. 0% on starters = dead feature.",
             )
     except Exception:
         pass
@@ -7277,26 +7291,41 @@ if combined_picks is not None and not combined_picks.empty:
     try:
         n_total = max(1, len(combined_picks))
         coverage_audits = []
-        # discipline_score coverage
-        if "discipline_score" in combined_picks.columns:
-            n_disc = combined_picks["discipline_score"].notna().sum()
-            pct = 100 * n_disc / n_total
-            icon = "⚠️" if pct < 60 else ""
-            coverage_audits.append(
-                f"discipline_score: {n_disc}/{n_total} ({pct:.0f}%) {icon}"
-            )
-        else:
-            coverage_audits.append("discipline_score: ❌ column missing")
+        # v43.63 (production-validated improvement): split coverage by
+        # starter vs bench. Bench players naturally have less coverage
+        # (low PA, no recent form, sometimes no Statcast data). Showing
+        # one blended number caused false ⚠️ icons after v43.62's bench
+        # inclusion (#1.3). Starter coverage is what should trigger
+        # warnings; bench coverage is informational.
+        _is_bench = (
+            combined_picks["is_roster_fill"]
+            if "is_roster_fill" in combined_picks.columns
+            else pd.Series([False] * n_total, index=combined_picks.index)
+        )
+        _starters = combined_picks[~_is_bench]
+        _bench = combined_picks[_is_bench]
+        n_st = max(1, len(_starters))
+        n_bn = len(_bench)
 
-        # total bases inputs (xslg + slg)
-        for tb_col, label in [("xslg", "xslg"), ("slg", "slg")]:
-            if tb_col in combined_picks.columns:
-                n = combined_picks[tb_col].notna().sum()
-                pct = 100 * n / n_total
-                icon = "⚠️" if pct < 80 else ""
-                coverage_audits.append(f"{label}: {n}/{n_total} ({pct:.0f}%) {icon}")
-            else:
-                coverage_audits.append(f"{label}: ❌ column missing")
+        def _coverage_line(col, label, warn_threshold_pct):
+            """Build a coverage diagnostic line with separate starter/bench %."""
+            if col not in combined_picks.columns:
+                return f"{label}: ❌ column missing"
+            st_n = _starters[col].notna().sum() if len(_starters) else 0
+            st_pct = 100 * st_n / n_st
+            icon = "⚠️" if st_pct < warn_threshold_pct else "✅"
+            line = f"{label}: starters {st_n}/{n_st} ({st_pct:.0f}%) {icon}"
+            if n_bn > 0:
+                bn_n = _bench[col].notna().sum()
+                bn_pct = 100 * bn_n / n_bn
+                line += f", bench {bn_n}/{n_bn} ({bn_pct:.0f}%)"
+            return line
+
+        coverage_audits.append(
+            _coverage_line("discipline_score", "discipline_score", 60)
+        )
+        coverage_audits.append(_coverage_line("xslg", "xslg", 80))
+        coverage_audits.append(_coverage_line("slg", "slg", 80))
 
         # Pitcher-side SLG-allowed coverage (for total_bases_per_pa).
         # v43.55 (fix B): the previous check looked at combined_picks for
