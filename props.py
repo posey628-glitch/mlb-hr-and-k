@@ -45,6 +45,32 @@ BARREL_TO_XHR_PER_PA = 0.385
 LEAGUE_K_PER_9 = 8.6
 
 
+def _first_non_null(*values):
+    """v43.62 (reviewer-validated): NaN-safe first-non-null picker.
+
+    Replaces vulnerable `or` chains like `row.get("xba") or row.get("xBA")`.
+    NaN is truthy in Python's bool context, so the `or` short-circuits
+    and the fallback never runs — exactly the kind of silent failure the
+    review keeps catching. This helper actually checks `pd.isna` and
+    `is None` so NaN values properly defer to the next candidate.
+
+    Usage:
+        xba = _first_non_null(row.get("xba"), row.get("xBA"))
+        pa = _first_non_null(row.get("pa"), row.get("PA"), 0)
+    """
+    for v in values:
+        if v is None:
+            continue
+        try:
+            if pd.isna(v):
+                continue
+        except (TypeError, ValueError):
+            # Non-numeric (string, bool) — pd.isna may raise; treat as present
+            return v
+        return v
+    return None
+
+
 def hr_prob_per_pa(
     hitter_row: dict,
     pitcher_row: dict,
@@ -78,8 +104,26 @@ def hr_prob_per_pa(
     projection with a confidence indicator. The confidence_tier flag added
     to hitter rows in app.py tells the user how much to trust each grade.
     """
-    pa = hitter_row.get("pa") if hitter_row else None
-    hr = hitter_row.get("home_run") if hitter_row else None
+    # v43.62 (reviewer-validated CRITICAL fix): dual-name fallback.
+    # Previously read `pa` and `home_run` exclusively. If build_matchup_table
+    # ever renames to "PA" / "HR" / "homeRuns" (the v43.29 hit-signal bug
+    # was this exact failure class: pitcher BAA stored under batting_avg
+    # was never found), the function returns None for every hitter and the
+    # ENTIRE HR model goes silent with no error. hit_prob_per_pa and
+    # total_bases_per_pa both defensively read `row.get("pa") or row.get("PA")`.
+    # Match that pattern here.
+    if not hitter_row:
+        return None
+    pa = (hitter_row.get("pa")
+          if hitter_row.get("pa") is not None and not pd.isna(hitter_row.get("pa"))
+          else (hitter_row.get("PA") if hitter_row.get("PA") is not None
+                and not pd.isna(hitter_row.get("PA")) else None))
+    hr = (hitter_row.get("home_run")
+          if hitter_row.get("home_run") is not None and not pd.isna(hitter_row.get("home_run"))
+          else (hitter_row.get("HR") if hitter_row.get("HR") is not None
+                and not pd.isna(hitter_row.get("HR")) else
+                (hitter_row.get("homeRuns") if hitter_row.get("homeRuns") is not None
+                 and not pd.isna(hitter_row.get("homeRuns")) else None)))
 
     # Hard requirement: real PA and HR data
     if pa is None or pd.isna(pa) or hr is None or pd.isna(hr):
@@ -96,11 +140,19 @@ def hr_prob_per_pa(
     #   HR_per_barrel ≈ 0.55 (Statcast research: barrels become HRs ~55% of time)
     #   xHR/PA ≈ barrel_pct × 0.70 × 0.55 = barrel_pct × 0.385
     #
-    # Previously used 0.50 multiplier which overstated; calibrated to real MLB rates.
-    # League-avg ~8% barrel × 0.385 ≈ 3.1% xHR/PA, matching observed ~2.8% league HR/PA.
+    # League calibration (v43.62 — single source of truth, see LEAGUE_HR_PER_PA):
+    #   LEAGUE_HR_PER_PA = 0.030 (3.0%) — the only number actually used by code.
+    #   League ~8% barrel × 0.385 = 3.08% xHR/PA ≈ matches the 3.0% anchor.
+    #   (Earlier docs in this file mentioned 2.8% and 3.1% in passing; those
+    #    were rough descriptive numbers, not different anchors. v43.62
+    #    harmonized: the only authoritative value is LEAGUE_HR_PER_PA = 0.030.)
     #
-    # Blend weight grows with sample size: 100 PA → 30% observed / 70% xHR;
-    # 300 PA → 60% observed / 40% xHR; 600 PA → 80% observed / 20% xHR.
+    # v43.62 (reviewer doc fix #2.4): blend weights — actual values:
+    #   100 PA → 30% observed / 70% xHR
+    #   300 PA → 50% observed / 50% xHR  (NOT 60% as the old doc claimed)
+    #   600 PA → 80% observed / 20% xHR
+    # Old doc said "300 PA → 60% observed" which doesn't match the formula
+    # `0.30 + (pa - 100) / 500 * 0.50` → at pa=300 that's 0.50, not 0.60.
 
     # NEW: sample-size shrinkage on raw observed HR/PA to combat early-season noise.
     # A hitter with 5 HR in 30 PA has 16.7% observed rate — that's not predictive.
@@ -192,8 +244,12 @@ def hr_prob_per_pa(
     # last 15 games. If this rate is significantly above/below season h_base,
     # nudge h_base toward it (but bounded so we don't over-react to small samples).
     #
-    # CAP: ±25% deviation from h_base. A hitter on a hot streak can boost their
-    # projection by at most 25%; a cold hitter can be reduced by at most 25%.
+    # v43.62 (reviewer doc fix #2.3): cap math corrected. hot_cold_ratio
+    # is clamped to [0.75, 1.25] (±25% deviation) BUT then only 20% of
+    # the deviation is applied (`(ratio - 1.0) * 0.20`). So the real
+    # effective cap is **±5%** (25% × 0.20 = 5%), not ±25% as the
+    # previous comment claimed. The 0.75/1.25 numbers are the RATIO clamps,
+    # not the projection-impact bounds.
     recent_weighted = hitter_row.get("recent_hr_weighted_rate")
     if (recent_weighted is not None and not pd.isna(recent_weighted)
             and recent_weighted > 0 and h_base > 0):
@@ -201,7 +257,7 @@ def hr_prob_per_pa(
         # Compute hot/cold ratio capped at [0.75, 1.25]
         hot_cold_ratio = recent_rate_decimal / h_base
         hot_cold_ratio = max(0.75, min(1.25, hot_cold_ratio))
-        # Apply only 20% of the deviation (lowered from 30% in May 2026).
+        # Apply only 20% of the deviation (effective cap: ±5%).
         # Baseball research consistently shows hot/cold streaks have minimal
         # predictive value beyond 1-2 weeks. Most quantitative analysts use
         # 10-15% weight; 20% is a balanced choice that respects the signal
@@ -281,14 +337,27 @@ def hr_prob_per_pa(
             #   .450 SLG → ~3.6% HR/PA
             #   .500 SLG → ~4.5% HR/PA
             #   .550 SLG → ~5.5% HR/PA
-            # Linear-ish fit: HR/PA% ≈ (SLG - 0.250) * 12.5
+            #
+            # v43.62 (reviewer-validated CRITICAL fix): the previous formula
+            # `(slg_val - 0.250) * 12.5` undershot the documented table by
+            # 30-40% across the range:
+            #   .450 → 2.50% (table says 3.6%)
+            #   .500 → 3.13% (table says 4.5%)
+            #   .550 → 3.75% (table says 5.5%)
+            # Linear fit through (.350→2.0, .550→5.5) gives slope 17.5 and
+            # intercept 0.236, which matches the documented points within
+            # 0.15 percentage points across the whole range. Net effect of
+            # the old formula: any SLG-only pitcher looked more HR-suppressing
+            # than intended, depressing HR projections for the hitters
+            # facing him. Fallback path so limited blast radius, but a real
+            # miscalibration.
             split_slg = pitcher_row.get(f"{col_prefix}slg")
             # SLG splits don't tell us PA, so assume modest reliability (use 80 as PA)
             if split_slg is not None and not pd.isna(split_slg) and split_slg > 0:
                 try:
                     slg_val = float(split_slg)
-                    # Cap derivation to reasonable range
-                    derived_hr_pct = max(0.5, min(7.0, (slg_val - 0.250) * 12.5))
+                    # Cap derivation to reasonable range (0.5% floor, 7% ceiling)
+                    derived_hr_pct = max(0.5, min(7.0, (slg_val - 0.236) * 17.5))
                     split_hr_per_pa = derived_hr_pct / 100.0
                     split_pa_count = 80  # treat as moderately reliable, shrinks somewhat
                     split_source = "slg_derived"
@@ -425,15 +494,26 @@ def hr_prob_per_pa(
         p_dn_hr = pitcher_row.get(f"vs_{game_type}_hr_per_pa")
         if (p_dn_pa is not None and not pd.isna(p_dn_pa) and p_dn_pa >= 50
                 and p_dn_hr is not None and not pd.isna(p_dn_hr) and p_dn_hr > 0):
-            # Compare pitcher's day/night HR rate to league average
+            # v43.62 (reviewer-validated fix #2.6): shrink the day/night split
+            # toward the PITCHER'S OWN expected rate, not the league average.
+            # The previous formula shrank toward LEAGUE_HR_PER_PA, then ratio'd
+            # against `LEAGUE_HR_PER_PA × pitcher_mult` — for a strong
+            # suppressor (pitcher_mult ≈ 0.7, expected ≈ 0.021), a merely
+            # league-average shrunk-toward-league day/night value (~0.030)
+            # gave ratio > 1 and nudged him back toward neutral. Partial
+            # double-count of the shrinkage already baked into pitcher_mult.
+            # Anchoring shrinkage to the pitcher's own expected rate makes
+            # this adjustment about the split's deviation from HIS OWN form,
+            # not from the league.
             p_dn_rate = float(p_dn_hr) / 100  # pct → decimal
-            # Shrinkage: 60 PA prior toward LEAGUE_HR_PER_PA
-            shrink_w = float(p_dn_pa) / (float(p_dn_pa) + 60)
-            p_dn_shrunk = p_dn_rate * shrink_w + LEAGUE_HR_PER_PA * (1 - shrink_w)
-            # Ratio of pitcher's split to overall expected (using current pitcher_mult)
-            # If pitcher_mult is 0.7 (good suppressor), expected rate is 0.7 × LEAGUE.
-            # If day/night actual exceeds that, he's slightly worse at this time.
             expected_pitcher_rate = LEAGUE_HR_PER_PA * pitcher_mult
+            # Shrinkage: 60 PA prior toward the pitcher's own expected rate
+            shrink_w = float(p_dn_pa) / (float(p_dn_pa) + 60)
+            p_dn_shrunk = p_dn_rate * shrink_w + expected_pitcher_rate * (1 - shrink_w)
+            # Ratio of pitcher's split to his own expected rate.
+            # If pitcher_mult is 0.7 (suppressor), expected rate is 0.7 × LEAGUE.
+            # A day/night split that matches that exactly → ratio 1.0, no nudge.
+            # A split that EXCEEDS his own expected → he's slightly worse at this time.
             if expected_pitcher_rate > 0:
                 dn_ratio = p_dn_shrunk / expected_pitcher_rate
                 dn_ratio = max(0.90, min(1.10, dn_ratio))
@@ -633,8 +713,11 @@ def hit_prob_per_pa(
         except Exception:
             return None
 
-    pa = hitter_row.get("pa") or hitter_row.get("PA") or 0
+    # v43.62 (reviewer fix #2.8 + #2.9):
+    pa = _first_non_null(hitter_row.get("pa"), hitter_row.get("PA"), 0)
     try:
+        if pa is None or pd.isna(pa):
+            return None
         pa_f = float(pa)
     except (TypeError, ValueError):
         return None
@@ -644,12 +727,13 @@ def hit_prob_per_pa(
     # Hitter side — prefer xBA (predictive) over BA (descriptive).
     # v43.27 FIX (from discipline-bug lesson): read BOTH possible column
     # names since build_matchup_table renames some but not all.
-    xba = hitter_row.get("xba")
-    if xba is None or pd.isna(xba):
-        xba = hitter_row.get("xBA")
-    ba = hitter_row.get("ba")
-    if ba is None or pd.isna(ba):
-        ba = hitter_row.get("BA") or hitter_row.get("batting_avg")
+    # v43.62: _first_non_null is NaN-safe; `or` chains weren't (NaN is truthy).
+    xba = _first_non_null(hitter_row.get("xba"), hitter_row.get("xBA"))
+    ba = _first_non_null(
+        hitter_row.get("ba"),
+        hitter_row.get("BA"),
+        hitter_row.get("batting_avg"),
+    )
 
     try:
         xba_f = float(xba) if xba is not None and not pd.isna(xba) else None
@@ -701,21 +785,24 @@ def hit_prob_per_pa(
     # looked for "baa"/"BAA"/"h9" only — never found them — so pitcher_mult
     # always defaulted to 1.0 and the hit signal lost the pitcher dimension
     # entirely. Adding the actual column name as a fallback.
+    # v43.62: _first_non_null is NaN-safe; the `or` chains weren't.
     p_baa = None
     if pitcher_row is not None:
         try:
-            p_baa = (
-                pitcher_row.get("baa")
-                or pitcher_row.get("BAA")
-                or pitcher_row.get("batting_avg")   # v43.29 fix
-                or pitcher_row.get("avg")
+            p_baa = _first_non_null(
+                pitcher_row.get("baa"),
+                pitcher_row.get("BAA"),
+                pitcher_row.get("batting_avg"),   # v43.29 fix
+                pitcher_row.get("avg"),
             )
-            if p_baa is not None and not pd.isna(p_baa):
+            if p_baa is not None:
                 p_baa = float(p_baa)
             else:
                 # Fallback derive: H/9 / typical 38 BF per 9 IP
-                h9 = pitcher_row.get("h9") or pitcher_row.get("h_per_9")
-                if h9 is not None and not pd.isna(h9):
+                h9 = _first_non_null(
+                    pitcher_row.get("h9"), pitcher_row.get("h_per_9"),
+                )
+                if h9 is not None:
                     p_baa = float(h9) / 38.0
         except (TypeError, ValueError):
             p_baa = None
@@ -814,18 +901,23 @@ def total_bases_per_pa(hitter_row, pitcher_row,
             hitter_row = dict(hitter_row)
         except Exception:
             return None
-    pa = hitter_row.get("pa") or hitter_row.get("PA") or 0
+    # v43.62 (reviewer fix #2.8 + #2.9):
+    #   #2.8: _first_non_null replaces NaN-vulnerable `or` chain
+    #   #2.9: NaN PA was passing the `< min_pa` gate (NaN comparisons return
+    #         False), so unknown-PA hitters got a full league projection
+    #         instead of None. Explicit pd.isna guard added.
+    pa = _first_non_null(hitter_row.get("pa"), hitter_row.get("PA"), 0)
     try:
-        if float(pa) < min_pa:
+        if pa is None or pd.isna(pa) or float(pa) < min_pa:
             return None
     except (TypeError, ValueError):
         return None
 
-    xslg = hitter_row.get("xslg") or hitter_row.get("xSLG")
-    slg = hitter_row.get("slg") or hitter_row.get("SLG")
+    xslg = _first_non_null(hitter_row.get("xslg"), hitter_row.get("xSLG"))
+    slg = _first_non_null(hitter_row.get("slg"), hitter_row.get("SLG"))
     try:
-        xslg_f = float(xslg) if xslg is not None and not pd.isna(xslg) else None
-        slg_f = float(slg) if slg is not None and not pd.isna(slg) else None
+        xslg_f = float(xslg) if xslg is not None else None
+        slg_f = float(slg) if slg is not None else None
     except (TypeError, ValueError):
         xslg_f, slg_f = None, None
     if xslg_f is not None and slg_f is not None:
@@ -1045,8 +1137,12 @@ def k_total_projection(
 
 
 def implied_prob_from_american(odds: int) -> float:
-    """Convert American odds to implied probability (with vig)."""
-    if odds is None:
+    """Convert American odds to implied probability (with vig).
+
+    v43.62 (reviewer fix #2.10): guard against odds=0 (never a real line,
+    but one stray 0 from upstream parsing would raise ZeroDivisionError).
+    """
+    if odds is None or odds == 0:
         return None
     if odds < 0:
         return -odds / (-odds + 100)
@@ -1071,8 +1167,10 @@ def edge_vs_market(model_prob: float, market_odds: int) -> dict:
       fair_odds     - what odds the model thinks are fair
       edge_pct      - (model_prob - market_prob) / market_prob * 100
       kelly         - optional Kelly stake (cap at 25% for safety)
+
+    v43.62 (reviewer fix #2.10): odds=0 guard.
     """
-    if model_prob is None or market_odds is None:
+    if model_prob is None or market_odds is None or market_odds == 0:
         return {}
     mp = implied_prob_from_american(market_odds)
     if mp is None:
