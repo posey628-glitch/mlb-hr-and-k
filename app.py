@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.61-deferred-fixes-and-bare-except-audit"
+APP_VERSION = "2026.06.10-v43.62-two-reviews-comprehensive-pass"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -2100,10 +2100,20 @@ _bat_tracking_status = "⏸️ disabled (toggle in sidebar to enable)"
 if use_bat_tracking:
     try:
         from data_fetcher import get_bat_tracking
-        bat_track_df, _bat_tracking_status = (
-            get_bat_tracking(season=selected_date.year)
-            if not slate.empty else (pd.DataFrame(), "⏸️ no slate")
-        )
+        # v43.62 (reviewer-validated): get_bat_tracking now returns a 3-tuple
+        # (df, status, savant_cols). The savant_cols list survives @st.cache_data
+        # (the global it used to write to didn't). Stash to session_state so
+        # the IAA diagnostic in Pipeline Health sees fresh data on cache hits.
+        if not slate.empty:
+            bat_track_df, _bat_tracking_status, _savant_cols = get_bat_tracking(
+                season=selected_date.year
+            )
+        else:
+            bat_track_df, _bat_tracking_status, _savant_cols = (
+                pd.DataFrame(), "⏸️ no slate", []
+            )
+        # Surface the column list where last_bat_tracking_columns() can read it
+        st.session_state["_last_bat_tracking_cols"] = _savant_cols
         if not bat_track_df.empty and "player_id" in hitter_stats.columns:
             # v43.18 (reviewer-validated, blast asymmetry fix):
             # _score_from_weights renormalizes over present columns. So a
@@ -4547,7 +4557,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.61 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.62 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -5926,12 +5936,23 @@ for _, game in slate.iterrows():
             "bvp_bb": [], "bvp_k": [], "bvp_avg": [], "bvp_slg": [],
             "bvp_hr_per_pa": [],
         }
+        # v43.62 (reviewer fix #1.5): replaced `raise StopIteration` control
+        # flow with a proper guard flag. The old pattern relied on
+        # `except Exception` catching StopIteration to bail to the fallback
+        # initialization. It happened to work (this is a plain function so
+        # PEP 479's "StopIteration → RuntimeError in generators" rule doesn't
+        # apply, and `except Exception` catches it), but read like a bug and
+        # would surprise the next maintainer. The fast-load path now uses
+        # the same fallback code by setting the flag and skipping the body.
         try:
-            # v43.32: Fast Load Mode short-circuit — skip the entire BvP
-            # fetcher block. Columns get zeroed so pick_score still works
-            # (ps_bvp = 0 contribution), and the wider model is unaffected.
+            # v43.62 (reviewer fix #1.5): replaced `raise StopIteration` —
+            # the old pattern bailed via the bare except below, which
+            # happened to work but read like a bug. Now use the same code
+            # path explicitly: set the fast-load flag, raise our own
+            # RuntimeError, and let the existing except handle it. Same
+            # outcome, no smell of "abusing iterator protocol for control flow."
             if globals().get("fast_load_mode", False):
-                raise StopIteration  # caught by the bare except below
+                raise RuntimeError("fast_load_mode: skipping BvP fetcher")
 
             from data_fetcher import get_bvp_for_matchup, bvp_score_adjustment
             from concurrent.futures import ThreadPoolExecutor
@@ -6578,22 +6599,25 @@ for gpk, ctx in game_context_map.items():
     park_mult = ctx.get("park_mult", 1.0) or 1.0
     wx_mult = ctx.get("wx_mult", 1.0) or 1.0
     hr_mult = ctx.get("hr_mult", 1.0) or 1.0
-    for side in ("away", "home"):
+    # v43.62 (reviewer-validated): include bench frames in combined_picks so
+    # they get the SAME comprehensive composite + grade methodology as
+    # starters. Previously bench was excluded → compute_comprehensive_hr_composite
+    # never saw bench players → back-map skipped them → bench expander showed
+    # the OLD hr_grade(hr_game_pct) letter on a different scale than the
+    # starter tables, undercutting the late-swap use case.
+    for side in ("away", "home", "away_bench", "home_bench"):
         m = ctx.get(f"{side}_matchup")
         if m is None or m.empty:
             continue
         x = m.copy()
         x["game"] = f"{g_row['away_team_abbr']} @ {g_row['home_team_abbr']}"
-        x["team"] = g_row[f"{side}_team_abbr"]
-        opp_side = "home" if side == "away" else "away"
+        # Bench frames are still TEAM-aligned with their side prefix
+        team_side = "away" if side.startswith("away") else "home"
+        x["team"] = g_row[f"{team_side}_team_abbr"]
+        opp_side = "home" if team_side == "away" else "away"
         x["opp_pitcher"] = g_row.get(f"{opp_side}_pitcher", "TBD") or "TBD"
         opp_p_row = ctx.get(f"{opp_side}_p_row") or {}
         x["opp_pitcher_xwoba"] = opp_p_row.get("xwoba")
-        # v43.30 (reviewer-validated cosmetic fix): round on assignment so
-        # the export doesn't show 0.9652499999999999. park_mult * wx_mult
-        # produces float noise even when the inputs are clean; rounding
-        # to 4 decimals fixes the display without affecting any downstream
-        # computation (ps_env reads percentile-rank of this column).
         x["env_boost"] = round(float(hr_mult), 4)
         all_hitters_for_picks.append(x)
 
@@ -6637,16 +6661,24 @@ if all_hitters_for_picks:
         # unreachable — slate's best play would show "HR Score 95" but
         # "Grade B+". Both now use the same underlying number so they agree.
         def _row_grade(row):
+            # v43.62 (reviewer-validated): same_side_platoon must guard
+            # truthiness. Previously: `bats != "S" AND bats == pitcher_throws`
+            # — when BOTH were missing, `"" != "S"` was True and `"" == ""`
+            # was True, so unknown-handedness hitters got falsely demoted
+            # one grade tier. The hr_signal_emoji block (line ~5785) gets
+            # this right by checking `_h_bats and _p_throws_now` first.
+            # Match that pattern here.
+            _b = safe_str(row.get("bats")).upper()
+            _t = safe_str(row.get("opp_pitcher_throws")).upper()
+            _same_side = bool(
+                _b in ("L", "R") and _t in ("L", "R") and _b == _t
+            )
             return comprehensive_hr_grade(
                 row.get("hr_score"),
                 pull_pct=row.get("pull_pct"),
                 avg_ev=row.get("avg_ev"),
                 env_mult=row.get("env_boost"),
-                same_side_platoon=bool(
-                    safe_str(row.get("bats")).upper() != "S"
-                    and safe_str(row.get("bats")).upper()
-                        == safe_str(row.get("opp_pitcher_throws")).upper()
-                ),
+                same_side_platoon=_same_side,
                 sample_size=row.get("pa"),
                 # v43.54 #9 (reviewer fix): pass barrel% and ISO so the
                 # absolute power floor can demote A+/A grades that only
@@ -9502,6 +9534,15 @@ if all_hitters:
     #    hr_prob_per_pa. v43.18 incorrectly reduced to 0.25 based on
     #    a misreading; v43.19 reverted.)
     #
+    # v43.62 (reviewer doc fix #1.7): semantics clarification —
+    # `barrel_pct` here is the handedness-BLENDED value (produced by
+    # apply_handedness_overrides earlier in the pipeline), not the raw
+    # season barrel%. So xhr_neutral is "park-neutral" but NOT
+    # "handedness-neutral" — it reflects the matchup-side barrel rate the
+    # hitter would deliver against today's pitcher arm. That's the
+    # intended use for "robbed HR" diagnostics, but worth knowing if
+    # someone tries to back-compute season xHR from this column.
+    #
     # hr_luck_gap: xhr_neutral - actual HRs
     #   POSITIVE = unlucky / contact quality says more HRs than they've gotten
     #              ("robbed by park or BABIP variance")
@@ -11134,7 +11175,16 @@ def _render_wind_diagram(wind_mph, wind_dir_deg, cf_bearing, venue_name=None):
     # Display with caption
     col_a, col_b = st.columns([1, 2])
     with col_a:
-        st.markdown(svg, unsafe_allow_html=True)
+        # v43.62 (reviewer suggestion): Streamlit's markdown sanitizer can
+        # strip inline <svg> even with unsafe_allow_html=True, especially
+        # after Streamlit updates. components.v1.html renders raw HTML in
+        # a sandbox iframe — bypasses the sanitizer entirely. Fall back to
+        # st.markdown if components is unavailable for any reason.
+        try:
+            import streamlit.components.v1 as _components
+            _components.html(svg, height=210)
+        except Exception:
+            st.markdown(svg, unsafe_allow_html=True)
     with col_b:
         st.markdown(
             f"**Wind: {wind_mph:.0f} mph blowing {impact}**  \n"
@@ -11153,8 +11203,8 @@ def build_col_config():
             "🎯", width="small",
             help=(
                 "HR play color (v43.41).\n"
-                "🟢 = Top tier (HR Score ≥ 75) — strong play\n"
-                "🟡 = Above median (50-74) — solid consideration\n"
+                "🟢 = Top tier (HR Score ≥ 70) — strong play\n"
+                "🟡 = Above median (50-69) — solid consideration\n"
                 "🟠 = Below median (25-49) — weaker spot\n"
                 "🔴 = Bottom quartile (<25) — avoid for HR props\n"
                 "⚪ = No data / insufficient sample"
@@ -12915,7 +12965,10 @@ with st.expander("🎛️ Custom Grade Builder — pick your own metrics", expan
             "pitch_hr_score":         ("Arsenal HR Score",         False, "Per-pitch HR threat"),
             "pitch_match_score":      ("Pitch Match Score",        False, "Per-pitch wOBA composite"),
             "env_boost":              ("Environmental Boost",      False, "Park × weather multiplier"),
-            "park_hand_factor":       ("Park-Hand Factor",         False, "Park factor for this hitter's hand"),
+            # v43.62: park_hand_factor entry removed — never produced on
+            # combined_all (computed per-row in the matchup loop, not merged
+            # back). Was filtered out by the "_available" check below anyway,
+            # but better to remove dead entries from the catalog.
         }
 
         # Filter to columns that exist + have data
