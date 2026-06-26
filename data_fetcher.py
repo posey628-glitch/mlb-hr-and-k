@@ -823,25 +823,65 @@ _LAST_BAT_TRACKING_COLS: list = []
 
 def last_bat_tracking_columns() -> list:
     """Returns the most recent Savant bat-tracking response's column names.
-    Empty when IAA was found or fetcher hasn't run."""
+
+    v43.62 (reviewer-validated fix): prefers st.session_state over the
+    module global. The global was set inside `get_bat_tracking` which is
+    `@st.cache_data` — on cache hit the function body doesn't run, so the
+    global stayed stale. App.py now stashes the returned 3rd tuple element
+    into session_state on EVERY call (cache hit or miss), so this reader
+    always sees the most recent fetch.
+
+    Empty when IAA was found, fetcher hasn't run, or session_state unavailable.
+    """
+    try:
+        # Prefer session_state (set by app.py from get_bat_tracking's
+        # 3rd tuple element — survives the @st.cache_data wrapper)
+        cols = st.session_state.get("_last_bat_tracking_cols")
+        if cols:
+            return list(cols)
+    except Exception:
+        pass
+    # Fall back to module global (legacy path / non-Streamlit callers)
     return list(_LAST_BAT_TRACKING_COLS)
 
 @st.cache_data(ttl=86400)  # 24hr — bat tracking is a slow-moving stat
-def get_bat_tracking(season: int = 2025) -> tuple[pd.DataFrame, str]:
+def get_bat_tracking(season: int | None = None) -> tuple[pd.DataFrame, str, list]:
     """Fetch Statcast bat tracking leaderboard.
 
-    Returns (df, status_message). The status_message describes what
-    happened — used by the app's caption to show whether the fetch
-    actually worked. Possible statuses:
+    Returns (df, status_message, savant_columns):
+      - df: the bat tracking dataframe (empty on failure)
+      - status_message: describes what happened (used by app caption)
+      - savant_columns: list of column names Savant actually returned
+                        (used by the IAA diagnostic to surface field-name drift)
+
+    Possible status messages:
       - "✅ N hitters" — success, df has rows
       - "❌ no rows returned" — endpoint responded but df was empty
       - "❌ no blast column" — endpoint returned data but expected field
                                 names weren't there (Savant schema drift)
       - "❌ fetch error: ..." — HTTP / parse error
+
+    v43.62 (reviewer-validated):
+      • Fix #1.2: returns savant_columns as part of the tuple. Previously
+        the function wrote to a module-level `_LAST_BAT_TRACKING_COLS`
+        global, but `@st.cache_data` skips the function body on cache hit
+        so the global stays stale. The IAA diagnostic in app.py read that
+        global and showed empty/old data after the first slate of the day.
+        Returning the column list as part of the cached tuple means it
+        survives caching — same data the diagnostic needs, but reliable.
+      • Fix #1.6: `season: int = 2025` default removed. Now defaults to
+        current year via None sentinel — wouldn't go stale next year.
     """
+    # v43.62: resolve default season at call time (was a stale hardcoded 2025)
+    if season is None:
+        from datetime import date as _date
+        season = _date.today().year
+
     # v43.59: declare global at function entry so all assignment sites
     # downstream (both the v43.57 dropna-failure path and the original
     # v43.42 iaa-missing path) can write without re-declaring.
+    # v43.62: still maintained for backward compat with last_bat_tracking_columns(),
+    # but the canonical source of truth is now the 3rd tuple element.
     global _LAST_BAT_TRACKING_COLS
 
     # Field name variants — try each, take whichever returns data
@@ -1056,13 +1096,13 @@ def get_bat_tracking(season: int = 2025) -> tuple[pd.DataFrame, str]:
                     f"Matched player_id col: '{_pid_matched}'. "
                     f"Matched blast col: '{blast_col}'."
                 )
-                return pd.DataFrame(), f"❌ no rows after filtering — {_reason}"
-            return out, f"✅ {len(out)} hitters"
+                return pd.DataFrame(), f"❌ no rows after filtering — {_reason}", list(df.columns)
+            return out, f"✅ {len(out)} hitters", list(df.columns)
         except Exception as e:
             # Try next URL
             continue
 
-    return pd.DataFrame(), "❌ all endpoints failed (Savant schema drift?)"
+    return pd.DataFrame(), "❌ all endpoints failed (Savant schema drift?)", []
 
 
 # ----------------------------------------------------------------------------
@@ -3731,7 +3771,15 @@ def get_team_hitting_aggregates(season: int = CURRENT_SEASON) -> pd.DataFrame:
             data = tr.json()
         except Exception:
             continue
+        # v43.62 (reviewer suggestion): use an explicit flag for the
+        # nested loops. The old pattern (`break` inner + `if rows[-1] is
+        # this team: break`) is brittle if a team returns multiple split
+        # blocks AND the last-pushed row happens to match this team_id.
+        # An explicit flag is unambiguous.
+        _team_done = False
         for split_block in data.get("stats", []):
+            if _team_done:
+                break
             for sp in split_block.get("splits", []):
                 stat = sp.get("stat") or {}
                 try:
@@ -3758,9 +3806,8 @@ def get_team_hitting_aggregates(season: int = CURRENT_SEASON) -> pd.DataFrame:
                     "hr_per_pa": round(hr / pa * 100, 2),
                     "iso": round(iso, 3) if iso is not None else None,
                 })
+                _team_done = True
                 break  # Just take the first split (regular season)
-            if rows and rows[-1].get("team_id") == team_id:
-                break
     return pd.DataFrame(rows)
 
 
