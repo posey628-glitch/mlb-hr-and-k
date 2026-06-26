@@ -547,6 +547,19 @@ def apply_handedness_overrides(matchup_df: pd.DataFrame,
     """Per-game: blend season-overall barrel/hard_hit/xwoba/avg_ev/iso
     with handedness-specific values, weighted by sample size.
 
+    v43.64 (reviewer doc fix #10) — IMPORTANT coverage caveat:
+    This function CAN blend barrel/hard_hit/xwoba/avg_ev/iso BUT only when
+    the corresponding `vs_lhp_*` / `vs_rhp_*` Statcast columns are actually
+    present. Those columns only exist if `get_hitter_handedness_statcast`
+    succeeded — and that fetcher's Savant URLs are unverified and often
+    return empty. In the common case the Savant handedness fetch comes
+    back empty, this function only blends `iso` (from the MLB Stats API
+    split path, which IS reliable). So "handedness blend" is effectively
+    "ISO-only blend" most of the time. The `_hand_statcast_status` caption
+    in app.py surfaces whether Statcast actually returned. Tune
+    expectations accordingly — Pipeline Health's "handedness coverage"
+    line shows what's actually populated.
+
     v43.43 (reviewer-validated): the original v43.18 implementation did a
     HARD REPLACE of season values with handedness values when split_pa >=
     min_split_pa=30. That let a hitter with 35 PA vs LHP and a flukey ISO
@@ -894,16 +907,24 @@ def get_bat_tracking(season: int | None = None) -> tuple[pd.DataFrame, str, list
     # Notably: Savant uses "hard_swing_rate" (not fast_swing*),
     # "blast_per_swing" / "blast_per_bat_contact" (not blast_rate*), and
     # has NO ideal-attack-angle column at all in this endpoint.
+    #
+    # v43.64 (reviewer fix #9 — calibration pin): per-swing and per-contact
+    # have DIFFERENT denominators. Same hitter looks ~20-30% better in one
+    # metric than the other. HR Criteria #4's `blast_pct ≥ 5` threshold was
+    # calibrated against per-SWING. If we silently switch to per-contact
+    # when per-swing is empty, criterion #4 flips meaning. Pin to per-swing
+    # candidates only; if Savant drops per-swing, we'll see it in the
+    # bat-tracking status and can update deliberately, not silently.
+    # Removed from candidates: "blast_per_bat_contact", "blasts_per_bbe".
     blast_candidates = ["blast_rate", "blasts_per_swing", "blast_percent",
-                          "blasts_per_bbe",
-                          "blast_per_swing", "blast_per_bat_contact"]
+                          "blast_per_swing"]
     bat_speed_candidates = ["avg_bat_speed", "bat_speed_avg", "swing_speed",
                               "bat_speed"]
     fast_swing_candidates = ["fast_swing_rate", "fast_swing_percent",
                               "hard_swing_rate"]
+    # Same per-swing vs per-contact concern applies; pin to per-swing.
     squared_up_candidates = ["squared_up_rate", "squared_up_per_swing",
-                               "squared_up_percent",
-                               "squared_up_per_bat_contact"]
+                               "squared_up_percent"]
     # v43.36 (user-requested): Ideal Attack Angle — Statcast bat-tracking
     # metric: % of competitive swings where attack angle is 5-20°. This is
     # the "HR launch zone" swing path. League avg ~50-55%, elite ~65%+.
@@ -1060,17 +1081,55 @@ def get_bat_tracking(season: int | None = None) -> tuple[pd.DataFrame, str, list
                     break
             else:
                 out["player_name"] = pd.Series(dtype="object")
-            out["blast_pct"] = pd.to_numeric(df[blast_col], errors="coerce")
+            # v43.65 (reviewer-validated CRITICAL fix #9): Savant returns
+            # `blast_per_swing` as a 0-1 DECIMAL (e.g. 0.05 means "5% of
+            # swings are blasts"). The rest of the codebase uses 0-100
+            # PERCENTAGE convention (barrel_pct, hard_hit, pull_pct all 0-100).
+            # The mismatch made HR Criteria #4's threshold (5.0) structurally
+            # unreachable — production export showed `hr_crit_iaa` = 0 for
+            # all 532 hitters, max criteria_met = 3/4 ever. Multiply by 100
+            # at the fetcher to restore convention consistency. App.py's
+            # median imputation block is scale-agnostic (works on either
+            # scale); only the threshold check in add_hr_criteria was
+            # scale-sensitive, and that now sees 0-100 values matching the
+            # documented ≥5 threshold.
+            _raw_blast = pd.to_numeric(df[blast_col], errors="coerce")
+            # Defensive: if Savant ever switches to percent (e.g. 5.0 not
+            # 0.05), don't double-multiply. Sniff scale by median —
+            # decimal-scale blasts have median ~0.03-0.06; percent-scale
+            # would have median ~3-6. Threshold at 1.0 cleanly separates.
+            try:
+                _med = float(_raw_blast.dropna().median())
+                if pd.notna(_med) and _med < 1.0:
+                    out["blast_pct"] = (_raw_blast * 100).round(2)
+                else:
+                    out["blast_pct"] = _raw_blast.round(2)
+            except Exception:
+                # If sniff fails, default to multiply-by-100 (the empirically
+                # observed Savant behavior as of June 2026)
+                out["blast_pct"] = (_raw_blast * 100).round(2)
             if bs_col:
                 out["bat_speed"] = pd.to_numeric(df[bs_col], errors="coerce")
+            # v43.65: same scale normalization as blast_pct (Savant returns
+            # 0-1 decimal for all per-swing/per-contact rates; codebase
+            # convention is 0-100).
+            def _to_percent_scale(col_name):
+                """Sniff scale and multiply by 100 if it's a 0-1 decimal."""
+                series = pd.to_numeric(df[col_name], errors="coerce")
+                try:
+                    _med = float(series.dropna().median())
+                    if pd.notna(_med) and _med < 1.0:
+                        return (series * 100).round(2)
+                except Exception:
+                    return (series * 100).round(2)
+                return series.round(2)
+
             if fs_col:
-                out["fast_swing_pct"] = pd.to_numeric(df[fs_col], errors="coerce")
+                out["fast_swing_pct"] = _to_percent_scale(fs_col)
             if sq_col:
-                out["squared_up_pct"] = pd.to_numeric(df[sq_col], errors="coerce")
+                out["squared_up_pct"] = _to_percent_scale(sq_col)
             if iaa_col:
-                out["ideal_attack_angle_pct"] = pd.to_numeric(
-                    df[iaa_col], errors="coerce"
-                )
+                out["ideal_attack_angle_pct"] = _to_percent_scale(iaa_col)
 
             # v43.57: capture pre-dropna shape so a "no rows after filtering"
             # status tells us WHY. Without this, we knew the filter killed
