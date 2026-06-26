@@ -86,10 +86,25 @@ def _safe_pct_rank(s: pd.Series) -> pd.Series:
 
 def _score_from_weights(df: pd.DataFrame, weights: dict, neg: tuple = ()) -> pd.Series:
     """
-    Weighted sum of percentile-ranked columns.
+    Weighted average of percentile-ranked columns, RENORMALIZING when data is sparse.
+
     - Rows with NO data in any weighted column → NaN (honest)
-    - Rows with partial data → score scaled by weights of columns that DO have data
+    - Rows with partial data → weighted_sum / (sum of weights with data)
     - Columns in `neg` are inverted (lower raw = higher score)
+
+    v43.64 (reviewer doc fix #5): the previous docstring said "score scaled
+    by weights of columns that DO have data," which implied a SCALING (the
+    score gets smaller with less data). What it actually does is
+    RENORMALIZE — a hitter with only one component present gets that
+    component's full percentile as their score, identical to a hitter at
+    that percentile across ALL components. That's a real asymmetry: a
+    hitter we only have ONE signal on isn't penalized for having less
+    data, they just get treated as "league average on the missing axes."
+    The v43.18 blast-median-imputation fix patched ONE symptom of this
+    (rows with missing blast got score = 0 for that axis because of the
+    `.fillna(0)` above, which DID effectively scale them down) — but only
+    for blast specifically. Other sparse columns still behave as
+    documented here. Acknowledge the property; don't pretend it's scaling.
     """
     contributions = []   # list of (weight_series, ranked_series) tuples
     for col, w in weights.items():
@@ -1570,18 +1585,25 @@ def add_hr_criteria(df: pd.DataFrame) -> pd.DataFrame:
 # A+ now means "everything aligns" — not just "high HR%."
 # F means "structural failure across multiple dimensions."
 #
-# 8 tiers totaling 100%:
+# v43.64 (reviewer doc fix #16): now 7 tiers totaling 98% (renormalized to
+# 100% by weight_total at runtime). Context tier (was 2%) was removed in
+# v43.61 because it read ps_bonus_lineup / ps_bonus_recent_hr which aren't
+# attached to combined_picks at the time this runs. Those signals still
+# count via pick_score's ps_bonus_* path — they're not lost, just no longer
+# double-counted into the comprehensive grade.
+#
+# 7 tiers (sum 0.98, renormalized):
 #
 #   30% — HR Probability (calibrated hr_game_pct: park × weather × pitcher
 #         × platoon × ttop × pitch_match × defense × bullpen × day_night)
 #   25% — Power Signals (barrel%, pulled_brl%, avg_ev, iso, max_hit_speed)
-#   12% — Swing Mechanics (pull%, fb_pct, ideal_attack_angle_pct)
+#   12% — Swing Mechanics (pull%, fb_pct, ideal_attack_angle_pct / blast_pct)
 #   12% — Matchup Quality (matchup_opp, pitch_hr_score)
 #   10% — Form / Recency (recent_hr_weighted_rate, hr_streak_games, hr_form)
 #   6%  — Environment (env_boost — small weight to avoid double-count with
 #         hr_game_pct which already includes env)
 #   3%  — Plate Discipline (discipline_score)
-#   2%  — Context Bonuses (confirmed lineup, recent pitcher HR streak)
+#  (2% context tier removed v43.61 — see GRADE_TIER_WEIGHTS comment)
 #
 # Composite range: 0-100 (weighted average of percentile ranks across tiers).
 # Grade thresholds:
@@ -1720,14 +1742,39 @@ def rescale_composite_to_slate(composite_series: pd.Series) -> pd.Series:
         return pd.Series(50.0, index=composite_series.index, dtype=float)
 
     rescaled = 10.0 + (composite_series - p5) * (95.0 - 10.0) / (p95 - p5)
-    # v43.42: cap at 95, not 100 — avoid "100 = guaranteed" misread
-    rescaled = rescaled.clip(0, 95)
+    # v43.42: cap at 95, not 100 — avoid "100 = guaranteed" misread.
+    # v43.65 (reviewer-validated fix #17): the previous hard clip at 95
+    # created an N-way tie at the top — production export showed 30 hitters
+    # all reading hr_score == 95.0, which kills sortability/discriminability
+    # in EXACTLY the region that matters most (the top picks of the slate).
+    #
+    # Fix: above 95, apply a soft asymptotic compression that preserves
+    # ordering. Below 95, behavior is unchanged. Above 95, the displayed
+    # value follows a tanh-like curve that maps the linear-rescale tail
+    # into [95, 99.5] — never reaches 100 (preserving the "not a probability"
+    # signal) but spreads the top hitters by ~0.1-0.3 each so they sort.
+    #
+    # Math: for v > 95, displayed = 95 + 4.5 * tanh((v - 95) / 8).
+    #   v = 95   → 95.0
+    #   v = 100  → ~97.3
+    #   v = 105  → ~98.4 (matches old "hard clipped" hitter)
+    #   v = 120  → ~99.4 (extreme outliers approach 99.5 asymptote)
+    # The /8 scale was chosen so a typical above-p95 spread (5-15 points
+    # of raw composite) produces a 1-4 point displayed spread — enough to
+    # rank, not enough to look like a different scale than below 95.
+    above_cap = rescaled > 95.0
+    if above_cap.any():
+        excess = rescaled[above_cap] - 95.0
+        rescaled.loc[above_cap] = 95.0 + 4.5 * np.tanh(excess / 8.0)
+    rescaled = rescaled.clip(0, 99.5)
     return rescaled.round(1)
 
 
 def hr_score_signal(hr_score):
     """v43.41: Color emoji from HR Score band.
-    v43.42: bands adjusted for 0-95 cap (was 0-100).
+    v43.42: bands adjusted for 0-95 cap.
+    v43.65: range is now 0-99.5 due to soft tail compression above 95.
+            Band thresholds unchanged — same green/yellow/orange/red boundaries.
     Bands aligned to slate-rescaled distribution:
       🟢 70+ (top ~25% of slate — strong play)
       🟡 50-69 (above median)
@@ -1839,18 +1886,46 @@ def comprehensive_hr_grade(composite, pull_pct=None, avg_ev=None,
     #    nor avg_ev nor ISO crosses the absolute threshold, demote one tier.
     if raw in ("A+", "A"):
         has_elite_power = False
+        # v43.64 (reviewer fix #15): track whether ANY input was parseable.
+        # Old behavior: a single parse failure set has_elite_power = True
+        # for the whole block, defeating the floor's intent. New behavior:
+        # only fail open if ALL THREE inputs are unparseable (genuinely no
+        # data); if ANY input parses, evaluate normally. This preserves
+        # "be defensive when truly no data" while not letting one bad
+        # value bypass the floor for a hitter who has real power signals
+        # on the other two inputs.
+        any_parseable = False
         try:
             if barrel_pct is not None and not pd.isna(barrel_pct):
-                if float(barrel_pct) >= 10.0:
-                    has_elite_power = True
+                try:
+                    bp = float(barrel_pct)
+                    any_parseable = True
+                    if bp >= 10.0:
+                        has_elite_power = True
+                except (TypeError, ValueError):
+                    pass
             if not has_elite_power and avg_ev is not None and not pd.isna(avg_ev):
-                if float(avg_ev) >= 90.0:
-                    has_elite_power = True
+                try:
+                    ev = float(avg_ev)
+                    any_parseable = True
+                    if ev >= 90.0:
+                        has_elite_power = True
+                except (TypeError, ValueError):
+                    pass
             if not has_elite_power and iso is not None and not pd.isna(iso):
-                if float(iso) >= 0.200:
-                    has_elite_power = True
-        except (TypeError, ValueError):
-            # If we can't evaluate, don't apply the floor — defensive.
+                try:
+                    iso_f = float(iso)
+                    any_parseable = True
+                    if iso_f >= 0.200:
+                        has_elite_power = True
+                except (TypeError, ValueError):
+                    pass
+        except Exception:
+            any_parseable = False
+        # If genuinely no data on any of barrel/EV/ISO, default has_elite_power
+        # to True (don't penalize a hitter we can't evaluate). Otherwise
+        # apply the floor as designed.
+        if not any_parseable:
             has_elite_power = True
         if not has_elite_power:
             _CAP_POWER = {"A+": "A", "A": "B+"}
