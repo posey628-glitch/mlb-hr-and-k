@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.65-export-validated-fixes"
+APP_VERSION = "2026.06.10-v43.66-researcher-framework-must-have-and-nuclear"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -4595,7 +4595,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.65 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.66 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -5216,7 +5216,10 @@ for _, game in slate.iterrows():
     # rows missing both K% and BB% — composite returns NaN there and the
     # downstream pct_rank handles it.
     try:
-        from models import add_discipline_score, add_hr_criteria
+        from models import (
+            add_discipline_score, add_hr_criteria,
+            add_must_have_criteria, add_nuclear_criteria,
+        )
         away_matchup = add_discipline_score(away_matchup)
         home_matchup = add_discipline_score(home_matchup)
         # v43.36 (user-requested): 4-point HR criteria checklist
@@ -5225,12 +5228,43 @@ for _, game in slate.iterrows():
         # by how many of the 4 thresholds each hitter meets.
         away_matchup = add_hr_criteria(away_matchup)
         home_matchup = add_hr_criteria(home_matchup)
+        # v43.66 (researcher framework): compute near_hr_est = max(0,
+        # barrel_count - home_run), the closest approximation we have for
+        # the researcher's "Near HR" metric (barrels that didn't leave the
+        # yard). Then run Must-Have (10-point) and Nuclear (14-point)
+        # checklists alongside the 4-point. All three remain display-only;
+        # no scoring change.
+        def _compute_near_hr(df):
+            if df is None or df.empty:
+                return df
+            if "barrel_count" in df.columns and "home_run" in df.columns:
+                _bc = pd.to_numeric(df["barrel_count"], errors="coerce")
+                _hr = pd.to_numeric(df["home_run"], errors="coerce").fillna(0)
+                df["near_hr_est"] = (_bc - _hr).clip(lower=0).round(0)
+            elif "barrel_count" in df.columns:
+                df["near_hr_est"] = pd.to_numeric(
+                    df["barrel_count"], errors="coerce"
+                ).round(0)
+            return df
+
+        away_matchup = _compute_near_hr(away_matchup)
+        home_matchup = _compute_near_hr(home_matchup)
+        away_matchup = add_must_have_criteria(away_matchup)
+        home_matchup = add_must_have_criteria(home_matchup)
+        away_matchup = add_nuclear_criteria(away_matchup)
+        home_matchup = add_nuclear_criteria(home_matchup)
         if not away_bench_matchup.empty:
             away_bench_matchup = add_discipline_score(away_bench_matchup)
             away_bench_matchup = add_hr_criteria(away_bench_matchup)
+            away_bench_matchup = _compute_near_hr(away_bench_matchup)
+            away_bench_matchup = add_must_have_criteria(away_bench_matchup)
+            away_bench_matchup = add_nuclear_criteria(away_bench_matchup)
         if not home_bench_matchup.empty:
             home_bench_matchup = add_discipline_score(home_bench_matchup)
             home_bench_matchup = add_hr_criteria(home_bench_matchup)
+            home_bench_matchup = _compute_near_hr(home_bench_matchup)
+            home_bench_matchup = add_must_have_criteria(home_bench_matchup)
+            home_bench_matchup = add_nuclear_criteria(home_bench_matchup)
     except Exception as _disc_e:
         # v43.61 (reviewer-validated audit): converted from silent `pass`.
         # discipline_score contributes 6% to pick_score (ps_discipline);
@@ -11474,6 +11508,108 @@ def build_col_config():
                 "Followed by 'X/Y' = met / total-with-data."
             ),
         ),
+        # v43.66 (researcher framework): Must-Have (10) + Nuclear (14)
+        # checkpoints alongside DingerMaven's 4-point criteria. Pure
+        # batted-ball profile lens — does NOT influence HR Score, Grade,
+        # or Pick Score (those remain matchup-aware). Lets the user
+        # cross-check DingerMaven's ranking against an external trusted
+        # framework on each row.
+        "must_have_label": st.column_config.TextColumn(
+            "Must-Have ✓✗",
+            width="medium",
+            help=(
+                "Researcher's 10-point MUST-HAVE checklist — pure "
+                "batted-ball profile (no matchup/park/weather).\n\n"
+                "Order: Barrel% / PullBrl% / PullAir% / HH% / AvgDist / "
+                "EV / ISO / FB% / Pull% / Blast%\n\n"
+                "Thresholds (all ≥):\n"
+                "  Barrel% ≥15 · PullBrl% ≥10 · PullAir% ≥35\n"
+                "  HH% ≥50 · AvgDist ≥315 ft · EV ≥92\n"
+                "  ISO ≥.250 · FB% ≥35 · Pull% ≥40 · Blast% ≥12\n\n"
+                "✓ = meets · ✗ = below · · = no data\n"
+                "Compare against HR Score / Grade — they use different lenses."
+            ),
+        ),
+        "must_have_met": st.column_config.NumberColumn(
+            "MH",
+            format="%d",
+            width="small",
+            help="Must-Have criteria met (0-10). Pure profile, no matchup.",
+        ),
+        "must_have_pass": st.column_config.CheckboxColumn(
+            "MH✓",
+            width="small",
+            help=(
+                "Hitter passes researcher's Must-Have filter "
+                "(all evaluatable criteria met, ≥8 evaluated). "
+                "These are hitters with the exact batted-ball profile "
+                "that produces home runs."
+            ),
+        ),
+        "nuclear_label": st.column_config.TextColumn(
+            "Nuclear ✓✗",
+            width="medium",
+            help=(
+                "Researcher's 14-point NUCLEAR filter — only the elite-est "
+                "HR profile. Most slates produce 0-2 hitters who pass all 14. "
+                "12+/14 is the practical 'very close to nuclear' tier.\n\n"
+                "Order: HR / NearHR / Barrel% / PullBrl% / PullAir% / HH% / "
+                "AvgDist / EV / ISO / SLG / Blast% / FB% / Pull% / GB%\n\n"
+                "Thresholds:\n"
+                "  HR ≥2 · NearHR ≥3 · Barrel% ≥18 · PullBrl% ≥15\n"
+                "  PullAir% ≥40 · HH% ≥55 · AvgDist ≥330 · EV ≥94\n"
+                "  ISO ≥.300 · SLG ≥.600 · Blast% ≥15 · FB% ≥40\n"
+                "  Pull% ≥45 · GB% ≤35 (note: this is an UPPER bound)\n\n"
+                "NearHR is approximated as (barrels - HR) since the "
+                "researcher's exact definition isn't published."
+            ),
+        ),
+        "nuclear_met": st.column_config.NumberColumn(
+            "NUC",
+            format="%d",
+            width="small",
+            help="Nuclear criteria met (0-14). 14/14 = elite HR-only play.",
+        ),
+        "nuclear_grade": st.column_config.TextColumn(
+            "NUC Grade",
+            width="small",
+            help=(
+                "☢️ NUCLEAR = all 14/14 (rare, ~0-2 per slate)\n"
+                "💥 STRONG = 12-13/14 (the actionable tier)\n"
+                "🎯 NEAR = 10-11/14 (close, profile mostly clean)\n"
+                "— = below 10/14"
+            ),
+        ),
+        "near_hr_est": st.column_config.NumberColumn(
+            "Near HR",
+            format="%d",
+            width="small",
+            help=(
+                "Approximated near-HR count: max(0, barrels - HR). "
+                "Barrels that didn't leave the yard (warning-track flyouts, "
+                "robbed HRs, deep doubles). Used for the Nuclear threshold "
+                "of ≥3. Approximate because the researcher's exact "
+                "definition isn't published."
+            ),
+        ),
+        "avg_dist": st.column_config.NumberColumn(
+            "AvgDist",
+            format="%.0f",
+            width="small",
+            help=(
+                "Average batted-ball distance (feet). Statcast metric. "
+                "Researcher's Must-Have threshold: ≥315 ft. Nuclear: ≥330 ft."
+            ),
+        ),
+        "barrel_count": st.column_config.NumberColumn(
+            "Brls",
+            format="%d",
+            width="small",
+            help=(
+                "Raw barrel count this season (not %). Used to derive "
+                "near_hr_est. The % version is barrel_pct."
+            ),
+        ),
         # v43.23: discipline score (K%/BB% composite). Powers ps_discipline
         # in pick_score (6% weight). Higher = better contact/discipline.
         "discipline_score": st.column_config.NumberColumn(
@@ -11886,6 +12022,12 @@ def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
         "contact_flag", "split_confidence", "slate_leader_flag",
         # v43.36 criteria — kept as visual checkmarks (NOT a grade)
         "hr_criteria_label",
+        # v43.66 researcher framework: Must-Have (10) + Nuclear (14) checkpoints
+        # alongside DingerMaven's 4-point. Lets users compare profile-only
+        # ranking against matchup-aware ranking on every row.
+        "must_have_label", "must_have_met", "must_have_pass",
+        "nuclear_label", "nuclear_met", "nuclear_grade",
+        "near_hr_est", "avg_dist", "barrel_count",
         # Letter grades AFTER scores (backward compat / for those who prefer letters)
         "grade", "hit_grade",
         "hr_profile_label",
