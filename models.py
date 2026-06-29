@@ -253,9 +253,15 @@ def _classify_role(row, min_ip: float, min_gs: int, full_ip: float) -> str:
 KNOWN_CONSUMED_COLUMNS = [
     # HR-criteria checklist inputs (add_hr_criteria)
     "pull_pct", "avg_ev", "barrel_pct", "ideal_attack_angle_pct",
+    # v43.66 researcher framework — Must-Have + Nuclear input columns.
+    # If any of these get dropped by the display_cols whitelist, the
+    # corresponding criterion silently goes dark on every row.
+    "pulled_brl_pct", "pull_air_pct", "hard_hit", "avg_dist",
+    "fb_pct", "blast_pct", "iso", "slg", "gb_pct",
+    "barrel_count", "home_run", "near_hr_est",
     # Comprehensive HR composite (compute_comprehensive_hr_composite)
-    "hr_game_pct", "pulled_brl_pct", "iso", "max_hit_speed",
-    "fb_pct", "matchup_opp", "pitch_hr_score",
+    "hr_game_pct", "max_hit_speed",
+    "matchup_opp", "pitch_hr_score",
     "recent_hr_weighted_rate", "hr_streak_games", "hr_form",
     "env_boost", "discipline_score",
     # Handedness override inputs (apply_handedness_overrides)
@@ -264,7 +270,7 @@ KNOWN_CONSUMED_COLUMNS = [
     "vs_rhp_pa", "vs_rhp_barrel_pct", "vs_rhp_hard_hit",
     "vs_rhp_xwoba", "vs_rhp_avg_ev", "vs_rhp_iso",
     # Total bases (props.total_bases_per_pa) — reads slg/xslg
-    "slg", "xslg",
+    "xslg",
     # Grade context platoon annotations (grade_context block)
     "bats", "opp_pitcher_throws", "platoon_hitter_flag",
 ]
@@ -417,6 +423,18 @@ def build_matchup_table(
         "groundballs_percent": "gb_pct",
         "linedrives_percent": "ld_pct",
         "whiff_percent": "whiff_pct",
+        # v43.66 (researcher framework): Avg Distance (ft) — used by
+        # Must-Have ≥315 ft / Nuclear ≥330 ft thresholds. Native Savant
+        # name is `avg_hit_distance`; normalized to `avg_dist` to match
+        # this codebase's percentage-shorthand convention (`pull_pct`,
+        # `hard_hit`, etc.).
+        "avg_hit_distance": "avg_dist",
+        # v43.66: raw barrel COUNT (not %). Used to derive near_hr_est =
+        # max(0, barrels - home_run) for the Nuclear ≥3 "Near HR" threshold.
+        # The researcher's definition of "Near HR" isn't documented; we
+        # use "barrels that didn't leave the yard" as the operational
+        # proxy. Flagged in tooltip.
+        "barrels": "barrel_count",
         # Savant uses several names for launch angle
         "launch_angle": "la",
         "launch_angle_avg": "la",
@@ -911,6 +929,12 @@ def build_matchup_table(
         "barrel_pct", "pulled_brl_pct", "hard_hit", "sweet_spot_pct",
         "fb_pct", "gb_pct", "ld_pct",
         "la", "avg_ev",
+        # v43.66 (researcher framework): new inputs the Must-Have / Nuclear
+        # checklists read. avg_dist is fetched directly from Savant; barrel_count
+        # is the raw count (not %); near_hr_est is derived in app.py as
+        # max(0, barrel_count - home_run). All three MUST survive display_cols
+        # or the new criteria silently die — the v43.5/v43.51-class bug.
+        "avg_dist", "barrel_count", "near_hr_est",
         # v43.17: bat tracking columns (Blast %, bat speed, etc.) — only
         # populated when sidebar opt-in toggle is enabled AND Savant
         # fetch succeeds. Otherwise NaN, _score_from_weights handles that
@@ -1572,6 +1596,247 @@ def add_hr_criteria(df: pd.DataFrame) -> pd.DataFrame:
     # `away_matchup = add_hr_criteria(away_matchup)` overwrote the
     # DataFrame with None. Next access (e.g. `matchup_df.empty`) crashed
     # with AttributeError on NoneType.
+    return df
+
+
+# ============================================================================
+# v43.66 — RESEARCHER'S FRAMEWORK (Must-Have + Nuclear filters)
+# ----------------------------------------------------------------------------
+# A trusted external researcher's HR-prediction framework, added as a
+# SECONDARY checkpoint alongside DingerMaven's existing HR Score / Grade /
+# Pick Score. The researcher's lens is pure batted-ball PROFILE — no
+# matchup, park, weather, or pitcher quality. Useful for comparing
+# DingerMaven's matchup-aware ranking against a profile-only sanity check.
+#
+# Two tiers:
+#   - MUST-HAVE (10 thresholds): "hitters making authoritative contact,
+#     elevating the ball, pulling it in the air, producing the exact
+#     batted-ball profile that leads to home runs"
+#   - NUCLEAR (14 thresholds, stricter overlap): "only the best 3-8 HR
+#     plays" per slate
+#
+# Both run alongside the existing 4-point hr_criteria — neither replaces
+# it. The user sees BOTH lenses on each row.
+#
+# Data availability notes:
+#   - avg_dist: added to Statcast fetcher in v43.66 (was not previously fetched)
+#   - near_hr: not directly fetched. Approximated as `max(0, barrel_count - home_run)`
+#     i.e. "barrels that didn't leave the yard." Computed in app.py once
+#     barrel_count is available on the hitter frame.
+# ============================================================================
+HR_MUST_HAVE_THRESHOLDS = {
+    "barrel_pct":    15.0,    # ≥15% barrels
+    "pulled_brl_pct": 10.0,   # ≥10% pulled barrels
+    "pull_air_pct":  35.0,    # ≥35% pull-in-air
+    "hard_hit":      50.0,    # ≥50% hard hit
+    "avg_dist":     315.0,    # ≥315 ft avg distance
+    "avg_ev":        92.0,    # ≥92 mph EV
+    "iso":            0.250,  # ≥.250 ISO
+    "fb_pct":        35.0,    # ≥35% fly ball
+    "pull_pct":      40.0,    # ≥40% pull
+    "blast_pct":     12.0,    # ≥12% blast (0-100 scale after v43.65)
+}
+
+# Some criteria have an UPPER bound (GB% ≤35). Mark direction explicitly.
+# Default "≥" for entries not in this set.
+_NUCLEAR_DIRECTION_LE = {"gb_pct"}
+
+HR_NUCLEAR_THRESHOLDS = {
+    "home_run":       2.0,     # ≥2 HR (season count)
+    "near_hr_est":    3.0,     # ≥3 near-HR (approximated)
+    "barrel_pct":     18.0,
+    "pulled_brl_pct": 15.0,
+    "pull_air_pct":   40.0,
+    "hard_hit":       55.0,
+    "avg_dist":      330.0,
+    "avg_ev":         94.0,
+    "iso":             0.300,
+    "slg":             0.600,
+    "blast_pct":      15.0,
+    "fb_pct":         40.0,
+    "pull_pct":       45.0,
+    "gb_pct":         35.0,    # ≤35 (see _NUCLEAR_DIRECTION_LE)
+}
+
+
+def _check_threshold(val, threshold, direction="ge"):
+    """Evaluate a single threshold. Returns True / False / None (no data).
+
+    direction: "ge" (≥, default) or "le" (≤)
+    """
+    if val is None or pd.isna(val):
+        return None
+    try:
+        v = float(val)
+    except (TypeError, ValueError):
+        return None
+    if direction == "le":
+        return v <= threshold
+    return v >= threshold
+
+
+def _build_label(per_criterion_results, met, total):
+    """Build the visual label '✓✓✗✓✗··✓✓ 6/10' from per-criterion bools."""
+    symbols = []
+    for c in per_criterion_results:
+        if c is True:
+            symbols.append("✓")
+        elif c is False:
+            symbols.append("✗")
+        else:
+            symbols.append("·")
+    return "".join(symbols) + f" {met}/{total}"
+
+
+def add_must_have_criteria(df: pd.DataFrame) -> pd.DataFrame:
+    """Mark each hitter against the researcher's 10-point MUST-HAVE checklist.
+
+    Adds columns:
+      - must_have_<metric>  bool|None for each of the 10 metrics
+                            (must_have_barrel, must_have_pullbrl, etc.)
+      - must_have_met       int 0-10  count of thresholds passed
+      - must_have_total     int 0-10  count of evaluatable thresholds (with data)
+      - must_have_label     str       e.g. "✓✓✗✓✓✓✗··✓ 6/8"
+      - must_have_pass      bool      True if 10/10 (or all-available passed)
+
+    None values indicate "data not available" — distinguished from False
+    ("data available, threshold not met"). avg_dist will be None for
+    hitters where the Statcast fetch didn't return it.
+
+    Threshold source: external researcher's framework, June 2026.
+    """
+    if df is None or df.empty:
+        return df
+
+    # Map threshold-dict keys to the friendly per-criterion column names
+    # the user sees on the dataframe / export.
+    _MH_LABELS = {
+        "barrel_pct":     "must_have_barrel",
+        "pulled_brl_pct": "must_have_pullbrl",
+        "pull_air_pct":   "must_have_pullair",
+        "hard_hit":       "must_have_hh",
+        "avg_dist":       "must_have_dist",
+        "avg_ev":         "must_have_ev",
+        "iso":            "must_have_iso",
+        "fb_pct":         "must_have_fb",
+        "pull_pct":       "must_have_pull",
+        "blast_pct":      "must_have_blast",
+    }
+
+    # Per-criterion eval
+    per_crit_cols = {label: [] for label in _MH_LABELS.values()}
+    met_list, total_list, label_list, pass_list = [], [], [], []
+
+    # Stable ordering for the label string
+    _MH_ORDER = list(_MH_LABELS.keys())
+
+    for _, row in df.iterrows():
+        row_results = []
+        for metric in _MH_ORDER:
+            val = row.get(metric)
+            threshold = HR_MUST_HAVE_THRESHOLDS[metric]
+            result = _check_threshold(val, threshold, direction="ge")
+            row_results.append(result)
+            per_crit_cols[_MH_LABELS[metric]].append(result)
+
+        met = sum(1 for r in row_results if r is True)
+        total = sum(1 for r in row_results if r is not None)
+        met_list.append(met)
+        total_list.append(total)
+        if total == 0:
+            label_list.append("—")
+            pass_list.append(False)
+        else:
+            label_list.append(_build_label(row_results, met, total))
+            # "Pass" = all evaluatable criteria met (handles missing data
+            # by not penalizing hitters with one missing metric)
+            pass_list.append(met == total and total >= 8)
+
+    for col, vals in per_crit_cols.items():
+        df[col] = vals
+    df["must_have_met"] = met_list
+    df["must_have_total"] = total_list
+    df["must_have_label"] = label_list
+    df["must_have_pass"] = pass_list
+    return df
+
+
+def add_nuclear_criteria(df: pd.DataFrame) -> pd.DataFrame:
+    """Mark each hitter against the researcher's 14-point NUCLEAR checklist.
+
+    Designed to surface "only the best 3-8 HR plays" — much stricter than
+    Must-Have. Common to see 0-2 hitters pass all 14 on a typical slate.
+    A 12+/14 partial pass is the practical "very close to nuclear" tier.
+
+    Adds columns:
+      - nuclear_<metric>    bool|None for each of the 14 metrics
+      - nuclear_met         int 0-14  thresholds passed
+      - nuclear_total       int 0-14  evaluatable thresholds
+      - nuclear_label       str       e.g. "✓✓✓✓✗✓···✓✓✓✓✓ 11/12"
+      - nuclear_grade       str       NUCLEAR (14/14) / STRONG (≥12) / NEAR (≥10) / —
+
+    Threshold source: external researcher's framework, June 2026.
+    """
+    if df is None or df.empty:
+        return df
+
+    _NUC_LABELS = {
+        "home_run":       "nuclear_hr",
+        "near_hr_est":    "nuclear_nearhr",
+        "barrel_pct":     "nuclear_barrel",
+        "pulled_brl_pct": "nuclear_pullbrl",
+        "pull_air_pct":   "nuclear_pullair",
+        "hard_hit":       "nuclear_hh",
+        "avg_dist":       "nuclear_dist",
+        "avg_ev":         "nuclear_ev",
+        "iso":            "nuclear_iso",
+        "slg":            "nuclear_slg",
+        "blast_pct":      "nuclear_blast",
+        "fb_pct":         "nuclear_fb",
+        "pull_pct":       "nuclear_pull",
+        "gb_pct":         "nuclear_gb",
+    }
+    _NUC_ORDER = list(_NUC_LABELS.keys())
+
+    per_crit_cols = {label: [] for label in _NUC_LABELS.values()}
+    met_list, total_list, label_list, grade_list = [], [], [], []
+
+    for _, row in df.iterrows():
+        row_results = []
+        for metric in _NUC_ORDER:
+            val = row.get(metric)
+            threshold = HR_NUCLEAR_THRESHOLDS[metric]
+            direction = "le" if metric in _NUCLEAR_DIRECTION_LE else "ge"
+            result = _check_threshold(val, threshold, direction=direction)
+            row_results.append(result)
+            per_crit_cols[_NUC_LABELS[metric]].append(result)
+
+        met = sum(1 for r in row_results if r is True)
+        total = sum(1 for r in row_results if r is not None)
+        met_list.append(met)
+        total_list.append(total)
+        if total == 0:
+            label_list.append("—")
+            grade_list.append("—")
+        else:
+            label_list.append(_build_label(row_results, met, total))
+            # Tiers based on raw met count (not fraction) since the researcher's
+            # framework treats this as a counting metric, not a percentage
+            if met == 14:
+                grade_list.append("☢️ NUCLEAR")
+            elif met >= 12:
+                grade_list.append("💥 STRONG")
+            elif met >= 10:
+                grade_list.append("🎯 NEAR")
+            else:
+                grade_list.append("—")
+
+    for col, vals in per_crit_cols.items():
+        df[col] = vals
+    df["nuclear_met"] = met_list
+    df["nuclear_total"] = total_list
+    df["nuclear_label"] = label_list
+    df["nuclear_grade"] = grade_list
     return df
 
 
