@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.66-researcher-framework-must-have-and-nuclear"
+APP_VERSION = "2026.06.10-v43.67-profile-summary-and-revised-spec"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -4595,7 +4595,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.66 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.67 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -6636,6 +6636,150 @@ else:
 st.divider()
 
 
+# ============================================================================
+# v43.67 — RESEARCHER'S PROFILE SUMMARY (user-requested)
+# ----------------------------------------------------------------------------
+# A single section answering "which players meet Must-Have / Nuclear for the
+# day's slate?" Pure profile lens (no matchup). Shows actual passers, top-N
+# rankings by criteria count, and side-by-side with DingerMaven's HR Score /
+# Grade so divergences are visible.
+# ============================================================================
+try:
+    if combined_picks is not None and not combined_picks.empty:
+        _cp = combined_picks
+        # Only show starters (is_roster_fill False) — bench scoring is on the
+        # same scale but most users want the starter view. Bench passers
+        # appear in the bench expanders.
+        if "is_roster_fill" in _cp.columns:
+            _cp = _cp[~_cp["is_roster_fill"]].copy()
+
+        # Build display frame with HR Score / Grade alongside profile counts
+        _profile_cols = [
+            "player_name", "team", "lineup_pos",
+            "hr_score", "grade",
+            "must_have_met", "must_have_total", "must_have_label", "must_have_pass",
+            "nuclear_met", "nuclear_total", "nuclear_grade", "nuclear_label",
+        ]
+        _avail = [c for c in _profile_cols if c in _cp.columns]
+        if "must_have_met" in _cp.columns and "nuclear_met" in _cp.columns:
+            st.subheader("🎯 Researcher's Profile Summary")
+            st.caption(
+                "Pure batted-ball profile lens (no matchup/park/weather). Shows "
+                "which hitters tonight match the researcher's threshold framework. "
+                "Compare against DingerMaven's HR Score (matchup-aware) — strong "
+                "picks should clear the profile bar too. Big divergence = "
+                "DingerMaven sees a matchup edge the profile alone misses (e.g. "
+                "elite park or terrible pitcher) or vice versa."
+            )
+
+            # ===== Section A: hitters who PASS Must-Have =====
+            _passers = _cp[_cp.get("must_have_pass") == True]
+            n_pass = len(_passers)
+            with st.expander(
+                f"✅ Hitters passing Must-Have filter ({n_pass} of {len(_cp)} starters)",
+                expanded=(n_pass > 0)
+            ):
+                if n_pass == 0:
+                    st.info(
+                        "No starters cleared all 9 Must-Have thresholds tonight. "
+                        "Check the Top-10-by-Must-Have list below — even "
+                        "passing 7-8 of 9 is a strong profile."
+                    )
+                else:
+                    _pass_view = _passers[_avail].sort_values(
+                        "hr_score", ascending=False, na_position="last"
+                    )
+                    st.dataframe(_pass_view, use_container_width=True, hide_index=True)
+
+            # ===== Section B: Nuclear-grade hitters (NEAR / STRONG / NUCLEAR) =====
+            _nuclear_tiered = _cp[
+                _cp["nuclear_grade"].isin(["☢️ NUCLEAR", "💥 STRONG", "🎯 NEAR"])
+            ] if "nuclear_grade" in _cp.columns else _cp.iloc[0:0]
+            n_nuc = len(_nuclear_tiered)
+            with st.expander(
+                f"☢️ Nuclear tier hitters ({n_nuc} reaching NEAR or better)",
+                expanded=(n_nuc > 0)
+            ):
+                if n_nuc == 0:
+                    st.info(
+                        "No starters reached NEAR (10+/14) tonight. This is "
+                        "common — Nuclear is designed to surface only 3-8 plays "
+                        "per slate at most, often zero. The Top-10-by-Nuclear "
+                        "list below shows the strongest profiles even when "
+                        "no one passes the NEAR bar."
+                    )
+                else:
+                    # Sort by nuclear_met DESC, then HR Score DESC
+                    _nuc_view = _nuclear_tiered[_avail].sort_values(
+                        ["nuclear_met", "hr_score"],
+                        ascending=[False, False],
+                        na_position="last",
+                    )
+                    st.dataframe(_nuc_view, use_container_width=True, hide_index=True)
+
+            # ===== Section C: Top 10 by Must-Have count regardless of pass =====
+            # Always useful — even when nobody officially "passes," the top
+            # 10 by count shows which hitters are CLOSEST to the profile.
+            _top10_mh = _cp.sort_values(
+                ["must_have_met", "hr_score"],
+                ascending=[False, False],
+                na_position="last",
+            ).head(10)
+            with st.expander(f"🔝 Top 10 by Must-Have count (out of {len(_cp)} starters)"):
+                st.dataframe(
+                    _top10_mh[_avail],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+            # ===== Section D: Top 10 by Nuclear count =====
+            _top10_nuc = _cp.sort_values(
+                ["nuclear_met", "hr_score"],
+                ascending=[False, False],
+                na_position="last",
+            ).head(10)
+            with st.expander(f"🔝 Top 10 by Nuclear count (out of {len(_cp)} starters)"):
+                st.dataframe(
+                    _top10_nuc[_avail],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+            # ===== Section E: Compact summary stats =====
+            try:
+                _mh_dist = _cp["must_have_met"].value_counts().sort_index(ascending=False)
+                _nuc_dist = _cp["nuclear_met"].value_counts().sort_index(ascending=False)
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    st.caption("**Must-Have count distribution**")
+                    _mh_lines = "\n".join(
+                        f"- **{k}/9** met: {v} hitter{'s' if v != 1 else ''}"
+                        for k, v in _mh_dist.head(10).items()
+                    )
+                    st.markdown(_mh_lines or "_no data_")
+                with col_b:
+                    st.caption("**Nuclear count distribution**")
+                    _nuc_lines = "\n".join(
+                        f"- **{k}/14** met: {v} hitter{'s' if v != 1 else ''}"
+                        for k, v in _nuc_dist.head(10).items()
+                    )
+                    st.markdown(_nuc_lines or "_no data_")
+            except Exception:
+                pass
+
+            st.divider()
+except Exception as _summary_err:
+    # Defensive — never let summary section crash the page
+    try:
+        stash_diagnostic(
+            "pipeline_health",
+            f"Researcher's Profile Summary section failed: "
+            f"{type(_summary_err).__name__}: {_summary_err}",
+            level="warning",
+        )
+    except Exception:
+        pass
+
 
 # ============================================================================
 # TOP 5 PICKS OF THE DAY — combined HR signal across all factors
@@ -7560,6 +7704,40 @@ if combined_picks is not None and not combined_picks.empty:
                 + "is mostly NaN-fallback. Pitcher SLG-allowed below 50% means "
                 + "total_bases_per_pa is falling back to xwoba/barrel proxies."
             )
+
+        # v43.67 (researcher framework): coverage check for the new columns
+        # the Must-Have / Nuclear evaluators read. If avg_dist or barrel_count
+        # don't flow from Savant, the Nuclear filter goes mostly dark and
+        # NUC Grade shows "—" everywhere. This line surfaces that.
+        try:
+            _researcher_audits = []
+            for col, label in [
+                ("avg_dist", "Avg Distance"),
+                ("barrel_count", "Barrel count"),
+                ("near_hr_est", "Near HR est"),
+            ]:
+                if col not in combined_picks.columns:
+                    _researcher_audits.append(f"{label}: ❌ column missing")
+                else:
+                    st_n = _starters[col].notna().sum() if len(_starters) else 0
+                    pct = 100 * st_n / n_st
+                    icon = "⚠️" if pct < 50 else "✅"
+                    _researcher_audits.append(
+                        f"{label}: starters {st_n}/{n_st} ({pct:.0f}%) {icon}"
+                    )
+            if _researcher_audits:
+                stash_diagnostic(
+                    "pipeline_health",
+                    "**Researcher framework inputs** · "
+                    + " · ".join(_researcher_audits)
+                    + "  ← if Avg Distance or Barrel count missing, Nuclear "
+                    + "filter loses 1-2 criteria per hitter and most NUC "
+                    + "grades will read '—'. Avg Distance comes from Savant's "
+                    + "custom leaderboard; if Savant drops it, we can switch "
+                    + "to the batted-ball leaderboard endpoint."
+                )
+        except Exception:
+            pass
     except Exception as _scov_e:
         # v43.61 (reviewer-validated audit): converted from silent `pass`.
         # 78-line try-block — typo or runtime error would silently kill
