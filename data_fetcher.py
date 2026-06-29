@@ -1722,9 +1722,29 @@ def get_hitter_stats(season: int = CURRENT_SEASON, _stats_day: str = "") -> pd.D
 
     # If LA still missing, try a sequence of Savant endpoints known to return it.
     # Each is independent and uses a different URL pattern.
-    if "launch_angle" in df.columns and df["launch_angle"].isna().all():
+    # v43.68 (production-validated): this same exit-velocity endpoint also
+    # returns avg_hit_distance and raw `barrels` count — fields that the
+    # custom leaderboard at the top of this function does NOT expose. So we
+    # extend this loop to ALSO populate avg_dist and barrel_count when present,
+    # even if launch_angle is already populated. Researcher's Nuclear filter
+    # needs these for ~3 of its 14 criteria; without them Nuclear grades go dark.
+    # Pre-check: are we missing any of {LA, avg_dist, barrel_count}? If so,
+    # hit the endpoint.
+    needs_la = (
+        "launch_angle" in df.columns and df["launch_angle"].isna().all()
+    )
+    needs_dist = (
+        "avg_dist" not in df.columns
+        or df.get("avg_dist", pd.Series(dtype=float)).isna().all()
+    )
+    needs_barrels = (
+        "barrel_count" not in df.columns
+        or df.get("barrel_count", pd.Series(dtype=float)).isna().all()
+    )
+    if needs_la or needs_dist or needs_barrels:
         la_urls = [
-            # Exit velocity & launch angle leaderboard
+            # Exit velocity & launch angle leaderboard (the canonical source
+            # of distance + barrels + LA in one CSV)
             f"https://baseballsavant.mlb.com/leaderboard/statcast"
             f"?type=batter&year={season}&position=&team=&min=1&csv=true",
             # Custom leaderboard with explicit launch_angle selection
@@ -1743,28 +1763,71 @@ def get_hitter_stats(season: int = CURRENT_SEASON, _stats_day: str = "") -> pd.D
                 ev_df = pd.read_csv(io.StringIO(rr.text))
                 if ev_df.empty:
                     continue
-                # Find LA column under any known name
-                la_col = None
-                for cand in ["launch_angle", "avg_hit_angle", "angle",
-                              "avg_launch_angle", "avg_la", "la"]:
-                    if cand in ev_df.columns:
-                        coerced = pd.to_numeric(ev_df[cand], errors="coerce")
-                        if coerced.notna().any():
-                            ev_df[cand] = coerced
-                            la_col = cand
-                            break
-                # Find ID column
+                # Find ID column once for all merges below
                 id_col = None
                 for cand in ["player_id", "mlb_id", "MLBAMID", "playerid", "id"]:
                     if cand in ev_df.columns:
                         id_col = cand
                         break
-                if la_col and id_col:
-                    ev_df[id_col] = pd.to_numeric(ev_df[id_col], errors="coerce").astype("Int64")
-                    la_map = dict(zip(ev_df[id_col], ev_df[la_col]))
-                    df["launch_angle"] = df["player_id"].map(la_map)
-                    if df["launch_angle"].notna().any():
-                        break  # success - stop trying more URLs
+                if not id_col:
+                    continue
+                ev_df[id_col] = pd.to_numeric(
+                    ev_df[id_col], errors="coerce"
+                ).astype("Int64")
+
+                # ----- LA (existing logic, unchanged) -----
+                if needs_la:
+                    la_col = None
+                    for cand in ["launch_angle", "avg_hit_angle", "angle",
+                                  "avg_launch_angle", "avg_la", "la"]:
+                        if cand in ev_df.columns:
+                            coerced = pd.to_numeric(ev_df[cand], errors="coerce")
+                            if coerced.notna().any():
+                                ev_df[cand] = coerced
+                                la_col = cand
+                                break
+                    if la_col:
+                        la_map = dict(zip(ev_df[id_col], ev_df[la_col]))
+                        df["launch_angle"] = df["player_id"].map(la_map)
+                        if df["launch_angle"].notna().any():
+                            needs_la = False  # success
+
+                # ----- v43.68: Avg Distance -----
+                if needs_dist:
+                    dist_col = None
+                    for cand in ["avg_hit_distance", "avg_distance",
+                                  "distance", "hit_distance"]:
+                        if cand in ev_df.columns:
+                            coerced = pd.to_numeric(ev_df[cand], errors="coerce")
+                            if coerced.notna().any():
+                                ev_df[cand] = coerced
+                                dist_col = cand
+                                break
+                    if dist_col:
+                        dist_map = dict(zip(ev_df[id_col], ev_df[dist_col]))
+                        df["avg_dist"] = df["player_id"].map(dist_map).round(0)
+                        if df["avg_dist"].notna().any():
+                            needs_dist = False
+
+                # ----- v43.68: Barrels (raw count) -----
+                if needs_barrels:
+                    brl_col = None
+                    for cand in ["barrels", "barrel", "n_barrels", "barrels_total"]:
+                        if cand in ev_df.columns:
+                            coerced = pd.to_numeric(ev_df[cand], errors="coerce")
+                            if coerced.notna().any():
+                                ev_df[cand] = coerced
+                                brl_col = cand
+                                break
+                    if brl_col:
+                        brl_map = dict(zip(ev_df[id_col], ev_df[brl_col]))
+                        df["barrel_count"] = df["player_id"].map(brl_map).round(0)
+                        if df["barrel_count"].notna().any():
+                            needs_barrels = False
+
+                # If everything's populated, stop trying URLs
+                if not (needs_la or needs_dist or needs_barrels):
+                    break
             except Exception:
                 continue
 
