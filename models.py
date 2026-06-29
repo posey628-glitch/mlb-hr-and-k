@@ -1625,17 +1625,24 @@ def add_hr_criteria(df: pd.DataFrame) -> pd.DataFrame:
 #     barrel_count is available on the hitter frame.
 # ============================================================================
 HR_MUST_HAVE_THRESHOLDS = {
-    "barrel_pct":    15.0,    # ≥15% barrels
-    "pulled_brl_pct": 10.0,   # ≥10% pulled barrels
-    "pull_air_pct":  35.0,    # ≥35% pull-in-air
-    "hard_hit":      50.0,    # ≥50% hard hit
-    "avg_dist":     315.0,    # ≥315 ft avg distance
-    "avg_ev":        92.0,    # ≥92 mph EV
-    "iso":            0.250,  # ≥.250 ISO
-    "fb_pct":        35.0,    # ≥35% fly ball
-    "pull_pct":      40.0,    # ≥40% pull
-    "blast_pct":     12.0,    # ≥12% blast (0-100 scale after v43.65)
+    # v43.67 (user-revised spec): nine metrics, mix of loosened (HH, ISO)
+    # and tightened (PullAir, FB) thresholds vs the original 10-metric
+    # researcher framework. AvgDist + EV dropped from Must-Have entirely
+    # (still evaluated in Nuclear). GB% added as the only ≤ check.
+    "barrel_pct":    15.0,    # ≥15% barrels (unchanged)
+    "pulled_brl_pct": 10.0,   # ≥10% pulled barrels (unchanged)
+    "pull_air_pct":  50.0,    # ≥50% pull-in-air (was 35; tighter)
+    "hard_hit":      40.0,    # ≥40% hard hit (was 50; looser)
+    "iso":            0.200,  # ≥.200 ISO (was .250; looser)
+    "fb_pct":        40.0,    # ≥40% fly ball (was 35; tighter)
+    "pull_pct":      40.0,    # ≥40% pull (unchanged)
+    "blast_pct":     12.0,    # ≥12% blast (unchanged; 0-100 scale after v43.65)
+    "gb_pct":        40.0,    # ≤40% ground ball (NEW; only ≤ check in MH)
 }
+
+# Must-Have GB% is an UPPER bound. Same _NUCLEAR_DIRECTION_LE
+# convention but for the Must-Have evaluator.
+_MUST_HAVE_DIRECTION_LE = {"gb_pct"}
 
 # Some criteria have an UPPER bound (GB% ≤35). Mark direction explicitly.
 # Default "≥" for entries not in this set.
@@ -1708,19 +1715,18 @@ def add_must_have_criteria(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return df
 
-    # Map threshold-dict keys to the friendly per-criterion column names
-    # the user sees on the dataframe / export.
+    # v43.67: Updated 9-metric mapping per user-revised spec. AvgDist and
+    # EV removed (still evaluated in Nuclear). GB% added with ≤ direction.
     _MH_LABELS = {
         "barrel_pct":     "must_have_barrel",
         "pulled_brl_pct": "must_have_pullbrl",
         "pull_air_pct":   "must_have_pullair",
         "hard_hit":       "must_have_hh",
-        "avg_dist":       "must_have_dist",
-        "avg_ev":         "must_have_ev",
         "iso":            "must_have_iso",
         "fb_pct":         "must_have_fb",
         "pull_pct":       "must_have_pull",
         "blast_pct":      "must_have_blast",
+        "gb_pct":         "must_have_gb",
     }
 
     # Per-criterion eval
@@ -1735,7 +1741,8 @@ def add_must_have_criteria(df: pd.DataFrame) -> pd.DataFrame:
         for metric in _MH_ORDER:
             val = row.get(metric)
             threshold = HR_MUST_HAVE_THRESHOLDS[metric]
-            result = _check_threshold(val, threshold, direction="ge")
+            direction = "le" if metric in _MUST_HAVE_DIRECTION_LE else "ge"
+            result = _check_threshold(val, threshold, direction=direction)
             row_results.append(result)
             per_crit_cols[_MH_LABELS[metric]].append(result)
 
@@ -1748,9 +1755,11 @@ def add_must_have_criteria(df: pd.DataFrame) -> pd.DataFrame:
             pass_list.append(False)
         else:
             label_list.append(_build_label(row_results, met, total))
-            # "Pass" = all evaluatable criteria met (handles missing data
-            # by not penalizing hitters with one missing metric)
-            pass_list.append(met == total and total >= 8)
+            # v43.67: "Pass" = all evaluatable criteria met AND at least 7
+            # of the 9 metrics had data. Previously required ≥8; lowered
+            # to ≥7 because dropping AvgDist (often missing) means typical
+            # coverage shifts to 7-8 of 9, not 9 of 10.
+            pass_list.append(met == total and total >= 7)
 
     for col, vals in per_crit_cols.items():
         df[col] = vals
@@ -1820,13 +1829,21 @@ def add_nuclear_criteria(df: pd.DataFrame) -> pd.DataFrame:
             grade_list.append("—")
         else:
             label_list.append(_build_label(row_results, met, total))
-            # Tiers based on raw met count (not fraction) since the researcher's
-            # framework treats this as a counting metric, not a percentage
-            if met == 14:
+            # v43.67 (production-validated): grade tiers are now data-aware.
+            # Previously raw `met` count: NUCLEAR (14), STRONG (≥12), NEAR (≥10).
+            # That penalized hitters when data was missing — a 12/12 hitter
+            # got STRONG (correctly), but a 10/12 hitter got "—" even though
+            # they're 83% on what we COULD evaluate. Now:
+            #   - NUCLEAR: met == total AND total >= 12 (all available passed)
+            #   - STRONG:  (total - met) <= 2 AND total >= 10 (off by ≤2)
+            #   - NEAR:    (total - met) <= 4 AND total >= 8 (off by ≤4)
+            # Sparse data no longer hides legitimate elite profiles.
+            missed = total - met
+            if met == total and total >= 12:
                 grade_list.append("☢️ NUCLEAR")
-            elif met >= 12:
+            elif missed <= 2 and total >= 10:
                 grade_list.append("💥 STRONG")
-            elif met >= 10:
+            elif missed <= 4 and total >= 8:
                 grade_list.append("🎯 NEAR")
             else:
                 grade_list.append("—")
