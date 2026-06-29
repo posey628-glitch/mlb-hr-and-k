@@ -1606,12 +1606,18 @@ def get_hitter_stats(season: int = CURRENT_SEASON, _stats_day: str = "") -> pd.D
     treat a new day as a cache miss — so morning users get fresh stats without
     waiting for the 1-hour TTL.
     """
+    # v43.66 (researcher framework): added avg_hit_distance (for Must-Have
+    # threshold ≥315 ft / Nuclear ≥330 ft) and barrels (raw barrel COUNT,
+    # used to derive a near_hr_est = max(0, barrels - home_run) for the
+    # Nuclear "Near HR ≥3" threshold). Both come from the same Savant
+    # custom leaderboard with no extra HTTP call.
     selections = (
         "pa,abs,hits,player_age,k_percent,bb_percent,woba,xwoba,xiso,xba,xslg,xobp,"
         "iso,babip,slg,obp,batting_avg,on_base_plus_slg,home_run,"
-        "barrel_batted_rate,solidcontact_percent,flareburner_percent,"
+        "barrel_batted_rate,barrels,solidcontact_percent,flareburner_percent,"
         "poorlyunder_percent,poorlytopped_percent,poorlyweak_percent,"
         "hard_hit_percent,avg_best_speed,avg_hit_angle,launch_speed,launch_angle,"
+        "avg_hit_distance,"
         "whiff_percent,swing_percent,sweet_spot_percent,xwobacon,wobacon,"
         "groundballs_percent,flyballs_percent,linedrives_percent,popups_percent,"
         "pull_percent,straightaway_percent,opposite_percent,"
