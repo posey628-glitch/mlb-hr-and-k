@@ -729,6 +729,103 @@ def list_snapshot_dates() -> list[str]:
 # Actual outcome fetcher - what actually happened on a given date
 # ----------------------------------------------------------------------------
 
+# ----------------------------------------------------------------------------
+# Actual outcome fetcher - what actually happened on a given date
+# ----------------------------------------------------------------------------
+
+def auto_attach_outcomes_to_past_snapshots(max_dates: int = 14) -> dict:
+    """v43.70 — Daily self-improvement loop.
+
+    For each snapshot whose date is in the past AND that doesn't yet have
+    outcomes attached, fetch the actual outcomes from MLB Stats API and
+    write them back to Gist. Caps at `max_dates` distinct dates per call
+    to bound runtime and API usage.
+
+    Designed to run automatically on app load. Idempotent — re-running
+    is a no-op for snapshots that already have outcomes.
+
+    Returns: {"n_processed": int, "n_attached": int, "errors": [str, ...]}
+
+    This is the foundation of the user-requested "model improves itself
+    daily" loop. After it runs, the Pattern Analysis section sees fresh
+    data and can identify new patterns.
+    """
+    from datetime import date, datetime, timedelta
+    result = {"n_processed": 0, "n_attached": 0, "errors": []}
+    try:
+        snaps = _gist_read_all() or {}
+        if not snaps:
+            return result
+
+        today = date.today()
+        # Group snapshots by date
+        snaps_by_date = {}
+        for k, v in snaps.items():
+            if not isinstance(v, dict):
+                continue
+            d_str = str(k).split("T")[0]
+            snaps_by_date.setdefault(d_str, []).append(k)
+
+        # Identify which dates need outcomes attached
+        candidate_dates = []
+        for d_str in sorted(snaps_by_date.keys()):
+            try:
+                d_obj = datetime.fromisoformat(d_str).date()
+            except Exception:
+                continue
+            # Only process dates strictly in the past (not today, not future).
+            # Games on the current date may still be in progress.
+            if d_obj >= today:
+                continue
+            # Skip if every snapshot for this date ALREADY has outcomes
+            already_done = all(
+                snaps.get(k, {}).get("hitter_outcomes")
+                for k in snaps_by_date[d_str]
+            )
+            if already_done:
+                continue
+            candidate_dates.append(d_str)
+
+        # Process newest-first up to max_dates
+        candidate_dates = sorted(candidate_dates, reverse=True)[:max_dates]
+
+        any_updated = False
+        for d_str in candidate_dates:
+            try:
+                h_out = fetch_hitter_outcomes(d_str)
+                p_out = fetch_pitcher_outcomes(d_str)
+                if not h_out and not p_out:
+                    continue
+                # Convert int keys to str for JSON safety in Gist payload
+                h_out_str = {str(k): v for k, v in h_out.items()}
+                p_out_str = {str(k): v for k, v in p_out.items()}
+
+                for snap_key in snaps_by_date[d_str]:
+                    payload = snaps.get(snap_key) or {}
+                    if not isinstance(payload, dict):
+                        continue
+                    # Don't overwrite existing outcomes (idempotent)
+                    if payload.get("hitter_outcomes"):
+                        continue
+                    payload["hitter_outcomes"] = h_out_str
+                    payload["pitcher_outcomes"] = p_out_str
+                    payload["outcomes_attached_at"] = datetime.utcnow().isoformat() + "Z"
+                    snaps[snap_key] = payload
+                    result["n_attached"] += 1
+                    any_updated = True
+                result["n_processed"] += 1
+            except Exception as e:
+                result["errors"].append(f"{d_str}: {type(e).__name__}: {e}")
+                continue
+
+        # Single Gist write at the end (avoid hammering API)
+        if any_updated:
+            _gist_write_all(snaps)
+    except Exception as e:
+        result["errors"].append(f"auto_attach outer: {type(e).__name__}: {e}")
+    return result
+
+
 def fetch_hitter_outcomes(target_date) -> dict:
     """
     For a given date, fetch which hitters homered and their game line.
@@ -780,13 +877,33 @@ def fetch_hitter_outcomes(target_date) -> dict:
                         bat = (player.get("stats") or {}).get("batting") or {}
                         if not bat:
                             continue
+                        # v43.70 (outcome tracker expansion): capture 2B/3B/R
+                        # to derive total_bases for the 2+ bases prop backtest,
+                        # and runs for run-scored analysis. Existing HR/H/K/BB
+                        # unchanged.
+                        doubles_ = int(bat.get("doubles") or 0)
+                        triples_ = int(bat.get("triples") or 0)
+                        hr_ = int(bat.get("homeRuns") or 0)
+                        h_ = int(bat.get("hits") or 0)
+                        singles_ = max(0, h_ - doubles_ - triples_ - hr_)
+                        total_bases = singles_ + 2*doubles_ + 3*triples_ + 4*hr_
                         out[pid] = {
-                            "hr": int(bat.get("homeRuns") or 0),
+                            "hr": hr_,
                             "ab": int(bat.get("atBats") or 0),
-                            "h": int(bat.get("hits") or 0),
+                            "h": h_,
                             "k": int(bat.get("strikeOuts") or 0),
                             "bb": int(bat.get("baseOnBalls") or 0),
                             "rbi": int(bat.get("rbi") or 0),
+                            # v43.70 additions
+                            "doubles": doubles_,
+                            "triples": triples_,
+                            "total_bases": total_bases,
+                            "runs": int(bat.get("runs") or 0),
+                            # Convenience binary flags for the analysis section
+                            "homered": hr_ > 0,
+                            "got_hit": h_ > 0,
+                            "got_2plus_bases": total_bases >= 2,
+                            "got_3plus_bases": total_bases >= 3,
                         }
             except Exception:
                 continue
