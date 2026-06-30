@@ -230,7 +230,13 @@ def _gist_write_all(snapshots: dict) -> bool:
         payload = {
             "files": {
                 GIST_FILENAME: {
-                    "content": json.dumps(snapshots, default=str, indent=2),
+                    # v43.74: compact JSON (no indent, tight separators) shrinks
+                    # the payload by 30-40% vs indent=2. Combined with v43.74's
+                    # 500K size target, this keeps us well under Gist's 1MB
+                    # ceiling even with 10 days of snapshots + outcomes.
+                    "content": json.dumps(
+                        snapshots, default=str, separators=(",", ":")
+                    ),
                 }
             }
         }
@@ -266,12 +272,18 @@ def _gist_write_all(snapshots: dict) -> bool:
 # GitHub gist soft cap is around 1 MB per file before truncation/perf issues.
 # We target ~700 KB to leave headroom for one write to grow past the cap
 # before pruning catches it.
-_GIST_SIZE_TARGET_BYTES = 700_000
+_GIST_SIZE_TARGET_BYTES = 500_000  # v43.74: lowered from 700K. With compact
+                                     # JSON (no indent), the typical snapshot
+                                     # is ~40K bytes. 500K target = ~12 days
+                                     # of headroom before pruning kicks in,
+                                     # well below Gist's 1MB hard limit.
 
 # Keep at minimum this many of the most recent snapshots, regardless of size.
 # Below this, even if the gist is too large, don't prune (something else is
 # wrong — better to surface the error than silently delete real data).
-_MIN_SNAPSHOTS_TO_KEEP = 14
+_MIN_SNAPSHOTS_TO_KEEP = 10  # v43.74: lowered from 14. Pattern Analysis needs
+                              # ~7+ snapshots for trustworthy signal; 10 leaves
+                              # buffer without bloating storage.
 
 
 def _prune_snapshots_for_size(snapshots: dict) -> tuple[dict, int]:
@@ -285,7 +297,7 @@ def _prune_snapshots_for_size(snapshots: dict) -> tuple[dict, int]:
     if not snapshots or len(snapshots) <= _MIN_SNAPSHOTS_TO_KEEP:
         return snapshots, 0
 
-    serialized = json.dumps(snapshots, default=str, indent=2)
+    serialized = json.dumps(snapshots, default=str, separators=(",", ":"))
     if len(serialized.encode("utf-8")) <= _GIST_SIZE_TARGET_BYTES:
         return snapshots, 0
 
@@ -300,7 +312,7 @@ def _prune_snapshots_for_size(snapshots: dict) -> tuple[dict, int]:
         del pruned[oldest]
         n_dropped += 1
         # Check size again
-        if len(json.dumps(pruned, default=str, indent=2).encode("utf-8")) <= _GIST_SIZE_TARGET_BYTES:
+        if len(json.dumps(pruned, default=str, separators=(",", ":")).encode("utf-8")) <= _GIST_SIZE_TARGET_BYTES:
             break
 
     return pruned, n_dropped
@@ -530,6 +542,15 @@ def save_snapshot(snapshot_date, matchup_df: pd.DataFrame,
                 "ps_form", "ps_sleeper", "ps_lift", "ps_env",
                 "ps_bonus_lineup", "ps_bonus_platoon",
                 "ps_bonus_recent_hr", "ps_penalty_il",
+                # v43.74: critical for Pattern Analysis to read accumulated
+                # snapshots and surface researcher-framework patterns. Without
+                # these, the analysis section says "no data" even with
+                # snapshots saved. Adds ~10 fields × 300 hitters = ~3000
+                # additional values per snapshot; compact JSON keeps it small.
+                "hr_score", "grade",
+                "must_have_met", "must_have_total", "must_have_pass",
+                "nuclear_met", "nuclear_total", "nuclear_grade",
+                "hit_game_pct", "tb_game_pct",
             ] if c in matchup_df.columns]
             hitter_records = _na_safe_records(matchup_df, keep_cols)
 
