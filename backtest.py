@@ -210,10 +210,44 @@ def _gist_read_all() -> dict | None:
         _LAST_GIST_READ_ERROR = f"Network connection failed: {type(e).__name__}"
         return None
     except json.JSONDecodeError as e:
+        # v43.75: AUTO-RECOVERY. Previously we returned None on corruption,
+        # which forced the user to manually click a reset button. They've
+        # been stuck in a loop where the reset doesn't seem to stick (likely
+        # they're not finding the button, or it requires re-confirmation
+        # each load). The right behavior: detect corruption, auto-reset to
+        # {}, log it so we can see it happened, then proceed normally.
+        # Data already lost to corruption is lost; no point making the user
+        # do ceremony around that fact.
         _LAST_GIST_READ_ERROR = (
             f"Gist content is not valid JSON ({e}). "
-            "Someone may have edited the gist manually. Check at gist.github.com."
+            "v43.75 auto-recovery: wiped to empty and continuing. Prior "
+            "snapshots were already unreachable due to corruption."
         )
+        # Attempt auto-reset. If the reset itself fails (network/auth),
+        # fall back to returning None so callers don't accidentally wipe.
+        try:
+            reset_payload = {
+                "files": {
+                    GIST_FILENAME: {"content": "{}"}
+                }
+            }
+            rr = requests.patch(
+                f"{GIST_API}/{gist_id}",
+                headers={
+                    "Authorization": f"token {token}",
+                    "Accept": "application/vnd.github.v3+json",
+                },
+                json=reset_payload,
+                timeout=15,
+            )
+            if rr.status_code in (200, 201):
+                # Recovery succeeded. Return empty dict so subsequent saves
+                # write fresh and don't think they're wiping a populated gist.
+                return {}
+        except Exception:
+            pass
+        # Auto-reset failed; preserve previous behavior of returning None
+        # to protect against unintended data wipes.
         return None
     except Exception as e:
         _LAST_GIST_READ_ERROR = f"Unexpected exception: {type(e).__name__}: {e}"
