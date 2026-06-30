@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.68-summary-relocated-and-distance-fallback"
+APP_VERSION = "2026.06.10-v43.70-outcome-tracker-and-pattern-analysis"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -3304,6 +3304,304 @@ if show_backtest:
         except Exception as e:
             st.error(f"Backtest panel error: {e}")
 
+
+# ============================================================================
+# v43.70 — PATTERN ANALYSIS (user-requested model-improvement infrastructure)
+# ----------------------------------------------------------------------------
+# Reads accumulated snapshot+outcome pairings from Gist and surfaces patterns
+# that show WHERE the model is over- or under-predicting. The user reads
+# these patterns to inform threshold/weight adjustments; this section does
+# NOT auto-tune anything (would be unsafe without more data).
+#
+# Sections:
+#   A. Researcher framework backtest — do Must-Have / Nuclear passers homer
+#      at a higher rate than the rest of the slate?
+#   B. Per-prop accuracy — for HR / Hits / 2+ bases, is our calibration tight?
+#   C. Feature-outcome correlation — which projection columns actually
+#      predict whether a hitter homers?
+#   D. Cohort analysis — pick a threshold, see actual hit rate above vs below
+#   E. Threshold sweep — for a given feature, find the threshold maximizing lift
+#   F. Calibration drift — Brier score over time
+#
+# All sections honestly surface sample size and flag when N is too small
+# to trust the signal (typically need ≥20-30 slates of accumulated data).
+# ============================================================================
+if show_backtest:
+    with st.expander(
+        "🔬 Pattern Analysis — what accumulated data tells us about the model",
+        expanded=False
+    ):
+        try:
+            from backtest import _gist_read_all
+            from pattern_analysis import (
+                merge_snapshots_with_outcomes,
+                cohort_analysis,
+                feature_correlation,
+                calibration_drift,
+                researcher_framework_backtest,
+                prop_accuracy_summary,
+                threshold_sweep,
+            )
+
+            _snaps = _gist_read_all() or {}
+            _with_outcomes = {
+                k: v for k, v in _snaps.items()
+                if isinstance(v, dict) and v.get("hitter_outcomes")
+            }
+            n_snaps_total = len(_snaps)
+            n_snaps_with_outcomes = len(_with_outcomes)
+
+            st.caption(
+                f"**Accumulated data: {n_snaps_with_outcomes} snapshots with "
+                f"outcomes** (out of {n_snaps_total} total snapshots). "
+                "Patterns get statistically reliable around 20-30 snapshots; "
+                "below that, treat findings as exploratory."
+            )
+
+            if n_snaps_with_outcomes == 0:
+                st.info(
+                    "No snapshots with outcomes yet. Outcomes auto-attach when "
+                    "you reload the app on a day AFTER the snapshot date. "
+                    "Save snapshots tonight via 💾 Save Snapshot, then check "
+                    "back tomorrow to see this section populate."
+                )
+            else:
+                merged = merge_snapshots_with_outcomes(_with_outcomes)
+                if merged.empty:
+                    st.warning(
+                        "Snapshots have outcomes but the merge produced no "
+                        "rows. This usually means snapshot payloads don't "
+                        "include the projection columns the analysis reads. "
+                        "Saving a fresh snapshot tonight should fix going "
+                        "forward."
+                    )
+                else:
+                    st.caption(
+                        f"_Analyzing {len(merged)} player-game rows across "
+                        f"{merged['snapshot_date'].nunique()} slates._"
+                    )
+
+                    # ====== Section A: Researcher framework backtest ======
+                    st.markdown("---")
+                    st.markdown("### A. Does the researcher's framework actually work?")
+                    st.caption(
+                        "The critical question: do hitters passing Must-Have "
+                        "or reaching Nuclear tier actually homer at a higher "
+                        "rate than the slate average? If lift ≫ 1.0, the "
+                        "framework adds signal. If ≈1.0, the framework is "
+                        "vanity. If <1.0, it's actively misleading."
+                    )
+                    rf_results = researcher_framework_backtest(merged)
+                    if rf_results.get("error"):
+                        st.info(rf_results["error"])
+                    else:
+                        slate_avg = rf_results.get("slate_average_hr_rate", 0)
+                        st.markdown(
+                            f"**Slate average HR rate:** {slate_avg:.1%} "
+                            f"across {rf_results.get('n_total', 0)} player-games."
+                        )
+
+                        mh = rf_results.get("must_have", {})
+                        if mh:
+                            n_pass = mh.get("n_pass", 0)
+                            n_fail = mh.get("n_fail", 0)
+                            pass_rate = mh.get("pass_hr_rate") or 0
+                            fail_rate = mh.get("fail_hr_rate") or 0
+                            lift = mh.get("lift")
+                            lift_str = f"{lift:.2f}×" if lift else "—"
+                            reliable = "✅" if mh.get("reliable") else "⚠️ small sample"
+                            st.markdown(
+                                f"**Must-Have filter:** "
+                                f"passers homered **{pass_rate:.1%}** (n={n_pass}) "
+                                f"vs non-passers **{fail_rate:.1%}** (n={n_fail}) "
+                                f"→ **lift {lift_str}** {reliable}"
+                            )
+                        nuc = rf_results.get("nuclear", {})
+                        if nuc:
+                            n_in = nuc.get("n_in", 0)
+                            n_out = nuc.get("n_out", 0)
+                            in_rate = nuc.get("in_hr_rate") or 0
+                            out_rate = nuc.get("out_hr_rate") or 0
+                            lift = nuc.get("lift")
+                            lift_str = f"{lift:.2f}×" if lift else "—"
+                            reliable = "✅" if nuc.get("reliable") else "⚠️ small sample"
+                            st.markdown(
+                                f"**Nuclear tier (NEAR/STRONG/NUCLEAR):** "
+                                f"in-tier homered **{in_rate:.1%}** (n={n_in}) "
+                                f"vs rest **{out_rate:.1%}** (n={n_out}) "
+                                f"→ **lift {lift_str}** {reliable}"
+                            )
+
+                    # ====== Section B: Per-prop accuracy ======
+                    st.markdown("---")
+                    st.markdown("### B. Per-prop projection accuracy")
+                    st.caption(
+                        "For each prop, do our predicted rates match the "
+                        "actual delivered rates? Calibration error close to "
+                        "0 = predictions match reality. Positive = under-predicting "
+                        "(actual higher than we said). Negative = over-predicting."
+                    )
+                    prop_acc = prop_accuracy_summary(merged)
+                    if prop_acc:
+                        prop_rows = []
+                        for label, m in prop_acc.items():
+                            prop_rows.append({
+                                "Prop": label,
+                                "N samples": m["n"],
+                                "Predicted rate": f"{m['predicted_rate']:.1%}",
+                                "Actual rate": f"{m['actual_rate']:.1%}",
+                                "Calibration error": f"{m['calibration_error']:+.1%}",
+                                "Brier score": f"{m['brier']:.4f}",
+                                "Reliable": "✅" if m["reliable"] else "⚠️",
+                            })
+                        st.dataframe(pd.DataFrame(prop_rows), hide_index=True,
+                                     use_container_width=True)
+                    else:
+                        st.info("Not enough data to evaluate any prop yet.")
+
+                    # ====== Section C: Feature-outcome correlation ======
+                    st.markdown("---")
+                    st.markdown("### C. Which features actually predict HRs?")
+                    st.caption(
+                        "Point-biserial correlation between each projection "
+                        "feature and whether the hitter homered. Higher = "
+                        "stronger predictor. Sort by |corr| to find what's "
+                        "really driving outcomes vs what just sounded smart."
+                    )
+                    feat_cols = [
+                        "hr_score", "hr_game_pct", "pick_score",
+                        "barrel_pct", "iso", "avg_ev", "blast_pct",
+                        "pull_pct", "pull_air_pct", "hard_hit", "fb_pct",
+                        "must_have_met", "nuclear_met",
+                    ]
+                    corr_df = feature_correlation(merged, feat_cols, "homered")
+                    if not corr_df.empty:
+                        # Format for display
+                        disp = corr_df.copy()
+                        disp["corr"] = disp["corr"].apply(lambda v: f"{v:+.4f}")
+                        disp["abs_corr"] = disp["abs_corr"].apply(lambda v: f"{v:.4f}")
+                        st.dataframe(
+                            disp[["feature", "corr", "n_pairs", "abs_corr"]],
+                            hide_index=True, use_container_width=True,
+                        )
+                    else:
+                        st.info("Not enough data for feature correlation yet.")
+
+                    # ====== Section D: Cohort analysis ======
+                    st.markdown("---")
+                    st.markdown("### D. Custom cohort analysis")
+                    st.caption(
+                        "Pick a feature + threshold + outcome. See actual "
+                        "hit rate in cohort (passes threshold) vs out of cohort. "
+                        "Use this to validate proposed thresholds before "
+                        "committing to them."
+                    )
+                    available_feats = [
+                        c for c in feat_cols if c in merged.columns
+                    ]
+                    available_outcomes = [
+                        c for c in ["homered", "got_hit", "got_2plus_bases",
+                                    "got_3plus_bases"]
+                        if c in merged.columns
+                    ]
+                    if available_feats and available_outcomes:
+                        c1, c2, c3 = st.columns(3)
+                        with c1:
+                            feat = st.selectbox(
+                                "Feature", available_feats,
+                                index=available_feats.index("barrel_pct")
+                                if "barrel_pct" in available_feats else 0,
+                                key="cohort_feat",
+                            )
+                        with c2:
+                            try:
+                                _med = float(merged[feat].dropna().median())
+                            except Exception:
+                                _med = 10.0
+                            thresh = st.number_input(
+                                "Threshold (≥)", value=_med, step=1.0,
+                                key="cohort_thresh",
+                            )
+                        with c3:
+                            outc = st.selectbox(
+                                "Outcome", available_outcomes,
+                                key="cohort_outc",
+                            )
+                        result = cohort_analysis(merged, feat, thresh, outc, "ge")
+                        if result.get("error"):
+                            st.warning(result["error"])
+                        else:
+                            in_n = result["in_cohort"]
+                            out_n = result["out_cohort"]
+                            in_r = result["in_rate"]
+                            out_r = result["out_rate"]
+                            lift = result.get("lift")
+                            lift_str = f"{lift:.2f}×" if lift else "∞"
+                            reliable = "✅" if result["reliable"] else "⚠️ small sample"
+                            st.markdown(
+                                f"**Above {feat} ≥ {thresh}:** "
+                                f"{outc} rate **{in_r:.1%}** (n={in_n}) "
+                                f"vs below threshold **{out_r:.1%}** (n={out_n}) "
+                                f"→ **lift {lift_str}** {reliable}"
+                            )
+
+                    # ====== Section E: Threshold sweep ======
+                    st.markdown("---")
+                    st.markdown("### E. Threshold sweep — find the best cut point")
+                    st.caption(
+                        "For a feature, try several threshold values and "
+                        "see which produces the strongest lift on the outcome. "
+                        "Helps answer 'should Must-Have barrel% be 12, 15, "
+                        "18, or 20?' empirically rather than by guess."
+                    )
+                    if available_feats and available_outcomes:
+                        sc1, sc2 = st.columns(2)
+                        with sc1:
+                            sweep_feat = st.selectbox(
+                                "Feature to sweep", available_feats,
+                                index=available_feats.index("barrel_pct")
+                                if "barrel_pct" in available_feats else 0,
+                                key="sweep_feat",
+                            )
+                        with sc2:
+                            sweep_outc = st.selectbox(
+                                "Outcome", available_outcomes,
+                                key="sweep_outc",
+                            )
+                        sweep = threshold_sweep(merged, sweep_feat, sweep_outc)
+                        if not sweep.empty:
+                            disp = sweep.copy()
+                            disp["pass_rate"] = disp["pass_rate"].apply(lambda v: f"{v:.1%}")
+                            disp["fail_rate"] = disp["fail_rate"].apply(lambda v: f"{v:.1%}")
+                            disp["lift"] = disp["lift"].apply(
+                                lambda v: f"{v:.2f}×" if v else "—"
+                            )
+                            st.dataframe(disp, hide_index=True, use_container_width=True)
+                        else:
+                            st.info("Need ≥50 samples to sweep thresholds reliably.")
+
+                    # ====== Section F: Calibration drift over time ======
+                    st.markdown("---")
+                    st.markdown("### F. Calibration drift over time")
+                    st.caption(
+                        "Per-snapshot Brier score and predicted-vs-actual HR rate. "
+                        "Watch for trend: lower Brier = better calibration. "
+                        "A rising trend means the model is degrading; falling "
+                        "means it's improving (or you're getting lucky)."
+                    )
+                    drift = calibration_drift(merged)
+                    if not drift.empty:
+                        disp = drift.copy()
+                        disp["predicted_rate"] = disp["predicted_rate"].apply(lambda v: f"{v:.1%}")
+                        disp["actual_rate"] = disp["actual_rate"].apply(lambda v: f"{v:.1%}")
+                        disp["brier"] = disp["brier"].apply(lambda v: f"{v:.4f}")
+                        st.dataframe(disp, hide_index=True, use_container_width=True)
+                    else:
+                        st.info("Need ≥10 hitters per snapshot to compute calibration.")
+        except Exception as _pa_err:
+            st.error(f"Pattern Analysis section error: {_pa_err}")
+
+
 if show_diagnostic:
     with st.expander("🔬 Data diagnostic — column completeness"):
         if not hitter_stats.empty:
@@ -4595,7 +4893,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.68 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.70 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -7754,6 +8052,51 @@ if combined_picks is not None and not combined_picks.empty:
                     + "custom leaderboard; if Savant drops it, we can switch "
                     + "to the batted-ball leaderboard endpoint."
                 )
+
+            # v43.69: surface the detailed fallback-fetch diagnostic so we
+            # can SEE which URLs were tried and what they returned. This is
+            # the smoking gun for "why is avg_dist still 0%."
+            try:
+                from data_fetcher import last_distance_diag
+                _dist_diag = last_distance_diag()
+                if _dist_diag:
+                    _lines = []
+                    for i, entry in enumerate(_dist_diag, 1):
+                        url_short = entry.get("url", "")[:80]
+                        status = entry.get("status")
+                        n_rows = entry.get("n_rows", 0)
+                        err = entry.get("error")
+                        if err:
+                            _lines.append(
+                                f"**URL {i}**: `{url_short}` · ❌ {err}"
+                            )
+                        else:
+                            cols_sample = entry.get("cols_sample", [])
+                            id_col = entry.get("id_col")
+                            dist_col = entry.get("dist_col")
+                            brl_col = entry.get("brl_col")
+                            dist_merged = entry.get("dist_merged", 0)
+                            brl_merged = entry.get("brl_merged", 0)
+                            _lines.append(
+                                f"**URL {i}**: `{url_short}` · "
+                                f"HTTP {status} · {n_rows} rows · "
+                                f"id_col={id_col} · "
+                                f"dist_col={dist_col} (merged {dist_merged}) · "
+                                f"brl_col={brl_col} (merged {brl_merged}) · "
+                                f"first cols: {cols_sample[:8]}"
+                            )
+                    stash_diagnostic(
+                        "pipeline_health",
+                        "**Distance/Barrels fallback debug** "
+                        "(v43.69 — what each Savant URL returned):\n\n"
+                        + "\n\n".join(_lines)
+                        + "\n\n*If all show dist_col=None or merged=0, "
+                        "Savant either changed the column names or isn't "
+                        "returning data. Paste this whole block back so we "
+                        "can fix the right URL/column.*"
+                    )
+            except Exception:
+                pass
         except Exception:
             pass
     except Exception as _scov_e:
@@ -10451,6 +10794,38 @@ if all_hitters:
     # ...then automatically save a snapshot. This ensures we capture EVERY day,
     # not just days when the user remembers to click the button.
     #
+    # v43.70 (user-requested self-improvement loop): once per session, also
+    # back-fill OUTCOMES for any past snapshots that don't have them yet.
+    # This is the data foundation for Pattern Analysis — daily improvement
+    # requires accumulated outcome data. Runs in the background; failures
+    # don't block the page. Capped at 14 dates per call to bound the time
+    # spent hitting MLB Stats API.
+    try:
+        if not st.session_state.get("_outcomes_back_filled_this_session"):
+            from backtest import auto_attach_outcomes_to_past_snapshots
+            _attach_result = auto_attach_outcomes_to_past_snapshots(max_dates=14)
+            st.session_state["_outcomes_back_filled_this_session"] = True
+            st.session_state["_outcomes_attach_result"] = _attach_result
+            if _attach_result.get("n_attached", 0) > 0:
+                stash_diagnostic(
+                    "pipeline_health",
+                    f"**Outcome back-fill (v43.70 daily loop):** attached "
+                    f"actual results to {_attach_result['n_attached']} prior "
+                    f"snapshots across {_attach_result['n_processed']} dates. "
+                    f"Pattern Analysis section now has fresh data."
+                )
+    except Exception as _e:
+        # Defensive — never let the back-fill block app load
+        try:
+            stash_diagnostic(
+                "pipeline_health",
+                f"Outcome back-fill failed: {type(_e).__name__}: {_e}. "
+                f"Pattern Analysis still works with previously-attached data.",
+                level="warning",
+            )
+        except Exception:
+            pass
+
     # SNAPSHOT BIAS WARNING (v41a): When the started-games filter is active,
     # snapshot data is biased — afternoon games are systematically excluded.
     # Detect and warn so the user knows to uncheck the filter if they're
