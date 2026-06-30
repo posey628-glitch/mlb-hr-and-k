@@ -1833,7 +1833,19 @@ def get_hitter_stats(season: int = CURRENT_SEASON, _stats_day: str = "") -> pd.D
                     ev_df[id_col], errors="coerce"
                 ).astype("Int64")
 
-                # ----- LA -----
+                # v43.72 (production-debug): switched from dict.map() to
+                # pd.merge() because Int64 + dict lookup was silently failing
+                # for the slate's actual lineup player_ids. The .map worked
+                # for 254 df rows but the 254 were NOT the lineup hitters —
+                # a pandas Int64 hash mismatch issue. pd.merge handles this
+                # correctly because it uses pandas' join semantics with proper
+                # dtype harmonization.
+
+                # Build a small subset to merge
+                merge_cols = [id_col]
+                merge_renames = {id_col: "player_id"}
+
+                # ----- LA (existing logic, unchanged at top) -----
                 if needs_la:
                     la_col = None
                     for cand in ["launch_angle", "avg_hit_angle", "angle",
@@ -1846,11 +1858,8 @@ def get_hitter_stats(season: int = CURRENT_SEASON, _stats_day: str = "") -> pd.D
                                 break
                     diag_entry["la_col"] = la_col
                     if la_col:
-                        la_map = dict(zip(ev_df[id_col], ev_df[la_col]))
-                        df["launch_angle"] = df["player_id"].map(la_map)
-                        diag_entry["la_merged"] = int(df["launch_angle"].notna().sum())
-                        if df["launch_angle"].notna().any():
-                            needs_la = False
+                        merge_cols.append(la_col)
+                        merge_renames[la_col] = "_la_from_ev"
 
                 # ----- v43.68: Avg Distance -----
                 if needs_dist:
@@ -1865,11 +1874,8 @@ def get_hitter_stats(season: int = CURRENT_SEASON, _stats_day: str = "") -> pd.D
                                 break
                     diag_entry["dist_col"] = dist_col
                     if dist_col:
-                        dist_map = dict(zip(ev_df[id_col], ev_df[dist_col]))
-                        df["avg_dist"] = df["player_id"].map(dist_map).round(0)
-                        diag_entry["dist_merged"] = int(df["avg_dist"].notna().sum())
-                        if df["avg_dist"].notna().any():
-                            needs_dist = False
+                        merge_cols.append(dist_col)
+                        merge_renames[dist_col] = "_dist_from_ev"
 
                 # ----- v43.68: Barrels (raw count) -----
                 if needs_barrels:
@@ -1884,8 +1890,42 @@ def get_hitter_stats(season: int = CURRENT_SEASON, _stats_day: str = "") -> pd.D
                                 break
                     diag_entry["brl_col"] = brl_col
                     if brl_col:
-                        brl_map = dict(zip(ev_df[id_col], ev_df[brl_col]))
-                        df["barrel_count"] = df["player_id"].map(brl_map).round(0)
+                        merge_cols.append(brl_col)
+                        merge_renames[brl_col] = "_brl_from_ev"
+
+                # If we picked up at least one mappable column, do a proper merge
+                if len(merge_cols) > 1:
+                    ev_subset = ev_df[merge_cols].copy().rename(columns=merge_renames)
+                    # Drop any rows with NA player_id (they can't merge)
+                    ev_subset = ev_subset.dropna(subset=["player_id"])
+                    # Deduplicate on player_id (keep last) to handle Savant duplicates
+                    ev_subset = ev_subset.drop_duplicates(subset=["player_id"], keep="last")
+                    # Merge — pandas handles Int64 alignment correctly
+                    df = df.merge(ev_subset, on="player_id", how="left")
+
+                    # Now copy the merged temp columns into the canonical names
+                    if needs_la and "_la_from_ev" in df.columns:
+                        # Only overwrite NaN cells in launch_angle; preserve any
+                        # values already present from primary fetch
+                        if "launch_angle" in df.columns:
+                            df["launch_angle"] = df["launch_angle"].fillna(df["_la_from_ev"])
+                        else:
+                            df["launch_angle"] = df["_la_from_ev"]
+                        df = df.drop(columns=["_la_from_ev"])
+                        diag_entry["la_merged"] = int(df["launch_angle"].notna().sum())
+                        if df["launch_angle"].notna().any():
+                            needs_la = False
+
+                    if needs_dist and "_dist_from_ev" in df.columns:
+                        df["avg_dist"] = df["_dist_from_ev"].round(0)
+                        df = df.drop(columns=["_dist_from_ev"])
+                        diag_entry["dist_merged"] = int(df["avg_dist"].notna().sum())
+                        if df["avg_dist"].notna().any():
+                            needs_dist = False
+
+                    if needs_barrels and "_brl_from_ev" in df.columns:
+                        df["barrel_count"] = df["_brl_from_ev"].round(0)
+                        df = df.drop(columns=["_brl_from_ev"])
                         diag_entry["brl_merged"] = int(df["barrel_count"].notna().sum())
                         if df["barrel_count"].notna().any():
                             needs_barrels = False
