@@ -834,6 +834,27 @@ def bvp_score_adjustment(bvp_dict: dict, min_pa: int = 20) -> tuple[float, str]:
 # surfaces this in an expander when IAA is missing for everyone.
 _LAST_BAT_TRACKING_COLS: list = []
 
+# v43.69 (production-debug): track what happened in the avg_dist / barrel_count
+# fallback fetch. Each entry: {"url": str, "status": int|str, "n_rows": int,
+# "cols": [...truncated], "dist_col": str|None, "brl_col": str|None,
+# "id_col": str|None, "dist_merged": int, "brl_merged": int}.
+# Surfaced via last_distance_diag() so app.py can show in Pipeline Health.
+_LAST_DISTANCE_DIAG: list = []
+
+def last_distance_diag() -> list:
+    """Returns the most recent avg_dist/barrel_count fallback fetch attempts.
+
+    Each entry is a dict describing one URL attempt. Empty list means the
+    fallback didn't run (because data was already present from primary fetch).
+    """
+    try:
+        from_state = st.session_state.get("_last_distance_diag")
+        if from_state:
+            return list(from_state)
+    except Exception:
+        pass
+    return list(_LAST_DISTANCE_DIAG)
+
 def last_bat_tracking_columns() -> list:
     """Returns the most recent Savant bat-tracking response's column names.
 
@@ -1742,9 +1763,18 @@ def get_hitter_stats(season: int = CURRENT_SEASON, _stats_day: str = "") -> pd.D
         or df.get("barrel_count", pd.Series(dtype=float)).isna().all()
     )
     if needs_la or needs_dist or needs_barrels:
+        # v43.69 (production-debug): per-URL diagnostic so we can see what's
+        # happening when the merge produces all-NaN.
+        global _LAST_DISTANCE_DIAG
+        _LAST_DISTANCE_DIAG = []
         la_urls = [
-            # Exit velocity & launch angle leaderboard (the canonical source
-            # of distance + barrels + LA in one CSV)
+            # v43.69: try the canonical Statcast leaderboard URL FIRST with
+            # an empty min so we don't accidentally filter out qualified
+            # hitters. The previous URL had `min=1` which Savant interprets
+            # variably depending on the leaderboard type.
+            f"https://baseballsavant.mlb.com/leaderboard/statcast"
+            f"?type=batter&year={season}&team=&min=&csv=true",
+            # Original exit-velocity + barrels endpoint
             f"https://baseballsavant.mlb.com/leaderboard/statcast"
             f"?type=batter&year={season}&position=&team=&min=1&csv=true",
             # Custom leaderboard with explicit launch_angle selection
@@ -1752,16 +1782,42 @@ def get_hitter_stats(season: int = CURRENT_SEASON, _stats_day: str = "") -> pd.D
             f"?year={season}&type=batter&filter=&min=1"
             f"&selections=pa,launch_angle,launch_speed,avg_hit_angle"
             f"&chart=false&x=pa&y=pa&r=no&csv=true",
-            # Statcast batted-ball leaderboard
+            # Legacy exit-velocity leaderboard
             f"https://baseballsavant.mlb.com/leaderboard/exit-velocity"
             f"?type=batter&year={season}&min=1&csv=true",
         ]
+        # Cast df["player_id"] to a stable type for dict lookups. Previous
+        # bug: mixing Int64 (from ev_df) and float (from df) made map() miss
+        # every row even when the data was present.
+        try:
+            df["player_id"] = pd.to_numeric(df["player_id"], errors="coerce").astype("Int64")
+        except Exception:
+            pass
+
         for url in la_urls:
+            diag_entry = {
+                "url": url[:100] + "..." if len(url) > 100 else url,
+                "status": None,
+                "n_rows": 0,
+                "cols_sample": [],
+                "id_col": None,
+                "la_col": None,
+                "dist_col": None,
+                "brl_col": None,
+                "dist_merged": 0,
+                "brl_merged": 0,
+                "la_merged": 0,
+                "error": None,
+            }
             try:
                 rr = requests.get(url, headers=HEADERS, timeout=20)
+                diag_entry["status"] = rr.status_code
                 rr.raise_for_status()
                 ev_df = pd.read_csv(io.StringIO(rr.text))
+                diag_entry["n_rows"] = len(ev_df)
+                diag_entry["cols_sample"] = list(ev_df.columns)[:25]
                 if ev_df.empty:
+                    _LAST_DISTANCE_DIAG.append(diag_entry)
                     continue
                 # Find ID column once for all merges below
                 id_col = None
@@ -1769,13 +1825,15 @@ def get_hitter_stats(season: int = CURRENT_SEASON, _stats_day: str = "") -> pd.D
                     if cand in ev_df.columns:
                         id_col = cand
                         break
+                diag_entry["id_col"] = id_col
                 if not id_col:
+                    _LAST_DISTANCE_DIAG.append(diag_entry)
                     continue
                 ev_df[id_col] = pd.to_numeric(
                     ev_df[id_col], errors="coerce"
                 ).astype("Int64")
 
-                # ----- LA (existing logic, unchanged) -----
+                # ----- LA -----
                 if needs_la:
                     la_col = None
                     for cand in ["launch_angle", "avg_hit_angle", "angle",
@@ -1786,50 +1844,67 @@ def get_hitter_stats(season: int = CURRENT_SEASON, _stats_day: str = "") -> pd.D
                                 ev_df[cand] = coerced
                                 la_col = cand
                                 break
+                    diag_entry["la_col"] = la_col
                     if la_col:
                         la_map = dict(zip(ev_df[id_col], ev_df[la_col]))
                         df["launch_angle"] = df["player_id"].map(la_map)
+                        diag_entry["la_merged"] = int(df["launch_angle"].notna().sum())
                         if df["launch_angle"].notna().any():
-                            needs_la = False  # success
+                            needs_la = False
 
                 # ----- v43.68: Avg Distance -----
                 if needs_dist:
                     dist_col = None
                     for cand in ["avg_hit_distance", "avg_distance",
-                                  "distance", "hit_distance"]:
+                                  "distance", "hit_distance", "avg_dist"]:
                         if cand in ev_df.columns:
                             coerced = pd.to_numeric(ev_df[cand], errors="coerce")
                             if coerced.notna().any():
                                 ev_df[cand] = coerced
                                 dist_col = cand
                                 break
+                    diag_entry["dist_col"] = dist_col
                     if dist_col:
                         dist_map = dict(zip(ev_df[id_col], ev_df[dist_col]))
                         df["avg_dist"] = df["player_id"].map(dist_map).round(0)
+                        diag_entry["dist_merged"] = int(df["avg_dist"].notna().sum())
                         if df["avg_dist"].notna().any():
                             needs_dist = False
 
                 # ----- v43.68: Barrels (raw count) -----
                 if needs_barrels:
                     brl_col = None
-                    for cand in ["barrels", "barrel", "n_barrels", "barrels_total"]:
+                    for cand in ["barrels", "barrel", "n_barrels",
+                                  "barrels_total", "barrel_count"]:
                         if cand in ev_df.columns:
                             coerced = pd.to_numeric(ev_df[cand], errors="coerce")
                             if coerced.notna().any():
                                 ev_df[cand] = coerced
                                 brl_col = cand
                                 break
+                    diag_entry["brl_col"] = brl_col
                     if brl_col:
                         brl_map = dict(zip(ev_df[id_col], ev_df[brl_col]))
                         df["barrel_count"] = df["player_id"].map(brl_map).round(0)
+                        diag_entry["brl_merged"] = int(df["barrel_count"].notna().sum())
                         if df["barrel_count"].notna().any():
                             needs_barrels = False
 
+                _LAST_DISTANCE_DIAG.append(diag_entry)
                 # If everything's populated, stop trying URLs
                 if not (needs_la or needs_dist or needs_barrels):
                     break
-            except Exception:
+            except Exception as _url_err:
+                diag_entry["error"] = f"{type(_url_err).__name__}: {str(_url_err)[:120]}"
+                _LAST_DISTANCE_DIAG.append(diag_entry)
                 continue
+
+        # v43.69: also stash to session_state so the diag survives the
+        # @st.cache_data wrapper on next call (cache hit doesn't run this code).
+        try:
+            st.session_state["_last_distance_diag"] = list(_LAST_DISTANCE_DIAG)
+        except Exception:
+            pass
 
     # Normalize player_id type for merges + derive missing columns
     df = _normalize_player_df(df)
