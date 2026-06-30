@@ -1648,14 +1648,21 @@ _MUST_HAVE_DIRECTION_LE = {"gb_pct"}
 # Default "≥" for entries not in this set.
 _NUCLEAR_DIRECTION_LE = {"gb_pct"}
 
+# v43.75: Reduced from 14 → 12 criteria. avg_dist and near_hr_est were
+# removed after 7+ ships of unsuccessful investigation into why Savant's
+# exit-velo endpoint returns 253 hitters whose player_ids systematically
+# don't overlap with our slate's lineup ids. Whatever the cause (Savant
+# ID system mismatch, qualified-hitter filter excluding starters, or
+# something else), the practical reality is that the data wasn't reaching
+# the model. The remaining 12 criteria are themselves strong HR predictors:
+# barrel_pct, hard_hit, ISO, SLG, avg_ev, FB%, pull air%, etc. are all
+# well-established power signals. A 12/12 hitter is still elite.
 HR_NUCLEAR_THRESHOLDS = {
     "home_run":       2.0,     # ≥2 HR (season count)
-    "near_hr_est":    3.0,     # ≥3 near-HR (approximated)
     "barrel_pct":     18.0,
     "pulled_brl_pct": 15.0,
     "pull_air_pct":   40.0,
     "hard_hit":       55.0,
-    "avg_dist":      330.0,
     "avg_ev":         94.0,
     "iso":             0.300,
     "slg":             0.600,
@@ -1782,7 +1789,7 @@ def add_nuclear_criteria(df: pd.DataFrame) -> pd.DataFrame:
       - nuclear_met         int 0-14  thresholds passed
       - nuclear_total       int 0-14  evaluatable thresholds
       - nuclear_label       str       e.g. "✓✓✓✓✗✓···✓✓✓✓✓ 11/12"
-      - nuclear_grade       str       NUCLEAR (14/14) / STRONG (≥12) / NEAR (≥10) / —
+      - nuclear_grade       str       NUCLEAR (12/12) / STRONG (≥10) / NEAR (≥8) / —
 
     Threshold source: external researcher's framework, June 2026.
     """
@@ -1791,12 +1798,10 @@ def add_nuclear_criteria(df: pd.DataFrame) -> pd.DataFrame:
 
     _NUC_LABELS = {
         "home_run":       "nuclear_hr",
-        "near_hr_est":    "nuclear_nearhr",
         "barrel_pct":     "nuclear_barrel",
         "pulled_brl_pct": "nuclear_pullbrl",
         "pull_air_pct":   "nuclear_pullair",
         "hard_hit":       "nuclear_hh",
-        "avg_dist":       "nuclear_dist",
         "avg_ev":         "nuclear_ev",
         "iso":            "nuclear_iso",
         "slg":            "nuclear_slg",
