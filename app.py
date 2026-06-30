@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.71-gist-recovery-pattern-toggle-expected-hr-fix"
+APP_VERSION = "2026.06.10-v43.72-merge-fix-and-overlap-diagnostic"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -2045,6 +2045,12 @@ try:
     # columns at this stage so we can compare with combined_picks later.
     # If hitter_stats has data here but combined_picks shows 0%, the loss
     # is downstream (build_matchup_table / display_cols / merge logic).
+    # v43.72: added overlap check — count how many of the SLATE's player_ids
+    # are in the avg_dist-populated subset of hitter_stats. If overlap is
+    # high but matchup_df coverage is still 0%, build_matchup_table is broken.
+    # If overlap is itself 0%, the merge in get_hitter_stats put data on the
+    # wrong rows (Int64 hash mismatch). pd.merge fix should resolve the
+    # latter; we'll know which from the new diagnostic.
     try:
         if not hitter_stats.empty:
             _hs_total = len(hitter_stats)
@@ -2064,6 +2070,56 @@ try:
                     "this shows data but combined_picks doesn't, the loss is "
                     "in build_matchup_table's display_cols filter or the "
                     "per-game lineup merge."
+                )
+
+            # v43.72: Overlap check between hitter_stats player_ids and slate
+            # starters. If overlap is low, the new pd.merge fix in v43.72
+            # put data on the wrong rows. If overlap is high but matchup_df
+            # shows 0%, build_matchup_table is the culprit.
+            try:
+                if "avg_dist" in hitter_stats.columns and not slate.empty:
+                    # Collect all starting lineup player_ids for the slate
+                    _all_starter_ids = set()
+                    for _g_pk in slate["gamePk"].dropna().unique():
+                        try:
+                            _lu_a = get_lineup(int(_g_pk), "away") or []
+                            _lu_h = get_lineup(int(_g_pk), "home") or []
+                            for _p in _lu_a + _lu_h:
+                                if _p.get("id"):
+                                    _all_starter_ids.add(int(_p["id"]))
+                        except Exception:
+                            continue
+                    if _all_starter_ids:
+                        # Convert hitter_stats player_ids to Python ints for the set check
+                        _hs_with_dist_ids = set(
+                            int(x) for x in
+                            hitter_stats.loc[
+                                hitter_stats["avg_dist"].notna(),
+                                "player_id"
+                            ].dropna().tolist()
+                        )
+                        _overlap = _all_starter_ids & _hs_with_dist_ids
+                        _n_overlap = len(_overlap)
+                        _n_starters = len(_all_starter_ids)
+                        _n_with_dist = len(_hs_with_dist_ids)
+                        stash_diagnostic(
+                            "pipeline_health",
+                            f"**[Trace] Slate vs avg_dist overlap** "
+                            f"(v43.72 diagnostic): {_n_overlap}/{_n_starters} "
+                            f"slate starter ids have avg_dist data in "
+                            f"hitter_stats. (Set sizes: {_n_starters} starters, "
+                            f"{_n_with_dist} hitters with avg_dist.) If overlap "
+                            f"is high (≥60%) but matchup_df shows 0%, "
+                            f"build_matchup_table is broken. If overlap itself "
+                            f"is 0-5%, the merge in get_hitter_stats put data "
+                            f"on wrong rows (dtype mismatch); v43.72's pd.merge "
+                            f"fix should resolve."
+                        )
+            except Exception as _e:
+                stash_diagnostic(
+                    "pipeline_health",
+                    f"Overlap diagnostic failed: {type(_e).__name__}: {_e}",
+                    level="warning",
                 )
     except Exception:
         pass
@@ -4987,7 +5043,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.71 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.72 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
