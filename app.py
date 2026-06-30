@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.70-outcome-tracker-and-pattern-analysis"
+APP_VERSION = "2026.06.10-v43.71-gist-recovery-pattern-toggle-expected-hr-fix"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -1656,6 +1656,20 @@ with st.sidebar:
         st.caption("Backtest module unavailable")
     show_backtest = st.checkbox("Show backtest panel", value=False,
                                   help="See accuracy of past projections vs actual outcomes.")
+    # v43.71 (user-requested): Pattern Analysis used to require show_backtest
+    # AND be collapsed by default — user couldn't find it. Now its own toggle
+    # so it surfaces independently. Default ON so users see the feature at
+    # least once.
+    show_pattern_analysis = st.checkbox(
+        "🔬 Show Pattern Analysis (self-improvement loop)",
+        value=True,
+        help=(
+            "Per-feature correlations, cohort analysis, researcher framework "
+            "backtest, calibration drift — reads accumulated outcomes to "
+            "surface where the model is over/under-predicting. Appears below "
+            "the main slate sections at the bottom of the page."
+        ),
+    )
 
     # =========================================================================
     # LEGEND & GLOSSARY (v39) — unified reference for every term and flag
@@ -2026,6 +2040,33 @@ if slate.empty:
 # Statcast pulls — wrap with try/except so transient timeouts don't crash app
 try:
     hitter_stats = get_hitter_stats(_stats_day=_stats_day_key()) if not slate.empty else pd.DataFrame()
+
+    # v43.71 (production-debug): trace coverage of the researcher-framework
+    # columns at this stage so we can compare with combined_picks later.
+    # If hitter_stats has data here but combined_picks shows 0%, the loss
+    # is downstream (build_matchup_table / display_cols / merge logic).
+    try:
+        if not hitter_stats.empty:
+            _hs_total = len(hitter_stats)
+            _trace_pieces = []
+            for _col in ["avg_dist", "barrel_count", "near_hr_est"]:
+                if _col in hitter_stats.columns:
+                    _n = int(hitter_stats[_col].notna().sum())
+                    _trace_pieces.append(f"{_col}: {_n}/{_hs_total}")
+                else:
+                    _trace_pieces.append(f"{_col}: ❌ missing column")
+            if _trace_pieces:
+                stash_diagnostic(
+                    "pipeline_health",
+                    "**[Trace] hitter_stats coverage** (after get_hitter_stats, "
+                    "before build_matchup_table): " + " · ".join(_trace_pieces)
+                    + ". Compare with the combined_picks coverage above — if "
+                    "this shows data but combined_picks doesn't, the loss is "
+                    "in build_matchup_table's display_cols filter or the "
+                    "per-game lineup merge."
+                )
+    except Exception:
+        pass
 except (ConnectionError, requests.exceptions.RequestException) as _e:
     st.error(
         f"⚠️ **Baseball Savant (hitter data) is currently unreachable.**\n\n"
@@ -2596,6 +2637,59 @@ if use_sprint_speed:
 # ============================================================================
 
 st.title(f"💣 DingerMaven — {selected_date.strftime('%A, %B %d, %Y')}")
+
+# v43.71 — prominent Gist corruption banner.
+# Previously the reset button was buried in an expander at the BOTTOM
+# of the page. User reported "zero clue how to fix this gist error
+# thing." Detection runs on every page load; if read fails the banner
+# fires at the TOP with a one-click recovery button (still confirm-gated).
+try:
+    from backtest import (
+        last_gist_read_error,
+        emergency_reset_gist,
+        durable_storage_configured,
+    )
+    if durable_storage_configured():
+        _gist_err = last_gist_read_error()
+        if _gist_err and ("not valid JSON" in _gist_err
+                          or "Unterminated" in _gist_err
+                          or "Expecting" in _gist_err):
+            st.error(
+                "🚨 **Snapshot storage is corrupted** — the Gist contains "
+                "invalid JSON, so reads and saves are failing. "
+                "Likely cause: someone (Claude, you, or a partial write) "
+                "left the Gist in a broken state. **Fix below ↓**"
+            )
+            with st.container(border=True):
+                st.markdown(
+                    f"**Error detail:** `{_gist_err[:200]}`\n\n"
+                    "**What this means:** prior snapshots cannot be read, "
+                    "so the daily back-fill, Pattern Analysis, and Save "
+                    "Snapshot are all blocked. **Resetting wipes prior "
+                    "history**, so confirm carefully — but on a corrupt "
+                    "gist, that history is already unreachable."
+                )
+                _confirm = st.checkbox(
+                    "I understand resetting wipes all prior snapshot history "
+                    "(it's already unreachable due to corruption)",
+                    key="_gist_reset_inline_confirm",
+                )
+                if _confirm and st.button(
+                    "🆘 Reset gist now (start fresh)",
+                    key="_gist_reset_inline_button",
+                    type="primary",
+                ):
+                    _ok, _msg = emergency_reset_gist()
+                    if _ok:
+                        st.success(
+                            f"✅ {_msg}\n\nReload the page to start "
+                            "fresh. Tonight's snapshot will save cleanly."
+                        )
+                        st.balloons()
+                    else:
+                        st.error(f"❌ Reset failed: {_msg}")
+except Exception:
+    pass
 
 # PLAYER SEARCH (v39c)
 # Quick filter — type a name fragment to find anyone in the slate.
@@ -3326,10 +3420,10 @@ if show_backtest:
 # All sections honestly surface sample size and flag when N is too small
 # to trust the signal (typically need ≥20-30 slates of accumulated data).
 # ============================================================================
-if show_backtest:
+if show_pattern_analysis:
     with st.expander(
         "🔬 Pattern Analysis — what accumulated data tells us about the model",
-        expanded=False
+        expanded=True  # v43.71: auto-expand so users can SEE the section
     ):
         try:
             from backtest import _gist_read_all
@@ -4893,7 +4987,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.70 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.71 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -5313,6 +5407,36 @@ for _, game in slate.iterrows():
         recent_form_dict=recent_hitter_map,
         pitcher_arsenal_df=pitcher_arsenal_all,
     )
+
+    # v43.71 (production-debug): trace ONCE on the first game's away matchup
+    # to see if avg_dist/barrel_count survive build_matchup_table.
+    # Bounded by a session_state flag so it doesn't spam every game.
+    try:
+        if not st.session_state.get("_matchup_trace_done"):
+            st.session_state["_matchup_trace_done"] = True
+            if away_matchup is not None and not away_matchup.empty:
+                _mm_total = len(away_matchup)
+                _mm_pieces = []
+                for _col in ["avg_dist", "barrel_count", "near_hr_est",
+                             "barrel_pct", "hard_hit"]:
+                    if _col in away_matchup.columns:
+                        _n = int(away_matchup[_col].notna().sum())
+                        _mm_pieces.append(f"{_col}: {_n}/{_mm_total}")
+                    else:
+                        _mm_pieces.append(f"{_col}: ❌ missing column")
+                stash_diagnostic(
+                    "pipeline_health",
+                    "**[Trace] First-game matchup_df coverage** (after "
+                    "build_matchup_table): " + " · ".join(_mm_pieces)
+                    + ". If avg_dist/barrel_count show '❌ missing column' "
+                    "but barrel_pct/hard_hit are populated, the issue is in "
+                    "display_cols — the new columns aren't surviving the "
+                    "whitelist for this lineup. If they're present here but "
+                    "0% on combined_picks, the loss is in _compute_near_hr "
+                    "or the criteria evaluators."
+                )
+    except Exception:
+        pass
 
     # v43.5: HANDEDNESS OVERRIDE — the central handedness fix.
     # For each game, override season-overall barrel/hard_hit/xwoba/avg_ev/iso
@@ -7319,8 +7443,18 @@ if all_hitters_for_picks:
 if combined_picks is not None and not combined_picks.empty:
     # ---- Slate HR forecast ----
     try:
+        # v43.71 (user-reported): "expected homers tomorrow 67.8 — no way
+        # that's accurate." Root cause: was summing hr_game_pct across
+        # combined_picks which includes BENCH players (~270 of them on top
+        # of ~216 starters). Bench players won't play, so their hr_game_pct
+        # shouldn't count. League norm is ~17-25 HRs across a 12-game slate;
+        # the 67.8 figure was ~4× inflated because of the bench inclusion.
+        # Fix: sum only over starters (is_roster_fill=False).
+        _starters_only = combined_picks
+        if "is_roster_fill" in combined_picks.columns:
+            _starters_only = combined_picks[~combined_picks["is_roster_fill"]]
         hr_pcts = pd.to_numeric(
-            combined_picks.get("hr_game_pct", pd.Series(dtype=float)),
+            _starters_only.get("hr_game_pct", pd.Series(dtype=float)),
             errors="coerce",
         )
         if hr_pcts.notna().any():
