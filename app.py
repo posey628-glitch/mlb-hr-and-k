@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.74-gist-compact-and-int-dict-merge"
+APP_VERSION = "2026.06.10-v43.75-gist-auto-recovery-and-nuclear-12"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -4989,7 +4989,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.74 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.75 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -8182,11 +8182,11 @@ if combined_picks is not None and not combined_picks.empty:
                     "pipeline_health",
                     "**Researcher framework inputs** · "
                     + " · ".join(_researcher_audits)
-                    + "  ← if Avg Distance or Barrel count missing, Nuclear "
-                    + "filter loses 1-2 criteria per hitter and most NUC "
-                    + "grades will read '—'. Avg Distance comes from Savant's "
-                    + "custom leaderboard; if Savant drops it, we can switch "
-                    + "to the batted-ball leaderboard endpoint."
+                    + "  ← v43.75: avg_dist + near_hr_est are NO LONGER part "
+                    + "of Nuclear (dropped after 7 ships of unsuccessful "
+                    + "investigation into Savant's exit-velo endpoint). "
+                    + "Nuclear now evaluates 12 robust criteria — 0% on these "
+                    + "is informational only and does not affect grades."
                 )
 
             # v43.69: surface the detailed fallback-fetch diagnostic so we
