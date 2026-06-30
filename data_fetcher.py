@@ -1900,6 +1900,28 @@ def get_hitter_stats(season: int = CURRENT_SEASON, _stats_day: str = "") -> pd.D
                     ev_subset = ev_subset.dropna(subset=["player_id"])
                     # Deduplicate on player_id (keep last) to handle Savant duplicates
                     ev_subset = ev_subset.drop_duplicates(subset=["player_id"], keep="last")
+
+                    # v43.73 (production-debug): capture SAMPLE player_ids from
+                    # each source to definitively diagnose whether the merge is
+                    # working OR whether the ID systems differ. Two cases:
+                    #  (a) overlap is 0 → Savant exit-velo uses different player_id
+                    #      system than the custom leaderboard. Bug in our id_col
+                    #      selection or Savant uses internal IDs not MLBAM.
+                    #  (b) overlap is high but matchup_df shows 0/9 → bug is
+                    #      downstream (build_matchup_table or _normalize_player_df
+                    #      changes the dtype).
+                    try:
+                        ev_ids = set(int(x) for x in ev_subset["player_id"].dropna().head(50).tolist())
+                        df_ids = set(int(x) for x in df["player_id"].dropna().head(200).tolist())
+                        overlap_ids = ev_ids & df_ids
+                        diag_entry["ev_sample_ids"] = sorted(list(ev_ids))[:5]
+                        diag_entry["df_sample_ids"] = sorted(list(df_ids))[:5]
+                        diag_entry["overlap_size"] = len(overlap_ids)
+                        diag_entry["ev_sample_size"] = len(ev_ids)
+                        diag_entry["df_sample_size"] = len(df_ids)
+                    except Exception:
+                        pass
+
                     # Merge — pandas handles Int64 alignment correctly
                     df = df.merge(ev_subset, on="player_id", how="left")
 
