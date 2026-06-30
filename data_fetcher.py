@@ -1903,13 +1903,7 @@ def get_hitter_stats(season: int = CURRENT_SEASON, _stats_day: str = "") -> pd.D
 
                     # v43.73 (production-debug): capture SAMPLE player_ids from
                     # each source to definitively diagnose whether the merge is
-                    # working OR whether the ID systems differ. Two cases:
-                    #  (a) overlap is 0 → Savant exit-velo uses different player_id
-                    #      system than the custom leaderboard. Bug in our id_col
-                    #      selection or Savant uses internal IDs not MLBAM.
-                    #  (b) overlap is high but matchup_df shows 0/9 → bug is
-                    #      downstream (build_matchup_table or _normalize_player_df
-                    #      changes the dtype).
+                    # working OR whether the ID systems differ.
                     try:
                         ev_ids = set(int(x) for x in ev_subset["player_id"].dropna().head(50).tolist())
                         df_ids = set(int(x) for x in df["player_id"].dropna().head(200).tolist())
@@ -1922,32 +1916,105 @@ def get_hitter_stats(season: int = CURRENT_SEASON, _stats_day: str = "") -> pd.D
                     except Exception:
                         pass
 
-                    # Merge — pandas handles Int64 alignment correctly
-                    df = df.merge(ev_subset, on="player_id", how="left")
+                    # v43.74: REPLACED pd.merge with explicit Python int dict.
+                    # Pandas Int64 dtype + pd.merge was producing apparently
+                    # correct counts (253 merged) but the merged rows were not
+                    # the rows that matched the lineup ids — a hash mismatch
+                    # symptom. Going through raw Python ints bypasses any
+                    # pandas nullable-integer weirdness. Verified correct on
+                    # small synthetic test before shipping.
+                    if needs_la and "_la_from_ev" in ev_subset.columns:
+                        la_dict = {}
+                        for pid, val in zip(
+                            ev_subset["player_id"], ev_subset["_la_from_ev"]
+                        ):
+                            try:
+                                if pd.notna(pid):
+                                    la_dict[int(pid)] = (
+                                        float(val) if pd.notna(val) else None
+                                    )
+                            except (ValueError, TypeError):
+                                continue
 
-                    # Now copy the merged temp columns into the canonical names
-                    if needs_la and "_la_from_ev" in df.columns:
-                        # Only overwrite NaN cells in launch_angle; preserve any
-                        # values already present from primary fetch
+                        def _lookup_la(pid):
+                            try:
+                                if pd.isna(pid):
+                                    return None
+                                return la_dict.get(int(pid))
+                            except (ValueError, TypeError):
+                                return None
+
+                        new_la = df["player_id"].apply(_lookup_la)
+                        # Preserve any LA already present from primary fetch
                         if "launch_angle" in df.columns:
-                            df["launch_angle"] = df["launch_angle"].fillna(df["_la_from_ev"])
+                            df["launch_angle"] = df["launch_angle"].fillna(new_la)
                         else:
-                            df["launch_angle"] = df["_la_from_ev"]
-                        df = df.drop(columns=["_la_from_ev"])
+                            df["launch_angle"] = new_la
                         diag_entry["la_merged"] = int(df["launch_angle"].notna().sum())
                         if df["launch_angle"].notna().any():
                             needs_la = False
 
-                    if needs_dist and "_dist_from_ev" in df.columns:
-                        df["avg_dist"] = df["_dist_from_ev"].round(0)
-                        df = df.drop(columns=["_dist_from_ev"])
+                    if needs_dist and "_dist_from_ev" in ev_subset.columns:
+                        dist_dict = {}
+                        for pid, val in zip(
+                            ev_subset["player_id"], ev_subset["_dist_from_ev"]
+                        ):
+                            try:
+                                if pd.notna(pid):
+                                    dist_dict[int(pid)] = (
+                                        float(val) if pd.notna(val) else None
+                                    )
+                            except (ValueError, TypeError):
+                                continue
+
+                        def _lookup_dist(pid):
+                            try:
+                                if pd.isna(pid):
+                                    return None
+                                return dist_dict.get(int(pid))
+                            except (ValueError, TypeError):
+                                return None
+
+                        df["avg_dist"] = df["player_id"].apply(_lookup_dist)
+                        # Round non-null values
+                        try:
+                            df["avg_dist"] = pd.to_numeric(
+                                df["avg_dist"], errors="coerce"
+                            ).round(0)
+                        except Exception:
+                            pass
                         diag_entry["dist_merged"] = int(df["avg_dist"].notna().sum())
                         if df["avg_dist"].notna().any():
                             needs_dist = False
 
-                    if needs_barrels and "_brl_from_ev" in df.columns:
-                        df["barrel_count"] = df["_brl_from_ev"].round(0)
-                        df = df.drop(columns=["_brl_from_ev"])
+                    if needs_barrels and "_brl_from_ev" in ev_subset.columns:
+                        brl_dict = {}
+                        for pid, val in zip(
+                            ev_subset["player_id"], ev_subset["_brl_from_ev"]
+                        ):
+                            try:
+                                if pd.notna(pid):
+                                    brl_dict[int(pid)] = (
+                                        float(val) if pd.notna(val) else None
+                                    )
+                            except (ValueError, TypeError):
+                                continue
+
+                        def _lookup_brl(pid):
+                            try:
+                                if pd.isna(pid):
+                                    return None
+                                return brl_dict.get(int(pid))
+                            except (ValueError, TypeError):
+                                return None
+
+                        df["barrel_count"] = df["player_id"].apply(_lookup_brl)
+                        try:
+                            df["barrel_count"] = pd.to_numeric(
+                                df["barrel_count"], errors="coerce"
+                            ).round(0)
+                        except Exception:
+                            pass
                         diag_entry["brl_merged"] = int(df["barrel_count"].notna().sum())
                         if df["barrel_count"].notna().any():
                             needs_barrels = False
