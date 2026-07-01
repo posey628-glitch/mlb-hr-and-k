@@ -905,79 +905,106 @@ def auto_attach_outcomes_to_past_snapshots(max_dates: int = 14) -> dict:
 def auto_run_pattern_discovery() -> dict:
     """Run today's correlation analysis and append to the rolling history.
 
-    v43.84 (bug fix): previously this required snapshots to have
-    hitter_outcomes ATTACHED (via auto_attach_outcomes). But if the attach
-    step hadn't caught up — because the user's Gist was reset, because
-    they're on a fresh install, or because auto_attach silently returned 0
-    on a slow API day — this would report "No snapshots have outcomes yet"
-    and never learn. Yesterday's-results banner sidesteps this by fetching
-    outcomes on demand from MLB Stats API. This function now does the same:
-    for any past-date snapshot without stored outcomes, we fetch them
-    fresh, merge in memory, and use them for the correlation computation.
-    Optionally attach them back so future runs don't refetch.
+    v43.85 (bug fix): use list_snapshots()/load_snapshot() which check BOTH
+    Gist AND local disk, instead of _gist_read_all() alone. Previously if
+    the user's Gist was empty (fresh reset) but local disk had snapshots
+    from the current session, my discovery reported "no snapshots" while
+    the yesterday's-results banner (which uses load_snapshot's multi-tier
+    lookup) worked fine. Now they use the same discovery path.
 
-    This is the "learns which stats predict HRs" loop the user requested.
-    Runs once per session per date:
-      1. Load all snapshots from Gist
-      2. For each past-date snapshot, ensure outcomes are available
-         (either from storage, or via MLB API fetch if missing)
-      3. Compute per-feature correlation with actual HR outcomes
-      4. Append today's correlations to _pattern_history in Gist
-      5. Prune history to last 60 days (keeps Gist under size limit)
+    v43.84: fetch outcomes on demand from MLB Stats API for any past-date
+    snapshot without stored outcomes, then persist them back.
 
-    The output feeds pattern_analysis.rolling_feature_importance() and
-    compute_adaptive_score() — those turn accumulated correlations into
-    a data-driven ranking that runs alongside pick_score.
-
-    Returns:
-        {"date": str, "computed": bool, "n_features": int, "note": str,
-         "n_snapshots_total": int, "n_snapshots_with_outcomes": int,
-         "n_snapshots_fetched_live": int}
+    Returns detailed diagnostic:
+        {"date", "computed", "n_features", "note",
+         "n_snapshots_total", "n_from_gist", "n_from_local",
+         "n_with_stored_outcomes", "n_fetched_live",
+         "gist_configured", "gist_error"}
     """
     from datetime import date, datetime
-    result = {"date": str(date.today()), "computed": False,
-              "n_features": 0, "note": "",
-              "n_snapshots_total": 0, "n_snapshots_with_outcomes": 0,
-              "n_snapshots_fetched_live": 0}
+    result = {
+        "date": str(date.today()), "computed": False,
+        "n_features": 0, "note": "",
+        "n_snapshots_total": 0,
+        "n_from_gist": 0, "n_from_local": 0,
+        "n_with_stored_outcomes": 0, "n_fetched_live": 0,
+        "gist_configured": durable_storage_configured(),
+        "gist_error": None,
+    }
     try:
-        snaps = _gist_read_all() or {}
-        # Restrict to snapshot payload dicts (skip _pattern_history, _LAST_SAVE_STATUS, etc)
-        snap_items = {
-            k: v for k, v in snaps.items()
-            if isinstance(v, dict) and isinstance(k, str)
-            and not k.startswith("_")
-        }
-        result["n_snapshots_total"] = len(snap_items)
-        if not snap_items:
-            result["note"] = (
-                "No snapshots in Gist yet. Once you run a slate, "
-                "the snapshot saves and this loop will start accumulating "
-                "correlation history on subsequent days."
-            )
+        # ------- Enumerate snapshots from BOTH tiers -------
+        try:
+            gist_keys = _list_snapshots_from_gist() if result["gist_configured"] else []
+            result["n_from_gist"] = len(gist_keys)
+        except Exception as ge:
+            gist_keys = []
+            result["gist_error"] = f"{type(ge).__name__}: {ge}"
+        # If Gist read failed, capture the reason
+        if result["gist_configured"] and not gist_keys:
+            _err = last_gist_read_error()
+            if _err:
+                result["gist_error"] = _err
+
+        # Local tier
+        try:
+            local_keys = []
+            if SNAPSHOT_DIR.exists():
+                local_keys = [
+                    p.stem.replace("snapshot_", "")
+                    for p in SNAPSHOT_DIR.glob("snapshot_*.json")
+                ]
+            result["n_from_local"] = len(local_keys)
+        except Exception:
+            local_keys = []
+
+        all_keys = sorted(set(gist_keys) | set(local_keys))
+        # Filter out the special internal keys (history bucket, save-status, etc.)
+        all_keys = [k for k in all_keys if not str(k).startswith("_")]
+        result["n_snapshots_total"] = len(all_keys)
+        if not all_keys:
+            if result["gist_error"]:
+                result["note"] = (
+                    f"No snapshots found. Gist error: {result['gist_error']}. "
+                    f"Local disk: 0 files. Save today's slate to start "
+                    f"accumulating history."
+                )
+            else:
+                result["note"] = (
+                    f"No snapshots found (Gist configured: {result['gist_configured']}, "
+                    f"local: 0 files). Once you run a slate, this loop will "
+                    f"start accumulating correlation history on subsequent days."
+                )
             return result
 
         today = date.today()
-        # Separate into: already-has-outcomes vs past-date-needs-fetch
+        # Load each snapshot payload (multi-tier via load_snapshot)
+        # and separate has-outcomes vs needs-fetch (past dates)
         with_stored_outcomes = {}
-        needs_live_fetch = {}  # keyed by date_str -> list of snap_keys
-        for k, v in snap_items.items():
-            d_str = k.split("T")[0]
+        needs_live_fetch = {}  # date_str -> list[snap_key]
+        skipped_future = 0
+        for k in all_keys:
+            d_str = str(k).split("T")[0]
             try:
                 d_obj = datetime.fromisoformat(d_str).date()
             except Exception:
                 continue
-            if v.get("hitter_outcomes"):
-                with_stored_outcomes[k] = v
+            payload = load_snapshot(k)
+            if not isinstance(payload, dict):
+                continue
+            if payload.get("hitter_outcomes"):
+                with_stored_outcomes[k] = payload
             elif d_obj < today:
-                # Past date, no stored outcomes — fetch live
                 needs_live_fetch.setdefault(d_str, []).append(k)
+            else:
+                # today or future — games not final, can't fetch outcomes yet
+                skipped_future += 1
 
-        result["n_snapshots_with_outcomes"] = len(with_stored_outcomes)
+        result["n_with_stored_outcomes"] = len(with_stored_outcomes)
 
-        # For each past-date needing fetch, get outcomes from MLB API
-        # once per date and enrich the in-memory copy of each snapshot.
+        # Fetch outcomes for past-date snapshots that don't have them stored
         enriched = dict(with_stored_outcomes)
-        any_newly_attached = False
+        # Track newly-fetched-and-attached-to-Gist snapshots for a single write
+        gist_updates = {}
         for d_str, snap_keys in needs_live_fetch.items():
             try:
                 h_out = fetch_hitter_outcomes(d_str)
@@ -985,33 +1012,40 @@ def auto_run_pattern_discovery() -> dict:
                     continue
                 h_out_str = {str(pid): row for pid, row in h_out.items()}
                 for snap_key in snap_keys:
-                    payload = dict(snap_items.get(snap_key) or {})
+                    payload = load_snapshot(snap_key) or {}
+                    payload = dict(payload)
                     payload["hitter_outcomes"] = h_out_str
                     payload["outcomes_attached_at"] = datetime.utcnow().isoformat() + "Z"
                     enriched[snap_key] = payload
-                    # Also persist back to Gist so we don't refetch tomorrow
-                    snaps[snap_key] = payload
-                    result["n_snapshots_fetched_live"] += 1
-                    any_newly_attached = True
-            except Exception as e:
-                # Don't fail the whole discovery for one bad date
+                    gist_updates[snap_key] = payload
+                    result["n_fetched_live"] += 1
+            except Exception:
                 continue
 
+        # Persist newly-attached outcomes back to Gist so tomorrow's run finds them
+        # (only if Gist is configured — no-op otherwise, which is fine for this session)
+        if gist_updates and result["gist_configured"]:
+            try:
+                snaps = _gist_read_all() or {}
+                for k, payload in gist_updates.items():
+                    snaps[k] = payload
+                _gist_write_all(snaps)
+            except Exception:
+                pass
+
         if not enriched:
-            result["note"] = (
-                f"Found {len(snap_items)} snapshots total, but none had "
-                f"outcomes (stored or fetchable). Wait until past-date "
-                f"games finish, or check MLB Stats API connectivity."
+            _future_note = (
+                f" ({skipped_future} snapshot(s) are today/future — games not final yet)"
+                if skipped_future else ""
             )
-            # Still try to persist any newly-attached snapshots for next run
-            if any_newly_attached:
-                try:
-                    _gist_write_all(snaps)
-                except Exception:
-                    pass
+            result["note"] = (
+                f"Found {result['n_snapshots_total']} snapshot(s){_future_note} "
+                f"but none had outcomes fetchable from MLB Stats API. "
+                f"Try again later — some game results may not be posted yet."
+            )
             return result
 
-        # Now compute correlations on the enriched set
+        # Compute correlations
         from pattern_analysis import (
             merge_snapshots_with_outcomes,
             compute_daily_correlations,
@@ -1019,15 +1053,11 @@ def auto_run_pattern_discovery() -> dict:
         merged = merge_snapshots_with_outcomes(enriched)
         if merged.empty:
             result["note"] = (
-                f"Merged {len(enriched)} snapshots but yielded no rows. "
-                f"Older snapshots may be missing feature columns "
-                f"(pre-v43.83 keep_cols)."
+                f"Merged {len(enriched)} snapshot(s) but yielded no player-game rows. "
+                f"Older snapshots may be missing the feature columns v43.83 needs "
+                f"(barrel_pct, iso, avg_ev, blast_pct, etc.). Newer snapshots will "
+                f"populate correlation history."
             )
-            if any_newly_attached:
-                try:
-                    _gist_write_all(snaps)
-                except Exception:
-                    pass
             return result
 
         today_corrs = compute_daily_correlations(merged, "homered")
@@ -1036,41 +1066,61 @@ def auto_run_pattern_discovery() -> dict:
                 f"Merged {len(merged)} rows but no feature had ≥30 valid pairs. "
                 f"Accumulate more slates before rolling analysis stabilizes."
             )
-            if any_newly_attached:
-                try:
-                    _gist_write_all(snaps)
-                except Exception:
-                    pass
             return result
 
-        # Load existing history, append, prune to last 60 entries
-        history = snaps.get("_pattern_history") or []
-        if not isinstance(history, list):
-            history = []
-        # Dedupe by date — if we already ran today, replace the entry
-        history = [
-            h for h in history
-            if h.get("date_computed") != today_corrs["date_computed"]
-        ]
-        history.append(today_corrs)
-        history = history[-60:]
-        snaps["_pattern_history"] = history
-
-        # Single Gist write at the end (persist newly-attached outcomes + history)
-        _gist_write_all(snaps)
+        # Persist history entry to Gist
+        if result["gist_configured"]:
+            try:
+                snaps = _gist_read_all() or {}
+                history = snaps.get("_pattern_history") or []
+                if not isinstance(history, list):
+                    history = []
+                history = [
+                    h for h in history
+                    if h.get("date_computed") != today_corrs["date_computed"]
+                ]
+                history.append(today_corrs)
+                history = history[-60:]
+                snaps["_pattern_history"] = history
+                _gist_write_all(snaps)
+            except Exception as we:
+                # Non-fatal — session still has computed today_corrs
+                pass
+        else:
+            # Gist not configured — stash in-session so at least this run's
+            # analysis is visible in the UI
+            try:
+                import streamlit as st  # noqa
+                if hasattr(st, "session_state"):
+                    _hist = st.session_state.get("_pattern_history_local", [])
+                    _hist = [
+                        h for h in _hist
+                        if h.get("date_computed") != today_corrs["date_computed"]
+                    ]
+                    _hist.append(today_corrs)
+                    _hist = _hist[-60:]
+                    st.session_state["_pattern_history_local"] = _hist
+            except Exception:
+                pass
 
         result["computed"] = True
         result["n_features"] = len(today_corrs["correlations"])
         result["n_samples"] = today_corrs["n_samples"]
         _live_note = (
-            f", fetched {result['n_snapshots_fetched_live']} live"
-            if result['n_snapshots_fetched_live'] > 0 else ""
+            f", fetched {result['n_fetched_live']} live"
+            if result['n_fetched_live'] > 0 else ""
+        )
+        _durability = (
+            "persisted to Gist"
+            if result["gist_configured"]
+            else "⚠️ session-only (Gist not configured)"
         )
         result["note"] = (
             f"Analyzed {today_corrs['n_samples']} player-games from "
-            f"{len(enriched)} snapshots ({result['n_snapshots_with_outcomes']} "
-            f"stored{_live_note}); tracked correlations for "
-            f"{result['n_features']} features."
+            f"{len(enriched)} snapshot(s) "
+            f"({result['n_with_stored_outcomes']} stored{_live_note}); "
+            f"tracked correlations for {result['n_features']} features — "
+            f"{_durability}."
         )
     except Exception as e:
         result["note"] = f"Pattern discovery failed: {type(e).__name__}: {e}"
@@ -1078,19 +1128,30 @@ def auto_run_pattern_discovery() -> dict:
 
 
 def load_pattern_history() -> list:
-    """Load the accumulated daily correlation history from Gist.
+    """Load the accumulated daily correlation history.
 
+    v43.85: check Gist first (durable); fall back to session state.
     Returns list of dicts (see compute_daily_correlations for schema),
     ordered by date. Empty list if no history yet.
     """
     try:
-        snaps = _gist_read_all() or {}
-        history = snaps.get("_pattern_history") or []
-        if not isinstance(history, list):
-            return []
-        return history
+        if durable_storage_configured():
+            snaps = _gist_read_all() or {}
+            history = snaps.get("_pattern_history") or []
+            if isinstance(history, list) and history:
+                return history
     except Exception:
-        return []
+        pass
+    # Fall back to session state (for users without Gist configured)
+    try:
+        import streamlit as st  # noqa
+        if hasattr(st, "session_state"):
+            _hist = st.session_state.get("_pattern_history_local")
+            if isinstance(_hist, list):
+                return _hist
+    except Exception:
+        pass
+    return []
 
 
 def fetch_hitter_outcomes(target_date) -> dict:
