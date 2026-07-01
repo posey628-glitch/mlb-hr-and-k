@@ -762,11 +762,13 @@ def bvp_score_adjustment(bvp_dict: dict, min_pa: int = 20) -> tuple[float, str]:
     hr_rate = bvp_dict.get("bvp_hr_per_pa")
     h = bvp_dict.get("bvp_h") or 0
     ab = bvp_dict.get("bvp_ab") or 0
-    slg = bvp_dict.get("bvp_slg")
-    avg = bvp_dict.get("bvp_avg")
+    # v43.81 cleanup: `slg` and `avg` were assigned here but never used.
+    # The scoring comment mentions "SLG/AVG" but the actual code only reads
+    # hr_rate + h/ab counts. If we want to bring SLG/AVG into scoring later,
+    # we'll re-add these.
 
     # Score based on HR rate vs league average (~3% per PA)
-    # AND on overall production (SLG/AVG)
+    # AND on overall production (SLG/AVG)  <— aspirational, not implemented yet
     points = 0.0
     if hr_rate is not None:
         # +1 pt per 1% above league avg, capped at +5
@@ -1134,6 +1136,9 @@ def get_bat_tracking(season: int | None = None) -> tuple[pd.DataFrame, str, list
             # v43.65: same scale normalization as blast_pct (Savant returns
             # 0-1 decimal for all per-swing/per-contact rates; codebase
             # convention is 0-100).
+            # v43.82 (reviewer-noted): _to_percent_scale below captures `df`
+            # from the enclosing scope. Safe because it's called immediately
+            # below in the same function scope, not in a deferred context.
             def _to_percent_scale(col_name):
                 """Sniff scale and multiply by 100 if it's a 0-1 decimal."""
                 series = pd.to_numeric(df[col_name], errors="coerce")
@@ -1178,7 +1183,7 @@ def get_bat_tracking(season: int | None = None) -> tuple[pd.DataFrame, str, list
                 )
                 return pd.DataFrame(), f"❌ no rows after filtering — {_reason}", list(df.columns)
             return out, f"✅ {len(out)} hitters", list(df.columns)
-        except Exception as e:
+        except Exception:
             # Try next URL
             continue
 
@@ -1923,6 +1928,15 @@ def get_hitter_stats(season: int = CURRENT_SEASON, _stats_day: str = "") -> pd.D
                     # symptom. Going through raw Python ints bypasses any
                     # pandas nullable-integer weirdness. Verified correct on
                     # small synthetic test before shipping.
+                    #
+                    # v43.82 (reviewer-noted): the _lookup_la / _lookup_dist /
+                    # _lookup_brl closures below capture the la_dict / dist_dict /
+                    # brl_dict from THIS iteration. Safe because df["player_id"]
+                    # .apply(_lookup_*) fires immediately in the same block.
+                    # DANGER: if any of these applies is ever deferred or the
+                    # dicts get reused across URL loop iterations, closure will
+                    # read the LAST iteration's dict. Fix in that case:
+                    #     def _lookup_dist(pid, _dict=dist_dict): ...
                     if needs_la and "_la_from_ev" in ev_subset.columns:
                         la_dict = {}
                         for pid, val in zip(
@@ -2387,7 +2401,7 @@ def _fetch_hitter_splits_single(hitter_id: int, season: int) -> dict:
                 hr = _to_int(stat.get("homeRuns") or stat.get("hr"))
                 k = _to_int(stat.get("strikeOuts") or stat.get("so"))
                 bb = _to_int(stat.get("baseOnBalls") or stat.get("bb"))
-                hits = _to_int(stat.get("hits") or stat.get("h"))
+                # v43.82 cleanup: `hits` was assigned but never used
                 avg = _to_float(stat.get("avg") or stat.get("battingAverage"))
                 obp = _to_float(stat.get("obp") or stat.get("onBasePercentage"))
                 slg = _to_float(stat.get("slg") or stat.get("sluggingPercentage"))
@@ -2774,7 +2788,7 @@ def get_player_il_status(player_id: int, season: int = CURRENT_SEASON) -> dict:
     """
     out = {"on_il": False, "days_since_return": None, "il_count_this_season": 0}
     try:
-        from datetime import datetime, timedelta
+        from datetime import datetime
         # Get player's transactions for the season
         url = (
             f"https://statsapi.mlb.com/api/v1/transactions"
@@ -4181,7 +4195,7 @@ def get_team_hitting_aggregates(season: int = CURRENT_SEASON) -> pd.DataFrame:
                     k = int(stat.get("strikeOuts") or 0)
                     hr = int(stat.get("homeRuns") or 0)
                     ab = int(stat.get("atBats") or 0)
-                    hits = int(stat.get("hits") or 0)
+                    # v43.82 cleanup: `hits` was assigned but never used
                     doubles = int(stat.get("doubles") or 0)
                     triples = int(stat.get("triples") or 0)
                     walks = int(stat.get("baseOnBalls") or 0)
