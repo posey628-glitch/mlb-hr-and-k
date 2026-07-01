@@ -6,14 +6,9 @@ DingerMaven dashboard - Streamlit main entry.
 
 from __future__ import annotations
 
-import os
-import re
 import io
-import math
-import json
-import datetime as dt
 from datetime import date, datetime, timedelta
-from typing import Optional, Any
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -25,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.80-venue-map-complete"
+APP_VERSION = "2026.06.10-v43.82-pyflakes-cleanup-and-b023-comments"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -222,14 +217,14 @@ except ImportError:
             return float(1 - (1 - prob_per_pa) ** expected_pa)
         except Exception:
             return None
-from park_factors import get_park, PARKS
+from park_factors import get_park
 
 # Optional newer helper
 try:
     from park_factors import park_k_factor
 except ImportError:
     def park_k_factor(venue_name): return 1.0
-from weather import fetch_weather, hr_multiplier, prefetch_weather_batch, get_last_weather_error
+from weather import fetch_weather, hr_multiplier, prefetch_weather_batch
 
 # splits.py was deleted — never used in main data flow.
 # Per-pitch matchup data is captured by pitch_match_score (pitch_match.py),
@@ -2040,7 +2035,7 @@ if hide_started and selected_date == datetime.now().date():
                 )
         else:
             st.session_state["_filter_dropped_games"] = 0
-    except Exception as _e:
+    except Exception:
         # If filtering fails for any reason, don't block the user — show everything
         pass
 
@@ -2293,7 +2288,7 @@ try:
                 pitcher_splits[["player_id"] + merge_cols],
                 on="player_id", how="left"
             )
-except Exception as _e:
+except Exception:
     # Don't block app if MLB Stats API splits fetch fails
     pass
 
@@ -4122,7 +4117,7 @@ try:
                 team_hit_map[row["team_abbr"]] = row_d
             if pd.notna(row.get("team_id")):
                 team_hit_map[int(row["team_id"])] = row_d
-except Exception as e:
+except Exception:
     team_hit_map = {}
 
 try:
@@ -4979,7 +4974,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.80 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.82 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -5862,6 +5857,15 @@ for _, game in slate.iterrows():
     # tuple-returning row functions can auto-expand to columns under some
     # pandas versions).
     FLOOR_RATE = 0.5  # %, same floor pattern as _platoon_hr_flag fix v41b
+    # v43.82 (reviewer-noted): _day_night_flag captures `game_type` and
+    # `FLOOR_RATE` from the enclosing scope. Safe TODAY because the .apply
+    # on line 5900 fires in the same iteration those variables are set.
+    # DANGER: if this .apply is ever deferred (queued, stored, or moved
+    # outside the loop), the closure will read the LAST iteration's values
+    # for every game, silently mis-classifying every day/night flag.
+    # Fix in that case: bind explicitly, e.g.
+    #     def _day_night_flag(row, _game_type=game_type, _floor=FLOOR_RATE):
+    # so the values are captured at definition, not at call time.
     def _apply_day_night(matchup_df):
         if matchup_df is None or matchup_df.empty:
             return
@@ -6487,6 +6491,12 @@ for _, game in slate.iterrows():
                     if bid is not None and not pd.isna(bid)
                 ]
                 if _valid_bids:
+                    # v43.82 (reviewer-noted): _one_bvp captures opp_pid_for_bvp
+                    # from the enclosing loop scope. Safe because ex.map fires
+                    # synchronously in the same iteration (blocks until done).
+                    # If this ever becomes async or the executor's results are
+                    # collected outside the loop, bind explicitly:
+                    #   def _one_bvp(bid, _opp_pid=int(opp_pid_for_bvp)): ...
                     def _one_bvp(bid):
                         try:
                             return bid, get_bvp_for_matchup(bid, int(opp_pid_for_bvp))
@@ -7648,6 +7658,42 @@ if combined_picks is not None and not combined_picks.empty:
                     "nuclear_label",
                 ]
                 _avail = [c for c in _profile_cols if c in _cp.columns]
+                # v43.81: shared column config so hr_score isn't 92.4000 etc.
+                _profile_config = {
+                    "player_name": st.column_config.TextColumn("Player", width="medium"),
+                    "team": st.column_config.TextColumn("Team", width="small"),
+                    "lineup_pos": st.column_config.NumberColumn(
+                        "Slot", format="%d", width="small",
+                    ),
+                    "hr_score": st.column_config.NumberColumn(
+                        "HR Score", format="%.0f",
+                    ),
+                    "grade": st.column_config.TextColumn("Grade", width="small"),
+                    "must_have_met": st.column_config.NumberColumn(
+                        "MH ✓", format="%d", width="small",
+                    ),
+                    "must_have_total": st.column_config.NumberColumn(
+                        "MH Total", format="%d", width="small",
+                    ),
+                    "must_have_label": st.column_config.TextColumn(
+                        "MH Detail", width="medium",
+                    ),
+                    "must_have_pass": st.column_config.CheckboxColumn(
+                        "MH Pass", width="small",
+                    ),
+                    "nuclear_met": st.column_config.NumberColumn(
+                        "NUC ✓", format="%d", width="small",
+                    ),
+                    "nuclear_total": st.column_config.NumberColumn(
+                        "NUC Total", format="%d", width="small",
+                    ),
+                    "nuclear_grade": st.column_config.TextColumn(
+                        "NUC Grade", width="small",
+                    ),
+                    "nuclear_label": st.column_config.TextColumn(
+                        "NUC Detail", width="medium",
+                    ),
+                }
                 if "must_have_met" in _cp.columns and "nuclear_met" in _cp.columns:
                     st.subheader("🎯 Researcher's Profile Summary")
                     st.caption(
@@ -7687,7 +7733,8 @@ if combined_picks is not None and not combined_picks.empty:
                                 "hr_score", ascending=False, na_position="last"
                             )
                             st.dataframe(
-                                _pass_view, use_container_width=True, hide_index=True
+                                _pass_view, use_container_width=True, hide_index=True,
+                                column_config=_profile_config,
                             )
 
                     # ===== B: Nuclear-grade hitters (NEAR / STRONG / NUCLEAR) =====
@@ -7717,7 +7764,8 @@ if combined_picks is not None and not combined_picks.empty:
                                 na_position="last",
                             )
                             st.dataframe(
-                                _nuc_view, use_container_width=True, hide_index=True
+                                _nuc_view, use_container_width=True, hide_index=True,
+                                column_config=_profile_config,
                             )
 
                     # ===== C: Top 10 by Must-Have count =====
@@ -7734,6 +7782,7 @@ if combined_picks is not None and not combined_picks.empty:
                             _top10_mh[_avail],
                             use_container_width=True,
                             hide_index=True,
+                            column_config=_profile_config,
                         )
 
                     # ===== D: Top 10 by Nuclear count =====
@@ -7750,6 +7799,7 @@ if combined_picks is not None and not combined_picks.empty:
                             _top10_nuc[_avail],
                             use_container_width=True,
                             hide_index=True,
+                            column_config=_profile_config,
                         )
 
                     # ===== E: Compact summary stats =====
@@ -11162,11 +11212,10 @@ if all_hitters:
         # Build combined export - try Excel, fall back to CSV-bundle
         import io as _io
         from datetime import datetime as _dt
-        try:
-            import openpyxl  # noqa: F401
-            HAS_OPENPYXL = True
-        except Exception:
-            HAS_OPENPYXL = False
+        # v43.82: use importlib.util.find_spec instead of a try/import block.
+        # Same intent (check availability) without the F401 warning.
+        import importlib.util
+        HAS_OPENPYXL = importlib.util.find_spec("openpyxl") is not None
 
         if HAS_OPENPYXL:
             try:
@@ -12088,7 +12137,7 @@ def _render_wind_diagram(wind_mph, wind_dir_deg, cf_bearing, venue_name=None):
     # The arrow inside the field shows wind direction relative to the
     # field as seen from above (CF at top, home plate at bottom).
     # Arrow ROTATES based on angle_rel_cf — 0 = pointing toward CF (up).
-    import math
+    # v43.82 cleanup: `import math` here was dead (no math.* call follows).
     # SVG rotation: 0 = up (toward CF). Positive rotation = clockwise
     # (toward RF / 1B side). angle_rel_cf positive means wind is east of
     # CF axis (toward LF if positive bearing rotation).
@@ -12568,6 +12617,70 @@ def build_col_config():
         ),
         "sleeper_score": st.column_config.NumberColumn("Sleeper", format="%.1f"),
         "verdict": st.column_config.TextColumn("Verdict"),
+        # v43.81 (user-reported: "expected total bases is like 2.2100000"):
+        # 12 columns were in the main display list but missing from this
+        # config, so Streamlit rendered them as raw floats/strings with all
+        # trailing zeros. Adding compact configs.
+        "expected_total_bases": st.column_config.NumberColumn(
+            "Exp Bases", format="%.2f",
+            help="Expected total bases this game (excludes walks). "
+                 "Includes singles, doubles, triples, HRs.",
+        ),
+        "avg_hr_distance": st.column_config.NumberColumn(
+            "HR Dist", format="%.0f",
+            help="Average HR distance (feet) — season-long. "
+                 "Higher = harder-hit HRs, fewer 'just-enough' outcomes.",
+        ),
+        "max_hit_speed": st.column_config.NumberColumn(
+            "Max EV", format="%.1f",
+            help="Season maximum exit velocity (mph). Ceiling indicator — "
+                 "hitters who've reached 110+ mph have HR potential in any game.",
+        ),
+        "hit_pa_pct": st.column_config.NumberColumn(
+            "Hit PA%", format="%.1f%%",
+            help="Per-plate-appearance hit probability, ignoring game length.",
+        ),
+        "tb_grade": st.column_config.TextColumn(
+            "TB Grade", width="small",
+            help="Letter grade for expected total bases this game. "
+                 "A ≥ 2.0, B ≥ 1.7, C ≥ 1.4, D below.",
+        ),
+        "arsenal_flag": st.column_config.TextColumn(
+            "Arsenal", width="small",
+            help="Pitch-arsenal matchup indicator. 🚨 = hitter feasts on "
+                 "pitcher's primary pitches. 🧊 = pitcher's arsenal suppresses this hitter.",
+        ),
+        "gb_flag": st.column_config.TextColumn(
+            "GB", width="small",
+            help="Groundball tendency. ⛰️ = extreme GB hitter (unlikely to HR). "
+                 "Nothing = normal.",
+        ),
+        "day_night_flag": st.column_config.TextColumn(
+            "D/N", width="small",
+            help="Day/night split flag. ☀️ = strong day-game performer. "
+                 "🌙 = strong night performer. Nothing = neutral or insufficient data.",
+        ),
+        "contact_flag": st.column_config.TextColumn(
+            "Contact", width="small",
+            help="Contact quality flag. 💥 = elite barrel/hard-hit combo. "
+                 "🚫 = poor contact quality.",
+        ),
+        "split_confidence": st.column_config.TextColumn(
+            "Split Conf", width="small",
+            help="Confidence in the handedness split PA sample. "
+                 "⭐⭐⭐ = high (100+ PA), ⭐⭐ = medium, ⭐ = low. "
+                 "Fewer stars = split less reliable.",
+        ),
+        "slate_leader_flag": st.column_config.TextColumn(
+            "Slate Lead", width="small",
+            help="This hitter tops the slate in at least one power category "
+                 "(HR/PA, barrel%, ISO, etc.). Rare category leaders get emojis.",
+        ),
+        "hr_profile_label": st.column_config.TextColumn(
+            "HR Profile", width="medium",
+            help="Quick-read power profile label combining barrel%, HR/PA, "
+                 "and hard-hit% into a single descriptor.",
+        ),
     }
 
 
@@ -12688,7 +12801,9 @@ def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
                     matchup_df[_smash_mask]
                     .sort_values("hr_game_pct", ascending=False)
                 )
-                _keep_idx = _ordered.head(2).index
+                # v43.82 cleanup: dropped _keep_idx local — we blank the
+                # LOWER-ranked ones so keeping the top 2 is implicit; no
+                # need to name them.
                 # Blank smash_spot on the lower-ranked smash rows
                 _drop_idx = _ordered.iloc[2:].index
                 matchup_df.loc[_drop_idx, "smash_spot"] = ""
