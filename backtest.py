@@ -9,7 +9,7 @@ For long-term tracking across container restarts, this same data can be
 mirrored to a Gist or GitHub repo (future enhancement).
 """
 
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta
 from pathlib import Path
 import json
 import pandas as pd
@@ -805,7 +805,7 @@ def auto_attach_outcomes_to_past_snapshots(max_dates: int = 14) -> dict:
     daily" loop. After it runs, the Pattern Analysis section sees fresh
     data and can identify new patterns.
     """
-    from datetime import date, datetime, timedelta
+    from datetime import date, datetime
     result = {"n_processed": 0, "n_attached": 0, "errors": []}
     try:
         snaps = _gist_read_all() or {}
