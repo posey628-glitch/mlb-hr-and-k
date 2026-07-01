@@ -2696,7 +2696,32 @@ VENUE_TIMEZONES = {
     "Kauffman Stadium": "America/Chicago",
     "Busch Stadium": "America/Chicago",
     "American Family Field": "America/Chicago",
-    # Eastern (all others)
+    # v43.80: Eastern venues added explicitly. Previously these fell through
+    # to the Eastern default — technically correct classification, but the
+    # v43.79 diagnostic fired warnings on them anyway ("unknown venue"),
+    # which was misleading. With the map now complete, the diagnostic only
+    # fires for genuinely unknown venues (name typos, temporary parks,
+    # newly renamed venues) — which is the actionable signal.
+    "Yankee Stadium": "America/New_York",
+    "Citi Field": "America/New_York",
+    "Fenway Park": "America/New_York",
+    "Rogers Centre": "America/New_York",  # Toronto — Eastern Time
+    "Oriole Park at Camden Yards": "America/New_York",
+    "Camden Yards": "America/New_York",  # alt short name
+    "Tropicana Field": "America/New_York",  # Rays historic home
+    "Steinbrenner Field": "America/New_York",  # Rays 2025 temporary
+    "Progressive Field": "America/New_York",
+    "Comerica Park": "America/New_York",
+    "Citizens Bank Park": "America/New_York",
+    "Nationals Park": "America/New_York",
+    "Truist Park": "America/New_York",
+    "loanDepot park": "America/New_York",  # Miami — MLB API lowercase 'l'
+    "LoanDepot park": "America/New_York",  # Alt capitalization
+    "PNC Park": "America/New_York",
+    "Great American Ball Park": "America/New_York",
+    # If a venue is STILL missing, it will surface in the Pipeline Health
+    # diagnostic — indicating a name change, typo, or new venue (e.g. a
+    # future international game or spring training makeup site).
 }
 
 
