@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.76-diagnostic-cleanup"
+APP_VERSION = "2026.06.10-v43.77-clear-diagnostics-per-run"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -407,6 +407,20 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# v43.77: reset the diagnostics bucket at the start of each rerun.
+# Streamlit persists session_state across reruns, so warnings stashed on
+# any prior run stayed in the bucket forever — the ⚠️ icon at the top of
+# Pipeline Health lit up permanently even when the current run was clean.
+# stash_diagnostic dedupes by message, so re-adding same-run entries costs
+# nothing. Only side effect: fixes a stale-warning display bug.
+if "_diagnostics" in st.session_state:
+    st.session_state["_diagnostics"] = {}
+# Also reset the once-per-session trace flags so they can re-fire if we
+# ever add them back for a future investigation.
+for _flag in ("_matchup_trace_done",):
+    if _flag in st.session_state:
+        del st.session_state[_flag]
 
 # ============================================================================
 # COLUMN HELP TEXT DICTIONARY (v42b)
@@ -4965,7 +4979,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.76 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.77 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
