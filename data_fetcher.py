@@ -2524,21 +2524,28 @@ def _parse_stat_split_response(data: dict, group: str = "hitting") -> dict:
             # Derive PA from AB+BB if missing
             if (pa is None or pa == 0) and ab and bb is not None:
                 pa = ab + bb
-            denom = pa if (pa and pa > 0) else ab
+            # v43.78 (auditor-found): SEPARATE denominators for HR/PA vs K/PA.
+            # HR/PA is a headline metric downstream — mixing in an AB fallback
+            # gives HR/AB (~10% overstated) but keeps the _per_pa name. K/PA
+            # is more tolerant of the fallback since it's used as a ratio.
+            # If PA is missing, skip the hr_per_pa emission entirely.
+            denom_pa_strict = pa if (pa and pa > 0) else None
+            denom_ab_fallback = pa if (pa and pa > 0) else ab
 
             if pa and pa > 0:
                 out[f"vs_{label}_pa"] = pa
-            if denom and denom > 0:
+            if denom_pa_strict:
                 if hr is not None:
-                    out[f"vs_{label}_hr_per_pa"] = round(hr / denom * 100, 3)
+                    out[f"vs_{label}_hr_per_pa"] = round(hr / denom_pa_strict * 100, 3)
                 # v40: Absent HR field → leave unset (no fabricated 0.0). A
                 # manufactured 0% reads as elite suppression downstream and
                 # corrupts _platoon_hr_flag (which divides r_safe/l_safe with
                 # min 0.001) — producing 40× ratios that trigger spurious
                 # 💥 RHB-vulnerability flags and +4 pick_score bonuses.
                 # Missing stays missing.
+            if denom_ab_fallback and denom_ab_fallback > 0:
                 if k is not None:
-                    out[f"vs_{label}_k_percent"] = round(k / denom * 100, 2)
+                    out[f"vs_{label}_k_percent"] = round(k / denom_ab_fallback * 100, 2)
             if avg:
                 try: out[f"vs_{label}_avg"] = float(avg)
                 except (TypeError, ValueError): pass
