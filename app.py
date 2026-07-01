@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.82-pyflakes-cleanup-and-b023-comments"
+APP_VERSION = "2026.06.10-v43.83-daily-pattern-learning-and-adaptive-score"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -3679,6 +3679,173 @@ if show_pattern_analysis:
                         st.dataframe(disp, hide_index=True, use_container_width=True)
                     else:
                         st.info("Need ≥10 hitters per snapshot to compute calibration.")
+
+                    # ====== Section G: Rolling feature importance (v43.83) ======
+                    st.markdown("---")
+                    st.markdown("### G. Rolling feature importance — the daily learning loop")
+                    st.caption(
+                        "**This is the 'model learns what predicts HRs' system.** "
+                        "Every day the app runs, it computes each feature's "
+                        "correlation with actual HR outcomes and appends it to "
+                        "history. This table shows the last 14 days rolled up: "
+                        "which features are consistently predictive (high avg_corr, "
+                        "low std), which are decaying (negative trend), which are "
+                        "noisy (high std). **Reliability** = |avg_corr| / std — "
+                        "higher means the signal is stable, not just lucky."
+                    )
+                    try:
+                        from backtest import load_pattern_history
+                        from pattern_analysis import (
+                            rolling_feature_importance,
+                            compute_adaptive_score,
+                        )
+                        _history = load_pattern_history()
+                        n_days_history = len(_history)
+                        if n_days_history == 0:
+                            st.info(
+                                "No pattern history yet. The daily loop runs "
+                                "automatically on app load — check back after "
+                                "your next slate's outcomes attach."
+                            )
+                        else:
+                            importance_df = rolling_feature_importance(_history, lookback_days=14)
+                            if importance_df.empty:
+                                st.info(
+                                    f"History has {n_days_history} day(s) but "
+                                    "need ≥3 days per feature to compute importance."
+                                )
+                            else:
+                                reliability_note = (
+                                    "🟢 **Trustworthy signal** — "
+                                    if n_days_history >= 15
+                                    else f"🟡 **Building signal** ({n_days_history}/15+ days) — "
+                                    if n_days_history >= 7
+                                    else f"🔴 **Too early to trust** ({n_days_history}/7+ days) — "
+                                )
+                                st.markdown(
+                                    reliability_note
+                                    + f"analyzing {n_days_history} day(s) of accumulated outcomes. "
+                                    + ("Rankings are stable." if n_days_history >= 15
+                                       else "Rankings will stabilize as more slates accumulate.")
+                                )
+                                disp = importance_df.head(15).copy()
+                                disp["trend_display"] = disp["trend"].apply(
+                                    lambda t: (
+                                        f"↗️ +{t:.3f}" if t > 0.02
+                                        else f"↘️ {t:.3f}" if t < -0.02
+                                        else f"→ {t:+.3f}"
+                                    )
+                                )
+                                # Present as clean table
+                                st.dataframe(
+                                    disp[["feature", "avg_corr", "recent_corr",
+                                          "trend_display", "reliability", "n_days"]]
+                                    .rename(columns={
+                                        "feature": "Feature",
+                                        "avg_corr": "Avg Corr",
+                                        "recent_corr": "Recent",
+                                        "trend_display": "Trend",
+                                        "reliability": "Reliability",
+                                        "n_days": "Days",
+                                    }),
+                                    hide_index=True, use_container_width=True,
+                                    column_config={
+                                        "Avg Corr": st.column_config.NumberColumn(format="%.3f"),
+                                        "Recent": st.column_config.NumberColumn(format="%.3f"),
+                                        "Reliability": st.column_config.NumberColumn(format="%.2f"),
+                                        "Days": st.column_config.NumberColumn(format="%d"),
+                                    },
+                                )
+
+                                # ====== Section H: Adaptive score (v43.83) ======
+                                st.markdown("---")
+                                st.markdown("### H. Adaptive Score — data-driven composite from top predictors")
+                                st.caption(
+                                    "A **data-driven ranking** that weights the top-5 "
+                                    "reliable features by their rolling correlation "
+                                    "strength — the opposite of the fixed-weights "
+                                    "hr_score. As correlations shift over time, so does "
+                                    "the weighting. Runs in parallel with hr_score so you "
+                                    "can compare picks side by side. **Does NOT modify "
+                                    "hr_score or pick_score** — those stay fixed until "
+                                    "we have enough validation data (60+ slates) to "
+                                    "confidently swap in a new weighting scheme."
+                                )
+                                if combined_picks is not None and not combined_picks.empty:
+                                    _starters_only = combined_picks
+                                    if "is_bench" in combined_picks.columns:
+                                        _starters_only = combined_picks[
+                                            ~combined_picks["is_bench"].fillna(False)
+                                        ]
+                                    adaptive = compute_adaptive_score(
+                                        _starters_only, importance_df, top_n_features=5
+                                    )
+                                    if adaptive.notna().any():
+                                        _adaptive_df = _starters_only.assign(
+                                            adaptive_score=adaptive.round(1)
+                                        )
+                                        # Show top 10 by adaptive_score
+                                        _top_adaptive = _adaptive_df.nlargest(
+                                            10, "adaptive_score"
+                                        )[[
+                                            c for c in ["player_name", "team",
+                                                        "adaptive_score", "hr_score",
+                                                        "pick_score", "hr_game_pct"]
+                                            if c in _adaptive_df.columns
+                                        ]]
+                                        st.markdown("**Top 10 by Adaptive Score:**")
+                                        st.dataframe(
+                                            _top_adaptive, hide_index=True,
+                                            use_container_width=True,
+                                            column_config={
+                                                "adaptive_score": st.column_config.NumberColumn(
+                                                    "Adaptive", format="%.0f",
+                                                ),
+                                                "hr_score": st.column_config.NumberColumn(
+                                                    "HR Score", format="%.0f",
+                                                ),
+                                                "pick_score": st.column_config.NumberColumn(
+                                                    "Pick", format="%.1f",
+                                                ),
+                                                "hr_game_pct": st.column_config.NumberColumn(
+                                                    "HR%", format="%.1f%%",
+                                                ),
+                                            },
+                                        )
+                                        # Which features are actually driving the score?
+                                        used_features = importance_df.head(5)["feature"].tolist()
+                                        _weights_str = " · ".join([
+                                            f"**{r['feature']}** ({r['avg_corr']:+.3f})"
+                                            for _, r in importance_df.head(5).iterrows()
+                                        ])
+                                        st.markdown(
+                                            f"**Features driving this score:** {_weights_str}"
+                                        )
+                                        # Overlap diagnostic
+                                        if "hr_score" in _adaptive_df.columns:
+                                            _hr_top = set(
+                                                _adaptive_df.nlargest(10, "hr_score")["player_name"].tolist()
+                                            )
+                                            _ad_top = set(_top_adaptive["player_name"].tolist())
+                                            overlap = _hr_top & _ad_top
+                                            st.caption(
+                                                f"_Overlap with HR Score top 10: "
+                                                f"**{len(overlap)}/10**. If overlap is "
+                                                f"consistently low, adaptive is finding a "
+                                                f"genuinely different signal — worth "
+                                                f"tracking hit rates in Section A to see "
+                                                f"if it outperforms._"
+                                            )
+                                    else:
+                                        st.info(
+                                            "Not enough reliable features yet "
+                                            "(need |avg_corr| ≥ 0.05 across ≥5 days). "
+                                            "More slates = more signal."
+                                        )
+                                else:
+                                    st.info("No slate loaded — adaptive score needs today's hitters.")
+                    except Exception as _de:
+                        st.error(f"Rolling importance / adaptive score error: {_de}")
         except Exception as _pa_err:
             st.error(f"Pattern Analysis section error: {_pa_err}")
 
@@ -4974,7 +5141,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.82 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.83 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -11035,6 +11202,36 @@ if all_hitters:
                     f"actual results to {_attach_result['n_attached']} prior "
                     f"snapshots across {_attach_result['n_processed']} dates. "
                     f"Pattern Analysis section now has fresh data."
+                )
+
+            # v43.83 — After outcomes are freshly attached, run pattern discovery.
+            # This is the "learn what predicts HRs daily" loop the user asked for.
+            # Computes today's per-feature correlations with actual outcomes and
+            # appends to _pattern_history in Gist. Rolling analysis + adaptive
+            # score in the Pattern Analysis UI reads from that history.
+            try:
+                from backtest import auto_run_pattern_discovery
+                _pd_result = auto_run_pattern_discovery()
+                st.session_state["_pattern_discovery_result"] = _pd_result
+                if _pd_result.get("computed"):
+                    stash_diagnostic(
+                        "pipeline_health",
+                        f"**Pattern discovery (v43.83 daily loop):** "
+                        f"{_pd_result['note']} History now feeds the "
+                        f"adaptive score in Pattern Analysis. Reliability "
+                        f"grows with each daily run."
+                    )
+                elif _pd_result.get("note"):
+                    stash_diagnostic(
+                        "pipeline_health",
+                        f"**Pattern discovery:** {_pd_result['note']}"
+                    )
+            except Exception as _pde:
+                stash_diagnostic(
+                    "pipeline_health",
+                    f"Pattern discovery failed: "
+                    f"{type(_pde).__name__}: {_pde}",
+                    level="warning",
                 )
     except Exception as _e:
         # Defensive — never let the back-fill block app load
