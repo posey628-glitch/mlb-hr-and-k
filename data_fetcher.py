@@ -2700,9 +2700,39 @@ VENUE_TIMEZONES = {
 }
 
 
+# v43.79 (auditor-found): track venue-name misses so we can see which
+# venues need adding to VENUE_TIMEZONES. Previously a west-coast venue
+# whose name didn't match the map keys exactly silently classified as
+# Eastern — leading to wrong day/night assignments for the games most
+# affected by early Pacific-time starts.
+_UNKNOWN_VENUES_SEEN: set = set()
+
+
 def get_venue_timezone(venue_name: str) -> str:
-    """Look up IANA timezone for a venue. Defaults to America/New_York."""
+    """Look up IANA timezone for a venue. Defaults to America/New_York.
+
+    v43.79: unknown venues are recorded to _UNKNOWN_VENUES_SEEN so the
+    app can surface them in Pipeline Health. The Eastern default is
+    safe for ~2/3 of MLB parks but silently mis-classifies west-coast
+    games for any venue whose Savant/MLBAPI name doesn't match our keys
+    exactly (e.g. minor rebrandings, sponsored name changes).
+    """
+    if venue_name and venue_name not in VENUE_TIMEZONES:
+        try:
+            _UNKNOWN_VENUES_SEEN.add(venue_name)
+        except Exception:
+            pass
     return VENUE_TIMEZONES.get(venue_name, "America/New_York")
+
+
+def unknown_venues_seen() -> list:
+    """Return venues encountered but not in VENUE_TIMEZONES map.
+
+    Used by app.py's Pipeline Health to surface silent misclassification
+    risk — an unknown west-coast venue means day/night is wrong for that
+    game's hitters.
+    """
+    return sorted(_UNKNOWN_VENUES_SEEN)
 
 
 # ----------------------------------------------------------------------------
