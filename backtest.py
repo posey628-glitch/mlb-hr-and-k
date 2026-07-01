@@ -585,6 +585,24 @@ def save_snapshot(snapshot_date, matchup_df: pd.DataFrame,
                 "must_have_met", "must_have_total", "must_have_pass",
                 "nuclear_met", "nuclear_total", "nuclear_grade",
                 "hit_game_pct", "tb_game_pct",
+                # v43.83 (user-requested self-improvement): the pattern-
+                # discovery loop needs the FULL predictor set to measure
+                # which features actually predict outcomes. Previously only
+                # barrel_pct + iso were snapshotted → correlation analysis
+                # was blind to hard_hit, avg_ev, blast_pct, pull metrics,
+                # xwoba, slg, etc. These are the actual candidate features
+                # for the adaptive score. Compact JSON keeps the payload
+                # under the Gist size budget even with these additions.
+                "avg_ev", "hard_hit", "blast_pct",
+                "pull_pct", "pull_air_pct", "pulled_brl_pct",
+                "fb_pct", "gb_pct", "ld_pct",
+                "xwoba", "xslg", "slg", "obp", "ops",
+                "k_pct", "bb_pct", "whiff_pct",
+                "discipline_score", "lift_score", "matchup_opp",
+                "recent_hr", "recent_hr_weighted_rate",
+                "pitch_hr_score", "pitch_match_score",
+                # Environment for env-boosted correlations
+                "env_boost", "opp_pitcher_xwoba",
             ] if c in matchup_df.columns]
             hitter_records = _na_safe_records(matchup_df, keep_cols)
 
@@ -879,6 +897,94 @@ def auto_attach_outcomes_to_past_snapshots(max_dates: int = 14) -> dict:
     except Exception as e:
         result["errors"].append(f"auto_attach outer: {type(e).__name__}: {e}")
     return result
+
+
+# ============================================================================
+# v43.83 — Daily automated pattern discovery
+# ============================================================================
+def auto_run_pattern_discovery() -> dict:
+    """Run today's correlation analysis and append to the rolling history.
+
+    This is the "learns which stats predict HRs" loop the user requested.
+    Runs once per session per date:
+      1. Load all snapshots with outcomes
+      2. Compute per-feature correlation with actual HR outcomes
+      3. Append today's correlations to _pattern_history in Gist
+      4. Prune history to last 60 days (keeps Gist under size limit)
+
+    The output feeds pattern_analysis.rolling_feature_importance() and
+    compute_adaptive_score() — those turn accumulated correlations into
+    a data-driven ranking that runs alongside pick_score.
+
+    Returns:
+        {"date": str, "computed": bool, "n_features": int, "note": str}
+    """
+    from datetime import date
+    result = {"date": str(date.today()), "computed": False,
+              "n_features": 0, "note": ""}
+    try:
+        snaps = _gist_read_all() or {}
+        # Filter to snapshots that have outcomes attached
+        with_outcomes = {k: v for k, v in snaps.items()
+                         if isinstance(v, dict) and v.get("hitter_outcomes")}
+        if not with_outcomes:
+            result["note"] = "No snapshots have outcomes yet — nothing to learn from."
+            return result
+
+        # Late import to avoid pulling pandas at module load
+        from pattern_analysis import (
+            merge_snapshots_with_outcomes,
+            compute_daily_correlations,
+        )
+        merged = merge_snapshots_with_outcomes(with_outcomes)
+        if merged.empty:
+            result["note"] = ("Snapshots have outcomes but the merge yielded "
+                             "no rows — likely older snapshots missing feature columns.")
+            return result
+
+        today_corrs = compute_daily_correlations(merged, "homered")
+        if not today_corrs.get("correlations"):
+            result["note"] = f"Merged {len(merged)} rows but no feature had ≥30 valid pairs."
+            return result
+
+        # Load existing history, append, prune to last 60 entries
+        history = snaps.get("_pattern_history") or []
+        if not isinstance(history, list):
+            history = []
+        # Dedupe by date — if we already ran today, replace the entry
+        history = [h for h in history if h.get("date_computed") != today_corrs["date_computed"]]
+        history.append(today_corrs)
+        # Keep last 60 to bound size
+        history = history[-60:]
+        snaps["_pattern_history"] = history
+        _gist_write_all(snaps)
+
+        result["computed"] = True
+        result["n_features"] = len(today_corrs["correlations"])
+        result["n_samples"] = today_corrs["n_samples"]
+        result["note"] = (
+            f"Analyzed {today_corrs['n_samples']} player-games; "
+            f"tracked correlations for {result['n_features']} features."
+        )
+    except Exception as e:
+        result["note"] = f"Pattern discovery failed: {type(e).__name__}: {e}"
+    return result
+
+
+def load_pattern_history() -> list:
+    """Load the accumulated daily correlation history from Gist.
+
+    Returns list of dicts (see compute_daily_correlations for schema),
+    ordered by date. Empty list if no history yet.
+    """
+    try:
+        snaps = _gist_read_all() or {}
+        history = snaps.get("_pattern_history") or []
+        if not isinstance(history, list):
+            return []
+        return history
+    except Exception:
+        return []
 
 
 def fetch_hitter_outcomes(target_date) -> dict:
