@@ -341,10 +341,18 @@ def prop_accuracy_summary(merged_df: pd.DataFrame) -> dict:
         return {}
 
     result = {}
+    # v43.79 (auditor-found): dropped "Total Bases (≥2)" from this backtest.
+    # tb_game_pct is EXPECTED TOTAL BASES (a count 0-4+), not a probability
+    # in [0,100]%. Dividing by 100 and comparing to a binary (got_2plus_bases)
+    # produced a garbage Brier score that would mislead threshold tuning.
+    # A proper Total Bases backtest needs either:
+    #   (a) a tb_prob_2plus column in snapshots (which we don't have yet), or
+    #   (b) comparing the raw expected count to the actual total_bases integer
+    # Neither is a probability-vs-binary Brier calc. Removing the misleading
+    # entry entirely rather than shipping wrong numbers.
     prop_specs = [
         ("HR", "hr_game_pct", "homered"),
         ("Hit (≥1)", "hit_game_pct", "got_hit"),
-        ("Total Bases (≥2)", "tb_game_pct", "got_2plus_bases"),
     ]
     for label, pred_col, actual_col in prop_specs:
         if pred_col not in merged_df.columns or actual_col not in merged_df.columns:
@@ -352,12 +360,10 @@ def prop_accuracy_summary(merged_df: pd.DataFrame) -> dict:
         valid = merged_df.dropna(subset=[pred_col, actual_col])
         if len(valid) < 30:
             continue
-        # tb_game_pct is in different units (expected total bases, not %)
-        # — for the ≥2 binary it's reasonable to compare directly only if
-        # hit_game_pct is in [0, 100] like HR. We'll proceed conservatively.
         try:
+            # Both HR and Hit predictors are proper 0-100 percentages
             pred = valid[pred_col].astype(float) / 100.0
-            pred = pred.clip(0, 1)  # safety
+            pred = pred.clip(0, 1)  # safety against outliers
             actual = valid[actual_col].astype(float)
             brier = float(((pred - actual) ** 2).mean())
             result[label] = {
