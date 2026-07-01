@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.78-auditor-fixes-bench-nan-dedupe"
+APP_VERSION = "2026.06.10-v43.79-auditor-followup"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -3813,7 +3813,7 @@ if show_diagnostic:
                             # Show first 500 chars of response
                             st.code(r.text[:500])
                     else:
-                        st.write(f"❌ Failed or empty response")
+                        st.write("❌ Failed or empty response")
                 except Exception as e:
                     st.write(f"❌ Error: {e}")
                 st.markdown("---")
@@ -4979,7 +4979,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.78 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.79 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -8246,6 +8246,26 @@ if combined_picks is not None and not combined_picks.empty:
                 "columns survived display_cols filter."
             )
 
+    # v43.79 (auditor-found): surface any venues encountered that aren't in
+    # VENUE_TIMEZONES. These silently classify as Eastern, which is wrong
+    # for west-coast parks. Once we see the name Savant/MLBAPI uses, add
+    # it to the map in data_fetcher.py.
+    try:
+        from data_fetcher import unknown_venues_seen
+        _unknown_venues = unknown_venues_seen()
+        if _unknown_venues:
+            stash_diagnostic(
+                "pipeline_health",
+                f"**Day/night: unknown venue(s) encountered** — silently "
+                f"defaulted to Eastern time: `{', '.join(_unknown_venues[:5])}`"
+                f"{f' + {len(_unknown_venues)-5} more' if len(_unknown_venues) > 5 else ''}. "
+                f"Add these to VENUE_TIMEZONES in data_fetcher.py to fix "
+                f"day/night classification for hitters in these games.",
+                level="warning",
+            )
+    except Exception:
+        pass
+
     if "pa" in combined_picks.columns and "hr_game_pct" in combined_picks.columns:
         q = combined_picks[
             combined_picks["pa"].notna()
@@ -8405,10 +8425,29 @@ if combined_picks is not None and not combined_picks.empty:
                 q[col_name] = (pct_series * (w / _fixed_total_w)).round(2)
 
             # Lineup confirmation bonus/penalty — store as ps_bonus_lineup
-            if "is_roster_fill" in q.columns:
-                fill = q["is_roster_fill"].fillna(False).astype(bool)
-                # -2 for fill, +3 for confirmed (non-fill)
-                lineup_adj = np.where(fill, -2.0, 3.0)
+            # v43.79 (auditor-found, second pass): the -2/+3 binary treated
+            # bench players as confirmed starters (they inherit is_roster_fill=False
+            # from the bench frame). Bench getting +3 boosted their pick_score
+            # against actual bench candidates in other games. Three-way split:
+            #   +3: confirmed starter (not bench, not padding fill)
+            #    0: bench (real bench player, could enter game)
+            #   -2: padding fill (call-up placeholder, might not play at all)
+            if "is_roster_fill" in q.columns or "is_bench" in q.columns:
+                fill = (
+                    q["is_roster_fill"].fillna(False).astype(bool)
+                    if "is_roster_fill" in q.columns
+                    else pd.Series(False, index=q.index)
+                )
+                bench = (
+                    q["is_bench"].fillna(False).astype(bool)
+                    if "is_bench" in q.columns
+                    else pd.Series(False, index=q.index)
+                )
+                # Priority: padding fill (-2) > bench (0) > confirmed starter (+3)
+                lineup_adj = np.where(
+                    fill, -2.0,
+                    np.where(bench, 0.0, 3.0)
+                )
                 q["pick_score"] = q["pick_score"] + lineup_adj
                 q["ps_bonus_lineup"] = lineup_adj
             else:
