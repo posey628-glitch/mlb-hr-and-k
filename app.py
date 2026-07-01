@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.77-clear-diagnostics-per-run"
+APP_VERSION = "2026.06.10-v43.78-auditor-fixes-bench-nan-dedupe"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -4979,7 +4979,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.77 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.78 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -7118,11 +7118,20 @@ for gpk, ctx in game_context_map.items():
     # never saw bench players → back-map skipped them → bench expander showed
     # the OLD hr_grade(hr_game_pct) letter on a different scale than the
     # starter tables, undercutting the late-swap use case.
+    #
+    # v43.78 (auditor-found): tag bench rows with is_bench=True. Reviewer
+    # traced the "Expected HRs 70.4" bug to this exact spot: bench frames
+    # inherit lineup_pos 1-9 from build_matchup_table's enumerate() so they
+    # look identical to starters, and is_roster_fill=False on both. Result:
+    # bench players were being counted as starters in Expected-HR sum, the
+    # Must-Have passer counts, the lineup bonus, PA scaling, and more.
+    # A single is_bench flag lets every downstream filter distinguish them.
     for side in ("away", "home", "away_bench", "home_bench"):
         m = ctx.get(f"{side}_matchup")
         if m is None or m.empty:
             continue
         x = m.copy()
+        x["is_bench"] = side.endswith("bench")  # v43.78 auditor fix
         x["game"] = f"{g_row['away_team_abbr']} @ {g_row['home_team_abbr']}"
         # Bench frames are still TEAM-aligned with their side prefix
         team_side = "away" if side.startswith("away") else "home"
@@ -7409,15 +7418,20 @@ if all_hitters_for_picks:
 if combined_picks is not None and not combined_picks.empty:
     # ---- Slate HR forecast ----
     try:
-        # v43.71 (user-reported): "expected homers tomorrow 67.8 — no way
-        # that's accurate." Root cause: was summing hr_game_pct across
-        # combined_picks which includes BENCH players (~270 of them on top
-        # of ~216 starters). Bench players won't play, so their hr_game_pct
-        # shouldn't count. League norm is ~17-25 HRs across a 12-game slate;
-        # the 67.8 figure was ~4× inflated because of the bench inclusion.
-        # Fix: sum only over starters (is_roster_fill=False).
+        # v43.71 (user-reported): "expected homers tomorrow 67.8 — no way."
+        # v43.78 (auditor-found): the v43.71 fix filtered on is_roster_fill
+        # to exclude "bench players who won't play." But is_roster_fill is
+        # only True for PADDING FILLS (call-ups added when a real lineup
+        # is short), NOT for actual bench players. Bench players default
+        # is_roster_fill=False, indistinguishable from starters — so the
+        # v43.71 filter removed nobody and Expected HRs stayed inflated
+        # (~2× reality). v43.78's is_bench flag added in the combined_picks
+        # assembly is the reliable signal to exclude bench here.
         _starters_only = combined_picks
-        if "is_roster_fill" in combined_picks.columns:
+        if "is_bench" in combined_picks.columns:
+            _starters_only = combined_picks[~combined_picks["is_bench"].fillna(False)]
+        elif "is_roster_fill" in combined_picks.columns:
+            # Fallback for old snapshots that don't have is_bench
             _starters_only = combined_picks[~combined_picks["is_roster_fill"]]
         hr_pcts = pd.to_numeric(
             _starters_only.get("hr_game_pct", pd.Series(dtype=float)),
@@ -7618,7 +7632,11 @@ if combined_picks is not None and not combined_picks.empty:
         try:
             if combined_picks is not None and not combined_picks.empty:
                 _cp = combined_picks
-                if "is_roster_fill" in _cp.columns:
+                # v43.78 (auditor-found): prefer is_bench (true bench signal);
+                # fall back to is_roster_fill (padding fills only).
+                if "is_bench" in _cp.columns:
+                    _cp = _cp[~_cp["is_bench"].fillna(False)].copy()
+                elif "is_roster_fill" in _cp.columns:
                     _cp = _cp[~_cp["is_roster_fill"]].copy()
 
                 _profile_cols = [
@@ -7643,7 +7661,15 @@ if combined_picks is not None and not combined_picks.empty:
                     )
 
                     # ===== A: hitters who PASS Must-Have =====
-                    _passers = _cp[_cp.get("must_have_pass") == True]
+                    # v43.78 (auditor-found): the .get(...) == True pattern
+                    # LOOKS defensive but crashes if the column is missing.
+                    # .get() returns None → None == True is scalar False →
+                    # _cp[False] raises KeyError. Explicit column check first.
+                    if "must_have_pass" in _cp.columns:
+                        _mh_mask = _cp["must_have_pass"].fillna(False).astype(bool)
+                        _passers = _cp[_mh_mask]
+                    else:
+                        _passers = _cp.iloc[0:0]  # empty frame with same schema
                     n_pass = len(_passers)
                     with st.expander(
                         f"✅ Hitters passing Must-Have filter "
@@ -7980,11 +8006,16 @@ if combined_picks is not None and not combined_picks.empty:
     try:
         n_total = len(combined_picks)
         # v43.63: split starter vs bench for accurate signal
-        _is_bench = (
-            combined_picks["is_roster_fill"]
-            if "is_roster_fill" in combined_picks.columns
-            else pd.Series([False] * n_total, index=combined_picks.index)
-        )
+        # v43.78 (auditor-found): prefer is_bench (correct signal for bench
+        # players); fall back to is_roster_fill for legacy compatibility.
+        # is_roster_fill was only True for PADDING FILLS, so it undercounted
+        # true bench players — driving inflated "starter" counts.
+        if "is_bench" in combined_picks.columns:
+            _is_bench = combined_picks["is_bench"].fillna(False).astype(bool)
+        elif "is_roster_fill" in combined_picks.columns:
+            _is_bench = combined_picks["is_roster_fill"].fillna(False).astype(bool)
+        else:
+            _is_bench = pd.Series([False] * n_total, index=combined_picks.index)
         _starters = combined_picks[~_is_bench]
         _bench = combined_picks[_is_bench]
         n_st = max(1, len(_starters))
@@ -8036,11 +8067,16 @@ if combined_picks is not None and not combined_picks.empty:
         # one blended number caused false ⚠️ icons after v43.62's bench
         # inclusion (#1.3). Starter coverage is what should trigger
         # warnings; bench coverage is informational.
-        _is_bench = (
-            combined_picks["is_roster_fill"]
-            if "is_roster_fill" in combined_picks.columns
-            else pd.Series([False] * n_total, index=combined_picks.index)
-        )
+        # v43.78 (auditor-found): prefer is_bench (correct signal for bench
+        # players); fall back to is_roster_fill for legacy compatibility.
+        # is_roster_fill was only True for PADDING FILLS, so it undercounted
+        # true bench players — driving inflated "starter" counts.
+        if "is_bench" in combined_picks.columns:
+            _is_bench = combined_picks["is_bench"].fillna(False).astype(bool)
+        elif "is_roster_fill" in combined_picks.columns:
+            _is_bench = combined_picks["is_roster_fill"].fillna(False).astype(bool)
+        else:
+            _is_bench = pd.Series([False] * n_total, index=combined_picks.index)
         _starters = combined_picks[~_is_bench]
         _bench = combined_picks[_is_bench]
         n_st = max(1, len(_starters))
@@ -8322,15 +8358,51 @@ if combined_picks is not None and not combined_picks.empty:
             component_meta.append(("ps_env", _p, _w))
 
         if score_parts:
-            total_w = sum(weights)
-            weighted = sum(p * (w / total_w) for p, w in zip(score_parts, weights))
-            q["pick_score"] = weighted
+            # v43.78 (auditor-found): NaN renormalization.
+            # PREVIOUSLY:
+            #     total_w = sum(weights)
+            #     weighted = sum(p * (w / total_w) for p, w in zip(...))
+            # This treated missing components as "in the ranking with NaN"
+            # which propagates: NaN * anything = NaN, so a hitter missing
+            # ONE optional signal (sleeper_score, lift_score, etc.) got
+            # pick_score = NaN, then fillna(0), then ranked as the worst
+            # possible play. This penalized exactly the low-PA guys most
+            # likely to be missing a season-derived signal (call-ups, spot
+            # starts). models.py's _score_from_weights (line 87) already
+            # handles this correctly — copy that pattern.
+            #
+            # NEW: for each row, zero the weight of any NaN component and
+            # divide by the row-local sum of PRESENT weights. A hitter
+            # with 3 of 4 optional signals gets ranked on those 3.
+            _fixed_total_w = sum(weights)  # kept for the ps_* contribution display
+            # Build a DataFrame of parts so we can operate row-wise
+            parts_df = pd.concat(
+                [p.rename(str(i)) for i, p in enumerate(score_parts)],
+                axis=1,
+            )
+            weights_arr = np.array(weights, dtype=float)
+            # Per-row present-weight mask
+            present_mask = parts_df.notna().astype(float).values
+            row_weight_totals = present_mask @ weights_arr  # shape (n_rows,)
+            # Guard against zero (no components present) — result is NaN
+            safe_totals = np.where(row_weight_totals > 0, row_weight_totals, np.nan)
+            # Fill NaN parts with 0 so the multiplication is well-defined,
+            # then multiply by weights, sum across components, divide by
+            # PER-ROW present-weight total.
+            parts_filled = parts_df.fillna(0).values
+            weighted_sum = parts_filled @ weights_arr
+            q["pick_score"] = weighted_sum / safe_totals
+            # Where NO components were present, pick_score is NaN — the
+            # correct signal that we have nothing to rank on. Downstream
+            # fillna(0) still applies for the strong-play threshold.
 
             # Store each component's contribution to the final base score.
-            # contribution = pct_rank * (weight / total_weight)
-            # Sum of all ps_* columns = the base pick_score (before bonuses/penalties).
+            # contribution = pct_rank * (weight / FIXED total_weight)
+            # — fixed denominator so contributions across rows are comparable.
+            # For rows where the component is NaN, contribution is NaN
+            # (not zero) so the audit reflects "this signal was missing."
             for col_name, pct_series, w in component_meta:
-                q[col_name] = (pct_series * (w / total_w)).round(2)
+                q[col_name] = (pct_series * (w / _fixed_total_w)).round(2)
 
             # Lineup confirmation bonus/penalty — store as ps_bonus_lineup
             if "is_roster_fill" in q.columns:
@@ -12374,14 +12446,11 @@ def build_col_config():
                 "Range: 0-5%."
             ),
         ),
-        "hr_score": st.column_config.NumberColumn(
-            "HR Score", format="%.1f",
-            help=(
-                "0-100 COMPOSITE SCORE (not a probability). "
-                "Combines barrel%, ISO, xwOBA, recent form × today's park/weather mult. "
-                "Used as input to sleeper_score percentile rank."
-            ),
-        ),
+        # v43.78 (auditor-found): the duplicate "hr_score" entry that used
+        # to live here was silently overriding the v43.41 primary at
+        # line 12128 (%.0f, detailed help text) with the older %.1f + stale
+        # help. In a Python dict literal the LATER key wins, so users saw
+        # the stale format. Removed.
         # v43.54 (reviewer cleanup L3): hr_prob column_config removed.
         # `hr_prob` is dropped from combined_all (see line ~9792), so this
         # config never renders. Was an alias for HR Score from the v43.41
