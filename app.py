@@ -25,7 +25,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.75-gist-auto-recovery-and-nuclear-12"
+APP_VERSION = "2026.06.10-v43.76-diagnostic-cleanup"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -2041,34 +2041,10 @@ if slate.empty:
 try:
     hitter_stats = get_hitter_stats(_stats_day=_stats_day_key()) if not slate.empty else pd.DataFrame()
 
-    # v43.71 (production-debug): trace coverage of the researcher-framework
-    # columns at this stage so we can compare with combined_picks later.
-    # v43.73: removed the slate-overlap sub-diagnostic — it silently failed
-    # because get_lineup isn't reachable at this scope. The definitive
-    # ID-overlap test now lives inside data_fetcher.get_hitter_stats and
-    # surfaces via the "Distance/Barrels fallback debug" line.
-    try:
-        if not hitter_stats.empty:
-            _hs_total = len(hitter_stats)
-            _trace_pieces = []
-            for _col in ["avg_dist", "barrel_count", "near_hr_est"]:
-                if _col in hitter_stats.columns:
-                    _n = int(hitter_stats[_col].notna().sum())
-                    _trace_pieces.append(f"{_col}: {_n}/{_hs_total}")
-                else:
-                    _trace_pieces.append(f"{_col}: ❌ missing column")
-            if _trace_pieces:
-                stash_diagnostic(
-                    "pipeline_health",
-                    "**[Trace] hitter_stats coverage** (after get_hitter_stats, "
-                    "before build_matchup_table): " + " · ".join(_trace_pieces)
-                    + ". Compare with the combined_picks coverage above — if "
-                    "this shows data but combined_picks doesn't, the loss is "
-                    "in build_matchup_table's display_cols filter or the "
-                    "per-game lineup merge."
-                )
-    except Exception:
-        pass
+    # v43.76: removed the [Trace] hitter_stats coverage diagnostic that
+    # was added in v43.71 to debug the avg_dist merge. The investigation
+    # was closed in v43.75 (avg_dist dropped from Nuclear). Diagnostic
+    # was producing noise without actionable signal.
 except (ConnectionError, requests.exceptions.RequestException) as _e:
     st.error(
         f"⚠️ **Baseball Savant (hitter data) is currently unreachable.**\n\n"
@@ -4989,7 +4965,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.75 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.76 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -5410,35 +5386,9 @@ for _, game in slate.iterrows():
         pitcher_arsenal_df=pitcher_arsenal_all,
     )
 
-    # v43.71 (production-debug): trace ONCE on the first game's away matchup
-    # to see if avg_dist/barrel_count survive build_matchup_table.
-    # Bounded by a session_state flag so it doesn't spam every game.
-    try:
-        if not st.session_state.get("_matchup_trace_done"):
-            st.session_state["_matchup_trace_done"] = True
-            if away_matchup is not None and not away_matchup.empty:
-                _mm_total = len(away_matchup)
-                _mm_pieces = []
-                for _col in ["avg_dist", "barrel_count", "near_hr_est",
-                             "barrel_pct", "hard_hit"]:
-                    if _col in away_matchup.columns:
-                        _n = int(away_matchup[_col].notna().sum())
-                        _mm_pieces.append(f"{_col}: {_n}/{_mm_total}")
-                    else:
-                        _mm_pieces.append(f"{_col}: ❌ missing column")
-                stash_diagnostic(
-                    "pipeline_health",
-                    "**[Trace] First-game matchup_df coverage** (after "
-                    "build_matchup_table): " + " · ".join(_mm_pieces)
-                    + ". If avg_dist/barrel_count show '❌ missing column' "
-                    "but barrel_pct/hard_hit are populated, the issue is in "
-                    "display_cols — the new columns aren't surviving the "
-                    "whitelist for this lineup. If they're present here but "
-                    "0% on combined_picks, the loss is in _compute_near_hr "
-                    "or the criteria evaluators."
-                )
-    except Exception:
-        pass
+    # v43.76: removed the [Trace] First-game matchup_df coverage diagnostic
+    # added in v43.71. Investigation closed (v43.75 dropped avg_dist from
+    # Nuclear). No longer surfaces actionable info.
 
     # v43.5: HANDEDNESS OVERRIDE — the central handedness fix.
     # For each game, override season-overall barrel/hard_hit/xwoba/avg_ev/iso
@@ -8173,81 +8123,27 @@ if combined_picks is not None and not combined_picks.empty:
                 else:
                     st_n = _starters[col].notna().sum() if len(_starters) else 0
                     pct = 100 * st_n / n_st
-                    icon = "⚠️" if pct < 50 else "✅"
+                    # v43.76: informational icon (ℹ️) instead of warning (⚠️)
+                    # since these columns are no longer part of Nuclear
+                    # evaluation. 0% coverage is a known state, not an issue.
+                    icon = "ℹ️" if pct < 50 else "✅"
                     _researcher_audits.append(
                         f"{label}: starters {st_n}/{n_st} ({pct:.0f}%) {icon}"
                     )
             if _researcher_audits:
                 stash_diagnostic(
                     "pipeline_health",
-                    "**Researcher framework inputs** · "
+                    "**Researcher framework inputs (informational)** · "
                     + " · ".join(_researcher_audits)
-                    + "  ← v43.75: avg_dist + near_hr_est are NO LONGER part "
-                    + "of Nuclear (dropped after 7 ships of unsuccessful "
-                    + "investigation into Savant's exit-velo endpoint). "
-                    + "Nuclear now evaluates 12 robust criteria — 0% on these "
-                    + "is informational only and does not affect grades."
+                    + "  ← v43.75: avg_dist + near_hr_est dropped from "
+                    + "Nuclear. These columns are still fetched and may show "
+                    + "in matchup tables, but 0% coverage no longer affects "
+                    + "grades or rankings."
                 )
 
-            # v43.69: surface the detailed fallback-fetch diagnostic so we
-            # can SEE which URLs were tried and what they returned. This is
-            # the smoking gun for "why is avg_dist still 0%."
-            try:
-                from data_fetcher import last_distance_diag
-                _dist_diag = last_distance_diag()
-                if _dist_diag:
-                    _lines = []
-                    for i, entry in enumerate(_dist_diag, 1):
-                        url_short = entry.get("url", "")[:80]
-                        status = entry.get("status")
-                        n_rows = entry.get("n_rows", 0)
-                        err = entry.get("error")
-                        if err:
-                            _lines.append(
-                                f"**URL {i}**: `{url_short}` · ❌ {err}"
-                            )
-                        else:
-                            cols_sample = entry.get("cols_sample", [])
-                            id_col = entry.get("id_col")
-                            dist_col = entry.get("dist_col")
-                            brl_col = entry.get("brl_col")
-                            dist_merged = entry.get("dist_merged", 0)
-                            brl_merged = entry.get("brl_merged", 0)
-                            # v43.73 — show overlap sample IDs and intersection size.
-                            # This is the definitive test for ID-system mismatch.
-                            ev_ids = entry.get("ev_sample_ids", [])
-                            df_ids = entry.get("df_sample_ids", [])
-                            overlap = entry.get("overlap_size")
-                            ev_n = entry.get("ev_sample_size")
-                            df_n = entry.get("df_sample_size")
-                            overlap_str = ""
-                            if overlap is not None:
-                                overlap_str = (
-                                    f" · 🆔 ev sample ids: {ev_ids} (of {ev_n}) "
-                                    f"· df sample ids: {df_ids} (of {df_n}) "
-                                    f"· **overlap = {overlap}**"
-                                )
-                            _lines.append(
-                                f"**URL {i}**: `{url_short}` · "
-                                f"HTTP {status} · {n_rows} rows · "
-                                f"id_col={id_col} · "
-                                f"dist_col={dist_col} (merged {dist_merged}) · "
-                                f"brl_col={brl_col} (merged {brl_merged}) · "
-                                f"first cols: {cols_sample[:8]}"
-                                f"{overlap_str}"
-                            )
-                    stash_diagnostic(
-                        "pipeline_health",
-                        "**Distance/Barrels fallback debug** "
-                        "(v43.69 — what each Savant URL returned):\n\n"
-                        + "\n\n".join(_lines)
-                        + "\n\n*If all show dist_col=None or merged=0, "
-                        "Savant either changed the column names or isn't "
-                        "returning data. Paste this whole block back so we "
-                        "can fix the right URL/column.*"
-                    )
-            except Exception:
-                pass
+            # v43.76: removed the Distance/Barrels fallback debug block.
+            # Investigation was closed in v43.75. The data_fetcher.last_distance_diag()
+            # function still exists for future investigation if needed.
         except Exception:
             pass
     except Exception as _scov_e:
