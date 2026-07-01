@@ -32,7 +32,6 @@ the dataset accumulates.
 from __future__ import annotations
 import logging
 from typing import Optional
-import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
@@ -435,3 +434,204 @@ def threshold_sweep(
             "lift": lift,
         })
     return pd.DataFrame(rows)
+
+
+# ============================================================================
+# v43.83 — Rolling feature importance + adaptive composite score
+# ============================================================================
+# The user-requested "look at results every day and find a pattern" loop.
+# Runs daily on app load: computes correlations, tracks which features
+# stayed predictive vs decayed, and generates an adaptive_score using the
+# top-N predictors weighted by their rolling correlation strength.
+#
+# What this is NOT: it does not modify hr_score or pick_score. It builds
+# a PARALLEL adaptive_score that the user can compare to see whether a
+# data-driven weighting outperforms the current fixed-weights model.
+# Auto-modifying the shipped model would need months of validation.
+
+# The canonical candidate feature set for HR prediction. Ordered by
+# theoretical importance (barrel/EV are direct HR precursors, discipline
+# and matchup effects are indirect).
+HR_CANDIDATE_FEATURES = [
+    "barrel_pct", "iso", "avg_ev", "hard_hit", "blast_pct",
+    "pull_pct", "pull_air_pct", "pulled_brl_pct",
+    "fb_pct", "xslg", "slg", "xwoba",
+    "hr_score", "hr_game_pct", "hr_pa_pct",
+    "must_have_met", "nuclear_met",
+    "matchup_opp", "power_score", "pitch_hr_score",
+    "lift_score", "discipline_score",
+    "recent_hr_weighted_rate",
+    "env_boost",
+]
+
+
+def compute_daily_correlations(merged_df: pd.DataFrame,
+                                outcome_col: str = "homered") -> dict:
+    """Compute Pearson correlations between all candidate features and outcome.
+
+    Called by the daily auto-runner. Returns a dict suitable for stashing
+    in the correlations history.
+
+    Args:
+        merged_df: output of merge_snapshots_with_outcomes
+        outcome_col: binary outcome ("homered", "got_hit", etc.)
+
+    Returns:
+        {"date_computed": str, "n_samples": int, "outcome": str,
+         "correlations": {feature: {"corr": float, "n": int}}}
+    """
+    from datetime import date
+    result = {
+        "date_computed": str(date.today()),
+        "n_samples": len(merged_df),
+        "outcome": outcome_col,
+        "correlations": {},
+    }
+    if merged_df.empty or outcome_col not in merged_df.columns:
+        return result
+
+    for feat in HR_CANDIDATE_FEATURES:
+        if feat not in merged_df.columns:
+            continue
+        valid = merged_df[[feat, outcome_col]].dropna()
+        if len(valid) < 30:
+            continue
+        try:
+            corr = float(valid[feat].astype(float).corr(
+                valid[outcome_col].astype(float)
+            ))
+            if pd.notna(corr):
+                result["correlations"][feat] = {
+                    "corr": round(corr, 4),
+                    "n": int(len(valid)),
+                }
+        except Exception:
+            continue
+    return result
+
+
+def rolling_feature_importance(correlation_history: list,
+                                lookback_days: int = 14) -> pd.DataFrame:
+    """Roll up the last N days of correlations into a feature-importance table.
+
+    Shows: which features are consistently predictive (high avg corr, low std),
+    which are noisy (high std), which are decaying (recent < older).
+
+    Args:
+        correlation_history: list of dicts from compute_daily_correlations,
+            each stored with a snapshot date
+        lookback_days: window size
+
+    Returns:
+        DataFrame with columns: feature, avg_corr, recent_corr, older_corr,
+        trend, std, n_days, reliability
+    """
+    if not correlation_history:
+        return pd.DataFrame()
+
+    # Take last N entries
+    recent = correlation_history[-lookback_days:]
+    if not recent:
+        return pd.DataFrame()
+
+    # Collect corr values per feature across days
+    per_feat = {}
+    for entry in recent:
+        corrs = entry.get("correlations", {})
+        for feat, obj in corrs.items():
+            per_feat.setdefault(feat, []).append(obj.get("corr", 0.0))
+
+    rows = []
+    for feat, corrs in per_feat.items():
+        if len(corrs) < 3:  # need at least 3 days
+            continue
+        arr = pd.Series(corrs)
+        avg_corr = float(arr.mean())
+        std = float(arr.std(ddof=0))
+        # Trend: compare last third to first third
+        n = len(corrs)
+        if n >= 6:
+            recent_third = float(pd.Series(corrs[-max(2, n//3):]).mean())
+            older_third = float(pd.Series(corrs[:max(2, n//3)]).mean())
+            trend = recent_third - older_third
+        else:
+            recent_third = avg_corr
+            older_third = avg_corr
+            trend = 0.0
+        rows.append({
+            "feature": feat,
+            "avg_corr": round(avg_corr, 4),
+            "recent_corr": round(recent_third, 4),
+            "older_corr": round(older_third, 4),
+            "trend": round(trend, 4),
+            "std": round(std, 4),
+            "n_days": n,
+            # Reliability: high avg, low std → high reliability
+            "reliability": round(
+                abs(avg_corr) / (std + 0.01) if std >= 0 else 0.0, 2
+            ),
+        })
+    return pd.DataFrame(rows).sort_values(
+        "avg_corr", key=abs, ascending=False
+    )
+
+
+def compute_adaptive_score(current_slate: pd.DataFrame,
+                            importance_df: pd.DataFrame,
+                            top_n_features: int = 5) -> pd.Series:
+    """Build a data-driven composite score from top-N features.
+
+    Each feature's contribution is weighted by its rolling correlation
+    strength. Only features with |avg_corr| >= 0.05 and n_days >= 5 are
+    included — otherwise the score degrades to noise.
+
+    Args:
+        current_slate: DataFrame with today's hitters (must contain features)
+        importance_df: output of rolling_feature_importance
+        top_n_features: how many predictors to combine
+
+    Returns:
+        pd.Series indexed to current_slate, values 0-100 (percentile rank)
+        of the weighted combination. NaN if not enough reliable features.
+    """
+    if current_slate.empty or importance_df.empty:
+        return pd.Series(dtype=float, index=current_slate.index)
+
+    # Filter to reliable predictors
+    reliable = importance_df[
+        (importance_df["avg_corr"].abs() >= 0.05)
+        & (importance_df["n_days"] >= 5)
+    ].head(top_n_features)
+    if reliable.empty:
+        return pd.Series(dtype=float, index=current_slate.index)
+
+    # Compute weighted percentile sum
+    parts = []
+    weights = []
+    for _, row in reliable.iterrows():
+        feat = row["feature"]
+        if feat not in current_slate.columns:
+            continue
+        pct = current_slate[feat].rank(pct=True) * 100.0
+        # Sign the contribution by correlation direction
+        # (positive corr → higher feature = higher score;
+        #  negative corr → higher feature = lower score)
+        signed = pct if row["avg_corr"] >= 0 else (100.0 - pct)
+        parts.append(signed)
+        weights.append(abs(float(row["avg_corr"])))
+
+    if not parts:
+        return pd.Series(dtype=float, index=current_slate.index)
+
+    # Per-row NaN-tolerant weighted average (same pattern as pick_score fix)
+    import numpy as np
+    weights_arr = np.array(weights)
+    parts_df = pd.concat(
+        [p.rename(str(i)) for i, p in enumerate(parts)], axis=1
+    )
+    present_mask = parts_df.notna().astype(float).values
+    row_weight_totals = present_mask @ weights_arr
+    safe_totals = np.where(row_weight_totals > 0, row_weight_totals, np.nan)
+    parts_filled = parts_df.fillna(0).values
+    weighted_sum = parts_filled @ weights_arr
+    return pd.Series(weighted_sum / safe_totals, index=current_slate.index)
