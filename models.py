@@ -355,8 +355,15 @@ def build_matchup_table(
         df["pitcher_zone_pct"] = pitcher_row.get("zone_percent", np.nan)
     else:
         df["pitcher_xwoba"] = np.nan
+        # v43.78 (auditor-found): pitcher_k_pct was missing from the else
+        # branch — line 578 reads it (k_combined derivation). KeyError risk
+        # if pitcher_row is empty. Also missing: pitcher_hr, pitcher_whiff.
+        # Adding all three symmetrically with the if-branch.
+        df["pitcher_k_pct"] = np.nan
         df["pitcher_k_inv"] = np.nan
         df["pitcher_barrel_allowed"] = np.nan
+        df["pitcher_hr"] = np.nan
+        df["pitcher_whiff"] = np.nan
         df["pitcher_zone_pct"] = np.nan
 
     # Normalize column names to consistent shorts
