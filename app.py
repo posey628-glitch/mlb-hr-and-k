@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.86-autosave-visible-and-count-fix"
+APP_VERSION = "2026.06.10-v43.87-nat-comparison-and-empty-df-fixes"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -2818,13 +2818,21 @@ if not st.session_state["_auto_eval_done"]:
         # one-digit month would sort wrong). Use pd.to_datetime so any
         # reasonable format works.
         def _parse_snap_date(s):
+            # v43.87: skip internal metadata keys (belt-and-suspenders — the
+            # list_snapshots filter should already catch these, but if they
+            # ever leak through, we return None to avoid NaT comparison crash).
+            if not s or str(s).startswith("_"):
+                return None
             try:
-                return pd.to_datetime(str(s).split("T")[0], errors="coerce").date()
+                _dt_obj = pd.to_datetime(str(s).split("T")[0], errors="coerce")
+                if pd.isna(_dt_obj):
+                    return None
+                return _dt_obj.date()
             except Exception:
                 return None
         _eligible = [
             s for s in _all_snaps
-            if (_d := _parse_snap_date(s)) and _d < _today_et
+            if (_d := _parse_snap_date(s)) is not None and _d < _today_et
         ]
 
         if not _eligible:
@@ -5194,7 +5202,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.86 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.87 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
