@@ -199,7 +199,29 @@ def _gist_read_all() -> dict | None:
             # Gist exists but doesn't have our file — first save scenario.
             # This is a legitimate "empty" state, not a read failure.
             return {}
-        content = target.get("content", "")
+        # v43.88 CRITICAL: GitHub truncates file content over ~1MB in API
+        # responses and sets truncated=true + a raw_url that serves the FULL
+        # content (up to 10MB). Without this check, a >1MB gist came back as
+        # cut-off JSON → JSONDecodeError → v43.75 auto-recovery misdiagnosed
+        # truncation as corruption and WIPED THE GIST. This is how accumulated
+        # snapshots (e.g. July 1 with outcomes) were destroyed.
+        if target.get("truncated") and target.get("raw_url"):
+            rr = requests.get(
+                target["raw_url"],
+                headers={"Authorization": f"token {token}"},
+                timeout=20,
+            )
+            if rr.status_code == 200:
+                content = rr.text
+            else:
+                _LAST_GIST_READ_ERROR = (
+                    f"Gist file is truncated (>1MB) and raw_url fetch failed "
+                    f"with HTTP {rr.status_code}. NOT wiping — data is intact "
+                    f"on GitHub, just unreadable this run."
+                )
+                return None
+        else:
+            content = target.get("content", "")
         if not content.strip():
             return {}
         return json.loads(content)
@@ -210,14 +232,24 @@ def _gist_read_all() -> dict | None:
         _LAST_GIST_READ_ERROR = f"Network connection failed: {type(e).__name__}"
         return None
     except json.JSONDecodeError as e:
-        # v43.75: AUTO-RECOVERY. Previously we returned None on corruption,
-        # which forced the user to manually click a reset button. They've
-        # been stuck in a loop where the reset doesn't seem to stick (likely
-        # they're not finding the button, or it requires re-confirmation
-        # each load). The right behavior: detect corruption, auto-reset to
-        # {}, log it so we can see it happened, then proceed normally.
-        # Data already lost to corruption is lost; no point making the user
-        # do ceremony around that fact.
+        # v43.88 CRITICAL GUARD: if the unparseable content is LARGE
+        # (≥850KB), this is almost certainly GitHub-side truncation of a
+        # >1MB file, NOT corruption. The full data is intact on GitHub.
+        # Auto-wiping here (the v43.75 behavior) DESTROYS real data.
+        # Only auto-wipe when the content is small — a genuinely mangled
+        # small file is unrecoverable anyway.
+        try:
+            _content_len = len(content.encode("utf-8"))
+        except Exception:
+            _content_len = 0
+        if _content_len >= 850_000:
+            _LAST_GIST_READ_ERROR = (
+                f"Gist content ({_content_len:,} bytes) failed to parse — "
+                f"this is truncation-shaped (file likely >1MB), NOT corruption. "
+                f"NOT wiping. Data is intact on GitHub. ({e})"
+            )
+            return None
+        # v43.75: AUTO-RECOVERY for genuinely corrupt SMALL content.
         _LAST_GIST_READ_ERROR = (
             f"Gist content is not valid JSON ({e}). "
             "v43.75 auto-recovery: wiped to empty and continuing. Prior "
@@ -255,22 +287,34 @@ def _gist_read_all() -> dict | None:
 
 
 def _gist_write_all(snapshots: dict) -> bool:
-    """Push the entire snapshot dict back to the gist. Returns True on success."""
+    """Push the entire snapshot dict back to the gist. Returns True on success.
+
+    v43.88 CRITICAL: this is now the single size-enforcement choke point.
+    Previously pruning only ran inside save_snapshot — but the outcome-attach
+    paths (auto_attach_outcomes, auto_run_pattern_discovery) call this
+    function directly and were adding ~25KB of outcomes per snapshot with NO
+    pruning. Combined with v43.83's expanded columns, the file blew past
+    GitHub's ~1MB write-truncation threshold → truncated JSON → (pre-v43.88)
+    auto-wipe. Every write now prunes to the target first, and if the payload
+    STILL exceeds the hard cap, the write is REFUSED (protecting the intact
+    data already on GitHub) rather than risking a truncated write.
+    """
     token = _gist_token()
     gist_id = _gist_id()
     if not token or not gist_id:
         return False
     try:
+        # Enforce the size budget on every write path.
+        snapshots, _n_dropped = _prune_snapshots_for_size(snapshots)
+        content = json.dumps(snapshots, default=str, separators=(",", ":"))
+        if len(content.encode("utf-8")) > _GIST_HARD_CAP_BYTES:
+            # Even after pruning we're over the hard cap — refuse rather
+            # than send a write GitHub may truncate mid-file.
+            return False
         payload = {
             "files": {
                 GIST_FILENAME: {
-                    # v43.74: compact JSON (no indent, tight separators) shrinks
-                    # the payload by 30-40% vs indent=2. Combined with v43.74's
-                    # 500K size target, this keeps us well under Gist's 1MB
-                    # ceiling even with 10 days of snapshots + outcomes.
-                    "content": json.dumps(
-                        snapshots, default=str, separators=(",", ":")
-                    ),
+                    "content": content,
                 }
             }
         }
@@ -306,50 +350,91 @@ def _gist_write_all(snapshots: dict) -> bool:
 # GitHub gist soft cap is around 1 MB per file before truncation/perf issues.
 # We target ~700 KB to leave headroom for one write to grow past the cap
 # before pruning catches it.
-_GIST_SIZE_TARGET_BYTES = 500_000  # v43.74: lowered from 700K. With compact
-                                     # JSON (no indent), the typical snapshot
-                                     # is ~40K bytes. 500K target = ~12 days
-                                     # of headroom before pruning kicks in,
-                                     # well below Gist's 1MB hard limit.
+_GIST_SIZE_TARGET_BYTES = 700_000  # v43.88: prune-to target. Slimmed
+                                     # snapshots (compact orientation, 3dp
+                                     # rounding, starters-only) run ~150-200KB
+                                     # each, so this holds ~3-4 snapshots.
+                                     # Raw-snapshot history is intentionally a
+                                     # short window — the durable learning
+                                     # memory is _pattern_history (60 days of
+                                     # daily correlations, a few KB each).
 
-# Keep at minimum this many of the most recent snapshots, regardless of size.
-# Below this, even if the gist is too large, don't prune (something else is
-# wrong — better to surface the error than silently delete real data).
-_MIN_SNAPSHOTS_TO_KEEP = 10  # v43.74: lowered from 14. Pattern Analysis needs
-                              # ~7+ snapshots for trustworthy signal; 10 leaves
-                              # buffer without bloating storage.
+_GIST_HARD_CAP_BYTES = 900_000  # v43.88: never send a write above this.
+                                 # GitHub truncates gist files near ~1MB
+                                 # (observed mid-write truncation at char
+                                 # ~921600 in v43.48 incident). A refused
+                                 # write preserves the intact data already
+                                 # on GitHub; a truncated write corrupts it.
+
+# Keep at minimum this many of the most recent snapshots when pruning to the
+# soft TARGET. The HARD cap overrides this — a gist that would exceed the
+# hard cap gets pruned below this floor, because losing old snapshots is
+# strictly better than a truncated write destroying everything.
+_MIN_SNAPSHOTS_TO_KEEP = 4  # v43.88: lowered from 10. With per-snapshot size
+                             # ~150-200KB, 10 could never fit under the cap —
+                             # the old floor made pruning mathematically
+                             # unable to succeed, guaranteeing oversize writes.
+
+_MAX_SNAPSHOTS_PER_DATE = 2  # v43.88: hourly auto-saves can create 5+
+                              # snapshots/day. For eval + pattern learning we
+                              # need at most the last couple per date (latest
+                              # lineups are the most accurate). Extra hourly
+                              # duplicates are the first thing pruned.
 
 
 def _prune_snapshots_for_size(snapshots: dict) -> tuple[dict, int]:
-    """v43.48: Drop oldest snapshots until serialized size is under target.
+    """v43.88 rewrite: bound serialized size while protecting what matters.
 
-    Snapshot keys are date-hour strings like '2026-06-23T19' — sortable as
-    strings. We drop oldest first, keeping the most recent N at minimum.
+    Order of operations:
+      1. Internal metadata keys (leading "_", e.g. _pattern_history) are
+         NEVER pruned — they're small and hold the 60-day learning memory.
+      2. If over target: collapse hourly duplicates — keep only the latest
+         _MAX_SNAPSHOTS_PER_DATE snapshots per date, dropping older hours.
+      3. If still over target: drop whole oldest snapshots, but not below
+         _MIN_SNAPSHOTS_TO_KEEP.
+      4. If still over the HARD cap: keep dropping oldest below the floor —
+         a short history beats a truncated write that destroys everything.
 
     Returns (pruned_dict, n_dropped).
     """
-    if not snapshots or len(snapshots) <= _MIN_SNAPSHOTS_TO_KEEP:
+    if not snapshots:
         return snapshots, 0
 
-    serialized = json.dumps(snapshots, default=str, separators=(",", ":"))
-    if len(serialized.encode("utf-8")) <= _GIST_SIZE_TARGET_BYTES:
+    def _size(d: dict) -> int:
+        return len(json.dumps(d, default=str, separators=(",", ":")).encode("utf-8"))
+
+    if _size(snapshots) <= _GIST_SIZE_TARGET_BYTES:
         return snapshots, 0
 
-    # Sort keys oldest-first. Drop oldest one at a time until under target,
-    # but never go below _MIN_SNAPSHOTS_TO_KEEP.
-    sorted_keys = sorted(snapshots.keys())
-    pruned = dict(snapshots)
+    protected = {k: v for k, v in snapshots.items() if str(k).startswith("_")}
+    real = {k: v for k, v in snapshots.items() if not str(k).startswith("_")}
     n_dropped = 0
-    while len(pruned) > _MIN_SNAPSHOTS_TO_KEEP:
-        # Drop the single oldest key
-        oldest = sorted_keys[n_dropped]
-        del pruned[oldest]
-        n_dropped += 1
-        # Check size again
-        if len(json.dumps(pruned, default=str, separators=(",", ":")).encode("utf-8")) <= _GIST_SIZE_TARGET_BYTES:
-            break
 
-    return pruned, n_dropped
+    # Step 2: per-date hourly collapse (drop older hours first)
+    by_date: dict = {}
+    for k in sorted(real.keys()):
+        by_date.setdefault(str(k).split("T")[0], []).append(k)
+    for d_str, keys in by_date.items():
+        # keys are sorted ascending; keep the LAST _MAX_SNAPSHOTS_PER_DATE
+        for k in keys[:-_MAX_SNAPSHOTS_PER_DATE] if len(keys) > _MAX_SNAPSHOTS_PER_DATE else []:
+            del real[k]
+            n_dropped += 1
+    merged = {**real, **protected}
+    if _size(merged) <= _GIST_SIZE_TARGET_BYTES:
+        return merged, n_dropped
+
+    # Steps 3+4: drop whole oldest snapshots
+    sorted_keys = sorted(real.keys())
+    for oldest in sorted_keys:
+        current = _size({**real, **protected})
+        if current <= _GIST_SIZE_TARGET_BYTES:
+            break
+        if len(real) <= _MIN_SNAPSHOTS_TO_KEEP and current <= _GIST_HARD_CAP_BYTES:
+            break  # under hard cap and at the floor — stop
+        del real[oldest]
+        n_dropped += 1
+
+    return {**real, **protected}, n_dropped
 
 
 def emergency_reset_gist() -> tuple[bool, str]:
@@ -508,6 +593,28 @@ def last_save_status() -> dict:
     return dict(_LAST_SAVE_STATUS)
 
 
+def snapshot_hitters(payload: dict) -> list[dict]:
+    """v43.88: decode hitter rows from a snapshot payload, either format.
+
+    New format (v43.88+): payload["hitters_compact"] = {"columns": [...],
+    "rows": [[...], ...]} — column-oriented to avoid repeating key names
+    per hitter (~470KB/snapshot of pure key repetition in the old format).
+    Legacy format: payload["hitters"] = [ {col: val, ...}, ... ].
+
+    Returns a list of dicts in all cases (possibly empty).
+    """
+    if not isinstance(payload, dict):
+        return []
+    compact = payload.get("hitters_compact")
+    if isinstance(compact, dict) and compact.get("columns"):
+        cols = compact["columns"]
+        return [dict(zip(cols, row)) for row in (compact.get("rows") or [])]
+    legacy = payload.get("hitters")
+    if isinstance(legacy, list):
+        return legacy
+    return []
+
+
 def save_snapshot(snapshot_date, matchup_df: pd.DataFrame,
                     pitcher_slate_df: pd.DataFrame,
                     snapshot_key: str | None = None,
@@ -551,13 +658,27 @@ def save_snapshot(snapshot_date, matchup_df: pd.DataFrame,
         # apparent accuracy (since "0% predicted, didn't homer" looks correct
         # but was never actually a prediction). Use None (JSON null) instead
         # so evaluate_hitter_projections can filter them out.
-        def _na_safe_records(df, keep_cols):
-            sub = df[keep_cols].copy()
-            # Convert NaN to None so JSON serializes as null, not 0
-            return sub.where(sub.notna(), None).to_dict("records")
+        #
+        # v43.88 (size crisis fix): three changes to keep the gist under
+        # GitHub's ~1MB truncation threshold:
+        #   1. ROUND floats to 3dp — full float64 reprs ("12.345678901234567")
+        #      were ~17 bytes each across ~50 numeric columns.
+        #   2. EXCLUDE bench rows — snapshots grade what the app ships
+        #      (starters + fills). Bench nearly doubled row count.
+        #   3. COMPACT column orientation ("hitters_compact": {"columns",
+        #      "rows"}) — records orientation repeated ~800 bytes of key
+        #      names PER HITTER (~470KB of pure key repetition per snapshot).
+        # Readers use snapshot_hitters() below, which handles both formats.
+        def _rounded(v):
+            if isinstance(v, float):
+                return round(v, 3)
+            return v
 
-        hitter_records = []
+        hitters_compact = None
         if matchup_df is not None and not matchup_df.empty:
+            _df = matchup_df
+            if "is_bench" in _df.columns:
+                _df = _df[~_df["is_bench"].fillna(False).astype(bool)]
             keep_cols = [c for c in [
                 "player_id", "player_name", "team", "opp", "lineup_pos",
                 # v43.4: 'game' is REQUIRED for the v43.3 pick_score diversity
@@ -604,7 +725,15 @@ def save_snapshot(snapshot_date, matchup_df: pd.DataFrame,
                 # Environment for env-boosted correlations
                 "env_boost", "opp_pitcher_xwoba",
             ] if c in matchup_df.columns]
-            hitter_records = _na_safe_records(matchup_df, keep_cols)
+            # Build compact column-oriented storage with rounded values
+            _sub = _df[keep_cols].where(_df[keep_cols].notna(), None)
+            hitters_compact = {
+                "columns": keep_cols,
+                "rows": [
+                    [_rounded(v) if v is not None and v == v else None for v in row]
+                    for row in _sub.itertuples(index=False, name=None)
+                ],
+            }
 
         pitcher_records = []
         if pitcher_slate_df is not None and not pitcher_slate_df.empty:
@@ -613,7 +742,14 @@ def save_snapshot(snapshot_date, matchup_df: pd.DataFrame,
                 "test_score", "kHR", "hr_suppress",
                 "proj_k", "role", "reliability",
             ] if c in pitcher_slate_df.columns]
-            pitcher_records = _na_safe_records(pitcher_slate_df, keep_cols)
+            _psub = pitcher_slate_df[keep_cols].where(
+                pitcher_slate_df[keep_cols].notna(), None
+            )
+            pitcher_records = [
+                {k: _rounded(v) if v is not None and v == v else None
+                 for k, v in rec.items()}
+                for rec in _psub.to_dict("records")
+            ]
 
         payload = {
             "date": str(snapshot_date),
@@ -630,7 +766,10 @@ def save_snapshot(snapshot_date, matchup_df: pd.DataFrame,
             # detect biased snapshots and either skip them or note the bias.
             # None / empty dict on snapshots taken before any games started.
             "filter_bias": filter_bias_metadata or {},
-            "hitters": hitter_records,
+            # v43.88: compact column-oriented hitters. Readers must use
+            # snapshot_hitters(payload) which decodes both this and the
+            # legacy "hitters" records list.
+            "hitters_compact": hitters_compact,
             "pitchers": pitcher_records,
         }
 
@@ -1090,7 +1229,7 @@ def auto_run_pattern_discovery() -> dict:
                 history = history[-60:]
                 snaps["_pattern_history"] = history
                 _gist_write_all(snaps)
-            except Exception as we:
+            except Exception:
                 # Non-fatal — session still has computed today_corrs
                 pass
         else:
@@ -1331,7 +1470,7 @@ def evaluate_hitter_projections(snapshot: dict, actuals: dict) -> dict:
     if not snapshot or not actuals:
         return {}
 
-    hitters = snapshot.get("hitters", [])
+    hitters = snapshot_hitters(snapshot)  # v43.88: handles both formats
     rows = []
     for h in hitters:
         pid = h.get("player_id")
