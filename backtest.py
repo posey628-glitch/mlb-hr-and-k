@@ -766,6 +766,12 @@ def list_snapshots() -> list[str]:
     """Return list of snapshot keys we have (date-only and date+hour formats).
 
     v42: keys may be "2026-06-08" (legacy) or "2026-06-08T14" (hour-keyed).
+
+    v43.87: EXCLUDE keys that start with "_" (like "_pattern_history",
+    "_LAST_SAVE_STATUS", etc.) — these are internal Gist-level metadata
+    buckets, not snapshots. Previously they leaked through and downstream
+    code that tried to parse them as dates crashed with NaT comparison
+    errors (yesterday's-results banner).
     """
     keys = set()
     # Gist tier — durable storage
@@ -783,7 +789,8 @@ def list_snapshots() -> list[str]:
         keys.update(local_keys)
     except Exception:
         pass
-    return sorted(keys)
+    # v43.87: filter internal metadata keys
+    return sorted(k for k in keys if not str(k).startswith("_"))
 
 
 def list_snapshot_dates() -> list[str]:
