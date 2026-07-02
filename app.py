@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.88-gist-truncation-fix-and-slim-snapshots"
+APP_VERSION = "2026.06.10-v43.89-adaptive-score-namerror-fix"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -3422,7 +3422,7 @@ if show_pattern_analysis:
     ):
         try:
             from backtest import (
-                _gist_read_all, list_snapshots, load_snapshot,
+                list_snapshots, load_snapshot,
                 fetch_hitter_outcomes,
                 durable_storage_configured,
             )
@@ -3832,11 +3832,19 @@ if show_pattern_analysis:
                                     "we have enough validation data (60+ slates) to "
                                     "confidently swap in a new weighting scheme."
                                 )
-                                if combined_picks is not None and not combined_picks.empty:
-                                    _starters_only = combined_picks
-                                    if "is_bench" in combined_picks.columns:
-                                        _starters_only = combined_picks[
-                                            ~combined_picks["is_bench"].fillna(False)
+                                # v43.89: the slate isn't built yet at this
+                                # point in the script (expander renders above
+                                # the slate assembly), so read the slim copy
+                                # stashed in session_state by the scoring
+                                # block. Fresh sessions populate it on the
+                                # first full run; the expander is typically
+                                # opened after, so data is present.
+                                _adaptive_slate = st.session_state.get("_slate_for_adaptive")
+                                if _adaptive_slate is not None and not _adaptive_slate.empty:
+                                    _starters_only = _adaptive_slate
+                                    if "is_bench" in _adaptive_slate.columns:
+                                        _starters_only = _adaptive_slate[
+                                            ~_adaptive_slate["is_bench"].fillna(False).astype(bool)
                                         ]
                                     adaptive = compute_adaptive_score(
                                         _starters_only, importance_df, top_n_features=5
@@ -3904,7 +3912,14 @@ if show_pattern_analysis:
                                             "More slates = more signal."
                                         )
                                 else:
-                                    st.info("No slate loaded — adaptive score needs today's hitters.")
+                                    st.info(
+                                        "Slate not captured yet this session — "
+                                        "the adaptive score reads today's scored "
+                                        "hitters, which populate on the first "
+                                        "full page run. Interact with anything "
+                                        "(or reopen this expander) and it will "
+                                        "appear."
+                                    )
                     except Exception as _de:
                         st.error(f"Rolling importance / adaptive score error: {_de}")
         except Exception as _pa_err:
@@ -5202,7 +5217,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.88 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.89 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -8830,6 +8845,26 @@ if combined_picks is not None and not combined_picks.empty:
         ) if c in q.columns]
         if "player_id" in q.columns:
             pick_audit = q[_ps_cols].drop_duplicates(subset="player_id", keep="first").copy()
+
+        # v43.89 (pyflakes F821 — auditor-style self-review): Section H of
+        # the Pattern Analysis expander referenced `combined_picks` directly,
+        # but that expander renders ~3,400 lines BEFORE the slate is built —
+        # NameError on every render, masked by its try/except into the
+        # generic "adaptive score error" message. Fix: stash a slim copy of
+        # the scored slate here (where it exists), keyed in session_state;
+        # Section H reads the stash. First-ever paint of a fresh session
+        # shows a "reload to populate" note; any rerun after has data.
+        try:
+            from pattern_analysis import HR_CANDIDATE_FEATURES as _adapt_feats
+            _adapt_cols = [c for c in (
+                ["player_name", "team", "is_bench",
+                 "pick_score", "hr_score", "hr_game_pct"] + list(_adapt_feats)
+            ) if c in q.columns]
+            st.session_state["_slate_for_adaptive"] = (
+                q[list(dict.fromkeys(_adapt_cols))].copy()
+            )
+        except Exception:
+            pass
 
         # ====================================================================
         # CONVERGENCE SCORE (v39) — "how many independent systems agree?"
