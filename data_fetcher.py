@@ -2263,7 +2263,12 @@ def _fetch_pitcher_splits_single(pitcher_id: int, season: int) -> dict:
                 if (pa is None or pa == 0) and ab and bb is not None:
                     pa = ab + bb
 
-                # If still no PA, fall back to AB for denominator (less precise)
+                # v43.90 (review completion): SEPARATE denominators — same fix
+                # the reviewer prompted for _parse_stat_split_response in v43.78,
+                # but this sibling parser was missed. HR/PA must use PA only;
+                # an AB fallback yields HR/AB (~10% overstated) under a _per_pa
+                # name. K%/BB% keep the AB fallback (tolerable approximation).
+                denom_pa_strict = pa if (pa and pa > 0) else None
                 denom = pa if (pa and pa > 0) else ab
 
                 if pa and pa > 0:
@@ -2274,8 +2279,9 @@ def _fetch_pitcher_splits_single(pitcher_id: int, season: int) -> dict:
                     # (the API often omits zero-count fields for "good" pitchers
                     # who gave up no HRs to one side). This was the Yesavage bug:
                     # 54 PA, .269 SLG, no HR field = should be 0% not NaN.
+                    if hr is not None and denom_pa_strict:
+                        out[f"vs_{label}_hr_per_pa"] = round(hr / denom_pa_strict * 100, 3)
                     if hr is not None:
-                        out[f"vs_{label}_hr_per_pa"] = round(hr / denom * 100, 3)
                         # v43.11: persist HR count so "3 HRs allowed to LHB in
                         # 180 PA" is visible alongside the rate. Helps spot
                         # situational vulnerability that the rate-only signal
@@ -2409,13 +2415,17 @@ def _fetch_hitter_splits_single(hitter_id: int, season: int) -> dict:
 
                 if pa is None and ab and bb is not None:
                     pa = ab + bb
+                # v43.90 (review completion): strict PA denominator for HR/PA —
+                # sibling of the v43.78 fix; see comment at the pitcher parser.
+                denom_pa_strict = pa if (pa and pa > 0) else None
                 denom = pa if (pa and pa > 0) else ab
 
                 if pa and pa > 0:
                     out[f"vs_{label}_pa"] = pa
                 if denom and denom > 0:
+                    if hr is not None and denom_pa_strict:
+                        out[f"vs_{label}_hr_per_pa"] = round(hr / denom_pa_strict * 100, 3)
                     if hr is not None:
-                        out[f"vs_{label}_hr_per_pa"] = round(hr / denom * 100, 3)
                         # v43.11: persist the raw HR count too. Rate alone hides
                         # whether "3% vs LHP" is "1 HR in 33 PA" (noise) or
                         # "12 HRs in 400 PA" (real platoon signal).
