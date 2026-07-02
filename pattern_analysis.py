@@ -67,9 +67,17 @@ def merge_snapshots_with_outcomes(snapshots: dict) -> pd.DataFrame:
             continue
         snapshot_date = str(snap_key).split("T")[0]
 
-        # The hitter projections live in payload["picks"] or payload["hitters"]
-        # depending on snapshot version
-        picks = payload.get("picks") or payload.get("hitters") or []
+        # The hitter projections live in payload["hitters_compact"] (v43.88
+        # column-oriented), payload["picks"], or payload["hitters"] (legacy
+        # records) depending on snapshot version. Decode locally — this
+        # module deliberately doesn't import backtest.
+        picks = []
+        _compact = payload.get("hitters_compact")
+        if isinstance(_compact, dict) and _compact.get("columns"):
+            _cols = _compact["columns"]
+            picks = [dict(zip(_cols, r)) for r in (_compact.get("rows") or [])]
+        if not picks:
+            picks = payload.get("picks") or payload.get("hitters") or []
         if not picks:
             continue
 
@@ -86,13 +94,27 @@ def merge_snapshots_with_outcomes(snapshots: dict) -> pd.DataFrame:
             # Build one combined row
             row = {"snapshot_date": snapshot_date, "player_id": pid}
             # Projection columns (whitelist what's useful for analysis)
+            # v43.88 (review finding): this whitelist predated v43.83's
+            # snapshot expansion, so only 12 of the 24 HR_CANDIDATE_FEATURES
+            # made it into the merged frame — daily correlations silently
+            # tracked half the intended predictor set. Now includes the
+            # full candidate set plus pick_score decomposition context.
             for col in [
                 "player_name", "team", "hr_score", "hr_game_pct", "pick_score",
                 "grade", "barrel_pct", "iso", "avg_ev", "blast_pct",
-                "pull_pct", "pull_air_pct", "hard_hit", "fb_pct",
+                "pull_pct", "pull_air_pct", "pulled_brl_pct", "hard_hit",
+                "fb_pct", "gb_pct", "ld_pct",
                 "must_have_met", "must_have_total", "must_have_pass",
                 "nuclear_met", "nuclear_total", "nuclear_grade",
                 "hit_game_pct", "tb_game_pct",
+                "hr_pa_pct", "power_score",
+                "xwoba", "xslg", "slg", "obp", "ops",
+                "k_pct", "bb_pct", "whiff_pct",
+                "discipline_score", "lift_score", "matchup_opp",
+                "recent_hr", "recent_hr_weighted_rate",
+                "pitch_hr_score", "pitch_match_score",
+                "env_boost", "opp_pitcher_xwoba",
+                "sleeper_score", "lineup_pos", "is_roster_fill",
             ]:
                 if col in pick:
                     row[col] = pick[col]
