@@ -2691,6 +2691,7 @@ VENUE_TIMEZONES = {
     # Pacific
     "Oracle Park": "America/Los_Angeles",
     "Dodger Stadium": "America/Los_Angeles",
+    "UNIQLO Field at Dodger Stadium": "America/Los_Angeles",  # v43.86 sponsor variant
     "Petco Park": "America/Los_Angeles",
     "Angel Stadium": "America/Los_Angeles",
     "T-Mobile Park": "America/Los_Angeles",
