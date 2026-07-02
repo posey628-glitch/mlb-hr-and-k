@@ -312,8 +312,9 @@ def researcher_framework_backtest(merged_df: pd.DataFrame) -> dict:
     # Must-Have pass cohort
     if "must_have_pass" in merged_df.columns:
         mh = merged_df.dropna(subset=["must_have_pass", "homered"])
-        mh_pass = mh[mh["must_have_pass"] == True]
-        mh_fail = mh[mh["must_have_pass"] == False]
+        _mh_mask = mh["must_have_pass"].fillna(False).astype(bool)
+        mh_pass = mh[_mh_mask]
+        mh_fail = mh[~_mh_mask]
         result["must_have"] = {
             "n_pass": len(mh_pass),
             "n_fail": len(mh_fail),
