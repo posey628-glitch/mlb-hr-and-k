@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.85-pattern-discovery-multi-tier"
+APP_VERSION = "2026.06.10-v43.86-autosave-visible-and-count-fix"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -3413,7 +3413,11 @@ if show_pattern_analysis:
         expanded=True  # v43.71: auto-expand so users can SEE the section
     ):
         try:
-            from backtest import _gist_read_all
+            from backtest import (
+                _gist_read_all, list_snapshots, load_snapshot,
+                fetch_hitter_outcomes,
+                durable_storage_configured,
+            )
             from pattern_analysis import (
                 merge_snapshots_with_outcomes,
                 cohort_analysis,
@@ -3423,13 +3427,51 @@ if show_pattern_analysis:
                 prop_accuracy_summary,
                 threshold_sweep,
             )
+            from datetime import date, datetime
 
-            _snaps = _gist_read_all() or {}
-            _with_outcomes = {
-                k: v for k, v in _snaps.items()
-                if isinstance(v, dict) and v.get("hitter_outcomes")
-            }
-            n_snaps_total = len(_snaps)
+            # v43.86 (auditor-found count mismatch): previously this read
+            # _gist_read_all() ONLY and counted len(_snaps) which included
+            # internal keys like _pattern_history — giving misleading totals
+            # AND missing snapshots that live on local disk during a warm
+            # container session. Now uses list_snapshots() + load_snapshot()
+            # (same multi-tier path as auto_run_pattern_discovery) so counts
+            # are consistent between the header banner and the daily runner.
+            _all_keys = [k for k in list_snapshots() if not str(k).startswith("_")]
+            _today = date.today()
+            _with_outcomes = {}
+            _snaps_by_date = {}
+            for k in _all_keys:
+                payload = load_snapshot(k)
+                if not isinstance(payload, dict):
+                    continue
+                _snaps_by_date[k] = payload
+                if payload.get("hitter_outcomes"):
+                    _with_outcomes[k] = payload
+
+            # Also fetch outcomes on-demand for past-date snapshots without them,
+            # mirroring auto_run_pattern_discovery. This ensures the manual
+            # Pattern Analysis expander shows the SAME analysis pool as the
+            # auto-runner, not a subset.
+            for k, payload in _snaps_by_date.items():
+                if k in _with_outcomes:
+                    continue
+                d_str = str(k).split("T")[0]
+                try:
+                    d_obj = datetime.fromisoformat(d_str).date()
+                except Exception:
+                    continue
+                if d_obj >= _today:
+                    continue  # today/future — games not final
+                try:
+                    h_out = fetch_hitter_outcomes(d_str)
+                    if h_out:
+                        payload = dict(payload)
+                        payload["hitter_outcomes"] = {str(pid): row for pid, row in h_out.items()}
+                        _with_outcomes[k] = payload
+                except Exception:
+                    continue
+
+            n_snaps_total = len(_snaps_by_date)
             n_snaps_with_outcomes = len(_with_outcomes)
 
             st.caption(
@@ -3441,10 +3483,21 @@ if show_pattern_analysis:
 
             if n_snaps_with_outcomes == 0:
                 st.info(
-                    "No snapshots with outcomes yet. Outcomes auto-attach when "
-                    "you reload the app on a day AFTER the snapshot date. "
-                    "Save snapshots tonight via 💾 Save Snapshot, then check "
-                    "back tomorrow to see this section populate."
+                    "**No snapshots with outcomes yet.**\n\n"
+                    "**How it works automatically:**\n"
+                    "1. Every time you open the app, a snapshot for the "
+                    "current hour is auto-saved (see Pipeline Health → "
+                    "Auto-snapshot status).\n"
+                    "2. The next day, when you open the app again, "
+                    "yesterday's outcomes get auto-attached to yesterday's "
+                    "snapshot.\n"
+                    "3. Pattern discovery then runs correlations and "
+                    "populates Section G (Rolling Importance) + Section H "
+                    "(Adaptive Score).\n\n"
+                    "**Your action:** just open the app whenever you check "
+                    "picks — that's it. Opening it 3× per day (morning, "
+                    "afternoon, before first pitch) captures 3 snapshots. "
+                    "The next day everything auto-fills."
                 )
             else:
                 merged = merge_snapshots_with_outcomes(_with_outcomes)
@@ -5141,7 +5194,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.85 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.86 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -11329,6 +11382,13 @@ if all_hitters:
         # If list_snapshots itself raises (e.g. gist read failure), user
         # needs to see why auto-save didn't fire.
         auto_snap_status = f"⚠️ Auto-snap check error: {type(e).__name__}: {e}"
+
+    # v43.86 (user-requested visibility): auto-snap happens on every load
+    # but was displayed as a small caption below the manual save button
+    # — user often missed it and thought no snapshots were saving. Surface
+    # it in Pipeline Health where they check status.
+    if auto_snap_status:
+        stash_diagnostic("pipeline_health", f"**Auto-snapshot:** {auto_snap_status}")
 
     # Save-snapshot + full export buttons - always render
     snap_col1, snap_col2, snap_col3 = st.columns([1.2, 1.5, 3])
