@@ -571,6 +571,15 @@ def rolling_feature_importance(correlation_history: list,
                 abs(avg_corr) / (std + 0.01) if std >= 0 else 0.0, 2
             ),
         })
+    # v43.87: guard against empty rows. pd.DataFrame([]).sort_values("avg_corr")
+    # raises KeyError because the empty df has no columns. Return an empty df
+    # with the proper columns so callers (Section G) can safely check .empty
+    # and column presence.
+    if not rows:
+        return pd.DataFrame(columns=[
+            "feature", "avg_corr", "recent_corr", "older_corr",
+            "trend", "std", "n_days", "reliability",
+        ])
     return pd.DataFrame(rows).sort_values(
         "avg_corr", key=abs, ascending=False
     )
