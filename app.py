@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.92-temp-coefficient-calibration"
+APP_VERSION = "2026.06.10-v43.93-confirmation-gated-lineup-bonus"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -5217,7 +5217,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.92 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.93 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -7388,6 +7388,13 @@ for gpk, ctx in game_context_map.items():
         x["game"] = f"{g_row['away_team_abbr']} @ {g_row['home_team_abbr']}"
         # Bench frames are still TEAM-aligned with their side prefix
         team_side = "away" if side.startswith("away") else "home"
+        # v43.93 (user-flagged skew): carry per-row lineup confirmation so
+        # scoring can distinguish MLB-POSTED lineups from projected ones.
+        # Without this, the +3 "confirmed starter" bonus fired on hitters
+        # in lineups MLB hadn't posted yet — rewarding a guess as if it
+        # were fact. Also snapshotted so pattern analysis can segment
+        # confirmed-vs-unconfirmed prediction accuracy.
+        x["lineup_confirmed"] = bool(ctx.get(f"{team_side}_lineup_confirmed"))
         x["team"] = g_row[f"{team_side}_team_abbr"]
         opp_side = "home" if team_side == "away" else "away"
         x["opp_pitcher"] = g_row.get(f"{opp_side}_pitcher", "TBD") or "TBD"
@@ -8736,10 +8743,22 @@ if combined_picks is not None and not combined_picks.empty:
                     if "is_bench" in q.columns
                     else pd.Series(False, index=q.index)
                 )
-                # Priority: padding fill (-2) > bench (0) > confirmed starter (+3)
+                # v43.93: four-way split. The +3 previously fired on ANY
+                # non-fill non-bench row, including hitters in lineups MLB
+                # had not posted yet (partial posts, projected nines). A
+                # confirmation bonus must require confirmation:
+                #   +3 confirmed starter (MLB posted the lineup)
+                #    0 unconfirmed non-fill (neutral — no reward for a guess)
+                #    0 bench
+                #   -2 padding fill
+                confirmed = (
+                    q["lineup_confirmed"].fillna(False).astype(bool)
+                    if "lineup_confirmed" in q.columns
+                    else pd.Series(True, index=q.index)  # legacy frames
+                )
                 lineup_adj = np.where(
                     fill, -2.0,
-                    np.where(bench, 0.0, 3.0)
+                    np.where(bench, 0.0, np.where(confirmed, 3.0, 0.0))
                 )
                 q["pick_score"] = q["pick_score"] + lineup_adj
                 q["ps_bonus_lineup"] = lineup_adj
