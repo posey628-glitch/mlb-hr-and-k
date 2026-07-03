@@ -369,7 +369,13 @@ def ttop_multiplier(lineup_pos: int, expected_ip: float = 5.5) -> float:
     """
     Hitter HR multiplier based on times-through-order.
     First time through: ~1.00. Second: ~1.05. Third: ~1.12.
-    Currently not called from the main pipeline — kept for future use.
+
+    v43.91 docstring fix: this IS called from the main pipeline
+    (app.py ~6205) as a pitcher-outing-depth multiplier — always with
+    lineup_pos=1 and a varying expected_ip, so deep-outing starters
+    (6+ IP → hitters see them a 3rd time) boost the whole opposing
+    lineup. The lineup_pos parameter is validated but unused by design
+    under that call pattern.
     """
     if lineup_pos is None or lineup_pos < 1 or lineup_pos > 9:
         return 1.0
