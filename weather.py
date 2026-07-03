@@ -583,10 +583,17 @@ def hr_multiplier(weather: dict, park: dict, skip_wind: bool = False,
     altitude_dampener = 0.5 if park.get("name") in HIGH_ALTITUDE_PARKS else 1.0
     temp = weather.get("temp_f")
     if temp is not None:
+        # v43.92 (assumptions audit): coefficients raised toward the evidence.
+        # Ball-flight physics (Nathan): ~0.35 ft carry per °F ≈ 4-5% HR prob
+        # per 10°F on borderline flies. Observational (Callahan et al. 2023):
+        # ~1.7-1.9% more HRs per +1°C ≈ 9-10%/10°F, but confounded by
+        # season effects. Old +3%/10°F sat below both; +4% warm stays
+        # conservative within the range. Cold gets +5%/10°F because TWO
+        # mechanisms stack: denser air AND reduced ball COR when cold.
         if temp >= 70:
-            t_eff = (temp - 70) / 10 * 0.03 * altitude_dampener
+            t_eff = (temp - 70) / 10 * 0.04 * altitude_dampener
         else:
-            t_eff = (temp - 70) / 10 * 0.04 * altitude_dampener  # stronger cold penalty
+            t_eff = (temp - 70) / 10 * 0.05 * altitude_dampener  # stronger cold penalty
         mult *= (1 + t_eff * roof_factor)
         if temp >= 85:
             summary.append(f"🌡️ {temp:.0f}°F (carries well)")
