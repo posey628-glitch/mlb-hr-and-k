@@ -27,7 +27,6 @@ LF_BEARING / RF_BEARING: bearing toward LF and RF foul poles. Used to
 LAT/LON: Used to fetch weather from Open-Meteo (no API key needed).
 """
 
-import math
 
 # Keys are MLB Stats API venue names (must match exactly what comes from
 # the schedule endpoint). When in doubt, print game['venue'] and add it here.
