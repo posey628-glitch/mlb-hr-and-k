@@ -722,6 +722,7 @@ def save_snapshot(snapshot_date, matchup_df: pd.DataFrame,
                 "discipline_score", "lift_score", "matchup_opp",
                 "recent_hr", "recent_hr_weighted_rate",
                 "pitch_hr_score", "pitch_match_score",
+                "lineup_confirmed",  # v43.93: segment confirmed-vs-projected accuracy
                 # Environment for env-boosted correlations
                 "env_boost", "opp_pitcher_xwoba",
             ] if c in matchup_df.columns]
