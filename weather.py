@@ -38,7 +38,6 @@ from __future__ import annotations
 
 import math
 from datetime import datetime
-from typing import Optional
 
 import requests
 import streamlit as st
@@ -631,12 +630,21 @@ def hr_multiplier(weather: dict, park: dict, skip_wind: bool = False,
         elif wind_mph >= 5:
             summary.append(f"{wind_mph:.0f}mph cross")
 
-    # Humidity - heavier air at high humidity in normal temp ranges
+    # Humidity — v43.91 (user-prompted physics correction): the previous
+    # -2% penalty at >70% RH encoded the "heavy humid air" myth with the
+    # mechanism backwards. Humid air is LESS dense than dry air (H2O mw 18
+    # displaces N2/O2 at 28/32), so carry is very slightly BETTER when muggy
+    # — Alan Nathan's ball-flight work puts the full 0→100% RH swing at
+    # ~1 foot of fly-ball distance. The REAL humidity effect is on the
+    # BALL (humidor-stored balls are heavier/deader — what MythBusters
+    # actually tested), but MLB mandated humidors league-wide in 2022, so
+    # ball storage is standardized and game-day air humidity has no ball
+    # pathway left. The old -2% also partially double-counted rain, which
+    # precip_prob already handles below. Net: no multiplier; keep the
+    # display note at extreme humidity for context only.
     humidity = weather.get("humidity")
-    if humidity is not None and humidity > 70:
-        mult *= (1 - 0.02 * roof_factor)
-        if humidity > 85:
-            summary.append(f"💦 {humidity:.0f}% humid")
+    if humidity is not None and humidity > 85:
+        summary.append(f"💦 {humidity:.0f}% humid")
 
     # Pressure - low pressure = ball carries (storm fronts, etc)
     pressure = weather.get("pressure_hpa")
