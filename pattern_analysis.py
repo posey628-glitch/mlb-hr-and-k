@@ -58,7 +58,9 @@ def merge_snapshots_with_outcomes(snapshots: dict) -> pd.DataFrame:
         return pd.DataFrame()
 
     rows = []
-    for snap_key, payload in snapshots.items():
+    # v43.95: iterate in sorted key order so the dedupe below keeps the
+    # LATEST hourly snapshot of each date (freshest lineups/projections).
+    for snap_key, payload in sorted(snapshots.items()):
         if not isinstance(payload, dict):
             continue
         # Only use snapshots that HAVE outcome data attached
@@ -92,7 +94,8 @@ def merge_snapshots_with_outcomes(snapshots: dict) -> pd.DataFrame:
                 continue  # snapshot has outcomes but not for this player
 
             # Build one combined row
-            row = {"snapshot_date": snapshot_date, "player_id": pid}
+            row = {"snapshot_date": snapshot_date, "player_id": pid,
+                   "_snap_key": str(snap_key)}
             # Projection columns (whitelist what's useful for analysis)
             # v43.88 (review finding): this whitelist predated v43.83's
             # snapshot expansion, so only 12 of the 24 HR_CANDIDATE_FEATURES
@@ -130,7 +133,21 @@ def merge_snapshots_with_outcomes(snapshots: dict) -> pd.DataFrame:
 
     if not rows:
         return pd.DataFrame()
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+    # v43.95 (diagnostic-exposed): the same player-game appeared once PER
+    # HOURLY SNAPSHOT of a date (6 snapshots of 2 slates → 1116 "rows" from
+    # ~470 unique player-games). That inflated n ~2.4×, overweighted
+    # whichever dates had more snapshots in every correlation, and
+    # overstated significance. One outcome per (date, player) is the
+    # statistical truth — keep the latest snapshot's projection of each.
+    if not df.empty and "player_id" in df.columns:
+        df = (
+            df.sort_values("_snap_key")
+              .drop_duplicates(subset=["snapshot_date", "player_id"], keep="last")
+              .drop(columns=["_snap_key"])
+              .reset_index(drop=True)
+        )
+    return df
 
 
 # ============================================================================
