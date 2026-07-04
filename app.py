@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.93-confirmation-gated-lineup-bonus"
+APP_VERSION = "2026.06.10-v43.95-dedupe-player-games-in-analysis"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -5217,7 +5217,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.93 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.95 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -14474,43 +14474,117 @@ with st.expander("🎛️ Custom Grade Builder — pick your own metrics", expan
         if not _available:
             st.warning("No metrics available — no usable columns in combined_all.")
         else:
-            # Build label → key map for the multiselect
-            _label_to_key = {f"{v[0]} — {v[2]}": k for k, v in _available.items()}
+            # ============================================================
+            # v43.94 (user-reported): three fixes to this tool.
+            # 1. PRESETS — you shouldn't need to be a sabermetrician to use
+            #    this. Four curated weight sets, incl. a data-driven one
+            #    wired to Section G's measured correlations.
+            # 2. st.form — previously EVERY slider tick reran the whole
+            #    script (the "takes so long to load"). Now nothing
+            #    recomputes until you press Apply.
+            # 3. Starters-only default + minimum-data rule — bench players
+            #    (82-84% coverage) filled the table with "None" cells, and
+            #    per-row renormalization let a player with data on ONE
+            #    metric outrank complete-data starters. Now a row needs
+            #    data on ≥60% of the selected metrics to receive a score,
+            #    and a Data column shows n/total so partial rows are
+            #    visible instead of silently skewing.
+            # ============================================================
+            _PRESETS = {
+                "🏆 Model blend (recommended start)": {
+                    "hr_game_pct": 3.0, "matchup_opp": 1.5, "power_score": 1.5,
+                    "pitch_hr_score": 1.0, "recent_hr_weighted_rate": 1.0,
+                    "env_boost": 0.75,
+                },
+                "💪 Raw power (matchup-blind)": {
+                    "pulled_brl_pct": 2.0, "barrel_pct": 2.0, "iso": 1.5,
+                    "hard_hit": 1.0, "fb_pct": 1.0, "max_hit_speed": 0.75,
+                },
+                "🎯 Matchup-driven (today-specific)": {
+                    "matchup_opp": 2.0, "pitch_hr_score": 2.0,
+                    "pitch_match_score": 1.5, "env_boost": 1.0,
+                    "hr_game_pct": 1.0,
+                },
+            }
+            # Data-driven preset from the learning loop (Section G).
+            _dd_weights, _dd_note = None, None
+            try:
+                from backtest import load_pattern_history
+                from pattern_analysis import rolling_feature_importance
+                _hist = load_pattern_history()
+                _imp = rolling_feature_importance(_hist) if _hist else None
+                if _imp is not None and not _imp.empty:
+                    _top = _imp[_imp["feature"].isin(_available.keys())].head(6)
+                    if len(_top) >= 3:
+                        _max_c = max(abs(float(r["avg_corr"])) for _, r in _top.iterrows()) or 1.0
+                        _dd_weights = {
+                            r["feature"]: round(3.0 * abs(float(r["avg_corr"])) / _max_c, 2)
+                            for _, r in _top.iterrows()
+                        }
+                        _dd_note = f"weights ∝ measured HR correlation over {int(_top['n_days'].max())} day(s) of your own slates"
+                if _dd_weights:
+                    _PRESETS["🤖 Data-driven (learned from YOUR results)"] = _dd_weights
+            except Exception:
+                pass
 
-            _selected_labels = st.multiselect(
-                "Pick metrics to include (1-10 recommended):",
-                options=list(_label_to_key.keys()),
-                default=[],
-                help=(
-                    "Each selected metric is percentile-ranked across the slate "
-                    "(0-100, higher = better; K%/whiff% auto-inverted). The "
-                    "composite is the weighted average of those ranks."
-                ),
-            )
-
-            _selected_keys = [_label_to_key[lbl] for lbl in _selected_labels]
+            _preset_options = list(_PRESETS.keys()) + ["🛠️ Custom — pick your own"]
+            with st.form("cgb_form"):
+                _preset_choice = st.selectbox(
+                    "Weight preset — a sensible starting point so you don't have to guess:",
+                    options=_preset_options, index=0,
+                    help=(
+                        "Model blend mirrors pick_score's philosophy. Raw power "
+                        "ranks pure thump ignoring today's pitcher. Matchup-driven "
+                        "is the opposite. Data-driven (appears after ~3 days of "
+                        "results) weights features by their MEASURED correlation "
+                        "with actual HRs on your slates — the learning loop's "
+                        "answer to 'what should the weights be'."
+                    ),
+                )
+                _starters_only_cgb = st.checkbox(
+                    "Starters only (recommended)", value=True,
+                    help=(
+                        "Bench players have 82-84% data coverage vs 100% for "
+                        "starters — including them fills the table with blank "
+                        "cells and lets partial-data players skew the rankings."
+                    ),
+                )
+                _label_to_key = {f"{v[0]} — {v[2]}": k for k, v in _available.items()}
+                _selected_labels = st.multiselect(
+                    "Custom mode only — pick metrics (ignored when a preset is chosen):",
+                    options=list(_label_to_key.keys()), default=[],
+                )
+                _custom_weights_on = st.checkbox(
+                    "Custom mode: adjust weights after first Apply", value=False,
+                )
+                _cgb_go = st.form_submit_button("▶ Apply / Recompute")
+            if not _cgb_go and "cgb_ran_once" not in st.session_state:
+                st.info("Choose a preset (or Custom) and press **Apply**. Nothing recomputes until you do — that's what makes this fast now.")
+                _selected_keys = []
+            else:
+                st.session_state["cgb_ran_once"] = True
+                if _preset_choice != "🛠️ Custom — pick your own":
+                    _preset_w = _PRESETS[_preset_choice]
+                    _selected_keys = [k for k in _preset_w if k in _available]
+                    _weights = {k: _preset_w[k] for k in _selected_keys}
+                    _w_desc = " · ".join(f"{_available[k][0]} ×{_weights[k]}" for k in _selected_keys)
+                    st.caption(f"**Using preset:** {_w_desc}" + (f" — _{_dd_note}_" if (_dd_note and _preset_choice.startswith('🤖')) else ""))
+                else:
+                    _selected_keys = [_label_to_key[lbl] for lbl in _selected_labels]
+                    _weights = {k: 1.0 for k in _selected_keys}
+                    if _custom_weights_on and _selected_keys:
+                        cols = st.columns(min(4, len(_selected_keys)))
+                        for i, k in enumerate(_selected_keys):
+                            with cols[i % len(cols)]:
+                                _weights[k] = st.slider(
+                                    f"{_available[k][0]} weight",
+                                    min_value=0.0, max_value=3.0, value=1.0, step=0.25,
+                                    key=f"cgb_w_{k}",
+                                )
 
             if not _selected_keys:
-                st.info("Pick at least one metric to see custom grades.")
+                pass
             else:
-                # Optional weights — default equal weight.
-                _use_weights = st.checkbox(
-                    "Adjust weights (default: equal weight for all selected)",
-                    value=False,
-                )
-                _weights = {}
-                if _use_weights:
-                    cols = st.columns(min(4, len(_selected_keys)))
-                    for i, k in enumerate(_selected_keys):
-                        with cols[i % len(cols)]:
-                            label = _available[k][0]
-                            _weights[k] = st.slider(
-                                f"{label} weight",
-                                min_value=0.0, max_value=3.0, value=1.0, step=0.25,
-                                key=f"cgb_w_{k}",
-                            )
-                else:
-                    _weights = {k: 1.0 for k in _selected_keys}
 
                 # ====================================================
                 # COMPUTE CUSTOM COMPOSITE
@@ -14519,11 +14593,21 @@ with st.expander("🎛️ Custom Grade Builder — pick your own metrics", expan
                 # → invert if lower_is_better → multiply by user weight
                 # → sum per row, normalize by total weight from contributing
                 # (non-NaN) metrics for that row.
-                _custom_sum = pd.Series(0.0, index=combined_all.index)
-                _weight_total = pd.Series(0.0, index=combined_all.index)
+                # v43.94: starters-only frame (bench coverage gaps were the
+                # "None in a lot of categories" complaint) + percentiles are
+                # now ranked WITHIN this frame so bench NaNs can't distort
+                # starter ranks either.
+                _cgb_frame = combined_all
+                if _starters_only_cgb and "is_bench" in combined_all.columns:
+                    _cgb_frame = combined_all[
+                        ~combined_all["is_bench"].fillna(False).astype(bool)
+                    ]
+                _custom_sum = pd.Series(0.0, index=_cgb_frame.index)
+                _weight_total = pd.Series(0.0, index=_cgb_frame.index)
+                _n_present = pd.Series(0, index=_cgb_frame.index)
 
                 for k in _selected_keys:
-                    col = pd.to_numeric(combined_all[k], errors="coerce")
+                    col = pd.to_numeric(_cgb_frame[k], errors="coerce")
                     if col.isna().all():
                         continue
                     pct = col.rank(pct=True, na_option="keep") * 100
@@ -14534,8 +14618,15 @@ with st.expander("🎛️ Custom Grade Builder — pick your own metrics", expan
                     mask = pct.notna()
                     _custom_sum = _custom_sum.add((pct.fillna(0) * w), fill_value=0)
                     _weight_total = _weight_total + (mask.astype(float) * w)
+                    _n_present = _n_present + mask.astype(int)
 
                 _custom_score = (_custom_sum / _weight_total.replace(0, np.nan))
+                # v43.94 minimum-data rule: a row must have data on ≥60% of
+                # the selected metrics to receive a score. Without this, a
+                # player with ONE lucky percentile and NaN everywhere else
+                # outranked complete-data hitters — the exact skew reported.
+                _min_needed = max(1, int(np.ceil(0.6 * len(_selected_keys))))
+                _custom_score = _custom_score.where(_n_present >= _min_needed)
 
                 # ====================================================
                 # GRADE FROM PERCENTILE COMPOSITE
@@ -14565,15 +14656,26 @@ with st.expander("🎛️ Custom Grade Builder — pick your own metrics", expan
                 # ====================================================
                 _has_score = _custom_score.notna()
                 if not _has_score.any():
-                    st.warning("No hitters have data on any of the selected metrics.")
+                    st.warning(
+                        f"No hitters have data on ≥{_min_needed} of the "
+                        f"{len(_selected_keys)} selected metrics."
+                    )
                 else:
+                    _n_excluded = int((_n_present > 0).sum() - _has_score.sum())
+                    if _n_excluded > 0:
+                        st.caption(
+                            f"ℹ️ {_n_excluded} hitter(s) hidden for having data on "
+                            f"fewer than {_min_needed}/{len(_selected_keys)} selected "
+                            f"metrics — partial-data rows skew rankings."
+                        )
                     _id_cols = [c for c in ("player_name", "team", "opp_pitcher")
-                                if c in combined_all.columns]
-                    _display = combined_all.loc[_has_score, _id_cols + _selected_keys].copy()
+                                if c in _cgb_frame.columns]
+                    _display = _cgb_frame.loc[_has_score, _id_cols + _selected_keys].copy()
+                    _display["data_n"] = _n_present[_has_score].astype(int).astype(str) + f"/{len(_selected_keys)}"
                     _display["custom_signal"] = _custom_score[_has_score].apply(_custom_emoji)
                     _display["custom_grade"] = _custom_score[_has_score].apply(_custom_grade)
                     _display["custom_score"] = _custom_score[_has_score].round(1)
-                    _front = ["custom_signal", "custom_grade", "custom_score"]
+                    _front = ["custom_signal", "custom_grade", "custom_score", "data_n"]
                     _display = _display[_front + [c for c in _display.columns if c not in _front]]
                     _display = _display.sort_values(
                         "custom_score", ascending=False, na_position="last",
@@ -14587,6 +14689,10 @@ with st.expander("🎛️ Custom Grade Builder — pick your own metrics", expan
                             "custom_score":  st.column_config.NumberColumn(
                                 "Score (percentile)", format="%.1f",
                                 help="Weighted average of percentile ranks across selected metrics (0-100)",
+                            ),
+                            "data_n": st.column_config.TextColumn(
+                                "Data", width="small",
+                                help="Metrics with data for this hitter / metrics selected. Rows below the 60% floor are hidden.",
                             ),
                             "player_name":   st.column_config.TextColumn("Hitter"),
                             "team":          st.column_config.TextColumn("Team", width="small"),
