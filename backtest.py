@@ -1207,31 +1207,56 @@ def auto_run_pattern_discovery() -> dict:
             )
             return result
 
-        today_corrs = compute_daily_correlations(merged, "homered")
-        if not today_corrs.get("correlations"):
+        # v43.96 (user-prompted redesign): bank ONE entry PER SLATE DATE,
+        # not one pooled entry per run-date. Two wins:
+        #   1. BACKFILL — every slate with outcomes still in storage gets
+        #      its history entry (re)computed on every run. Days lost to
+        #      the July-2 storage wipe are recovered automatically as long
+        #      as their snapshots exist; days never banked (like July 3's
+        #      empty morning) get banked the moment their data appears.
+        #   2. STATISTICS — pooled-cumulative entries were autocorrelated
+        #      (each contained all prior data), artificially deflating the
+        #      std in Section G and inflating "reliability." Per-slate
+        #      entries are independent observations — the correct unit.
+        # Entries for dates older than raw-snapshot retention keep their
+        # last banked value untouched, so history still outlives the
+        # short raw window by design.
+        new_entries = []
+        for d_str, day_df in merged.groupby("snapshot_date"):
+            day_corrs = compute_daily_correlations(day_df, "homered")
+            if day_corrs.get("correlations"):
+                day_corrs["date_computed"] = str(d_str)  # slate date, not run date
+                day_corrs["basis"] = "slate"
+                new_entries.append(day_corrs)
+        if not new_entries:
             result["note"] = (
-                f"Merged {len(merged)} rows but no feature had ≥30 valid pairs. "
-                f"Accumulate more slates before rolling analysis stabilizes."
+                f"Merged {len(merged)} rows but no slate-date had ≥30 valid "
+                f"pairs for any feature. Accumulate more slates."
             )
             return result
 
-        # Persist history entry to Gist
+        today_corrs = new_entries[-1]  # newest slate, for result reporting
+
+        # Persist: replace any existing entries for recomputed dates, keep rest
         if result["gist_configured"]:
             try:
                 snaps = _gist_read_all() or {}
                 history = snaps.get("_pattern_history") or []
                 if not isinstance(history, list):
                     history = []
+                _recomputed = {e["date_computed"] for e in new_entries}
                 history = [
                     h for h in history
-                    if h.get("date_computed") != today_corrs["date_computed"]
+                    if h.get("date_computed") not in _recomputed
                 ]
-                history.append(today_corrs)
+                history.extend(new_entries)
+                history = sorted(history, key=lambda h: h.get("date_computed", ""))
                 history = history[-60:]
                 snaps["_pattern_history"] = history
                 _gist_write_all(snaps)
+                result["n_history_days"] = len(history)
             except Exception:
-                # Non-fatal — session still has computed today_corrs
+                # Non-fatal — session still has computed entries
                 pass
         else:
             # Gist not configured — stash in-session so at least this run's
@@ -1240,12 +1265,10 @@ def auto_run_pattern_discovery() -> dict:
                 import streamlit as st  # noqa
                 if hasattr(st, "session_state"):
                     _hist = st.session_state.get("_pattern_history_local", [])
-                    _hist = [
-                        h for h in _hist
-                        if h.get("date_computed") != today_corrs["date_computed"]
-                    ]
-                    _hist.append(today_corrs)
-                    _hist = _hist[-60:]
+                    _rec = {e["date_computed"] for e in new_entries}
+                    _hist = [h for h in _hist if h.get("date_computed") not in _rec]
+                    _hist.extend(new_entries)
+                    _hist = sorted(_hist, key=lambda h: h.get("date_computed", ""))[-60:]
                     st.session_state["_pattern_history_local"] = _hist
             except Exception:
                 pass
@@ -1263,11 +1286,13 @@ def auto_run_pattern_discovery() -> dict:
             else "⚠️ session-only (Gist not configured)"
         )
         result["note"] = (
-            f"Analyzed {today_corrs['n_samples']} player-games from "
+            f"Banked/updated {len(new_entries)} slate-day correlation "
+            f"entr{'y' if len(new_entries) == 1 else 'ies'} "
+            f"({', '.join(e['date_computed'] for e in new_entries)}) from "
             f"{len(enriched)} snapshot(s) "
             f"({result['n_with_stored_outcomes']} stored{_live_note}); "
-            f"tracked correlations for {result['n_features']} features — "
-            f"{_durability}."
+            f"{result['n_features']} features tracked — {_durability}. "
+            f"History: {result.get('n_history_days', '?')} day(s)."
         )
     except Exception as e:
         result["note"] = f"Pattern discovery failed: {type(e).__name__}: {e}"
