@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.96-per-slate-history-backfill"
+APP_VERSION = "2026.06.10-v43.97-parlay-empty-slate-crash-fix"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -5217,7 +5217,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.96 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.97 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -10170,9 +10170,15 @@ if combined_picks is not None and not combined_picks.empty:
                     "_p1_name": rows[0]['player_name'],
                     "_p2_name": rows[1]['player_name'],
                 })
-            two_leg_all = pd.DataFrame(two_leg_parlays).sort_values(
-                "Parlay HR%", ascending=False
-            ).reset_index(drop=True)
+            # v43.97: guard the empty case (small slates → no combos).
+            _2LEG_COLS = ["Leg 1", "Leg 2", "Avg HR%", "Parlay HR%",
+                          "Approx Odds", "_p1_name", "_p2_name"]
+            two_leg_all = (
+                pd.DataFrame(two_leg_parlays).sort_values(
+                    "Parlay HR%", ascending=False
+                ).reset_index(drop=True)
+                if two_leg_parlays else pd.DataFrame(columns=_2LEG_COLS)
+            )
 
             # GREEDY DIVERSITY: cap each player at appearing in at most MAX_USES
             # parlay rows. User feedback was Wood appearing in 5+ rows was too
@@ -10222,9 +10228,16 @@ if combined_picks is not None and not combined_picks.empty:
                     "_p2_name": rows[1]['player_name'],
                     "_p3_name": rows[2]['player_name'],
                 })
-            three_leg_all = pd.DataFrame(three_leg_parlays).sort_values(
-                "Parlay HR%", ascending=False
-            ).reset_index(drop=True)
+            # v43.97: guard the empty case — THIS site crashed the app on
+            # the 2026-07-05 holiday-morning slate (no 3-game combos).
+            _3LEG_COLS = ["Leg 1", "Leg 2", "Leg 3", "Avg HR%", "Parlay HR%",
+                          "Approx Odds", "_p1_name", "_p2_name", "_p3_name"]
+            three_leg_all = (
+                pd.DataFrame(three_leg_parlays).sort_values(
+                    "Parlay HR%", ascending=False
+                ).reset_index(drop=True)
+                if three_leg_parlays else pd.DataFrame(columns=_3LEG_COLS)
+            )
             # Same MAX_USES rule for 3-leg
             three_leg_selected = []
             player_use_count_3 = {}
@@ -10337,9 +10350,15 @@ if combined_picks is not None and not combined_picks.empty:
                                 "Parlay HR%": joint * 100,
                                 "Approx Odds": f"+{int(round(1 / joint * 100 - 100))}" if joint > 0 else "N/A",
                             })
-                        sleeper_2leg_df = pd.DataFrame(sleeper_2leg).sort_values(
-                            "Parlay HR%", ascending=False
-                        ).head(8).reset_index(drop=True)
+                        # v43.97: same empty-list guard as the main parlays
+                        sleeper_2leg_df = (
+                            pd.DataFrame(sleeper_2leg).sort_values(
+                                "Parlay HR%", ascending=False
+                            ).head(8).reset_index(drop=True)
+                            if sleeper_2leg else pd.DataFrame(
+                                columns=["Leg 1", "Leg 2", "L1 HR%", "L2 HR%",
+                                         "Parlay HR%", "Approx Odds"])
+                        )
                         st.markdown(f"**💎 Top sleeper 2-leg parlays ({len(sleeper_2leg_df)})**")
                         st.dataframe(
                             sleeper_2leg_df, hide_index=True, use_container_width=True,
