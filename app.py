@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.97-parlay-empty-slate-crash-fix"
+APP_VERSION = "2026.06.10-v43.98-pitcher-hand-grade-on-game-slates"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -4527,6 +4527,35 @@ if not p_slate.empty:
     # not alphabetical order. We sort the dataframe by this BEFORE display.
     p_slate["_grade_rank"] = p_slate["grade"].apply(pitcher_grade_sort_key)
 
+    # v43.98 (user-requested): pitcher hand + grade surfaced on the game
+    # slates so you don't have to cross-reference the Pitcher Overview to
+    # know a matchup is a target (EXPLOIT/EXPLOIT+) or an avoid (ELITE).
+    _PITCHER_BADGE = {}
+    try:
+        for _, _pr in p_slate.iterrows():
+            _nm = str(_pr.get("pitcher_name") or "").strip()
+            if not _nm:
+                continue
+            _th = str(_pr.get("throws") or "").upper()
+            _th = _th if _th in ("L", "R") else "?"
+            _PITCHER_BADGE[_nm] = (_th, str(_pr.get("grade") or ""))
+    except Exception:
+        _PITCHER_BADGE = {}
+
+    def _decorate_pitcher(name: str) -> str:
+        """'Noah Cameron' → '**Noah Cameron** (L) 🎯 EXPLOIT+' when known."""
+        if not name or name == "TBD":
+            return f"**{name or 'TBD'}**"
+        hand, grade = _PITCHER_BADGE.get(str(name).strip(), ("", ""))
+        _emoji = {"EXPLOIT+": "🎯🎯", "EXPLOIT": "🎯",
+                  "ELITE": "🛑", "TOUGH": "⚠️"}.get(grade, "")
+        bits = [f"**{name}**"]
+        if hand in ("L", "R"):
+            bits.append(f"({hand}HP)")
+        if grade and grade != "MIXED":
+            bits.append(f"{_emoji} {grade}".strip())
+        return " ".join(bits)
+
     # Add a visible warning flag column combining role + sample_noise + IL
     if not p_slate.empty:
         def _warn_flag(r):
@@ -5217,7 +5246,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.97 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.98 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -13833,9 +13862,18 @@ if _valid_games:
         if time_str:
             header_bits.append(f"🕐 {time_str}")
         if game.get("away_pitcher") and game.get("home_pitcher"):
-            header_bits.append(
-                f"**{game['away_pitcher']}** vs **{game['home_pitcher']}**"
-            )
+            # v43.98: hand + EXPLOIT/ELITE badge inline. The away pitcher
+            # faces the HOME hitters and vice versa — a 🎯 next to a name
+            # means the OPPOSING lineup is the target.
+            try:
+                header_bits.append(
+                    f"{_decorate_pitcher(game['away_pitcher'])} vs "
+                    f"{_decorate_pitcher(game['home_pitcher'])}"
+                )
+            except Exception:
+                header_bits.append(
+                    f"**{game['away_pitcher']}** vs **{game['home_pitcher']}**"
+                )
         # Status flag — surface in progress / final / postponed games prominently
         game_status_str = (game.get("status") or "").strip()
         if game_status_str:
