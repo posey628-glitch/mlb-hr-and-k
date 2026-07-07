@@ -1297,6 +1297,11 @@ def get_slate(game_date: Optional[str] = None) -> pd.DataFrame:
     """
     if game_date is None:
         game_date = date.today().isoformat()
+    # v44.01: reset the dropped-games counter for this build
+    try:
+        globals()["_SLATE_DROPPED_GAMES"] = 0
+    except Exception:
+        pass
 
     url = (
         "https://statsapi.mlb.com/api/v1/schedule"
@@ -1359,7 +1364,39 @@ def get_slate(game_date: Optional[str] = None) -> pd.DataFrame:
     df = pd.DataFrame(rows)
     if not df.empty:
         df["gameTime"] = pd.to_datetime(df["gameTime"], errors="coerce")
+        # v44.01 (user-reported: phantom 2nd Brewers game showing Gasser):
+        # the schedule endpoint returns EVERY game on the date, including
+        # ones that won't be played — postponed, cancelled, suspended — each
+        # carrying its own probablePitcher. Without filtering, a postponed
+        # game appeared as a real matchup (e.g. a scrapped doubleheader
+        # game 2), attaching a wrong pitcher to a team that's only playing
+        # once. Drop non-playable statuses. Keep anything scheduled, live,
+        # warmup, pre-game, delayed, or final — only exclude games MLB has
+        # marked as not happening.
+        _dead_statuses = {
+            "Postponed", "Cancelled", "Canceled", "Suspended",
+            "Forfeit", "Completed Early: Rain",
+        }
+        if "status" in df.columns:
+            _before = len(df)
+            df = df[~df["status"].isin(_dead_statuses)].reset_index(drop=True)
+            _dropped = _before - len(df)
+            if _dropped > 0:
+                # Surface it so the user sees WHY a game vanished rather
+                # than silently changing the slate.
+                try:
+                    globals().setdefault("_SLATE_DROPPED_GAMES", 0)
+                    globals()["_SLATE_DROPPED_GAMES"] += _dropped
+                except Exception:
+                    pass
     return df
+
+
+def slate_dropped_games() -> int:
+    """v44.01: count of games dropped from the last slate build for being
+    postponed/cancelled/suspended. Surfaced in Pipeline Health so the user
+    understands why a matchup isn't shown."""
+    return int(globals().get("_SLATE_DROPPED_GAMES", 0) or 0)
 
 
 @st.cache_data(ttl=180)  # 3min — lineups are posted/changed throughout afternoon
