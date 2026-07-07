@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.98-pitcher-hand-grade-on-game-slates"
+APP_VERSION = "2026.06.10-v43.99-copyable-results-report"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -2971,6 +2971,55 @@ if _eval_metrics and _eval_date:
                 f"**Only pick_score**: {', '.join(sorted(only_ps)) if only_ps else 'none'} · "
                 f"**Only hr_game_pct**: {', '.join(sorted(only_legacy)) if only_legacy else 'none'}"
             )
+
+            # v43.99 (user-requested): a one-click copyable text report.
+            # Streamlit st.dataframe tables do NOT survive clipboard copy —
+            # pasting elsewhere loses every row. st.code() renders a copy
+            # button that grabs the whole block as plain text, so the full
+            # results + pattern context travel intact (e.g. back to here).
+            def _fmt_pred_rows(preds):
+                lines = []
+                for i, p in enumerate(preds, 1):
+                    hr = "HR" if p.get("homered") else "--"
+                    ps = p.get("pick_score")
+                    hg = p.get("hr_game_pct")
+                    ps_s = f"{ps:>5}" if isinstance(ps, (int, float)) else "  -- "
+                    hg_s = f"{hg:>4}%" if isinstance(hg, (int, float)) else "  -- "
+                    lines.append(
+                        f"{i:>2}. [{hr}] {str(p.get('name','?'))[:22]:<22} "
+                        f"pick {ps_s}  hr% {hg_s}  {p.get('game','') or ''}"
+                    )
+                return "\n".join(lines)
+
+            _report = []
+            _report.append(f"YESTERDAY'S RESULTS — {_eval_date}")
+            _report.append(f"Slate: {_actual_hrs} HRs across "
+                           f"{_eval_metrics.get('hitters_who_played', 0)} hitters "
+                           f"| avg HR rate {_slate_rate:.1f}% "
+                           f"| Brier {_eval_metrics.get('brier_score', 0):.4f}")
+            _report.append("")
+            _report.append(f"PICK_SCORE TOP 10 — {_top10_hits}/{len(_ps_preds)} "
+                           f"({_hit_rate:.0f}%), edge {_edge:+.1f}pp")
+            _report.append(_fmt_pred_rows(_ps_preds))
+            _report.append("")
+            _report.append(f"LEGACY hr_game_pct TOP 10 — {_legacy_hits}/"
+                           f"{len(_legacy_preds)} ({_legacy_hit:.0f}%)")
+            _report.append(_fmt_pred_rows(_legacy_preds))
+            _report.append("")
+            _report.append(f"Overlap {len(both)} | only pick_score: "
+                           f"{', '.join(sorted(only_ps)) if only_ps else 'none'} "
+                           f"| only hr_game_pct: "
+                           f"{', '.join(sorted(only_legacy)) if only_legacy else 'none'}")
+
+            # Append pattern-analysis context if it was computed this session
+            _pd_note = (st.session_state.get("_pattern_discovery_result") or {}).get("note")
+            if _pd_note:
+                _report.append("")
+                _report.append(f"PATTERN DISCOVERY: {_pd_note}")
+
+            with st.expander("📋 Copy results as text (tables paste intact)", expanded=False):
+                st.caption("Click the copy icon in the top-right of the box below.")
+                st.code("\n".join(_report), language="text")
         else:
             # Either pre-v43.4 snapshot (no pick_score metric) or
             # equivalent — just show what we have
@@ -5246,7 +5295,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.98 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v43.99 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
