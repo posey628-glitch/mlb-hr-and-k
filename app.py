@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v43.99-copyable-results-report"
+APP_VERSION = "2026.06.10-v44.00-section-h-order-independent"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -3474,6 +3474,7 @@ if show_pattern_analysis:
                 list_snapshots, load_snapshot,
                 fetch_hitter_outcomes,
                 durable_storage_configured,
+                snapshot_hitters,  # v44.00: Section H reads latest snapshot directly
             )
             from pattern_analysis import (
                 merge_snapshots_with_outcomes,
@@ -3881,14 +3882,36 @@ if show_pattern_analysis:
                                     "we have enough validation data (60+ slates) to "
                                     "confidently swap in a new weighting scheme."
                                 )
-                                # v43.89: the slate isn't built yet at this
-                                # point in the script (expander renders above
-                                # the slate assembly), so read the slim copy
-                                # stashed in session_state by the scoring
-                                # block. Fresh sessions populate it on the
-                                # first full run; the expander is typically
-                                # opened after, so data is present.
-                                _adaptive_slate = st.session_state.get("_slate_for_adaptive")
+                                # v44.00 (user-reported: Section H never
+                                # rendered): the old approach stashed the
+                                # scored slate in session_state from a block
+                                # ~5000 lines BELOW this one, so on every run
+                                # the reader executed before the writer and
+                                # got stale/absent data — reopening the
+                                # expander didn't reliably repaint it either.
+                                # Fix: derive the adaptive slate from the
+                                # SAME snapshot pool this section already
+                                # loaded for Sections A-G (latest snapshot =
+                                # today's scored hitters, with every feature
+                                # column). Fully order-independent, no
+                                # session-state dependency.
+                                _adaptive_slate = None
+                                try:
+                                    if _snaps_by_date:
+                                        _latest_key = max(_snaps_by_date.keys())
+                                        _latest_hitters = snapshot_hitters(
+                                            _snaps_by_date[_latest_key]
+                                        )
+                                        if _latest_hitters:
+                                            _adaptive_slate = pd.DataFrame(_latest_hitters)
+                                except Exception:
+                                    _adaptive_slate = None
+                                # Fallback to combined_all if the current
+                                # slate is already built and in scope
+                                if (_adaptive_slate is None or _adaptive_slate.empty) and \
+                                   "combined_all" in dir() and combined_all is not None \
+                                   and not combined_all.empty:
+                                    _adaptive_slate = combined_all
                                 if _adaptive_slate is not None and not _adaptive_slate.empty:
                                     _starters_only = _adaptive_slate
                                     if "is_bench" in _adaptive_slate.columns:
@@ -5295,7 +5318,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v43.99 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.00 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
