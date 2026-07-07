@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.00-section-h-order-independent"
+APP_VERSION = "2026.06.10-v44.01-filter-postponed-games"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -5318,7 +5318,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.00 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.01 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -8663,6 +8663,23 @@ if combined_picks is not None and not combined_picks.empty:
                 f"Add these to VENUE_TIMEZONES in data_fetcher.py to fix "
                 f"day/night classification for hitters in these games.",
                 level="warning",
+            )
+    except Exception:
+        pass
+
+    # v44.01: report games dropped for being postponed/cancelled/suspended,
+    # so the user knows why a scheduled matchup isn't on the slate (this is
+    # what removed the phantom 2nd Brewers/Gasser game).
+    try:
+        from data_fetcher import slate_dropped_games
+        _dropped_games = slate_dropped_games()
+        if _dropped_games > 0:
+            stash_diagnostic(
+                "pipeline_health",
+                f"**Slate: {_dropped_games} game(s) excluded** — MLB marked "
+                f"them postponed/cancelled/suspended. Their probable pitchers "
+                f"and hitters are correctly kept off the slate. If a real game "
+                f"is missing, check its status on MLB.com.",
             )
     except Exception:
         pass
