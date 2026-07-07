@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.01-filter-postponed-games"
+APP_VERSION = "2026.06.10-v44.02-per-game-moonshot-laser-targets"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -5318,7 +5318,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.01 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.02 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -13979,6 +13979,107 @@ if _valid_games:
             elif is_postponed:
                 header_bits.append(f"⚫ **{game_status_str.upper()}**")
         st.markdown(" · ".join(header_bits))
+
+        # ============================================================
+        # v44.02 (user-requested): per-game POWER TARGETS.
+        #   🌙 Moonshot  — most likely to hit a 400+ ft HR (distance)
+        #   ⚡ Laser     — most likely to hit a 105+ mph HR (velocity)
+        # avg_hr_distance / max_hit_speed are 0% coverage from Savant's
+        # current endpoint, so these are built from POPULATED proxies:
+        #   Laser  ← avg_ev + hard_hit% (direct exit-velo measures)
+        #   Moonshot ← barrel% + pull_air% + blast% (+ avg_hr_distance if
+        #              present) — the drivers of carry distance.
+        # Both are ranked WITHIN this game's hitters only, gated on having
+        # a real HR profile (hr_game_pct present) so we don't crown a
+        # no-data scrub. Shown only when the inputs actually exist.
+        try:
+            _pt_frames = [f for f in (ctx.get("away_matchup"), ctx.get("home_matchup"))
+                          if f is not None and not f.empty]
+            if _pt_frames:
+                _pt = pd.concat(_pt_frames, ignore_index=True)
+                # only real, playing hitters with a HR projection
+                if "is_bench" in _pt.columns:
+                    _pt = _pt[~_pt["is_bench"].fillna(False).astype(bool)]
+                if "hr_game_pct" in _pt.columns:
+                    _pt = _pt[pd.to_numeric(_pt["hr_game_pct"], errors="coerce").notna()]
+
+                def _z(col):
+                    if col not in _pt.columns:
+                        return None
+                    s = pd.to_numeric(_pt[col], errors="coerce")
+                    return s if s.notna().any() else None
+
+                def _pick(components, min_hr=5.0):
+                    """Weighted percentile-rank blend of available components.
+                    components = list of (series, weight). Returns (name, why)
+                    or None. Requires the winner to have a non-trivial HR%."""
+                    present = [(s, w) for s, w in components if s is not None]
+                    if not present or _pt.empty:
+                        return None
+                    score = pd.Series(0.0, index=_pt.index)
+                    wsum = 0.0
+                    for s, w in present:
+                        score = score.add(s.rank(pct=True) * w, fill_value=0)
+                        wsum += w
+                    if wsum == 0:
+                        return None
+                    score = score / wsum
+                    # require a real HR projection so we don't crown a scrub
+                    hrp = pd.to_numeric(_pt.get("hr_game_pct"), errors="coerce")
+                    eligible = score[hrp >= min_hr] if hrp is not None else score
+                    if eligible.empty:
+                        eligible = score
+                    idx = eligible.idxmax()
+                    row = _pt.loc[idx]
+                    return row
+
+                _ev = _z("avg_ev"); _hh = _z("hard_hit")
+                _brl = _z("barrel_pct"); _pa = _z("pull_air_pct"); _bl = _z("blast_pct")
+                _dist = _z("avg_hr_distance")
+
+                # Laser: exit velocity
+                _laser = _pick([(_ev, 2.0), (_hh, 1.0), (_brl, 0.5)])
+                # Moonshot: carry distance (distance col if present, else proxy)
+                _moon = _pick([(_dist, 2.0)] if _dist is not None
+                              else [(_brl, 1.5), (_pa, 1.5), (_bl, 1.0), (_ev, 0.5)])
+
+                def _tag(row, kind):
+                    if row is None:
+                        return None
+                    nm = row.get("player_name") or row.get("name") or "?"
+                    tm = row.get("team") or ""
+                    bits = []
+                    if kind == "laser":
+                        ev = row.get("avg_ev"); hh = row.get("hard_hit")
+                        if pd.notna(ev): bits.append(f"{float(ev):.1f} avg EV")
+                        if pd.notna(hh): bits.append(f"{float(hh):.0f}% hard-hit")
+                    else:
+                        br = row.get("barrel_pct"); pa = row.get("pull_air_pct")
+                        d = row.get("avg_hr_distance")
+                        if pd.notna(d): bits.append(f"{float(d):.0f} ft avg HR")
+                        if pd.notna(br): bits.append(f"{float(br):.1f}% barrel")
+                        if pd.notna(pa): bits.append(f"{float(pa):.0f}% pull-air")
+                    hrp = row.get("hr_game_pct")
+                    if pd.notna(hrp): bits.append(f"{float(hrp):.1f}% HR")
+                    return f"**{nm}** ({tm}) — " + ", ".join(bits) if bits else f"**{nm}** ({tm})"
+
+                _laser_s = _tag(_laser, "laser")
+                _moon_s = _tag(_moon, "moon")
+                if _laser_s or _moon_s:
+                    _lines = []
+                    if _moon_s:
+                        _lines.append(f"🌙 **Moonshot target** (400+ ft): {_moon_s}")
+                    if _laser_s:
+                        _lines.append(f"⚡ **Laser target** (105+ mph): {_laser_s}")
+                    st.markdown("  \\n".join(_lines))
+                    if _dist is None:
+                        st.caption(
+                            "_Moonshot uses barrel/pull-air/blast as a distance "
+                            "proxy — Savant isn't returning avg HR distance right "
+                            "now. Laser uses measured exit velocity._"
+                        )
+        except Exception:
+            pass  # power-target line is a nicety; never break the game render
 
         # Loud full-width banner for games that have started or finished — user
         # asked for an unmistakable signal so they don't pick from these.
