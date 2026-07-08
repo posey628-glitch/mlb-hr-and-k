@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.02-per-game-moonshot-laser-targets"
+APP_VERSION = "2026.06.10-v44.04-per-game-csv-export"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -975,6 +975,41 @@ def stash_diagnostic(category: str, message: str, level: str = "caption") -> Non
             cat_list.append({"message": message, "level": level})
     except Exception:
         pass
+
+
+# v44.03 (external review — valid finding): the app had 156 bare
+# `except Exception: pass` handlers and NO logging, so an unexpected
+# failure in a data-fetch or scoring path vanished with zero trace.
+# Most handlers are deliberate "this feature is a nicety, never break
+# the page" guards and are fine as-is. But for the paths where a silent
+# failure would produce WRONG DATA rather than a skipped cosmetic, this
+# helper records the error into the existing diagnostics system so it
+# surfaces in Pipeline Health instead of disappearing. No heavyweight
+# logging dependency — routes through the mechanism we already have.
+_SWALLOWED_ERRORS: list = []
+
+
+def log_swallowed_error(where: str, exc: Exception, surface: bool = True) -> None:
+    """Record an error that we're recovering from, so it's observable.
+
+    Args:
+        where: short label of the code path (e.g. "pitch_match_score").
+        exc:   the caught exception.
+        surface: if True, also stash into Pipeline Health so the user sees
+                 that a recoverable error occurred (with its type + location).
+    """
+    try:
+        _SWALLOWED_ERRORS.append((where, f"{type(exc).__name__}: {exc}"))
+        if surface:
+            stash_diagnostic(
+                "pipeline_health",
+                f"⚙️ Recovered from error in **{where}**: "
+                f"{type(exc).__name__} — feature degraded gracefully, "
+                f"other data unaffected.",
+                level="caption",
+            )
+    except Exception:
+        pass  # observability must never itself break anything
 
 
 def safe_float(val) -> Optional[float]:
@@ -5318,7 +5353,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.02 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.04 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -14390,6 +14425,42 @@ if _valid_games:
                             )
 
         tabs = st.tabs([away_tab, home_tab, "🎯 K Projections"])
+
+        # v44.04 (nice-to-have): per-game CSV export. The full-slate export
+        # already exists at the bottom, but pulling ONE matchup's hitters
+        # (both sides) is handy for dropping a single game into a betting
+        # app. Built here where both matchup frames are in scope.
+        try:
+            _game_frames = [f for f in (ctx.get("away_matchup"), ctx.get("home_matchup"))
+                            if f is not None and not f.empty]
+            if _game_frames:
+                _game_csv_df = pd.concat(_game_frames, ignore_index=True)
+                _exp_cols = [c for c in [
+                    "player_name", "team", "lineup_pos", "bats", "opp_pitcher",
+                    "hr_game_pct", "hr_score", "pick_score", "grade",
+                    "barrel_pct", "iso", "avg_ev", "hard_hit", "xwoba",
+                    "pull_air_pct", "blast_pct", "recent_hr", "matchup_opp",
+                ] if c in _game_csv_df.columns]
+                if _exp_cols:
+                    _game_csv_df = _game_csv_df[_exp_cols].sort_values(
+                        "hr_game_pct", ascending=False, na_position="last"
+                    ) if "hr_game_pct" in _exp_cols else _game_csv_df[_exp_cols]
+                    import io as _io_csv
+                    _cbuf = _io_csv.StringIO()
+                    _game_csv_df.to_csv(_cbuf, index=False)
+                    _gm_name = f"{game['away_team_abbr']}_at_{game['home_team_abbr']}"
+                    st.download_button(
+                        f"📥 Export this game ({game['away_team_abbr']} @ "
+                        f"{game['home_team_abbr']}) to CSV",
+                        data=_cbuf.getvalue(),
+                        file_name=f"dingermaven_{_gm_name}_{selected_date}.csv",
+                        mime="text/csv",
+                        key=f"gamecsv_{game.get('gamePk', _gm_name)}",
+                        help="Both lineups' hitters for this matchup, sorted by HR Game%.",
+                    )
+        except Exception as _gce:
+            log_swallowed_error("per_game_csv_export", _gce, surface=False)
+
         with tabs[0]:
             render_matchup_section(ctx.get("away_matchup"), game['away_team_abbr'])
             # Late-swap candidates from active roster but not in tonight's 9
