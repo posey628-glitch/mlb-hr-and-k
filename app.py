@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.07-honest-trend-below-6-days"
+APP_VERSION = "2026.06.10-v44.09-dinger-score-preset"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -5465,7 +5465,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.07 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.09 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -14941,6 +14941,11 @@ with st.expander("🎛️ Custom Grade Builder — pick your own metrics", expan
             "hr_form":                ("HR Form Composite",        False, "Multi-stat form (existing)"),
             # === Existing composites ===
             "power_score":            ("Power Score",              False, "Existing power composite"),
+            "must_have_met":          ("Must-Have Criteria Met",   False, "How many HR Must-Have thresholds a hitter clears (learning-loop predictive)"),
+            "nuclear_met":            ("Nuclear Criteria Met",     False, "How many Nuclear thresholds a hitter clears"),
+            "hr_pa_pct":              ("HR per PA %",              False, "Per-plate-appearance HR rate"),
+            "xslg":                   ("xSLG",                     False, "Expected slugging (Statcast)"),
+            "blast_pct":              ("Blast %",                  False, "Elite-contact blast rate"),
             "matchup_opp":            ("Matchup vs Pitcher",       False, "Hitter advantage vs this pitcher"),
             "hr_game_pct":            ("HR Game %",                False, "Model's HR probability this game"),
             "hit_game_pct":           ("Hit Game %",               False, "Model's hit probability this game"),
@@ -14995,6 +15000,35 @@ with st.expander("🎛️ Custom Grade Builder — pick your own metrics", expan
                     "pitch_match_score": 1.5, "env_boost": 1.0,
                     "hr_game_pct": 1.0,
                 },
+                # v44.08 (user-built from Section G): the 7 metrics that
+                # showed the strongest + most STABLE correlation with actual
+                # HRs over the accumulated slates, weighted by reliability
+                # (avg_corr / std). barrel_pct + pulled_brl_pct led on
+                # stability; avg_ev + iso led on raw correlation.
+                "🧪 Pattern-7 (your learning-loop leaders)": {
+                    "barrel_pct": 2.0, "pulled_brl_pct": 2.0,
+                    "avg_ev": 1.75, "hard_hit": 1.5, "iso": 1.5,
+                    "power_score": 1.25, "must_have_met": 1.0,
+                },
+                # v44.09 — "DINGER SCORE": the curated HR predictor. Built
+                # from Section G's measured correlations, but ONLY raw,
+                # independent batted-ball inputs. Deliberately EXCLUDES the
+                # model's own outputs (power_score, must_have_met, hr_score,
+                # hr_game_pct, hr_pa_pct) — those correlate with HRs because
+                # they're DERIVED from these same raw stats, so including them
+                # would be circular (grading the model against itself). Also
+                # drops xslg as redundant with iso (both = extra-base power).
+                # Weights ∝ avg_corr × √reliability, so a signal must be both
+                # predictive AND stable to earn weight. Editable as more data
+                # accumulates and Section G sharpens.
+                "💥 Dinger Score (curated HR predictor)": {
+                    "avg_ev": 2.0,          # highest raw correlation (+0.131)
+                    "barrel_pct": 1.9,      # highest reliability (2.04)
+                    "pulled_brl_pct": 1.8,  # HR-specific: pulled air barrels
+                    "hard_hit": 1.5,        # contact quality, stable (1.84)
+                    "iso": 1.5,             # extra-base power (+0.130)
+                    "blast_pct": 1.2,       # elite contact, lower reliability
+                },
             }
             # Data-driven preset from the learning loop (Section G).
             _dd_weights, _dd_note = None, None
@@ -15014,6 +15048,20 @@ with st.expander("🎛️ Custom Grade Builder — pick your own metrics", expan
                         _dd_note = f"weights ∝ measured HR correlation over {int(_top['n_days'].max())} day(s) of your own slates"
                 if _dd_weights:
                     _PRESETS["🤖 Data-driven (learned from YOUR results)"] = _dd_weights
+            except Exception:
+                pass
+
+            # v44.08: fold the user's SAVED custom metrics in as selectable
+            # presets (prefixed 💾) so a formula you built once can be
+            # re-applied any day without rebuilding it.
+            _saved_metrics = {}
+            try:
+                from backtest import load_custom_metrics
+                _saved_metrics = load_custom_metrics() or {}
+                for _sm_name, _sm in _saved_metrics.items():
+                    _w = _sm.get("weights") if isinstance(_sm, dict) else None
+                    if isinstance(_w, dict) and _w:
+                        _PRESETS[f"💾 {_sm_name}"] = _w
             except Exception:
                 pass
 
@@ -15198,6 +15246,57 @@ with st.expander("🎛️ Custom Grade Builder — pick your own metrics", expan
                         f"Grades: A+ ≥90 / A ≥80 / B+ ≥70 / B ≥55 / C+ ≥40 / C ≥25 / "
                         f"D ≥10 / F <10 (percentile composite)."
                     )
+
+                    # v44.08 (user-requested): save THIS formula as a named
+                    # custom metric so it persists and can be re-applied any
+                    # day from the preset dropdown (prefixed 💾). Stores the
+                    # {metric: weight} set that produced the table above.
+                    with st.expander("💾 Save this as a named custom metric", expanded=False):
+                        st.caption(
+                            "Give this weight formula a name to save it. It'll "
+                            "appear in the preset dropdown (💾 prefix) on future "
+                            "visits, so you can re-run it without rebuilding — and "
+                            "track how it does over time in the results."
+                        )
+                        with st.form("cgb_save_form"):
+                            _save_name = st.text_input(
+                                "Metric name", value="",
+                                placeholder="e.g. My Power Blend",
+                                max_chars=60,
+                            )
+                            _save_go = st.form_submit_button("💾 Save formula")
+                        if _save_go:
+                            if not _save_name.strip():
+                                st.warning("Give it a name first.")
+                            else:
+                                try:
+                                    from backtest import save_custom_metric
+                                    _formula = {k: float(_weights.get(k, 1.0))
+                                                for k in _selected_keys}
+                                    if save_custom_metric(_save_name.strip(), _formula):
+                                        st.success(
+                                            f"Saved **{_save_name.strip()}** — "
+                                            f"pick it from the preset dropdown next time."
+                                        )
+                                    else:
+                                        st.error("Save failed (storage unavailable this session).")
+                                except Exception as _se:
+                                    st.error(f"Save error: {type(_se).__name__}")
+
+                        # Delete controls for existing saved metrics
+                        if _saved_metrics:
+                            _del = st.selectbox(
+                                "Delete a saved metric",
+                                options=["(none)"] + list(_saved_metrics.keys()),
+                                index=0, key="cgb_del_select",
+                            )
+                            if _del != "(none)" and st.button(f"🗑️ Delete '{_del}'", key="cgb_del_btn"):
+                                try:
+                                    from backtest import delete_custom_metric
+                                    if delete_custom_metric(_del):
+                                        st.success(f"Deleted {_del}. Reload to refresh the dropdown.")
+                                except Exception:
+                                    st.error("Delete failed.")
     else:
         st.caption("No slate data loaded yet.")
 
