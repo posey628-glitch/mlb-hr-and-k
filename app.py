@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.04-per-game-csv-export"
+APP_VERSION = "2026.06.10-v44.05-power-targets-matchup-aware"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -5353,7 +5353,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.04 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.05 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -14044,39 +14044,88 @@ if _valid_games:
                     s = pd.to_numeric(_pt[col], errors="coerce")
                     return s if s.notna().any() else None
 
+                # v44.05: small-sample shrinkage. A hitter with a loud
+                # barrel%/EV on very few batted balls shouldn't win on noise.
+                # Pull a plate-appearance-ish volume column and damp the
+                # percentile toward the middle (50) when the sample is thin.
+                _vol = None
+                for _vc in ("pa", "bbe", "batted_balls", "ab"):
+                    _vol = _z(_vc)
+                    if _vol is not None:
+                        break
+
                 def _pick(components, min_hr=5.0):
-                    """Weighted percentile-rank blend of available components.
-                    components = list of (series, weight). Returns (name, why)
-                    or None. Requires the winner to have a non-trivial HR%."""
+                    """Per-row NaN-renormalized weighted percentile blend with
+                    small-sample shrinkage. components = [(series, weight)].
+                    Returns the winning row, requiring a real HR projection.
+
+                    v44.05: (1) per-row renormalization — a hitter missing one
+                    component is scored on the signals they DO have (divide by
+                    present weight, not fixed total) instead of being dragged
+                    down by a fillna(0). (2) shrinkage — each component's
+                    percentile is pulled toward 50 by a factor that shrinks
+                    with low volume, so thin-sample loud stats can't dominate."""
                     present = [(s, w) for s, w in components if s is not None]
                     if not present or _pt.empty:
                         return None
-                    score = pd.Series(0.0, index=_pt.index)
-                    wsum = 0.0
+                    # shrink factor per row: 1.0 at high volume → ~0.4 at very low
+                    if _vol is not None:
+                        v = _vol.fillna(_vol.median() if _vol.notna().any() else 0)
+                        shrink = (v / (v + 60.0)).clip(0.4, 1.0)  # 60 BBE ~ half-trust
+                    else:
+                        shrink = pd.Series(1.0, index=_pt.index)
+                    num = pd.Series(0.0, index=_pt.index)
+                    den = pd.Series(0.0, index=_pt.index)
                     for s, w in present:
-                        score = score.add(s.rank(pct=True) * w, fill_value=0)
-                        wsum += w
-                    if wsum == 0:
-                        return None
-                    score = score / wsum
-                    # require a real HR projection so we don't crown a scrub
+                        pct = s.rank(pct=True) * 100.0
+                        # shrink each present value toward 50
+                        pct = 50.0 + (pct - 50.0) * shrink
+                        mask = s.notna()
+                        num = num.add((pct.fillna(0) * w) * mask.astype(float), fill_value=0)
+                        den = den.add(mask.astype(float) * w, fill_value=0)
+                    score = num / den.replace(0, np.nan)
                     hrp = pd.to_numeric(_pt.get("hr_game_pct"), errors="coerce")
                     eligible = score[hrp >= min_hr] if hrp is not None else score
+                    eligible = eligible.dropna()
                     if eligible.empty:
-                        eligible = score
-                    idx = eligible.idxmax()
-                    row = _pt.loc[idx]
-                    return row
+                        eligible = score.dropna()
+                    if eligible.empty:
+                        return None
+                    return _pt.loc[eligible.idxmax()]
 
+                # Power / contact-quality signals
                 _ev = _z("avg_ev"); _hh = _z("hard_hit")
-                _brl = _z("barrel_pct"); _pa = _z("pull_air_pct"); _bl = _z("blast_pct")
+                _brl = _z("barrel_pct"); _pa = _z("pull_air_pct")
+                _bl = _z("blast_pct"); _pbrl = _z("pulled_brl_pct")
+                _iso = _z("iso"); _fb = _z("fb_pct")
                 _dist = _z("avg_hr_distance")
+                # Tonight's-matchup signals (the part that was missing)
+                _mopp = _z("matchup_opp")       # batter vs THIS pitcher
+                _parse = _z("pitch_hr_score")   # batter vs THIS arsenal (HR-tilt)
+                _pmatch = _z("pitch_match_score")
+                _env = _z("env_boost")          # park + weather
+                _rhr = _z("recent_hr_weighted_rate")
 
-                # Laser: exit velocity
-                _laser = _pick([(_ev, 2.0), (_hh, 1.0), (_brl, 0.5)])
-                # Moonshot: carry distance (distance col if present, else proxy)
-                _moon = _pick([(_dist, 2.0)] if _dist is not None
-                              else [(_brl, 1.5), (_pa, 1.5), (_bl, 1.0), (_ev, 0.5)])
+                # ⚡ LASER (105+ mph) — exit velocity is the spine, but now
+                # blended with matchup + arsenal + environment so it favors a
+                # hard-hitter in a GOOD spot over a hard-hitter facing an ace.
+                _laser = _pick([
+                    (_ev, 2.5), (_hh, 1.5), (_brl, 1.0),
+                    (_mopp, 1.0), (_parse, 1.0), (_env, 0.75),
+                    (_rhr, 0.5),
+                ])
+                # 🌙 MOONSHOT (400+ ft) — carry drivers (barrel/pull-air/blast/
+                # pulled-barrel/ISO/FB), plus the same matchup context. Uses
+                # real avg_hr_distance when Savant returns it, else the proxy.
+                _moon_components = (
+                    [(_dist, 2.5)] if _dist is not None else
+                    [(_brl, 1.5), (_pa, 1.5), (_pbrl, 1.25), (_bl, 1.0),
+                     (_iso, 1.0), (_fb, 0.5), (_ev, 0.5)]
+                )
+                _moon_components += [
+                    (_mopp, 1.0), (_parse, 1.0), (_env, 0.75), (_rhr, 0.5),
+                ]
+                _moon = _pick(_moon_components)
 
                 def _tag(row, kind):
                     if row is None:
@@ -14094,6 +14143,14 @@ if _valid_games:
                         if pd.notna(d): bits.append(f"{float(d):.0f} ft avg HR")
                         if pd.notna(br): bits.append(f"{float(br):.1f}% barrel")
                         if pd.notna(pa): bits.append(f"{float(pa):.0f}% pull-air")
+                    # v44.05: surface the matchup context now driving the pick
+                    mo = row.get("matchup_opp")
+                    if pd.notna(mo):
+                        try:
+                            _mo = float(mo)
+                            if _mo >= 60: bits.append(f"good matchup ({_mo:.0f})")
+                        except Exception:
+                            pass
                     hrp = row.get("hr_game_pct")
                     if pd.notna(hrp): bits.append(f"{float(hrp):.1f}% HR")
                     return f"**{nm}** ({tm}) — " + ", ".join(bits) if bits else f"**{nm}** ({tm})"
@@ -14109,9 +14166,12 @@ if _valid_games:
                     st.markdown("  \\n".join(_lines))
                     if _dist is None:
                         st.caption(
-                            "_Moonshot uses barrel/pull-air/blast as a distance "
-                            "proxy — Savant isn't returning avg HR distance right "
-                            "now. Laser uses measured exit velocity._"
+                            "_Moonshot blends barrel/pull-air/blast/ISO (distance "
+                            "proxy — Savant isn't returning avg HR distance now) with "
+                            "tonight's matchup, arsenal & park. Laser blends measured "
+                            "exit velocity with the same matchup context. Both damp "
+                            "thin-sample stats so loud numbers on few batted balls "
+                            "don't win on noise._"
                         )
         except Exception:
             pass  # power-target line is a nicety; never break the game render
