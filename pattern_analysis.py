@@ -588,22 +588,31 @@ def rolling_feature_importance(correlation_history: list,
         arr = pd.Series(corrs)
         avg_corr = float(arr.mean())
         std = float(arr.std(ddof=0))
-        # Trend: compare last third to first third
+        # Trend: compare recent third to older third. Requires ≥6 days —
+        # below that there aren't enough points to split into thirds, so
+        # trend is UNDEFINED, not zero.
+        # v44.07 (user spotted every trend showing +0.000 at 5 days): the
+        # old code hard-coded trend=0.0 below 6 days, which rendered as a
+        # real-looking "no movement" reading when the truth is "not computed
+        # yet." Now flag it so the UI can show n/a instead of a fake zero.
         n = len(corrs)
         if n >= 6:
             recent_third = float(pd.Series(corrs[-max(2, n//3):]).mean())
             older_third = float(pd.Series(corrs[:max(2, n//3)]).mean())
-            trend = recent_third - older_third
+            trend = round(recent_third - older_third, 4)
+            trend_valid = True
         else:
             recent_third = avg_corr
             older_third = avg_corr
-            trend = 0.0
+            trend = None
+            trend_valid = False
         rows.append({
             "feature": feat,
             "avg_corr": round(avg_corr, 4),
             "recent_corr": round(recent_third, 4),
             "older_corr": round(older_third, 4),
-            "trend": round(trend, 4),
+            "trend": trend,
+            "trend_valid": trend_valid,
             "std": round(std, 4),
             "n_days": n,
             # Reliability: high avg, low std → high reliability
@@ -618,7 +627,7 @@ def rolling_feature_importance(correlation_history: list,
     if not rows:
         return pd.DataFrame(columns=[
             "feature", "avg_corr", "recent_corr", "older_corr",
-            "trend", "std", "n_days", "reliability",
+            "trend", "trend_valid", "std", "n_days", "reliability",
         ])
     return pd.DataFrame(rows).sort_values(
         "avg_corr", key=abs, ascending=False
