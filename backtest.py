@@ -1299,6 +1299,97 @@ def auto_run_pattern_discovery() -> dict:
     return result
 
 
+# ============================================================================
+# v44.08 — user-defined custom metrics (saved grade formulas)
+# ============================================================================
+# Lets the user name and SAVE a custom weighted-metric formula from the
+# grade builder, so it persists across sessions and can be re-applied. Stored
+# under "_custom_metrics" in the Gist — the leading underscore makes it
+# pruning-exempt (see _prune_snapshots_for_size), so a saved formula is never
+# dropped to make room for snapshots. Formulas are tiny (a name + a
+# {column: weight} dict), so dozens fit in a few KB.
+def save_custom_metric(name: str, weights: dict) -> bool:
+    """Persist a named custom-metric formula. Returns True on success.
+
+    Args:
+        name: user-chosen label (e.g. "My Power Blend").
+        weights: {column_name: weight} the builder used.
+    """
+    if not name or not isinstance(weights, dict) or not weights:
+        return False
+    try:
+        entry = {
+            "name": str(name)[:60],
+            "weights": {str(k): float(v) for k, v in weights.items()},
+            "saved_at": datetime.utcnow().isoformat() + "Z",
+        }
+        if durable_storage_configured():
+            snaps = _gist_read_all() or {}
+            metrics = snaps.get("_custom_metrics") or {}
+            if not isinstance(metrics, dict):
+                metrics = {}
+            metrics[entry["name"]] = entry
+            # cap at 25 saved formulas to bound size
+            if len(metrics) > 25:
+                # drop oldest by saved_at
+                ordered = sorted(metrics.values(), key=lambda e: e.get("saved_at", ""))
+                for old in ordered[:len(metrics) - 25]:
+                    metrics.pop(old["name"], None)
+            snaps["_custom_metrics"] = metrics
+            return _gist_write_all(snaps)
+        # session fallback
+        import streamlit as st  # noqa
+        if hasattr(st, "session_state"):
+            m = st.session_state.get("_custom_metrics_local", {})
+            m[entry["name"]] = entry
+            st.session_state["_custom_metrics_local"] = m
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def load_custom_metrics() -> dict:
+    """Return all saved custom-metric formulas as {name: entry}. Empty if none."""
+    try:
+        if durable_storage_configured():
+            snaps = _gist_read_all() or {}
+            metrics = snaps.get("_custom_metrics") or {}
+            if isinstance(metrics, dict) and metrics:
+                return metrics
+    except Exception:
+        pass
+    try:
+        import streamlit as st  # noqa
+        if hasattr(st, "session_state"):
+            return st.session_state.get("_custom_metrics_local", {}) or {}
+    except Exception:
+        pass
+    return {}
+
+
+def delete_custom_metric(name: str) -> bool:
+    """Remove a saved custom-metric formula by name."""
+    try:
+        if durable_storage_configured():
+            snaps = _gist_read_all() or {}
+            metrics = snaps.get("_custom_metrics") or {}
+            if name in metrics:
+                metrics.pop(name)
+                snaps["_custom_metrics"] = metrics
+                return _gist_write_all(snaps)
+        import streamlit as st  # noqa
+        if hasattr(st, "session_state"):
+            m = st.session_state.get("_custom_metrics_local", {})
+            if name in m:
+                m.pop(name)
+                st.session_state["_custom_metrics_local"] = m
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def load_pattern_history() -> list:
     """Load the accumulated daily correlation history.
 
