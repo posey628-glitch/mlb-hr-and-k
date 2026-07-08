@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.06-pattern-analysis-copyable"
+APP_VERSION = "2026.06.10-v44.07-honest-trend-below-6-days"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -3877,7 +3877,8 @@ if show_pattern_analysis:
                                 disp = importance_df.head(15).copy()
                                 disp["trend_display"] = disp["trend"].apply(
                                     lambda t: (
-                                        f"↗️ +{t:.3f}" if t > 0.02
+                                        "n/a (need 6+ days)" if t is None or pd.isna(t)
+                                        else f"↗️ +{t:.3f}" if t > 0.02
                                         else f"↘️ {t:.3f}" if t < -0.02
                                         else f"→ {t:+.3f}"
                                     )
@@ -4096,10 +4097,13 @@ if show_pattern_analysis:
                                 f"({n_days_history} day(s) of history)"
                             )
                             for _, _r in importance_df.head(12).iterrows():
+                                _tr = _r['trend']
+                                _tr_s = (f"{_tr:+.3f}" if _tr is not None
+                                         and not pd.isna(_tr) else "  n/a ")
                                 _pa_report.append(
                                     f"  {str(_r['feature'])[:24]:<24} "
                                     f"avg_corr {_r['avg_corr']:+.3f}  "
-                                    f"trend {_r['trend']:+.3f}  "
+                                    f"trend {_tr_s}  "
                                     f"reliab {_r['reliability']:.2f}  "
                                     f"({int(_r['n_days'])}d)"
                                 )
@@ -5461,7 +5465,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.06 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.07 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
