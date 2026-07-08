@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.05-power-targets-matchup-aware"
+APP_VERSION = "2026.06.10-v44.06-pattern-analysis-copyable"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -4029,6 +4029,114 @@ if show_pattern_analysis:
                                     )
                     except Exception as _de:
                         st.error(f"Rolling importance / adaptive score error: {_de}")
+
+                # ============================================================
+                # v44.06 (user-requested): copyable text report for Pattern
+                # Analysis, mirroring the eval banner's copy button. The
+                # st.dataframe tables (importance, adaptive top-10) don't
+                # survive clipboard copy, so this rebuilds the key numbers as
+                # plain text in an st.code block. Built from the SOURCE data
+                # objects (rf_results, merged, importance_df, _top_adaptive)
+                # rather than scraping widgets, so it's robust.
+                try:
+                    _pa_report = []
+                    _pa_report.append("PATTERN ANALYSIS")
+                    try:
+                        _pa_report.append(
+                            f"Data: {n_snaps_with_outcomes} snapshot(s) with "
+                            f"outcomes / {n_snaps_total} total | "
+                            f"{len(merged)} player-games across "
+                            f"{merged['snapshot_date'].nunique()} slate(s)"
+                        )
+                    except Exception:
+                        pass
+
+                    # Section A — framework
+                    try:
+                        if "rf_results" in dir() and not rf_results.get("error"):
+                            _pa_report.append("")
+                            _pa_report.append("A. RESEARCHER FRAMEWORK")
+                            _pa_report.append(
+                                f"  Slate avg HR rate: "
+                                f"{rf_results.get('slate_average_hr_rate', 0):.1%} "
+                                f"(n={rf_results.get('n_total', 0)})"
+                            )
+                            _mh = rf_results.get("must_have", {})
+                            if _mh:
+                                _l = _mh.get("lift")
+                                _pa_report.append(
+                                    f"  Must-Have: passers "
+                                    f"{(_mh.get('pass_hr_rate') or 0):.1%} "
+                                    f"(n={_mh.get('n_pass',0)}) vs "
+                                    f"{(_mh.get('fail_hr_rate') or 0):.1%} "
+                                    f"(n={_mh.get('n_fail',0)}) → lift "
+                                    f"{f'{_l:.2f}x' if _l else '—'}"
+                                )
+                            _nuc = rf_results.get("nuclear", {})
+                            if _nuc:
+                                _l = _nuc.get("lift")
+                                _pa_report.append(
+                                    f"  Nuclear: in-tier "
+                                    f"{(_nuc.get('in_hr_rate') or 0):.1%} "
+                                    f"(n={_nuc.get('n_in',0)}) vs "
+                                    f"{(_nuc.get('out_hr_rate') or 0):.1%} "
+                                    f"(n={_nuc.get('n_out',0)}) → lift "
+                                    f"{f'{_l:.2f}x' if _l else '—'}"
+                                )
+                    except Exception:
+                        pass
+
+                    # Section G — rolling importance
+                    try:
+                        if "importance_df" in dir() and importance_df is not None \
+                           and not importance_df.empty:
+                            _pa_report.append("")
+                            _pa_report.append(
+                                f"G. ROLLING FEATURE IMPORTANCE "
+                                f"({n_days_history} day(s) of history)"
+                            )
+                            for _, _r in importance_df.head(12).iterrows():
+                                _pa_report.append(
+                                    f"  {str(_r['feature'])[:24]:<24} "
+                                    f"avg_corr {_r['avg_corr']:+.3f}  "
+                                    f"trend {_r['trend']:+.3f}  "
+                                    f"reliab {_r['reliability']:.2f}  "
+                                    f"({int(_r['n_days'])}d)"
+                                )
+                    except Exception:
+                        pass
+
+                    # Section H — adaptive score
+                    try:
+                        if "_top_adaptive" in dir() and _top_adaptive is not None \
+                           and not _top_adaptive.empty:
+                            _pa_report.append("")
+                            _pa_report.append("H. ADAPTIVE SCORE — top 10")
+                            for i, (_, _r) in enumerate(_top_adaptive.iterrows(), 1):
+                                _line = f"  {i:>2}. {str(_r.get('player_name','?'))[:22]:<22}"
+                                if pd.notna(_r.get("adaptive_score")):
+                                    _line += f" adaptive {float(_r['adaptive_score']):>4.0f}"
+                                if pd.notna(_r.get("hr_score")):
+                                    _line += f"  hr_score {float(_r['hr_score']):>4.0f}"
+                                if pd.notna(_r.get("hr_game_pct")):
+                                    _line += f"  hr% {float(_r['hr_game_pct']):>4.1f}"
+                                _pa_report.append(_line)
+                            if "_weights_str" in dir():
+                                _plain_w = _weights_str.replace("**", "")
+                                _pa_report.append(f"  Drivers: {_plain_w}")
+                            if "overlap" in dir():
+                                _pa_report.append(
+                                    f"  Overlap with HR Score top 10: {len(overlap)}/10"
+                                )
+                    except Exception:
+                        pass
+
+                    if len(_pa_report) > 2:
+                        with st.expander("📋 Copy pattern analysis as text (tables paste intact)", expanded=False):
+                            st.caption("Click the copy icon in the top-right of the box below.")
+                            st.code("\\n".join(_pa_report), language="text")
+                except Exception:
+                    pass
         except Exception as _pa_err:
             st.error(f"Pattern Analysis section error: {_pa_err}")
 
@@ -5353,7 +5461,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.05 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.06 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
