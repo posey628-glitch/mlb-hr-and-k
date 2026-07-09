@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.30-fix-duplicate-column-crash"
+APP_VERSION = "2026.06.10-v44.31-dinger-tiebreak-and-composite"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -1089,7 +1089,9 @@ def compute_dinger_score(df: "pd.DataFrame", context: bool = True) -> "pd.Series
         return pd.Series(dtype=float)
     base = _dinger_base_percentile(df)
     if not context:
-        return base.round(1)
+        _bscore = base.round(1)
+        _apply_dinger_tiebreak(df, _bscore)
+        return _bscore
 
     mult = pd.Series(1.0, index=df.index)
 
@@ -1118,7 +1120,30 @@ def compute_dinger_score(df: "pd.DataFrame", context: bool = True) -> "pd.Series
             mult = mult * (1.0 + DINGER_CONTEXT["matchup"] * mp)
 
     mult = mult.clip(0.70, 1.35)
-    return (base * mult).clip(0, 100).round(1)
+    _score = (base * mult).clip(0, 100).round(1)
+    _apply_dinger_tiebreak(df, _score)
+    return _score
+
+
+def _apply_dinger_tiebreak(df: "pd.DataFrame", score: "pd.Series") -> None:
+    """v44.31: set df['dinger_score_precise'] = score + a sub-0.1 nudge from
+    the highest-signal HR predictors, so tied displayed scores still rank
+    meaningfully (by who's stronger in the most HR-predictive stat). The
+    displayed dinger_score stays the clean rounded value; this is sort-only.
+    Priority order = Section G's most reliable predictors, decaying so the
+    first (pulled_brl_pct) dominates ties. Total nudge < 0.099 → never
+    changes the rounded display."""
+    try:
+        _tb = pd.Series(0.0, index=df.index)
+        for _i, _c in enumerate(["pulled_brl_pct", "barrel_pct", "avg_ev",
+                                  "iso", "hard_hit"]):
+            if _c in df.columns:
+                _s = pd.to_numeric(df[_c], errors="coerce")
+                if _s.notna().any():
+                    _tb = _tb + _s.rank(pct=True).fillna(0.5) * (0.05 / (2 ** _i))
+        df["dinger_score_precise"] = (score.fillna(0) + _tb).round(4)
+    except Exception:
+        df["dinger_score_precise"] = score
 
 
 def tag_power_targets(df: "pd.DataFrame") -> "pd.DataFrame":
@@ -2313,6 +2338,31 @@ if slate.empty:
 # Statcast pulls — wrap with try/except so transient timeouts don't crash app
 try:
     hitter_stats = get_hitter_stats(_stats_day=_stats_day_key()) if not slate.empty else pd.DataFrame()
+
+    # v44.31: pinpoint diagnostic to isolate WHERE distance data is lost.
+    # The fetch trace shows dist_merged=251 inside get_hitter_stats, but
+    # combined_picks shows 0% — so either (a) the column doesn't survive the
+    # build_matchup_table join, or (b) the 251 merged onto non-slate players.
+    # This logs coverage in hitter_stats ITSELF (the source), so if it's high
+    # here but 0% in combined_picks, the loss is the downstream join — and if
+    # it's already low here, the merge assigned to the wrong IDs.
+    try:
+        if not hitter_stats.empty:
+            _hs_n = len(hitter_stats)
+            _ad = int(hitter_stats.get("avg_dist", pd.Series(dtype=float)).notna().sum()) if "avg_dist" in hitter_stats.columns else -1
+            _ahd = int(hitter_stats.get("avg_hr_distance", pd.Series(dtype=float)).notna().sum()) if "avg_hr_distance" in hitter_stats.columns else -1
+            _bc = int(hitter_stats.get("barrel_count", pd.Series(dtype=float)).notna().sum()) if "barrel_count" in hitter_stats.columns else -1
+            stash_diagnostic(
+                "pipeline_health",
+                f"🔬 hitter_stats source coverage (of {_hs_n} hitters): "
+                f"avg_dist={_ad if _ad>=0 else 'col-missing'}, "
+                f"avg_hr_distance={_ahd if _ahd>=0 else 'col-missing'}, "
+                f"barrel_count={_bc if _bc>=0 else 'col-missing'}  "
+                f"← if high here but 0% in combined_picks, loss is the matchup join",
+                level="info",
+            )
+    except Exception:
+        pass
 
     # v43.76: removed the [Trace] hitter_stats coverage diagnostic that
     # was added in v43.71 to debug the avg_dist merge. The investigation
@@ -5779,7 +5829,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.30 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.31 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -11435,6 +11485,29 @@ if all_hitters:
         log_swallowed_error("compute_dinger_score", _dse, surface=False)
         combined_all["dinger_score"] = np.nan
 
+    # v44.31 (user idea: a composite between HR Score and Dinger Score to
+    # differentiate where needed). These two rank HRs from DIFFERENT angles:
+    # HR Score is the full matchup-aware model (probability + power + mechanics
+    # + matchup + form + park); Dinger Score is curated raw power tilted by
+    # context. When they AGREE, that's a strong signal; when they diverge, the
+    # composite surfaces hitters both systems partially like. Blend = 55% HR
+    # Score + 45% Dinger (HR Score weighted a bit higher since it's the
+    # validated, broader model). Runs PARALLEL — does not alter either input
+    # or the shipped pick_score. Ranked with the same tiebreak precision.
+    try:
+        _hrs = pd.to_numeric(combined_all.get("hr_score"), errors="coerce")
+        _dng = pd.to_numeric(combined_all.get("dinger_score"), errors="coerce")
+        if _hrs is not None and _dng is not None:
+            # per-row renormalize if one is missing (score on what's present)
+            _w_hr, _w_dg = 0.55, 0.45
+            _num = (_hrs.fillna(0) * _w_hr * _hrs.notna().astype(float)
+                    + _dng.fillna(0) * _w_dg * _dng.notna().astype(float))
+            _den = (_w_hr * _hrs.notna().astype(float)
+                    + _w_dg * _dng.notna().astype(float))
+            combined_all["power_composite"] = (_num / _den.replace(0, np.nan)).round(1)
+    except Exception as _pce:
+        log_swallowed_error("power_composite", _pce, surface=False)
+
     # v44.18: tag per-game Moonshot/Laser targets HERE (upstream of the
     # snapshot at ~line 11900) so the picks get snapshotted and the learning
     # loop can grade whether the target actually produced the outcome. The
@@ -14211,6 +14284,7 @@ def build_col_config():
         "whiff_pct":       st.column_config.NumberColumn("Whiff%", format="%.1f", width="small", help="Swing-and-miss rate on swings."),
         "avg_ev":          st.column_config.NumberColumn("Avg EV", format="%.1f", width="small", help="Average exit velocity (mph) across all batted balls. Core input to the Laser (105+ mph) target."),
         "avg_hr_ev":       st.column_config.NumberColumn("HR EV", format="%.1f", width="small", help="Average exit velocity (mph) on home runs specifically — how hard this hitter's HRs are struck. Feeds the Laser target alongside overall avg EV."),
+        "power_composite": st.column_config.NumberColumn("💥+ Combo", format="%.0f", width="small", help="Composite of HR Score (55%) + Dinger Score (45%) — blends the full matchup-aware model with curated raw power. Highest when both systems agree a hitter is a strong HR play. Runs parallel to the shipped ranking."),
         "max_hit_speed":   st.column_config.NumberColumn("Max EV", format="%.1f", width="small", help="Hardest-hit ball (mph). Ceiling of raw power."),
         "avg_hr_distance": st.column_config.NumberColumn("HR Dist", format="%.0f", width="small", help="Average home-run distance (ft) when available from Savant. Feeds the Moonshot (400+ ft) target."),
         "la":              st.column_config.NumberColumn("LA", format="%.1f", width="small", help="Average launch angle (degrees). ~25-35° is the HR sweet spot."),
@@ -15250,7 +15324,9 @@ if _valid_games:
                     if "is_bench" in _gd.columns:
                         _gd = _gd[~_gd["is_bench"].fillna(False).astype(bool)]
                     _gd = _gd[_gd["dinger_score"].notna()].sort_values(
-                        "dinger_score", ascending=False
+                        "dinger_score_precise" if "dinger_score_precise" in _gd.columns
+                        else "dinger_score",
+                        ascending=False
                     )
                     with st.expander(
                         f"💥 Dinger Scores — {_gm_key} ({len(_gd)} hitters)",
