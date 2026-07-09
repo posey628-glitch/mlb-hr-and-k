@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.09-dinger-score-preset"
+APP_VERSION = "2026.06.10-v44.12-form-trend-and-timezone-fixes"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -1010,6 +1010,106 @@ def log_swallowed_error(where: str, exc: Exception, surface: bool = True) -> Non
             )
     except Exception:
         pass  # observability must never itself break anything
+
+
+# ============================================================================
+# v44.11 — DINGER SCORE v2 (two-layer: power base × per-slate context)
+# ============================================================================
+# WHY TWO LAYERS: a season-stats-only score (barrel%, ISO, EV over the full
+# year) barely moves slate to slate, so it would rank the same 10 sluggers
+# every single day regardless of who they face, the park, or the weather —
+# useless for daily play. Dinger v2 separates:
+#   BASE   = raw season power (the ceiling: can this hitter go deep at all?)
+#   CONTEXT = tonight's multipliers (recency form, park+weather, matchup)
+# Final = base_percentile × context_multiplier, so the SAME slugger scores
+# differently in Coors vs Petco, hot vs cold, vs an ace vs a soft arm.
+#
+# Editable single source of truth — reweight as Section G sharpens.
+DINGER_BASE_WEIGHTS = {
+    "avg_ev": 2.0,          # highest raw HR correlation (+0.131)
+    "barrel_pct": 1.9,      # highest reliability (2.04)
+    "pulled_brl_pct": 1.8,  # HR-specific: pulled air barrels
+    "hard_hit": 1.5,        # contact quality, stable (1.84)
+    "iso": 1.5,             # extra-base power (+0.130)
+    "blast_pct": 1.2,       # elite contact, lower reliability
+}
+# Context multipliers: each maps a per-slate signal to a gentle multiplier
+# on the base. Kept modest (max ~±20% each) so context TILTS the power
+# ranking toward tonight's spot without letting a good matchup crown a
+# weak-power hitter. Capped in aggregate to [0.70, 1.35].
+DINGER_CONTEXT = {
+    "recency": 0.20,   # recent HR/ISO form
+    "env": 0.15,       # park + weather (env_boost)
+    "matchup": 0.15,   # vs tonight's pitcher (matchup_opp)
+}
+# For the builder preset (season-power view only), expose the base.
+DINGER_SCORE_WEIGHTS = dict(DINGER_BASE_WEIGHTS)
+
+
+def _dinger_base_percentile(df: "pd.DataFrame") -> "pd.Series":
+    """Percentile-ranked raw power base (0-100), per-row NaN-renormalized."""
+    present = [(c, w) for c, w in DINGER_BASE_WEIGHTS.items() if c in df.columns]
+    if not present:
+        return pd.Series(np.nan, index=df.index)
+    num = pd.Series(0.0, index=df.index)
+    den = pd.Series(0.0, index=df.index)
+    for col, w in present:
+        s = pd.to_numeric(df[col], errors="coerce")
+        if s.notna().sum() == 0:
+            continue
+        pct = s.rank(pct=True) * 100.0
+        mask = pct.notna()
+        num = num.add((pct.fillna(0) * w) * mask.astype(float), fill_value=0)
+        den = den.add(mask.astype(float) * w, fill_value=0)
+    return num / den.replace(0, np.nan)
+
+
+def compute_dinger_score(df: "pd.DataFrame", context: bool = True) -> "pd.Series":
+    """Dinger Score v2: raw-power base tilted by tonight's context.
+
+    Args:
+        df: hitter frame (needs the base columns; context columns optional).
+        context: if True (default), apply recency/park-weather/matchup
+                 multipliers so the score moves per slate. If False, returns
+                 the pure season-power percentile (used by the builder preset
+                 so that view stays a clean season-power ranking).
+
+    Returns 0-100 Series. NaN for a hitter with no base inputs.
+    """
+    if df is None or df.empty:
+        return pd.Series(dtype=float)
+    base = _dinger_base_percentile(df)
+    if not context:
+        return base.round(1)
+
+    mult = pd.Series(1.0, index=df.index)
+
+    # Recency: recent HR-weighted rate, percentile-centered so above-median
+    # form lifts and below-median form drags. Falls back to hr_last_10.
+    _rec_col = "recent_hr_weighted_rate" if "recent_hr_weighted_rate" in df.columns \
+        else ("hr_last_10" if "hr_last_10" in df.columns else None)
+    if _rec_col:
+        r = pd.to_numeric(df[_rec_col], errors="coerce")
+        if r.notna().sum() > 0:
+            rp = r.rank(pct=True)  # 0-1
+            # center at 0.5 → multiplier in [1-w, 1+w]
+            mult = mult * (1.0 + DINGER_CONTEXT["recency"] * (rp.fillna(0.5) - 0.5) * 2)
+
+    # Environment: env_boost is already a multiplier (~0.8-1.2). Blend a
+    # dampened version so it nudges rather than dominates.
+    if "env_boost" in df.columns:
+        e = pd.to_numeric(df["env_boost"], errors="coerce").fillna(1.0)
+        mult = mult * (1.0 + DINGER_CONTEXT["env"] * (e - 1.0) / 0.20)
+
+    # Matchup: matchup_opp (0-100, higher = better hitter spot). Center at 50.
+    if "matchup_opp" in df.columns:
+        m = pd.to_numeric(df["matchup_opp"], errors="coerce")
+        if m.notna().sum() > 0:
+            mp = (m.fillna(50) - 50) / 50.0  # -1..+1
+            mult = mult * (1.0 + DINGER_CONTEXT["matchup"] * mp)
+
+    mult = mult.clip(0.70, 1.35)
+    return (base * mult).clip(0, 100).round(1)
 
 
 def safe_float(val) -> Optional[float]:
@@ -2044,8 +2144,20 @@ if hide_started and selected_date == datetime.now().date():
                 try:
                     if hasattr(t, "tzinfo") and t.tzinfo is not None:
                         return t > now_utc
-                    # Assume UTC if naive
-                    return pd.Timestamp(t).tz_localize("UTC") > now_utc
+                    # v44.12 (user bug: 6:40pm ET game showed "locked" before
+                    # 3pm): a NAIVE gameTime is almost certainly MLB local
+                    # (US Eastern), NOT UTC. Assuming UTC shifted a 22:40 ET
+                    # first pitch to 22:40 UTC = 6:40pm *UTC* = 2:40pm ET,
+                    # making evening games look already-started at midday.
+                    # Localize naive times to US/Eastern before comparing.
+                    try:
+                        _t_et = pd.Timestamp(t).tz_localize(
+                            "US/Eastern", ambiguous=True, nonexistent="shift_forward"
+                        )
+                        return _t_et.tz_convert("UTC") > now_utc
+                    except Exception:
+                        # last-resort: assume UTC (old behavior)
+                        return pd.Timestamp(t).tz_localize("UTC") > now_utc
                 except Exception:
                     return True
             mask = slate["gameTime"].apply(_is_upcoming)
@@ -5465,7 +5577,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.09 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.12 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -11059,6 +11171,14 @@ for gpk, ctx in game_context_map.items():
 if all_hitters:
     combined_all = pd.concat(all_hitters, ignore_index=True)
 
+    # v44.11: Dinger Score v2 column (power base × per-slate context) — a
+    # first-class column so it appears per-game and gets snapshotted/graded.
+    try:
+        combined_all["dinger_score"] = compute_dinger_score(combined_all, context=True)
+    except Exception as _dse:
+        log_swallowed_error("compute_dinger_score", _dse, surface=False)
+        combined_all["dinger_score"] = np.nan
+
     # v42r: "ROBBED HR" diagnostic columns. Park-neutral expected HR vs
     # actual HR. Display/audit-only — does NOT feed into pick_score.
     #
@@ -12523,6 +12643,7 @@ try:
             _h2h_categories = [
                 ("hr_game_pct",    "HR Game%",         True,  "pct"),
                 ("pick_score",     "Pick Score",       True,  "num1"),
+                ("dinger_score",   "💥 Dinger Score",  True,  "num0"),
                 ("grade_context",  "Grade (w/platoon)", None, "text"),
                 ("matchup_opp",    "Matchup",          True,  "num1"),
                 ("env_boost",      "Env Boost",        True,  "mult"),
@@ -14288,6 +14409,72 @@ if _valid_games:
         except Exception:
             pass  # power-target line is a nicety; never break the game render
 
+        # v44.11 (user-requested): per-game Dinger Score section. Every hitter
+        # in this game ranked by Dinger Score v2 (raw power × tonight's
+        # context), so you can scan the board and compare against who actually
+        # homers. Includes a copy-as-text button.
+        try:
+            if combined_all is not None and "dinger_score" in combined_all.columns:
+                _gm_key = f"{game['away_team_abbr']} @ {game['home_team_abbr']}"
+                _gd = combined_all[combined_all.get("game") == _gm_key].copy() \
+                    if "game" in combined_all.columns else pd.DataFrame()
+                if not _gd.empty and _gd["dinger_score"].notna().any():
+                    if "is_bench" in _gd.columns:
+                        _gd = _gd[~_gd["is_bench"].fillna(False).astype(bool)]
+                    _gd = _gd[_gd["dinger_score"].notna()].sort_values(
+                        "dinger_score", ascending=False
+                    )
+                    with st.expander(
+                        f"💥 Dinger Scores — {_gm_key} ({len(_gd)} hitters)",
+                        expanded=False,
+                    ):
+                        st.caption(
+                            "Dinger Score v2 = raw power (avg EV, barrel%, "
+                            "pulled-air barrel%, hard-hit%, ISO, blast%) TILTED by "
+                            "tonight's context (recent form, park+weather, matchup) "
+                            "— so it moves per slate, not the same names daily. "
+                            "Compare the top names to who actually homers."
+                        )
+                        _dcols = [c for c in [
+                            "player_name", "team", "dinger_score",
+                            "hr_game_pct", "hr_score", "avg_ev", "barrel_pct",
+                            "pulled_brl_pct", "hard_hit", "iso", "blast_pct",
+                            "env_boost", "matchup_opp",
+                        ] if c in _gd.columns]
+                        st.dataframe(
+                            _gd[_dcols], hide_index=True, use_container_width=True,
+                            column_config={
+                                "player_name": st.column_config.TextColumn("Hitter"),
+                                "team": st.column_config.TextColumn("Tm", width="small"),
+                                "dinger_score": st.column_config.NumberColumn(
+                                    "💥 Dinger", format="%.0f",
+                                    help="Raw power × tonight's context (0-100).",
+                                ),
+                                "hr_game_pct": st.column_config.NumberColumn("HR%", format="%.1f%%"),
+                                "hr_score": st.column_config.NumberColumn("HR Score", format="%.0f"),
+                                "avg_ev": st.column_config.NumberColumn("EV", format="%.1f"),
+                                "barrel_pct": st.column_config.NumberColumn("Brl%", format="%.1f"),
+                                "pulled_brl_pct": st.column_config.NumberColumn("PBrl%", format="%.1f"),
+                                "hard_hit": st.column_config.NumberColumn("HH%", format="%.0f"),
+                                "iso": st.column_config.NumberColumn("ISO", format="%.3f"),
+                                "blast_pct": st.column_config.NumberColumn("Blast%", format="%.1f"),
+                                "env_boost": st.column_config.NumberColumn("Env", format="%.2f"),
+                                "matchup_opp": st.column_config.NumberColumn("Mtch", format="%.0f"),
+                            },
+                        )
+                        # copy-as-text
+                        _drep = [f"DINGER SCORES — {_gm_key}"]
+                        for _i, (_, _r) in enumerate(_gd.iterrows(), 1):
+                            _drep.append(
+                                f"{_i:>2}. {str(_r.get('player_name','?'))[:22]:<22} "
+                                f"dinger {float(_r['dinger_score']):>3.0f}"
+                                + (f"  hr% {float(_r['hr_game_pct']):>4.1f}" if pd.notna(_r.get('hr_game_pct')) else "")
+                            )
+                        with st.popover("📋 Copy"):
+                            st.code("\\n".join(_drep), language="text")
+        except Exception as _dge:
+            log_swallowed_error("per_game_dinger_section", _dge, surface=False)
+
         # Loud full-width banner for games that have started or finished — user
         # asked for an unmistakable signal so they don't pick from these.
         if game_status_str:
@@ -15010,25 +15197,12 @@ with st.expander("🎛️ Custom Grade Builder — pick your own metrics", expan
                     "avg_ev": 1.75, "hard_hit": 1.5, "iso": 1.5,
                     "power_score": 1.25, "must_have_met": 1.0,
                 },
-                # v44.09 — "DINGER SCORE": the curated HR predictor. Built
-                # from Section G's measured correlations, but ONLY raw,
-                # independent batted-ball inputs. Deliberately EXCLUDES the
-                # model's own outputs (power_score, must_have_met, hr_score,
-                # hr_game_pct, hr_pa_pct) — those correlate with HRs because
-                # they're DERIVED from these same raw stats, so including them
-                # would be circular (grading the model against itself). Also
-                # drops xslg as redundant with iso (both = extra-base power).
-                # Weights ∝ avg_corr × √reliability, so a signal must be both
-                # predictive AND stable to earn weight. Editable as more data
-                # accumulates and Section G sharpens.
-                "💥 Dinger Score (curated HR predictor)": {
-                    "avg_ev": 2.0,          # highest raw correlation (+0.131)
-                    "barrel_pct": 1.9,      # highest reliability (2.04)
-                    "pulled_brl_pct": 1.8,  # HR-specific: pulled air barrels
-                    "hard_hit": 1.5,        # contact quality, stable (1.84)
-                    "iso": 1.5,             # extra-base power (+0.130)
-                    "blast_pct": 1.2,       # elite contact, lower reliability
-                },
+                # v44.11 — "DINGER SCORE" builder preset shows the SEASON-POWER
+                # BASE (avg_ev/barrel/pulled_brl/hard_hit/iso/blast). The
+                # per-game Dinger column adds recency/park/matchup context on
+                # top; this builder view is the pure power ranking. Sourced
+                # from the DINGER_BASE_WEIGHTS constant so they never drift.
+                "💥 Dinger Score (season-power base)": dict(DINGER_BASE_WEIGHTS),
             }
             # Data-driven preset from the learning loop (Section G).
             _dd_weights, _dd_note = None, None
@@ -15238,7 +15412,7 @@ with st.expander("🎛️ Custom Grade Builder — pick your own metrics", expan
                         },
                     )
                     n_qualified = int(_has_score.sum())
-                    weight_str = " (custom weights)" if _use_weights else " (equal weight)"
+                    weight_str = " (custom weights)" if _custom_weights_on else " (preset/equal weight)"
                     st.caption(
                         f"Top 30 of {n_qualified} hitters with data on at least one "
                         f"selected metric. Composite of {len(_selected_keys)} metric"
