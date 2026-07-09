@@ -128,15 +128,35 @@ def _score_from_weights(df: pd.DataFrame, weights: dict, neg: tuple = ()) -> pd.
     return score.round(2)
 
 
-def _form_arrow(recent: float, season: float, threshold: float = 0.10) -> str:
-    """Compare recent rolling form vs season baseline."""
+def _form_arrow(recent: float, season: float, threshold: float = 0.10,
+                recent_hr: float = None) -> str:
+    """Compare recent rolling form vs season baseline.
+
+    v44.12 (user bug: Torkelson had 2 HR in last 5 but showed 'cold'): the
+    arrow keyed purely on recent ISO vs season ISO, which ignores recent HR
+    COUNT. A hitter can homer twice in five games yet have below-season ISO
+    (few other extra-base hits), reading as a false '↓ cold' for a HR tool.
+    Recent HRs now override: 2+ HR in the recent window forces '↑', and 1
+    recent HR blocks a 'cold' downgrade to neutral.
+    """
+    # Recent-HR override — HRs are the outcome this arrow exists to signal.
+    if recent_hr is not None and not pd.isna(recent_hr):
+        try:
+            rhr = float(recent_hr)
+            if rhr >= 2:
+                return "↑"
+        except (TypeError, ValueError):
+            rhr = 0
+    else:
+        rhr = 0
     if pd.isna(recent) or pd.isna(season) or season == 0:
-        return "→"
+        # even with no ISO signal, 1+ recent HR is a mild positive
+        return "↑" if rhr >= 2 else "→"
     diff = (recent - season) / abs(season)
     if diff > threshold:
         return "↑"
     if diff < -threshold:
-        return "↓"
+        return "→" if rhr >= 1 else "↓"  # 1 recent HR blocks a false 'cold'
     return "→"
 
 
@@ -590,7 +610,8 @@ def build_matchup_table(
     # HR Form arrow
     if "recent_iso" in df.columns and "iso" in df.columns:
         df["hr_form_arrow"] = df.apply(
-            lambda r: _form_arrow(r.get("recent_iso"), r.get("iso")), axis=1
+            lambda r: _form_arrow(r.get("recent_iso"), r.get("iso"),
+                                  recent_hr=r.get("hr_last_5")), axis=1
         )
         df["hr_form_label"] = df.apply(
             lambda r: f"{r['hr_form']:.0f}% {r['hr_form_arrow']}"
@@ -689,10 +710,19 @@ def build_matchup_table(
             iso5 = row.get("recent_iso_5")
             ab5 = row.get("recent_ab_5")
             iso_season = row.get("iso")
+            # v44.12: recent HR override (see _form_arrow). 2+ HR in last 5 is
+            # hot for HR purposes regardless of overall ISO; 1 blocks 'cold'.
+            hr5 = row.get("hr_last_5")
+            try:
+                hr5 = float(hr5) if hr5 is not None and not pd.isna(hr5) else 0
+            except (TypeError, ValueError):
+                hr5 = 0
             if (iso5 is None or pd.isna(iso5) or ab5 is None or pd.isna(ab5)
                 or iso_season is None or pd.isna(iso_season)):
-                return ""
+                return f"🔥 hot ({int(hr5)} HR L5)" if hr5 >= 2 else ""
             iso5 = float(iso5); ab5 = float(ab5); iso_season = float(iso_season)
+            if hr5 >= 2:
+                return f"🔥 hot ({int(hr5)} HR L5, {iso5:.3f} ISO)"
             if ab5 < 10 or iso_season <= 0.05:
                 return ""  # not enough recent AB, or weak-baseline hitter (avoid divide-by-tiny)
             ratio = iso5 / iso_season
@@ -700,10 +730,11 @@ def build_matchup_table(
                 return f"🔥 hot ({iso5:.3f} vs {iso_season:.3f})"
             if ratio >= 1.15:
                 return f"📈 trending up ({iso5:.3f} vs {iso_season:.3f})"
+            # 1 recent HR blocks a 'cold'/'trending down' label
             if ratio <= 0.50:
-                return f"❄️ cold ({iso5:.3f} vs {iso_season:.3f})"
+                return "" if hr5 >= 1 else f"❄️ cold ({iso5:.3f} vs {iso_season:.3f})"
             if ratio <= 0.75:
-                return f"📉 trending down ({iso5:.3f} vs {iso_season:.3f})"
+                return "" if hr5 >= 1 else f"📉 trending down ({iso5:.3f} vs {iso_season:.3f})"
             return ""
         except (TypeError, ValueError):
             return ""
