@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.27-download-button-fix"
+APP_VERSION = "2026.06.10-v44.28-distance-fetch-trace-diagnostic"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -5779,7 +5779,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.27 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.28 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -9043,6 +9043,7 @@ if combined_picks is not None and not combined_picks.empty:
         # NUC Grade shows "—" everywhere. This line surfaces that.
         try:
             _researcher_audits = []
+            _dist_brl_low = False  # v44.28: trip the fetch-trace diagnostic
             for col, label in [
                 ("avg_dist", "Avg Distance"),
                 ("barrel_count", "Barrel count"),
@@ -9050,9 +9051,13 @@ if combined_picks is not None and not combined_picks.empty:
             ]:
                 if col not in combined_picks.columns:
                     _researcher_audits.append(f"{label}: ❌ column missing")
+                    if col in ("avg_dist", "barrel_count"):
+                        _dist_brl_low = True
                 else:
                     st_n = _starters[col].notna().sum() if len(_starters) else 0
                     pct = 100 * st_n / n_st
+                    if col in ("avg_dist", "barrel_count") and pct < 50:
+                        _dist_brl_low = True
                     # v43.76: informational icon (ℹ️) instead of warning (⚠️)
                     # since these columns are no longer part of Nuclear
                     # evaluation. 0% coverage is a known state, not an issue.
@@ -9070,6 +9075,32 @@ if combined_picks is not None and not combined_picks.empty:
                     + "in matchup tables, but 0% coverage no longer affects "
                     + "grades or rankings."
                 )
+
+            # v44.28: focused per-endpoint diagnostic for the distance/barrel/
+            # HR-EV fetch. When coverage is 0%, this shows WHICH Savant endpoint
+            # was tried, what columns it returned, and which column (if any)
+            # matched — so we can see exactly why it's empty and add the right
+            # column name. Only shown when at least one target metric is missing.
+            try:
+                if _dist_brl_low:
+                    from data_fetcher import last_distance_diag
+                    _ddiag = last_distance_diag()
+                    if _ddiag:
+                        stash_diagnostic(
+                            "pipeline_health",
+                            "🔎 Distance/barrel fetch trace (why coverage is 0%): "
+                            + " | ".join(
+                                f"[{d.get('status','?')}] "
+                                f"{d.get('url','')[:55]} → {d.get('n_rows',0)} rows, "
+                                f"dist_col={d.get('dist_col') or '✗'}, "
+                                f"brl_col={d.get('brl_col') or '✗'}, "
+                                f"cols={','.join(d.get('cols_sample', [])[:12])}"
+                                for d in _ddiag[:4]
+                            ),
+                            level="info",
+                        )
+            except Exception:
+                pass
 
             # v43.76: removed the Distance/Barrels fallback debug block.
             # Investigation was closed in v43.75. The data_fetcher.last_distance_diag()
