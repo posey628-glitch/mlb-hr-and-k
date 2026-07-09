@@ -726,6 +726,7 @@ def save_snapshot(snapshot_date, matchup_df: pd.DataFrame,
                 # Environment for env-boosted correlations
                 "env_boost", "opp_pitcher_xwoba",
                 "dinger_score",  # v44.11: grade Dinger Score
+                "power_composite",  # v44.32: grade HR+Dinger composite
                 "is_moonshot_target", "is_laser_target",  # v44.18: grade power targets
             ] if c in matchup_df.columns]
             # Build compact column-oriented storage with rounded values
