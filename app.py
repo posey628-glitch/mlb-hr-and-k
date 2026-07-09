@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.35-scores-visible-in-matchup-tables"
+APP_VERSION = "2026.06.10-v44.36-backmap-all-combined-all-columns"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -5871,7 +5871,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.35 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.36 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -11597,16 +11597,24 @@ if all_hitters:
     except Exception as _bmse:
         log_swallowed_error("barrel_matchup_score", _bmse, surface=False)
 
-    # v44.35 (user: "I don't see the combo anywhere"). The custom scores
-    # (dinger_score, power_composite, barrel_matchup_score) are computed HERE
-    # on combined_all — but the per-game matchup TABLES render from the ctx
-    # frames (ctx["away_matchup"]/["home_matchup"]) built earlier, which never
-    # had these columns. So the cols_to_show entries silently dropped (a column
-    # not on the frame just doesn't render). Back-map by player_id onto every
-    # ctx matchup frame so the scores actually appear in the main slate tables.
+    # v44.35/44.36 (user: "I don't see the combo" → audit found 10+ columns
+    # with the same bug). Custom columns computed HERE on combined_all — the
+    # scores, plus opp-pitcher context, robbed-HR diagnostics, slate-leader
+    # flags, sleeper score, roster-move flags — are listed in the matchup
+    # cols_to_show but were NEVER on the ctx matchup frames that actually
+    # render, so they silently dropped. Back-map ALL of them by player_id onto
+    # every ctx frame. Only maps columns that (a) exist on combined_all and
+    # (b) aren't already on the target frame, so we never clobber a value the
+    # matchup frame computed itself.
     try:
-        _score_cols = [c for c in ["dinger_score", "dinger_score_precise",
-                       "power_composite", "barrel_matchup_score"]
+        _backmap_candidates = [
+            "dinger_score", "dinger_score_precise", "power_composite",
+            "barrel_matchup_score", "is_moonshot_target", "is_laser_target",
+            "opp_pitcher_grade", "opp_pitcher_barrel_allowed", "opp_recent_hr",
+            "opp_platoon_hr", "xhr_neutral", "hr_conv_ratio", "hr_luck_gap",
+            "slate_leader_flag", "sleeper_score", "recently_moved", "il_flag",
+        ]
+        _score_cols = [c for c in _backmap_candidates
                        if c in combined_all.columns and "player_id" in combined_all.columns]
         if _score_cols:
             _ca_key = pd.to_numeric(combined_all["player_id"], errors="coerce")
@@ -11619,7 +11627,10 @@ if all_hitters:
                         continue
                     _fk = pd.to_numeric(_frame["player_id"], errors="coerce")
                     for _c, _m in _score_maps.items():
-                        _frame[_c] = _fk.map(_m)
+                        # don't clobber a column the matchup frame already has
+                        # its own values for (e.g. sleeper_score set on-frame)
+                        if _c not in _frame.columns or _frame[_c].isna().all():
+                            _frame[_c] = _fk.map(_m)
                     _gctx[_side] = _frame
     except Exception as _bmap_e:
         log_swallowed_error("score_backmap_to_matchup", _bmap_e, surface=False)
