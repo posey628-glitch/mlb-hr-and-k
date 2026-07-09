@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.31-dinger-tiebreak-and-composite"
+APP_VERSION = "2026.06.10-v44.32-custom-metrics-learning-loop"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -4396,6 +4396,41 @@ if show_pattern_analysis:
                 except Exception as _pae:
                     log_swallowed_error("power_target_accuracy_section", _pae, surface=False)
 
+                # v44.32 — CUSTOM METRICS SCORECARD. Head-to-head: how well is
+                # each SCORE (HR Score, Pick Score, Dinger, HR+Dinger Combo)
+                # actually predicting HRs across accumulated slates? This is how
+                # we see whether the custom metrics earn their keep and whether
+                # reweights help — the same learn/measure loop as the features,
+                # applied to the composites themselves.
+                try:
+                    from pattern_analysis import custom_metric_scorecard
+                    _score_card = custom_metric_scorecard(merged)
+                    if _score_card is not None and not _score_card.empty:
+                        st.markdown("**🏅 Custom Metrics Scorecard — which SCORE predicts HRs best**")
+                        st.caption(
+                            "Head-to-head correlation of each composite score with "
+                            "actual HRs, plus the HR rate among each metric's top "
+                            "10% of hitters (lift vs slate average). Higher corr + "
+                            "higher lift = the metric is finding the HR hitters. "
+                            "Watch this to see if Dinger reweights and the combo "
+                            "are improving over time."
+                        )
+                        _disp_sc = _score_card.rename(columns={
+                            "metric": "Metric", "corr_with_HR": "Corr w/HR",
+                            "top10pct_HR_rate": "Top10% HR", "slate_HR_rate": "Slate HR",
+                            "lift": "Lift", "n": "N",
+                        })
+                        st.dataframe(_disp_sc, hide_index=True, use_container_width=True)
+                    else:
+                        st.caption(
+                            "🏅 **Custom Metrics Scorecard** — compares how well HR "
+                            "Score, Pick Score, Dinger, and the HR+Dinger combo "
+                            "each predict HRs. Appears once ~20+ graded player-games "
+                            "accumulate. All four are now snapshotted and graded."
+                        )
+                except Exception as _sce:
+                    log_swallowed_error("custom_metric_scorecard_section", _sce, surface=False)
+
                 # Analysis, mirroring the eval banner's copy button. The
                 # st.dataframe tables (importance, adaptive top-10) don't
                 # survive clipboard copy, so this rebuilds the key numbers as
@@ -5829,7 +5864,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.31 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.32 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
