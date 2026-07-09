@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.34-barrel-matchup-score-and-join-fix"
+APP_VERSION = "2026.06.10-v44.35-scores-visible-in-matchup-tables"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -5871,7 +5871,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.34 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.35 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -11596,6 +11596,33 @@ if all_hitters:
         combined_all["barrel_matchup_score"] = (_spine * _amp).clip(0, 100).round(1)
     except Exception as _bmse:
         log_swallowed_error("barrel_matchup_score", _bmse, surface=False)
+
+    # v44.35 (user: "I don't see the combo anywhere"). The custom scores
+    # (dinger_score, power_composite, barrel_matchup_score) are computed HERE
+    # on combined_all — but the per-game matchup TABLES render from the ctx
+    # frames (ctx["away_matchup"]/["home_matchup"]) built earlier, which never
+    # had these columns. So the cols_to_show entries silently dropped (a column
+    # not on the frame just doesn't render). Back-map by player_id onto every
+    # ctx matchup frame so the scores actually appear in the main slate tables.
+    try:
+        _score_cols = [c for c in ["dinger_score", "dinger_score_precise",
+                       "power_composite", "barrel_matchup_score"]
+                       if c in combined_all.columns and "player_id" in combined_all.columns]
+        if _score_cols:
+            _ca_key = pd.to_numeric(combined_all["player_id"], errors="coerce")
+            _score_maps = {c: dict(zip(_ca_key, combined_all[c])) for c in _score_cols}
+            for _gpk, _gctx in game_context_map.items():
+                for _side in ("away_matchup", "home_matchup",
+                              "away_bench_matchup", "home_bench_matchup"):
+                    _frame = _gctx.get(_side)
+                    if _frame is None or _frame.empty or "player_id" not in _frame.columns:
+                        continue
+                    _fk = pd.to_numeric(_frame["player_id"], errors="coerce")
+                    for _c, _m in _score_maps.items():
+                        _frame[_c] = _fk.map(_m)
+                    _gctx[_side] = _frame
+    except Exception as _bmap_e:
+        log_swallowed_error("score_backmap_to_matchup", _bmap_e, surface=False)
 
     # v44.18: tag per-game Moonshot/Laser targets HERE (upstream of the
     # snapshot at ~line 11900) so the picks get snapshotted and the learning
