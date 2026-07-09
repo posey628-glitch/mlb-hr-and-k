@@ -1658,6 +1658,97 @@ def get_team_recent_starts(team_id: int, lookback_days: int = 14,
 # ----------------------------------------------------------------------------
 
 @st.cache_data(ttl=3600)
+def _get_hitter_stats_backup(season: int) -> pd.DataFrame:
+    """v44.26: backup hitter-stats source when the primary Savant custom
+    leaderboard fails. Tries an alternate Savant endpoint first (still
+    Statcast), then the MLB Stats API (keyless, already used across this app)
+    for core rate stats. Returns whatever it can; empty DataFrame if all fail.
+
+    Note: the MLB Stats API path does NOT carry Statcast batted-ball metrics
+    (barrel%, distance, EV) — those are Savant-only. When this fallback fires,
+    those columns stay empty and the model uses its documented proxies. The
+    point is graceful degradation (app stays up with core stats) rather than
+    a full Statcast substitute.
+    """
+    # --- Attempt 1: alternate Savant endpoint (expected_statistics) ---
+    try:
+        _alt_url = (
+            "https://baseballsavant.mlb.com/leaderboard/expected_statistics"
+            f"?type=batter&year={season}&position=&team=&filterType=&min=1&csv=true"
+        )
+        r = requests.get(_alt_url, headers=HEADERS, timeout=25)
+        if r.ok and r.text and len(r.text) > 200:
+            _adf = pd.read_csv(io.StringIO(r.text))
+            if not _adf.empty and len(_adf) > 50:
+                if "last_name, first_name" in _adf.columns:
+                    _adf["player_name"] = _adf["last_name, first_name"].apply(
+                        lambda s: " ".join(reversed([p.strip() for p in str(s).split(",")]))
+                        if isinstance(s, str) and "," in s else s)
+                for cand in ["mlb_id", "playerid", "MLBAMID"]:
+                    if cand in _adf.columns and "player_id" not in _adf.columns:
+                        _adf = _adf.rename(columns={cand: "player_id"})
+                if "player_id" in _adf.columns:
+                    return _adf
+    except Exception:
+        pass
+
+    # --- Attempt 2: MLB Stats API season hitting leaders (keyless) ---
+    try:
+        _stats_url = (
+            "https://statsapi.mlb.com/api/v1/stats"
+            f"?stats=season&group=hitting&season={season}"
+            "&gameType=R&limit=1500&sportId=1"
+        )
+        r = requests.get(_stats_url, headers=HEADERS, timeout=25)
+        if r.ok:
+            _j = r.json()
+            _rows = []
+            for _split in (_j.get("stats") or []):
+                for _s in (_split.get("splits") or []):
+                    _stat = _s.get("stat", {}) or {}
+                    _pl = _s.get("player", {}) or {}
+                    try:
+                        _pa = int(_stat.get("plateAppearances") or 0)
+                    except (ValueError, TypeError):
+                        _pa = 0
+                    if _pa < 1:
+                        continue
+                    _rows.append({
+                        "player_id": _pl.get("id"),
+                        "player_name": _pl.get("fullName"),
+                        "pa": _pa,
+                        "home_run": _num(_stat.get("homeRuns")),
+                        "batting_avg": _num(_stat.get("avg")),
+                        "slg": _num(_stat.get("slg")),
+                        "obp": _num(_stat.get("obp")),
+                        "on_base_plus_slg": _num(_stat.get("ops")),
+                        "hits": _num(_stat.get("hits")),
+                        "abs": _num(_stat.get("atBats")),
+                    })
+            if _rows:
+                _mdf = pd.DataFrame(_rows)
+                # derive ISO from SLG - AVG (Statcast batted-ball stays empty)
+                if "slg" in _mdf.columns and "batting_avg" in _mdf.columns:
+                    _mdf["iso"] = (pd.to_numeric(_mdf["slg"], errors="coerce")
+                                   - pd.to_numeric(_mdf["batting_avg"], errors="coerce")).round(3)
+                _mdf["_backup_source"] = "mlb_stats_api"
+                return _mdf
+    except Exception:
+        pass
+
+    return pd.DataFrame()
+
+
+def _num(v):
+    """Coerce a stat string/number to float, else None."""
+    try:
+        if v is None or v == "" or v == "-.--" or v == ".---":
+            return None
+        return float(v)
+    except (ValueError, TypeError):
+        return None
+
+
 def get_hitter_stats(season: int = CURRENT_SEASON, _stats_day: str = "") -> pd.DataFrame:
     """
     Pull season-level Statcast hitter stats with ALL columns needed for the
@@ -1709,8 +1800,20 @@ def get_hitter_stats(season: int = CURRENT_SEASON, _stats_day: str = "") -> pd.D
         except Exception:
             break
     if df is None or df.empty:
-        # Raise so Streamlit doesn't cache empty. Caller in app.py shows warning.
-        raise ConnectionError("Baseball Savant unreachable for hitter stats after 3 attempts")
+        # v44.26 — BACKUP SOURCES before giving up. The primary custom
+        # leaderboard occasionally fails or gets rate-limited. Rather than
+        # crash the whole app, try documented fallbacks in order:
+        #   1. Alternate Savant endpoint (expected_statistics leaderboard) —
+        #      still Statcast, just a different URL that sometimes survives
+        #      when the custom one is throttled.
+        #   2. MLB Stats API season hitting stats — NOT Statcast (no barrel/
+        #      distance), but gives the core rate stats (HR, AVG, SLG, OBP,
+        #      K%, BB%) so the app degrades gracefully instead of going dark.
+        #      This is the same keyless API the app already uses 25+ places.
+        df = _get_hitter_stats_backup(season)
+        if df is None or df.empty:
+            # Raise so Streamlit doesn't cache empty. Caller shows warning.
+            raise ConnectionError("Baseball Savant + backup sources all unreachable for hitter stats")
     if "last_name, first_name" in df.columns:
         df["player_name"] = df["last_name, first_name"].apply(
             lambda s: " ".join(reversed([p.strip() for p in str(s).split(",")]))
@@ -2058,6 +2161,18 @@ def get_hitter_stats(season: int = CURRENT_SEASON, _stats_day: str = "") -> pd.D
                             ).round(0)
                         except Exception:
                             pass
+                        # v44.29 (bug fix): the Moonshot target, display, and
+                        # tooltips all read the column `avg_hr_distance`, but
+                        # this merge historically only wrote `avg_dist` — so the
+                        # data was fetched into a column nothing consumed. When
+                        # the source column WAS the HR-specific distance
+                        # (avg_hr_distance / avg_home_run_distance / hr_distance),
+                        # also populate avg_hr_distance so the picks upgrade to
+                        # real distance. If it was only all-batted-ball distance,
+                        # leave avg_hr_distance empty (don't mislabel it as HR).
+                        if dist_col in ("avg_hr_distance", "avg_home_run_distance",
+                                        "hr_distance"):
+                            df["avg_hr_distance"] = df["avg_dist"]
                         diag_entry["dist_merged"] = int(df["avg_dist"].notna().sum())
                         if df["avg_dist"].notna().any():
                             needs_dist = False
