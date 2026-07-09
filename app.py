@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.13-column-reorganization"
+APP_VERSION = "2026.06.10-v44.14-hits-tb-pattern-loops"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -4145,6 +4145,57 @@ if show_pattern_analysis:
 
                 # ============================================================
                 # v44.06 (user-requested): copyable text report for Pattern
+                # v44.14 — PROP PREDICTORS (Hits & Total Bases). Parallel to
+                # Section C/G but for got_hit and got_2plus_bases, so you can
+                # see which stats predict a HIT or an extra-base day — and
+                # spot when a hitter is a better 2+ bases play than a HR play.
+                try:
+                    from backtest import load_prop_pattern_history
+                    from pattern_analysis import rolling_feature_importance
+                    _prop_specs = [
+                        ("hits", "🥎 HITS predictors", "got a hit"),
+                        ("tb", "📊 2+ TOTAL BASES predictors", "got 2+ bases"),
+                    ]
+                    _any_prop = False
+                    _prop_report_lines = []
+                    for _pk, _plabel, _pdesc in _prop_specs:
+                        _phist = load_prop_pattern_history(_pk)
+                        if not _phist:
+                            continue
+                        _pimp = rolling_feature_importance(_phist, lookback_days=14)
+                        if _pimp is None or _pimp.empty:
+                            continue
+                        _any_prop = True
+                        _ndays = int(_pimp["n_days"].max()) if "n_days" in _pimp else len(_phist)
+                        st.markdown(f"**{_plabel}** ({_ndays} day(s) of history)")
+                        st.caption(
+                            f"Which projection stats correlate with a hitter "
+                            f"having {_pdesc}. Higher avg_corr = stronger "
+                            f"predictor. Reliability = stability across slates."
+                        )
+                        _show = _pimp.head(8)[
+                            [c for c in ["feature", "avg_corr", "reliability", "n_days"]
+                             if c in _pimp.columns]
+                        ]
+                        st.dataframe(_show, hide_index=True, use_container_width=True)
+                        _prop_report_lines.append(f"{_plabel} ({_ndays}d):")
+                        for _, _rr in _show.iterrows():
+                            _prop_report_lines.append(
+                                f"  {str(_rr['feature'])[:22]:<22} "
+                                f"corr {_rr['avg_corr']:+.3f} reliab {_rr['reliability']:.2f}"
+                            )
+                    if not _any_prop:
+                        st.caption(
+                            "🥎📊 **Hits & Total Bases predictors** — will appear "
+                            "once 3+ slates of outcomes accumulate. The data "
+                            "(got_hit, got_2plus_bases) is already being tracked "
+                            "each day alongside HRs; this shows which stats "
+                            "predict a hit or extra-base day, so you can tell "
+                            "when a player is a better 2+ bases play than a HR play."
+                        )
+                except Exception as _ppe:
+                    log_swallowed_error("prop_predictors_section", _ppe, surface=False)
+
                 # Analysis, mirroring the eval banner's copy button. The
                 # st.dataframe tables (importance, adaptive top-10) don't
                 # survive clipboard copy, so this rebuilds the key numbers as
@@ -5577,7 +5628,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.13 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.14 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
