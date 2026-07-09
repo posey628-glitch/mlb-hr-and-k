@@ -1810,23 +1810,27 @@ def get_hitter_stats(season: int = CURRENT_SEASON, _stats_day: str = "") -> pd.D
         global _LAST_DISTANCE_DIAG
         _LAST_DISTANCE_DIAG = []
         la_urls = [
-            # v43.69: try the canonical Statcast leaderboard URL FIRST with
-            # an empty min so we don't accidentally filter out qualified
-            # hitters. The previous URL had `min=1` which Savant interprets
-            # variably depending on the leaderboard type.
+            # v44.23: the EXIT VELOCITY & BARRELS leaderboard is the one that
+            # actually carries avg HR distance, barrel COUNT, BBE, and avg HR
+            # exit velocity — the generic statcast leaderboard omits distance.
+            # Try it first with both the modern and legacy path.
+            f"https://baseballsavant.mlb.com/leaderboard/exit_velocity"
+            f"?type=batter&year={season}&team=&min=&csv=true",
+            f"https://baseballsavant.mlb.com/leaderboard/exit-velocity"
+            f"?type=batter&year={season}&min=&csv=true",
+            # v43.69: canonical Statcast leaderboard (has barrel rate, EV, some
+            # distance depending on Savant's current schema).
             f"https://baseballsavant.mlb.com/leaderboard/statcast"
             f"?type=batter&year={season}&team=&min=&csv=true",
             # Original exit-velocity + barrels endpoint
             f"https://baseballsavant.mlb.com/leaderboard/statcast"
             f"?type=batter&year={season}&position=&team=&min=1&csv=true",
-            # Custom leaderboard with explicit launch_angle selection
+            # Custom leaderboard with explicit distance/barrel selections
             f"https://baseballsavant.mlb.com/leaderboard/custom"
             f"?year={season}&type=batter&filter=&min=1"
-            f"&selections=pa,launch_angle,launch_speed,avg_hit_angle"
+            f"&selections=pa,launch_angle,launch_speed,avg_hit_angle,"
+            f"avg_distance,avg_hr_distance,barrels,avg_hr_hit_speed"
             f"&chart=false&x=pa&y=pa&r=no&csv=true",
-            # Legacy exit-velocity leaderboard
-            f"https://baseballsavant.mlb.com/leaderboard/exit-velocity"
-            f"?type=batter&year={season}&min=1&csv=true",
         ]
         # Cast df["player_id"] to a stable type for dict lookups. Previous
         # bug: mixing Int64 (from ev_df) and float (from df) made map() miss
@@ -1903,11 +1907,17 @@ def get_hitter_stats(season: int = CURRENT_SEASON, _stats_day: str = "") -> pd.D
                         merge_cols.append(la_col)
                         merge_renames[la_col] = "_la_from_ev"
 
-                # ----- v43.68: Avg Distance -----
+                # ----- v43.68/v44.23: Avg Distance -----
+                # v44.23: HR-specific distance columns FIRST (that's what the
+                # Moonshot target wants), then all-batted-ball distance as a
+                # fallback proxy. The Exit Velocity & Barrels leaderboard uses
+                # avg_hr_distance / avg_home_run_distance.
                 if needs_dist:
                     dist_col = None
-                    for cand in ["avg_hit_distance", "avg_distance",
-                                  "distance", "hit_distance", "avg_dist"]:
+                    for cand in ["avg_hr_distance", "avg_home_run_distance",
+                                  "hr_distance", "avg_hit_distance",
+                                  "avg_distance", "distance", "hit_distance",
+                                  "avg_dist"]:
                         if cand in ev_df.columns:
                             coerced = pd.to_numeric(ev_df[cand], errors="coerce")
                             if coerced.notna().any():
@@ -1918,6 +1928,20 @@ def get_hitter_stats(season: int = CURRENT_SEASON, _stats_day: str = "") -> pd.D
                     if dist_col:
                         merge_cols.append(dist_col)
                         merge_renames[dist_col] = "_dist_from_ev"
+
+                # ----- v44.23: Avg HR Exit Velocity (for the Laser target) -----
+                _hrev_col = None
+                for cand in ["avg_hr_hit_speed", "avg_hr_exit_velocity",
+                              "avg_home_run_hit_speed", "hr_launch_speed"]:
+                    if cand in ev_df.columns:
+                        coerced = pd.to_numeric(ev_df[cand], errors="coerce")
+                        if coerced.notna().any():
+                            ev_df[cand] = coerced
+                            _hrev_col = cand
+                            break
+                if _hrev_col:
+                    merge_cols.append(_hrev_col)
+                    merge_renames[_hrev_col] = "_hrev_from_ev"
 
                 # ----- v43.68: Barrels (raw count) -----
                 if needs_barrels:
@@ -2069,6 +2093,43 @@ def get_hitter_stats(season: int = CURRENT_SEASON, _stats_day: str = "") -> pd.D
                         diag_entry["brl_merged"] = int(df["barrel_count"].notna().sum())
                         if df["barrel_count"].notna().any():
                             needs_barrels = False
+
+                    # v44.23: avg HR exit velocity → avg_hr_ev (for the Laser
+                    # target alongside regular avg_ev). Always attempt when the
+                    # column was captured, independent of la/dist/barrel needs.
+                    if "_hrev_from_ev" in ev_subset.columns:
+                        _hrev_dict = {}
+                        for pid, val in zip(
+                            ev_subset["player_id"], ev_subset["_hrev_from_ev"]
+                        ):
+                            try:
+                                if pd.notna(pid):
+                                    _hrev_dict[int(pid)] = (
+                                        float(val) if pd.notna(val) else None
+                                    )
+                            except (ValueError, TypeError):
+                                continue
+
+                        def _lookup_hrev(pid, _d=_hrev_dict):
+                            try:
+                                if pd.isna(pid):
+                                    return None
+                                return _d.get(int(pid))
+                            except (ValueError, TypeError):
+                                return None
+
+                        _new_hrev = df["player_id"].apply(_lookup_hrev)
+                        if "avg_hr_ev" in df.columns:
+                            df["avg_hr_ev"] = pd.to_numeric(
+                                df["avg_hr_ev"], errors="coerce").fillna(_new_hrev)
+                        else:
+                            df["avg_hr_ev"] = _new_hrev
+                        try:
+                            df["avg_hr_ev"] = pd.to_numeric(
+                                df["avg_hr_ev"], errors="coerce").round(1)
+                        except Exception:
+                            pass
+                        diag_entry["hrev_merged"] = int(df["avg_hr_ev"].notna().sum())
 
                 _LAST_DISTANCE_DIAG.append(diag_entry)
                 # If everything's populated, stop trying URLs
