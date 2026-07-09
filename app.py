@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.12-form-trend-and-timezone-fixes"
+APP_VERSION = "2026.06.10-v44.13-column-reorganization"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -5577,7 +5577,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.12 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.13 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -12959,6 +12959,23 @@ def build_col_config():
                 "fail (pull<35 + EV<88) cap the score regardless of other tiers."
             ),
         ),
+        "dinger_score": st.column_config.NumberColumn(
+            "💥 Dinger",
+            format="%.0f",
+            width="small",
+            help=(
+                "**Dinger Score (0-100)** — the curated HR predictor. v44.11.\n\n"
+                "Two layers:\n"
+                "  • BASE = raw season power (avg EV, barrel%, pulled-air "
+                "barrel%, hard-hit%, ISO, blast%) — deliberately ONLY "
+                "independent batted-ball inputs, no model outputs.\n"
+                "  • CONTEXT = tonight's multipliers (recent form, "
+                "park+weather, matchup) so it MOVES per slate rather than "
+                "ranking the same sluggers every day.\n\n"
+                "Runs parallel to HR Score — compare them to see when raw "
+                "power and matchup-aware ranking disagree."
+            ),
+        ),
         "alert": st.column_config.TextColumn(
             "Signal", width="small",
             help=(
@@ -13585,47 +13602,45 @@ def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
         )
 
     cols_to_show = [c for c in [
-        # v43.41 UX simplification — HR Score (0-100) is the PRIMARY metric.
-        # Signal emoji + score + raw HR% gives 3 levels of detail at a glance:
-        # color > number > probability. Letter grade kept for backward compat
-        # but moved later in the column order so it's not competing visually.
-        "hr_score_signal", "hr_score", "hr_game_pct",
-        # Identity / lineup (moved up for readability)
+        # v44.13 — COLUMN REORGANIZATION for readability. Reading order now
+        # follows how a person actually scans a row: WHO → headline verdict →
+        # HR outlook → hit / total-base outlook → the power stats driving it →
+        # tonight's matchup context → supporting detail. Previously the
+        # player's NAME sat in column 4 behind three HR-score columns, which
+        # is backwards — you find the person first, then read their numbers.
+        #
+        # 1) IDENTITY — who is this and where do they hit
         "player_name", "lineup_pos", "bats", "position",
-        # Hit signal — same simplified pattern (color + number + raw)
-        "hit_alert", "hit_game_pct",
-        # 2+ bases (v43.38)
-        "tb_grade", "expected_total_bases",
-        # Smash + flags
+        # 2) HEADLINE HR VERDICT — the 3-level glance: signal > score > raw%
+        "hr_score_signal", "hr_score", "hr_game_pct",
+        # 3) DINGER SCORE — the curated raw-power×context HR predictor (v44.11)
+        "dinger_score",
+        # 4) HIT + TOTAL-BASE OUTLOOK — the "maybe a better non-HR play" read
+        "hit_alert", "hit_game_pct", "tb_grade", "expected_total_bases",
+        # 5) FORM / STREAK — recent trajectory (now HR-aware, v44.12)
+        "streak_label",
+        # 6) POWER STATS — what drives the HR verdict, grouped together
+        "barrel_pct", "pulled_brl_pct", "iso", "avg_ev", "hard_hit",
+        "blast_pct", "fb_pct", "la", "xwoba", "xwobacon",
+        "avg_hr_distance", "max_hit_speed",
+        # 7) MATCHUP CONTEXT — tonight's spot: pitcher, arsenal, environment
+        "matchup", "matchup_opp", "pitch_match_score", "pitch_hr_score",
+        "best_pitch", "best_pitch_xwoba", "worst_pitch", "mini_arsenal",
+        # 8) SITUATIONAL FLAGS
         "smash_spot", "arsenal_flag", "gb_flag", "day_night_flag",
         "contact_flag", "split_confidence", "slate_leader_flag",
-        # v43.36 criteria — kept as visual checkmarks (NOT a grade)
+        # 9) HR PROFILE / RESEARCHER FRAMEWORK checkpoints
         "hr_criteria_label",
-        # v43.66 researcher framework: Must-Have (10) + Nuclear (14) checkpoints
-        # alongside DingerMaven's 4-point. Lets users compare profile-only
-        # ranking against matchup-aware ranking on every row.
         "must_have_label", "must_have_met", "must_have_pass",
         "nuclear_label", "nuclear_met", "nuclear_grade",
         "near_hr_est", "avg_dist", "barrel_count",
-        # Letter grades AFTER scores (backward compat / for those who prefer letters)
-        "grade", "hit_grade",
         "hr_profile_label",
-        # Score composites
-        "power_score", "lift_score", "matchup_opp",
-        "hr_pa_pct", "hit_pa_pct",
-        "matchup", "test_score",
-        # v43.23: discipline_score visible now (was computed but never displayed)
-        "discipline_score",
-        # v43.50: park_history_flag removed — feature non-functional, see below
-        "streak_label",
-        "pa", "barrel_pct", "iso", "xwoba", "xwobacon",
-        "obp", "slg", "ops",
-        "pitch_match_score", "pitch_hr_score", "best_pitch", "best_pitch_xwoba", "worst_pitch",
-        # v43.29: top-3 pitch breakdown so user can see how this hitter
-        # handles the specific pitches this pitcher leans on
-        "mini_arsenal",
-        "fb_pct", "la", "avg_ev", "hard_hit",
-        "avg_hr_distance", "max_hit_speed",
+        # 10) LETTER GRADES — kept for those who prefer letters, after scores
+        "grade", "hit_grade",
+        # 11) SECONDARY COMPOSITES + supporting detail
+        "power_score", "lift_score", "test_score",
+        "hr_pa_pct", "hit_pa_pct", "discipline_score",
+        "pa", "obp", "slg", "ops",
         "k_pct", "bb_pct", "whiff_pct",
         "home_run", "recent_hr", "recent_hr_weighted_rate", "sleeper_score",
     ] if c in matchup_df.columns]
