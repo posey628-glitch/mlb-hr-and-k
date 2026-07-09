@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.28-distance-fetch-trace-diagnostic"
+APP_VERSION = "2026.06.10-v44.29-hr-distance-column-name-fix"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -5779,7 +5779,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.28 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.29 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -9091,10 +9091,14 @@ if combined_picks is not None and not combined_picks.empty:
                             "🔎 Distance/barrel fetch trace (why coverage is 0%): "
                             + " | ".join(
                                 f"[{d.get('status','?')}] "
-                                f"{d.get('url','')[:55]} → {d.get('n_rows',0)} rows, "
+                                f"{d.get('url','')[:45]} → {d.get('n_rows',0)} rows, "
                                 f"dist_col={d.get('dist_col') or '✗'}, "
                                 f"brl_col={d.get('brl_col') or '✗'}, "
-                                f"cols={','.join(d.get('cols_sample', [])[:12])}"
+                                f"dist_merged={d.get('dist_merged',0)}, "
+                                f"brl_merged={d.get('brl_merged',0)}, "
+                                f"id_overlap={d.get('overlap_size','?')}, "
+                                f"ev_ids={d.get('ev_sample_ids','?')}, "
+                                f"df_ids={d.get('df_sample_ids','?')}"
                                 for d in _ddiag[:4]
                             ),
                             level="info",
