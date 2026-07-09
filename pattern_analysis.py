@@ -116,7 +116,8 @@ def merge_snapshots_with_outcomes(snapshots: dict) -> pd.DataFrame:
                 "discipline_score", "lift_score", "matchup_opp",
                 "recent_hr", "recent_hr_weighted_rate",
                 "pitch_hr_score", "pitch_match_score",
-                "env_boost", "opp_pitcher_xwoba",
+                "env_boost", "opp_pitcher_xwoba", "dinger_score",
+                "is_moonshot_target", "is_laser_target",
                 "sleeper_score", "lineup_pos", "is_roster_fill",
             ]:
                 if col in pick:
@@ -419,6 +420,39 @@ def prop_accuracy_summary(merged_df: pd.DataFrame) -> dict:
     return result
 
 
+def power_target_accuracy(merged_df: pd.DataFrame) -> dict:
+    """v44.18: how often did the Moonshot / Laser targets actually homer?
+
+    The per-game Moonshot (400+ ft) and Laser (105+ mph) picks are tagged
+    upstream (is_moonshot_target / is_laser_target) and snapshotted, so once
+    outcomes attach we can grade them. Returns for each: the tagged targets'
+    HR rate vs the field (non-target) HR rate, plus lift and sample size.
+    A lift > 1.0 means the target picks genuinely find the HR hitters.
+    """
+    if merged_df.empty or "homered" not in merged_df.columns:
+        return {}
+    out = {}
+    for label, tag in [("Moonshot", "is_moonshot_target"),
+                       ("Laser", "is_laser_target")]:
+        if tag not in merged_df.columns:
+            continue
+        valid = merged_df.dropna(subset=["homered"]).copy()
+        valid[tag] = pd.to_numeric(valid[tag], errors="coerce").fillna(0)
+        targets = valid[valid[tag] == 1]
+        field = valid[valid[tag] == 0]
+        if len(targets) < 5:  # need a few slates of picks
+            continue
+        t_rate = float(targets["homered"].mean())
+        f_rate = float(field["homered"].mean()) if len(field) else 0.0
+        out[label] = {
+            "n_targets": len(targets),
+            "target_hr_rate": t_rate,
+            "field_hr_rate": f_rate,
+            "lift": (t_rate / f_rate) if f_rate > 0 else None,
+        }
+    return out
+
+
 # ============================================================================
 # Threshold sweep — find the threshold for a feature that maximizes lift
 # ============================================================================
@@ -501,7 +535,7 @@ HR_CANDIDATE_FEATURES = [
     "matchup_opp", "power_score", "pitch_hr_score",
     "lift_score", "discipline_score",
     "recent_hr_weighted_rate",
-    "env_boost",
+    "env_boost", "dinger_score",
 ]
 
 
