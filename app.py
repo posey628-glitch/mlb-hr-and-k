@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.19-sidebar-section-navigation"
+APP_VERSION = "2026.06.10-v44.20-float-format-and-grade-visible"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -5776,7 +5776,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.19 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.20 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -11408,6 +11408,36 @@ if all_hitters:
         combined_all["is_moonshot_target"] = 0
         combined_all["is_laser_target"] = 0
 
+    # v44.20 (user-reported: 3.1700000 trailing zeros). The column_config
+    # format specifiers fix the on-screen dataframe display, but exports,
+    # copy-text, and snapshots use the raw values — so round the float
+    # columns at the source too. Percent/score cols → 1dp, rate stats
+    # (ISO/xwOBA/SLG) → 3dp. Values stay plenty precise for all math; this
+    # just strips the float64 noise. Skip columns used as exact keys.
+    try:
+        _round_1dp = ["barrel_pct", "pulled_brl_pct", "blast_pct", "hard_hit",
+                      "pull_air_pct", "pull_pct", "fb_pct", "gb_pct", "ld_pct",
+                      "k_pct", "bb_pct", "whiff_pct", "avg_ev", "max_hit_speed",
+                      "la", "sprint_speed", "hr_game_pct", "hit_game_pct",
+                      "hr_pa_pct", "hit_pa_pct", "matchup_opp", "power_score",
+                      "lift_score", "discipline_score", "pitch_match_score",
+                      "pitch_hr_score", "test_score", "sleeper_score"]
+        _round_3dp = ["iso", "xslg", "slg", "obp", "ops", "xwoba", "xwobacon",
+                      "best_pitch_xwoba"]
+        _round_2dp = ["expected_total_bases", "recent_hr_weighted_rate",
+                      "env_boost", "dinger_score"]
+        for _c in _round_1dp:
+            if _c in combined_all.columns:
+                combined_all[_c] = pd.to_numeric(combined_all[_c], errors="coerce").round(1)
+        for _c in _round_3dp:
+            if _c in combined_all.columns:
+                combined_all[_c] = pd.to_numeric(combined_all[_c], errors="coerce").round(3)
+        for _c in _round_2dp:
+            if _c in combined_all.columns:
+                combined_all[_c] = pd.to_numeric(combined_all[_c], errors="coerce").round(2)
+    except Exception as _rnd_e:
+        log_swallowed_error("source_rounding", _rnd_e, surface=False)
+
     # v42r: "ROBBED HR" diagnostic columns. Park-neutral expected HR vs
     # actual HR. Display/audit-only — does NOT feed into pick_score.
     #
@@ -13888,6 +13918,48 @@ def build_col_config():
             help="Quick-read power profile label combining barrel%, HR/PA, "
                  "and hard-hit% into a single descriptor.",
         ),
+        # v44.20 (user-reported: trailing zeros like 3.1700000). These
+        # percent/rate/decimal columns previously had NO column_config entry,
+        # so st.dataframe rendered the raw float64 with full precision. A
+        # format specifier fixes the DISPLAY cleanly across every table
+        # without touching the underlying values (which stay full-precision
+        # for correct math). One-decimal for percents, three for rate stats.
+        "barrel_pct":      st.column_config.NumberColumn("Barrel%", format="%.1f", width="small"),
+        "pulled_brl_pct":  st.column_config.NumberColumn("Pull Brl%", format="%.1f", width="small"),
+        "blast_pct":       st.column_config.NumberColumn("Blast%", format="%.1f", width="small"),
+        "hard_hit":        st.column_config.NumberColumn("Hard Hit%", format="%.1f", width="small"),
+        "pull_air_pct":    st.column_config.NumberColumn("Pull Air%", format="%.1f", width="small"),
+        "pull_pct":        st.column_config.NumberColumn("Pull%", format="%.1f", width="small"),
+        "fb_pct":          st.column_config.NumberColumn("FB%", format="%.1f", width="small"),
+        "gb_pct":          st.column_config.NumberColumn("GB%", format="%.1f", width="small"),
+        "ld_pct":          st.column_config.NumberColumn("LD%", format="%.1f", width="small"),
+        "k_pct":           st.column_config.NumberColumn("K%", format="%.1f", width="small"),
+        "bb_pct":          st.column_config.NumberColumn("BB%", format="%.1f", width="small"),
+        "whiff_pct":       st.column_config.NumberColumn("Whiff%", format="%.1f", width="small"),
+        "avg_ev":          st.column_config.NumberColumn("Avg EV", format="%.1f", width="small"),
+        "max_hit_speed":   st.column_config.NumberColumn("Max EV", format="%.1f", width="small"),
+        "avg_hr_distance": st.column_config.NumberColumn("HR Dist", format="%.0f", width="small"),
+        "la":              st.column_config.NumberColumn("LA", format="%.1f", width="small"),
+        "iso":             st.column_config.NumberColumn("ISO", format="%.3f", width="small"),
+        "xslg":            st.column_config.NumberColumn("xSLG", format="%.3f", width="small"),
+        "slg":             st.column_config.NumberColumn("SLG", format="%.3f", width="small"),
+        "obp":             st.column_config.NumberColumn("OBP", format="%.3f", width="small"),
+        "ops":             st.column_config.NumberColumn("OPS", format="%.3f", width="small"),
+        "xwoba":           st.column_config.NumberColumn("xwOBA", format="%.3f", width="small"),
+        "xwobacon":        st.column_config.NumberColumn("xwOBAcon", format="%.3f", width="small"),
+        "best_pitch_xwoba": st.column_config.NumberColumn("Best Pitch xwOBA", format="%.3f", width="small"),
+        "sprint_speed":    st.column_config.NumberColumn("Sprint", format="%.1f", width="small"),
+        "pitch_match_score": st.column_config.NumberColumn("Pitch Match", format="%.0f", width="small"),
+        "pitch_hr_score":  st.column_config.NumberColumn("Pitch HR", format="%.0f", width="small"),
+        "expected_total_bases": st.column_config.NumberColumn("xTB", format="%.2f", width="small"),
+        "recent_hr_weighted_rate": st.column_config.NumberColumn("L15 wHR%", format="%.2f", width="small"),
+        "env_boost":       st.column_config.NumberColumn("Env", format="%.2f", width="small"),
+        "pa":              st.column_config.NumberColumn("PA", format="%d", width="small"),
+        "recent_hr":       st.column_config.NumberColumn("Rec HR", format="%d", width="small"),
+        "home_run":        st.column_config.NumberColumn("HR", format="%d", width="small"),
+        "test_score":      st.column_config.NumberColumn("Test", format="%.0f", width="small"),
+        "sleeper_score":   st.column_config.NumberColumn("Sleeper", format="%.0f", width="small"),
+        "hit_pa_pct":      st.column_config.NumberColumn("Hit/PA%", format="%.1f", width="small"),
     }
 
 
@@ -14077,12 +14149,15 @@ def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
         #
         # 1) IDENTITY — who is this and where do they hit
         "player_name", "lineup_pos", "bats", "position",
-        # 2) HEADLINE HR VERDICT — the 3-level glance: signal > score > raw%
-        "hr_score_signal", "hr_score", "hr_game_pct",
+        # 2) HEADLINE HR VERDICT — signal > score > LETTER GRADE > raw%.
+        # v44.20 (user: "I see hr_score and signal but not grade"). The letter
+        # grade was in section 10, ~40 columns to the right and past the fold.
+        # Moved here beside the score so the verdict reads together at a glance.
+        "hr_score_signal", "hr_score", "grade", "hr_game_pct",
         # 3) DINGER SCORE — the curated raw-power×context HR predictor (v44.11)
         "dinger_score",
         # 4) HIT + TOTAL-BASE OUTLOOK — the "maybe a better non-HR play" read
-        "hit_alert", "hit_game_pct", "tb_grade", "expected_total_bases",
+        "hit_alert", "hit_game_pct", "hit_grade", "tb_grade", "expected_total_bases",
         # 5) FORM / STREAK — recent trajectory (now HR-aware, v44.12)
         "streak_label",
         # 6) POWER STATS — what drives the HR verdict, grouped together
@@ -14101,9 +14176,7 @@ def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
         "nuclear_label", "nuclear_met", "nuclear_grade",
         "near_hr_est", "avg_dist", "barrel_count",
         "hr_profile_label",
-        # 10) LETTER GRADES — kept for those who prefer letters, after scores
-        "grade", "hit_grade",
-        # 11) SECONDARY COMPOSITES + supporting detail
+        # 10) SECONDARY COMPOSITES + supporting detail
         "power_score", "lift_score", "test_score",
         "hr_pa_pct", "hit_pa_pct", "discipline_score",
         "pa", "obp", "slg", "ops",
