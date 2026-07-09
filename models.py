@@ -966,13 +966,13 @@ def build_matchup_table(
         # Quality of contact
         "barrel_pct", "pulled_brl_pct", "hard_hit", "sweet_spot_pct",
         "fb_pct", "gb_pct", "ld_pct",
-        "la", "avg_ev",
+        "la", "avg_ev", "avg_hr_ev",
         # v43.66 (researcher framework): new inputs the Must-Have / Nuclear
         # checklists read. avg_dist is fetched directly from Savant; barrel_count
         # is the raw count (not %); near_hr_est is derived in app.py as
         # max(0, barrel_count - home_run). All three MUST survive display_cols
         # or the new criteria silently die — the v43.5/v43.51-class bug.
-        "avg_dist", "barrel_count", "near_hr_est",
+        "avg_dist", "avg_hr_distance", "barrel_count", "near_hr_est",
         # v43.17: bat tracking columns (Blast %, bat speed, etc.) — only
         # populated when sidebar opt-in toggle is enabled AND Savant
         # fetch succeeds. Otherwise NaN, _score_from_weights handles that
