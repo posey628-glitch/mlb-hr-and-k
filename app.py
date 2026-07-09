@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.36-backmap-all-combined-all-columns"
+APP_VERSION = "2026.06.10-v44.37-top10-column-reorg"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -5871,7 +5871,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.36 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.37 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -9829,18 +9829,25 @@ if combined_picks is not None and not combined_picks.empty:
             honorable_mentions = pd.DataFrame()
 
         cols_to_show = [c for c in [
-            "rank", "il_flag", "slate_leader_flag", "convergence_label", "same_game_flag",
-            "arsenal_flag", "gb_flag", "split_confidence",
-            "player_name", "team", "game", "opp_pitcher",
+            # 1) IDENTITY — who is this pick and where do they play? Lead with
+            # the name, not a wall of flags (v44.37 reorg: previously opened
+            # with 8 flag columns before you could even see the player).
+            "rank", "player_name", "team", "game", "opp_pitcher",
+            # 2) THE VERDICT — the headline numbers this table exists to show.
             "pick_score", "hr_game_pct", "matchup",
-            # v42u: pulled_brl_pct surfaced alongside barrel_pct so user can
-            # see pull-power separately from raw barrel rate (different signal —
-            # raw barrel can come from oppo, pull barrel is the HR-specific one).
-            "barrel_pct", "pulled_brl_pct", "lift_score",
-            "hr_profile_label",
-            # v42t: 5-game form trend (hot/cold streak relative to baseline)
-            "form_trend_flag",
-            "hr_form", "env_boost",
+            # 3) POWER SIGNALS — what's driving the pick. pulled_brl_pct sits
+            # beside barrel_pct so pull-power (the HR-specific signal) reads
+            # next to raw barrel rate; lift_score is the model's edge measure.
+            "barrel_pct", "pulled_brl_pct", "lift_score", "hr_profile_label",
+            # 4) FORM / ENVIRONMENT — recent trajectory + park/weather.
+            "hr_form", "form_trend_flag", "env_boost",
+            # 5) CONTEXT FLAGS — consensus, correlation, arsenal, and the
+            # sample/roster caveats. These qualify the pick, so they read AFTER
+            # the pick itself (leader flag, cross-system convergence, same-game
+            # correlation warning, arsenal edge, GB caution, split confidence,
+            # IL note).
+            "slate_leader_flag", "convergence_label", "same_game_flag",
+            "arsenal_flag", "gb_flag", "split_confidence", "il_flag",
         ] if c in top10.columns]
         disp = top10[cols_to_show].copy()
 
