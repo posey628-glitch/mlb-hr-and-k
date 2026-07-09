@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.32-custom-metrics-learning-loop"
+APP_VERSION = "2026.06.10-v44.33-composite-placement-and-diag"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -2352,12 +2352,19 @@ try:
             _ad = int(hitter_stats.get("avg_dist", pd.Series(dtype=float)).notna().sum()) if "avg_dist" in hitter_stats.columns else -1
             _ahd = int(hitter_stats.get("avg_hr_distance", pd.Series(dtype=float)).notna().sum()) if "avg_hr_distance" in hitter_stats.columns else -1
             _bc = int(hitter_stats.get("barrel_count", pd.Series(dtype=float)).notna().sum()) if "barrel_count" in hitter_stats.columns else -1
+            # v44.33: dtype of player_id + a sample of the IDs that HAVE avg_dist,
+            # so we can see if it's an ID-type or ID-space mismatch downstream.
+            _pid_dtype = str(hitter_stats["player_id"].dtype) if "player_id" in hitter_stats.columns else "no-col"
+            _ad_ids = []
+            if "avg_dist" in hitter_stats.columns and "player_id" in hitter_stats.columns:
+                _ad_ids = hitter_stats[hitter_stats["avg_dist"].notna()]["player_id"].head(5).tolist()
             stash_diagnostic(
                 "pipeline_health",
                 f"🔬 hitter_stats source coverage (of {_hs_n} hitters): "
                 f"avg_dist={_ad if _ad>=0 else 'col-missing'}, "
                 f"avg_hr_distance={_ahd if _ahd>=0 else 'col-missing'}, "
                 f"barrel_count={_bc if _bc>=0 else 'col-missing'}  "
+                f"| pid_dtype={_pid_dtype}, sample_ids_with_dist={_ad_ids}  "
                 f"← if high here but 0% in combined_picks, loss is the matchup join",
                 level="info",
             )
@@ -5864,7 +5871,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.32 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.33 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -14537,8 +14544,10 @@ def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
         # grade was in section 10, ~40 columns to the right and past the fold.
         # Moved here beside the score so the verdict reads together at a glance.
         "hr_score_signal", "hr_score", "grade", "hr_game_pct",
-        # 3) DINGER SCORE — the curated raw-power×context HR predictor (v44.11)
-        "dinger_score",
+        # 3) CUSTOM HR COMPOSITES — Dinger (raw power×context) + the
+        # HR-Score×Dinger combo, grouped together right after the headline
+        # verdict so all the HR-prediction numbers read together (v44.11/44.31).
+        "dinger_score", "power_composite",
         # 4) HIT + TOTAL-BASE OUTLOOK — the "maybe a better non-HR play" read
         "hit_alert", "hit_game_pct", "hit_grade", "tb_grade", "expected_total_bases",
         # 5) FORM / STREAK — recent trajectory (now HR-aware, v44.12)
