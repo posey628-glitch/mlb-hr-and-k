@@ -725,6 +725,7 @@ def save_snapshot(snapshot_date, matchup_df: pd.DataFrame,
                 "lineup_confirmed",  # v43.93: segment confirmed-vs-projected accuracy
                 # Environment for env-boosted correlations
                 "env_boost", "opp_pitcher_xwoba",
+                "dinger_score",  # v44.11: grade Dinger Score
             ] if c in matchup_df.columns]
             # Build compact column-oriented storage with rounded values
             _sub = _df[keep_cols].where(_df[keep_cols].notna(), None)
@@ -1228,6 +1229,29 @@ def auto_run_pattern_discovery() -> dict:
                 day_corrs["date_computed"] = str(d_str)  # slate date, not run date
                 day_corrs["basis"] = "slate"
                 new_entries.append(day_corrs)
+
+        # v44.14 — PARALLEL PROP LOOPS: compute the same per-slate feature
+        # correlations against HITS (got_hit) and 2+ TOTAL BASES
+        # (got_2plus_bases), banked under separate history keys. This lets the
+        # app learn which stats predict a HIT or an extra-base day — often a
+        # better play than a HR, since a hitter reaches base far more often
+        # than he homers. Same independent-per-slate structure as the HR loop.
+        _prop_loops = {
+            "_pattern_history_hits": "got_hit",
+            "_pattern_history_tb": "got_2plus_bases",
+        }
+        _prop_new_entries = {k: [] for k in _prop_loops}
+        for _hist_key, _outcome in _prop_loops.items():
+            if _outcome not in merged.columns:
+                continue
+            for d_str, day_df in merged.groupby("snapshot_date"):
+                _c = compute_daily_correlations(day_df, _outcome)
+                if _c.get("correlations"):
+                    _c["date_computed"] = str(d_str)
+                    _c["basis"] = "slate"
+                    _c["outcome"] = _outcome
+                    _prop_new_entries[_hist_key].append(_c)
+
         if not new_entries:
             result["note"] = (
                 f"Merged {len(merged)} rows but no slate-date had ≥30 valid "
@@ -1253,6 +1277,18 @@ def auto_run_pattern_discovery() -> dict:
                 history = sorted(history, key=lambda h: h.get("date_computed", ""))
                 history = history[-60:]
                 snaps["_pattern_history"] = history
+                # v44.14: persist the parallel prop loops the same way
+                for _hk, _entries in _prop_new_entries.items():
+                    if not _entries:
+                        continue
+                    _ph = snaps.get(_hk) or []
+                    if not isinstance(_ph, list):
+                        _ph = []
+                    _rec = {e["date_computed"] for e in _entries}
+                    _ph = [h for h in _ph if h.get("date_computed") not in _rec]
+                    _ph.extend(_entries)
+                    _ph = sorted(_ph, key=lambda h: h.get("date_computed", ""))[-60:]
+                    snaps[_hk] = _ph
                 _gist_write_all(snaps)
                 result["n_history_days"] = len(history)
             except Exception:
@@ -1270,6 +1306,16 @@ def auto_run_pattern_discovery() -> dict:
                     _hist.extend(new_entries)
                     _hist = sorted(_hist, key=lambda h: h.get("date_computed", ""))[-60:]
                     st.session_state["_pattern_history_local"] = _hist
+                    # v44.14: parallel prop loops in session fallback
+                    for _hk, _entries in _prop_new_entries.items():
+                        if not _entries:
+                            continue
+                        _ph = st.session_state.get(f"{_hk}_local", [])
+                        _rec = {e["date_computed"] for e in _entries}
+                        _ph = [h for h in _ph if h.get("date_computed") not in _rec]
+                        _ph.extend(_entries)
+                        _ph = sorted(_ph, key=lambda h: h.get("date_computed", ""))[-60:]
+                        st.session_state[f"{_hk}_local"] = _ph
             except Exception:
                 pass
 
@@ -1412,6 +1458,36 @@ def load_pattern_history() -> list:
             _hist = st.session_state.get("_pattern_history_local")
             if isinstance(_hist, list):
                 return _hist
+    except Exception:
+        pass
+    return []
+
+
+def load_prop_pattern_history(prop: str = "hr") -> list:
+    """v44.14: load the accumulated per-slate correlation history for a prop.
+
+    prop: "hr" (homered), "hits" (got_hit), or "tb" (got_2plus_bases).
+    Returns list of per-slate correlation dicts ordered by date; [] if none.
+    """
+    _key = {
+        "hr": "_pattern_history",
+        "hits": "_pattern_history_hits",
+        "tb": "_pattern_history_tb",
+    }.get(prop, "_pattern_history")
+    try:
+        if durable_storage_configured():
+            snaps = _gist_read_all() or {}
+            history = snaps.get(_key) or []
+            if isinstance(history, list) and history:
+                return history
+    except Exception:
+        pass
+    try:
+        import streamlit as st  # noqa
+        if hasattr(st, "session_state"):
+            _local = st.session_state.get(f"{_key}_local")
+            if isinstance(_local, list):
+                return _local
     except Exception:
         pass
     return []
