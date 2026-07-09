@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.24-dinger-reweight-6day"
+APP_VERSION = "2026.06.10-v44.25-bot-team-hand-fade-confirmed"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -5779,7 +5779,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.24 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.25 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -12896,6 +12896,10 @@ try:
         "Who are the laser targets?",
         "Who's hot right now?",
         "Best hitters in the best park tonight",
+        "Best HR bats vs LHP tonight",
+        "Best HR bats vs RHP tonight",
+        "Top HR plays in confirmed lineups",
+        "Who should I avoid tonight?",
         "What is Barrel%?",
         "What is Dinger Score?",
         "What is Blast%?",
@@ -12997,6 +13001,102 @@ try:
                         f"— env {float(_r.get('env_boost',1)):.2f}×"
                         + (f" · {float(_r['hr_game_pct']):.1f}% HR" if pd.notna(_r.get('hr_game_pct')) else ""))
                 _ans = "\\n".join(_lines)
+
+        # ---- v44.25: team / game targeting ("best hitters in COL @ LAD",
+        # "who to target on the Yankees") ----
+        if _ans is None and any(w in _ql for w in ["target", "team", "game", "on the", "in the"]) and \
+           "team" in combined_all.columns:
+            _pool = combined_all.copy()
+            if "is_bench" in _pool.columns:
+                _pool = _pool[~_pool["is_bench"].fillna(False).astype(bool)]
+            _match = None
+            # match a game string like "COL @ LAD" or a team abbr/name in the query
+            if "game" in _pool.columns:
+                for _g in _pool["game"].dropna().astype(str).unique():
+                    _parts = [p.strip().lower() for p in _g.replace("@", " ").split()]
+                    if any(p and p in _ql for p in _parts):
+                        _match = _pool[_pool["game"] == _g]
+                        _mlabel = _g
+                        break
+            if _match is None:
+                for _tm in _pool["team"].dropna().astype(str).unique():
+                    if _tm.lower() in _ql:
+                        _match = _pool[_pool["team"] == _tm]
+                        _mlabel = _tm
+                        break
+            if _match is not None and not _match.empty:
+                _sortcol = "hr_score" if "hr_score" in _match.columns else "hr_game_pct"
+                _match = _match[pd.to_numeric(_match[_sortcol], errors="coerce").notna()].nlargest(8, _sortcol)
+                _lines = [f"**Best HR targets — {_mlabel}:**"]
+                for _, _r in _match.iterrows():
+                    _lines.append(
+                        f"- **{_r.get('player_name','?')}** ({_r.get('team','')}) "
+                        f"— HR Score {float(_r.get('hr_score', 0)):.0f}"
+                        + (f" · {float(_r['hr_game_pct']):.1f}% HR" if pd.notna(_r.get('hr_game_pct')) else "")
+                        + (f" · 💥{float(_r['dinger_score']):.0f}" if pd.notna(_r.get('dinger_score')) else ""))
+                _ans = "\\n".join(_lines)
+
+        # ---- v44.25: handedness ("best hitters vs lefties / vs RHP") ----
+        if _ans is None and ("bats" in combined_all.columns) and \
+           any(w in _ql for w in ["lefty", "lefties", "lhp", "left-handed pitch",
+                                   "righty", "righties", "rhp", "right-handed pitch",
+                                   "vs left", "vs right"]):
+            _vs_lhp = any(w in _ql for w in ["lefty", "lefties", "lhp", "left-handed", "vs left"])
+            # hitters who HIT the opposite hand well: vs LHP → prefer RHB/switch
+            _pool = combined_all.copy()
+            if "is_bench" in _pool.columns:
+                _pool = _pool[~_pool["is_bench"].fillna(False).astype(bool)]
+            _want = ["R", "S"] if _vs_lhp else ["L", "S"]
+            _pool = _pool[_pool["bats"].astype(str).str.upper().str[:1].isin(_want)]
+            _sortcol = "hr_score" if "hr_score" in _pool.columns else "hr_game_pct"
+            _pool = _pool[pd.to_numeric(_pool[_sortcol], errors="coerce").notna()].nlargest(10, _sortcol)
+            if not _pool.empty:
+                _hlabel = "vs LHP (RHB/switch)" if _vs_lhp else "vs RHP (LHB/switch)"
+                _lines = [f"**Best HR bats {_hlabel}:**"]
+                for _, _r in _pool.iterrows():
+                    _lines.append(
+                        f"- **{_r.get('player_name','?')}** ({_r.get('team','')}, "
+                        f"{_r.get('bats','?')}) — HR Score {float(_r.get('hr_score',0)):.0f}"
+                        + (f" · {float(_r['hr_game_pct']):.1f}% HR" if pd.notna(_r.get('hr_game_pct')) else ""))
+                _ans = "\\n".join(_lines)
+
+        # ---- v44.25: fade / avoid (inverse — lowest scores) ----
+        if _ans is None and any(w in _ql for w in ["avoid", "fade", "stay away", "worst", "don't play", "dont play"]):
+            _sortcol = "hr_score" if "hr_score" in combined_all.columns else "hr_game_pct"
+            _pool = combined_all.copy()
+            if "is_bench" in _pool.columns:
+                _pool = _pool[~_pool["is_bench"].fillna(False).astype(bool)]
+            _pool = _pool[pd.to_numeric(_pool[_sortcol], errors="coerce").notna()]
+            # only among "notable" hitters people might consider (top half by PA)
+            if "pa" in _pool.columns:
+                _pool = _pool[pd.to_numeric(_pool["pa"], errors="coerce") >= _pool["pa"].median()]
+            _low = _pool.nsmallest(8, _sortcol)
+            if not _low.empty:
+                _lines = ["**Lowest HR outlook tonight (fade candidates among regulars):**"]
+                for _, _r in _low.iterrows():
+                    _lines.append(
+                        f"- {_r.get('player_name','?')} ({_r.get('team','')}) "
+                        f"— HR Score {float(_r.get('hr_score',0)):.0f}"
+                        + (f" · {float(_r['hr_game_pct']):.1f}% HR" if pd.notna(_r.get('hr_game_pct')) else ""))
+                _ans = "\\n".join(_lines)
+
+        # ---- v44.25: confirmed lineups ----
+        if _ans is None and "confirm" in _ql and "lineup_confirmed" in combined_all.columns:
+            _pool = combined_all[combined_all["lineup_confirmed"].fillna(False).astype(bool)]
+            if "is_bench" in _pool.columns:
+                _pool = _pool[~_pool["is_bench"].fillna(False).astype(bool)]
+            _sortcol = "hr_score" if "hr_score" in _pool.columns else "hr_game_pct"
+            _pool = _pool[pd.to_numeric(_pool[_sortcol], errors="coerce").notna()].nlargest(12, _sortcol)
+            if not _pool.empty:
+                _lines = [f"**Top HR plays in CONFIRMED lineups ({len(_pool)} shown):**"]
+                for _, _r in _pool.iterrows():
+                    _lines.append(
+                        f"- **{_r.get('player_name','?')}** ({_r.get('team','')}) "
+                        f"— HR Score {float(_r.get('hr_score',0)):.0f}"
+                        + (f" · {float(_r['hr_game_pct']):.1f}% HR" if pd.notna(_r.get('hr_game_pct')) else ""))
+                _ans = "\\n".join(_lines)
+            else:
+                _ans = "No confirmed lineups yet — check back closer to game time."
 
         # ---- ranking questions: "top N by <stat>", "who's most likely to
         # homer", "best hitters tonight", "who should I play" ----
