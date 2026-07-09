@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.23-savant-hr-distance-ev-barrels"
+APP_VERSION = "2026.06.10-v44.24-dinger-reweight-6day"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -1025,13 +1025,22 @@ def log_swallowed_error(where: str, exc: Exception, surface: bool = True) -> Non
 # differently in Coors vs Petco, hot vs cold, vs an ace vs a soft arm.
 #
 # Editable single source of truth — reweight as Section G sharpens.
+# v44.24: FIRST data-driven reweight, from 6 days of Section G. The change
+# is deliberately CONSERVATIVE — 6 days is enough to trust a two-reading
+# reliability trend but NOT the exact correlation ordering (still clustered
+# 0.105-0.122, and negative trends are partly small-sample artifact from
+# one down slate). The one confident move: pulled_brl_pct's reliability rose
+# 2.03→2.69 across two readings — now clearly the most STABLE predictor and
+# the only Dinger input with a positive trend — so it's bumped to co-lead
+# with avg_ev. avg_ev/iso reliability softened, so iso eases slightly. Small
+# nudges, not a rebuild; the ceiling stays avg_ev-anchored raw power.
 DINGER_BASE_WEIGHTS = {
-    "avg_ev": 2.0,          # highest raw HR correlation (+0.131)
-    "barrel_pct": 1.9,      # highest reliability (2.04)
-    "pulled_brl_pct": 1.8,  # HR-specific: pulled air barrels
-    "hard_hit": 1.5,        # contact quality, stable (1.84)
-    "iso": 1.5,             # extra-base power (+0.130)
-    "blast_pct": 1.2,       # elite contact, lower reliability
+    "pulled_brl_pct": 2.0,  # reliab 2.69 (highest, rising) + only + trend
+    "avg_ev": 2.0,          # still top-tier corr; reliab softened 1.85→1.45
+    "barrel_pct": 1.9,      # strong & stable (reliab 1.80)
+    "hard_hit": 1.5,        # contact quality, stable (1.58)
+    "iso": 1.4,             # corr strong but steep neg trend (-0.111), eased
+    "blast_pct": 1.2,       # elite contact, lower reliability (1.27)
 }
 # Context multipliers: each maps a per-slate signal to a gentle multiplier
 # on the base. Kept modest (max ~±20% each) so context TILTS the power
@@ -5770,7 +5779,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.23 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.24 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
