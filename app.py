@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.18-moonshot-laser-accuracy-tracking"
+APP_VERSION = "2026.06.10-v44.19-sidebar-section-navigation"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -2860,6 +2860,33 @@ if use_sprint_speed:
 
 st.title(f"💣 DingerMaven — {selected_date.strftime('%A, %B %d, %Y')}")
 
+# v44.19 (user-requested navigation): a sidebar jump-menu so you don't have
+# to scroll the whole page to reach a section. These are pure HTML anchor
+# links — clicking one scrolls to that section with ZERO rerun and ZERO
+# change to what computes (the load-time concern with tabs doesn't apply
+# here). Full-page st.tabs would require moving the data pipeline above the
+# display, a large risky refactor of a working app; anchor nav gives the
+# "stop scrolling everywhere" benefit safely. Section anchors are emitted
+# just before each st.subheader below.
+try:
+    st.sidebar.markdown("### 🧭 Jump to section")
+    st.sidebar.markdown(
+        "\n".join([
+            "- [🥎 Pitcher Slate](#sec-pitchers)",
+            "- [🏆 Top 10 Picks](#sec-top10)",
+            "- [💎 Sleepers & Best Plays](#sec-sleepers)",
+            "- [🤖 Ask DingerMaven](#sec-ask)",
+            "- [🆚 Head-to-Head Compare](#sec-compare)",
+            "- [🎮 Game-by-Game Matchups](#sec-games)",
+            "- [🛠️ Tools & Diagnostics](#sec-tools)",
+        ]),
+        unsafe_allow_html=True,
+    )
+    st.sidebar.caption("Clicking a link scrolls there instantly — no reload.")
+except Exception:
+    pass
+
+
 # v43.71 — prominent Gist corruption banner.
 # Previously the reset button was buried in an expander at the BOTTOM
 # of the page. User reported "zero clue how to fix this gist error
@@ -4825,6 +4852,7 @@ st.divider()
 # PITCHER SLATE OVERVIEW
 # ============================================================================
 
+st.markdown("<div id='sec-pitchers'></div>", unsafe_allow_html=True)
 st.subheader("🥎 Pitcher Slate Overview")
 st.caption(
     "Role-aware scoring: relievers and short-sample pitchers get reliability-adjusted "
@@ -5748,7 +5776,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.18 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.19 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -7811,6 +7839,7 @@ st.divider()
 # ============================================================================
 # TOP 5 PICKS OF THE DAY — combined HR signal across all factors
 # ============================================================================
+st.markdown("<div id='sec-top10'></div>", unsafe_allow_html=True)
 st.subheader("🏆 Top 10 Picks of the Day")
 st.caption(
     "**HR Score (0-95)** is the primary metric — comprehensive composite of "
@@ -11301,6 +11330,7 @@ st.divider()
 # ============================================================================
 # TOP SLEEPERS + TOP HR PLAYS ACROSS THE WHOLE SLATE
 # ============================================================================
+st.markdown("<div id='sec-sleepers'></div>", unsafe_allow_html=True)
 st.subheader("💎 Top Sleepers & Best HR Plays")
 st.caption(
     "Combined view across every game today. **Sleepers**: hitters whose HR probability "
@@ -12809,6 +12839,7 @@ st.divider()
 # with the slate data as grounding context. Without a key, those fall back to
 # a helpful "here's what I can answer" message. This keeps the bot FREE and
 # useful for everyone, with an optional LLM upgrade for power users.
+st.markdown("<div id='sec-ask'></div>", unsafe_allow_html=True)
 st.subheader("🤖 Ask DingerMaven")
 st.caption(
     "Ask about tonight's slate — e.g. *\"top 5 dinger scores\"*, *\"how is "
@@ -12964,6 +12995,7 @@ except Exception as _ask_e:
     log_swallowed_error("ask_bot", _ask_e, surface=False)
 
 st.markdown("---")
+st.markdown("<div id='sec-compare'></div>", unsafe_allow_html=True)
 st.subheader("🆚 Head-to-Head Comparison")
 st.caption(
     "Pick 2-4 hitters to compare side-by-side. The leader in each category "
@@ -13214,6 +13246,7 @@ st.divider()
 # ============================================================================
 # GAME-BY-GAME MATCHUPS
 # ============================================================================
+st.markdown("<div id='sec-games'></div>", unsafe_allow_html=True)
 st.subheader("🎮 Isolated Game-by-Game Matchups")
 st.caption("Real data only. Empty cells = data not available for that player.")
 
@@ -15465,6 +15498,7 @@ if _valid_games:
 # ============================================================================
 
 st.divider()
+st.markdown("<div id='sec-tools'></div>", unsafe_allow_html=True)
 st.header("🛠️ Tools & Diagnostics")
 st.caption(
     "Secondary controls and observability. Build a custom grade, "
