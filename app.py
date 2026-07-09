@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.21-bot-ranking-and-nav-top"
+APP_VERSION = "2026.06.10-v44.22-bot-form-dropdown-tooltips"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -5769,7 +5769,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.21 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.22 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -12865,16 +12865,48 @@ st.divider()
 st.markdown("<div id='sec-ask'></div>", unsafe_allow_html=True)
 st.subheader("🤖 Ask DingerMaven")
 st.caption(
-    "Ask about tonight's slate — e.g. *\"top 5 dinger scores\"*, *\"how is "
-    "Judge tonight\"*, *\"who should I target against a lefty\"*, or *\"what is "
-    "barrel%\"*. Answers come straight from tonight's data."
+    "Ask about tonight's slate, or pick a common question below. Answers come "
+    "straight from tonight's data — no reload until you hit Ask."
 )
 try:
-    _ask_q = st.text_input(
-        "Your question:",
-        key="_ask_bot_q",
-        placeholder="top 5 dinger scores tonight",
-    )
+    # v44.22 (user: load times after each question too long). Wrap the input
+    # in st.form so the page does NOT rerun on every keystroke — it only
+    # recomputes when you press Ask. Plus a dropdown of ready-to-go common
+    # questions so you don't have to type the common ones.
+    _common_qs = [
+        "— pick a common question —",
+        "Who is most likely to homer tonight?",
+        "Top 10 by Dinger Score",
+        "Top 10 by HR Score",
+        "Who's most likely to get a hit?",
+        "Who's most likely to get 2+ total bases?",
+        "Best value plays (pick score)",
+        "Who are the moonshot targets?",
+        "Who are the laser targets?",
+        "Who's hot right now?",
+        "Best hitters in the best park tonight",
+        "What is Barrel%?",
+        "What is Dinger Score?",
+        "What is Blast%?",
+    ]
+    with st.form("_ask_bot_form"):
+        _c1, _c2 = st.columns([2, 1])
+        with _c1:
+            _typed_q = st.text_input(
+                "Your question:",
+                key="_ask_bot_q",
+                placeholder="who is most likely to homer tonight",
+            )
+        with _c2:
+            _picked_q = st.selectbox(
+                "or pick one:", _common_qs, index=0, key="_ask_bot_pick")
+        _ask_go = st.form_submit_button("🔎 Ask")
+    # Typed question wins; else the dropdown pick (if not the placeholder)
+    _ask_q = ""
+    if _ask_go:
+        _ask_q = _typed_q.strip() or (
+            _picked_q if _picked_q != _common_qs[0] else "")
+
     if _ask_q and combined_all is not None and not combined_all.empty:
         _ans = None
         _ql = _ask_q.lower().strip()
@@ -12888,13 +12920,72 @@ try:
             "iso": "**ISO** (Isolated Power) = SLG minus AVG — measures raw extra-base power, stripping out singles.",
             "hard hit": "**Hard-Hit%** = share of batted balls at 95+ mph exit velocity.",
             "pull air": "**Pull-Air%** = share of batted balls pulled in the air — the launch pattern that produces the most home runs.",
+            "blast": "**Blast%** = share of a hitter's competitive swings that are 'blasts' — Statcast's label for the fast-swing + squared-up combos that do the most damage. High blast% = elite bat speed meeting the ball flush.",
             "matchup_opp": "**Matchup** = the hitter's projected advantage vs tonight's specific pitcher (0-100, higher = better spot).",
             "env": "**Env Boost** = park + weather multiplier on HR likelihood. >1.0 favors hitters (warm, thin air, wind out), <1.0 favors pitchers.",
+            "moonshot": "**Moonshot target** = the one hitter per game most likely to hit a 400+ ft home run (distance-driven: barrel, pull-air, blast, ISO + tonight's matchup).",
+            "laser": "**Laser target** = the one hitter per game most likely to hit a 105+ mph home run (exit-velocity driven: avg EV, hard-hit% + matchup).",
         }
         for _k, _v in _glossary.items():
             if ("what is " in _ql or "what's " in _ql or "explain" in _ql or "define" in _ql) and _k in _ql:
                 _ans = _v
                 break
+
+        # ---- moonshot / laser target questions ----
+        if _ans is None and ("moonshot" in _ql or "laser" in _ql) and \
+           not any(w in _ql for w in ["what is", "what's", "explain", "define"]):
+            _tag = "is_moonshot_target" if "moonshot" in _ql else "is_laser_target"
+            _tlabel = "🌙 Moonshot" if "moonshot" in _ql else "⚡ Laser"
+            if _tag in combined_all.columns:
+                _tg = combined_all[pd.to_numeric(combined_all[_tag], errors="coerce") == 1]
+                if not _tg.empty:
+                    _lines = [f"**{_tlabel} targets tonight:**"]
+                    for _, _r in _tg.iterrows():
+                        _lines.append(
+                            f"- **{_r.get('player_name','?')}** ({_r.get('team','')})"
+                            + (f" · {float(_r['hr_game_pct']):.1f}% HR" if pd.notna(_r.get('hr_game_pct')) else "")
+                            + (f" · {_r.get('matchup','')}" if pd.notna(_r.get('matchup')) else "")
+                        )
+                    _ans = "\\n".join(_lines)
+
+        # ---- "who's hot" (form) ----
+        if _ans is None and ("hot" in _ql or "streak" in _ql or "on fire" in _ql) and \
+           "streak_label" in combined_all.columns:
+            _hot = combined_all.copy()
+            if "is_bench" in _hot.columns:
+                _hot = _hot[~_hot["is_bench"].fillna(False).astype(bool)]
+            _hot = _hot[_hot["streak_label"].astype(str).str.contains(
+                "🔥|hot|📈", case=False, na=False)]
+            if "hr_score" in _hot.columns:
+                _hot = _hot.nlargest(10, "hr_score")
+            if not _hot.empty:
+                _lines = ["**Hitters trending hot tonight:**"]
+                for _, _r in _hot.iterrows():
+                    _lines.append(
+                        f"- **{_r.get('player_name','?')}** ({_r.get('team','')}) "
+                        f"— {_r.get('streak_label','')}"
+                        + (f" · HR Score {float(_r['hr_score']):.0f}" if pd.notna(_r.get('hr_score')) else ""))
+                _ans = "\\n".join(_lines)
+
+        # ---- best park / environment ----
+        if _ans is None and ("park" in _ql or "coors" in _ql or "environment" in _ql or "weather" in _ql) and \
+           "env_boost" in combined_all.columns:
+            _ep = combined_all.copy()
+            if "is_bench" in _ep.columns:
+                _ep = _ep[~_ep["is_bench"].fillna(False).astype(bool)]
+            _ep = _ep[pd.to_numeric(_ep["env_boost"], errors="coerce").notna()]
+            if not _ep.empty:
+                _best_env = _ep.nlargest(1, "env_boost")["env_boost"].iloc[0]
+                _bestgames = _ep[_ep["env_boost"] >= _best_env - 0.02]
+                if "hr_score" in _bestgames.columns:
+                    _bestgames = _bestgames.nlargest(8, "hr_score")
+                _lines = [f"**Best HR environment tonight (env boost up to {float(_best_env):.2f}×):**"]
+                for _, _r in _bestgames.iterrows():
+                    _lines.append(
+                        f"- **{_r.get('player_name','?')}** ({_r.get('team','')}) "
+                        f"— env {float(_r.get('env_boost',1)):.2f}×"
+                        + (f" · {float(_r['hr_game_pct']):.1f}% HR" if pd.notna(_r.get('hr_game_pct')) else ""))
+                _ans = "\\n".join(_lines)
 
         # ---- ranking questions: "top N by <stat>", "who's most likely to
         # homer", "best hitters tonight", "who should I play" ----
@@ -13958,42 +14049,42 @@ def build_col_config():
         # format specifier fixes the DISPLAY cleanly across every table
         # without touching the underlying values (which stay full-precision
         # for correct math). One-decimal for percents, three for rate stats.
-        "barrel_pct":      st.column_config.NumberColumn("Barrel%", format="%.1f", width="small"),
-        "pulled_brl_pct":  st.column_config.NumberColumn("Pull Brl%", format="%.1f", width="small"),
-        "blast_pct":       st.column_config.NumberColumn("Blast%", format="%.1f", width="small"),
-        "hard_hit":        st.column_config.NumberColumn("Hard Hit%", format="%.1f", width="small"),
-        "pull_air_pct":    st.column_config.NumberColumn("Pull Air%", format="%.1f", width="small"),
-        "pull_pct":        st.column_config.NumberColumn("Pull%", format="%.1f", width="small"),
-        "fb_pct":          st.column_config.NumberColumn("FB%", format="%.1f", width="small"),
-        "gb_pct":          st.column_config.NumberColumn("GB%", format="%.1f", width="small"),
-        "ld_pct":          st.column_config.NumberColumn("LD%", format="%.1f", width="small"),
-        "k_pct":           st.column_config.NumberColumn("K%", format="%.1f", width="small"),
-        "bb_pct":          st.column_config.NumberColumn("BB%", format="%.1f", width="small"),
-        "whiff_pct":       st.column_config.NumberColumn("Whiff%", format="%.1f", width="small"),
-        "avg_ev":          st.column_config.NumberColumn("Avg EV", format="%.1f", width="small"),
-        "max_hit_speed":   st.column_config.NumberColumn("Max EV", format="%.1f", width="small"),
-        "avg_hr_distance": st.column_config.NumberColumn("HR Dist", format="%.0f", width="small"),
-        "la":              st.column_config.NumberColumn("LA", format="%.1f", width="small"),
-        "iso":             st.column_config.NumberColumn("ISO", format="%.3f", width="small"),
-        "xslg":            st.column_config.NumberColumn("xSLG", format="%.3f", width="small"),
-        "slg":             st.column_config.NumberColumn("SLG", format="%.3f", width="small"),
-        "obp":             st.column_config.NumberColumn("OBP", format="%.3f", width="small"),
-        "ops":             st.column_config.NumberColumn("OPS", format="%.3f", width="small"),
-        "xwoba":           st.column_config.NumberColumn("xwOBA", format="%.3f", width="small"),
-        "xwobacon":        st.column_config.NumberColumn("xwOBAcon", format="%.3f", width="small"),
-        "best_pitch_xwoba": st.column_config.NumberColumn("Best Pitch xwOBA", format="%.3f", width="small"),
-        "sprint_speed":    st.column_config.NumberColumn("Sprint", format="%.1f", width="small"),
-        "pitch_match_score": st.column_config.NumberColumn("Pitch Match", format="%.0f", width="small"),
-        "pitch_hr_score":  st.column_config.NumberColumn("Pitch HR", format="%.0f", width="small"),
-        "expected_total_bases": st.column_config.NumberColumn("xTB", format="%.2f", width="small"),
-        "recent_hr_weighted_rate": st.column_config.NumberColumn("L15 wHR%", format="%.2f", width="small"),
-        "env_boost":       st.column_config.NumberColumn("Env", format="%.2f", width="small"),
-        "pa":              st.column_config.NumberColumn("PA", format="%d", width="small"),
-        "recent_hr":       st.column_config.NumberColumn("Rec HR", format="%d", width="small"),
-        "home_run":        st.column_config.NumberColumn("HR", format="%d", width="small"),
-        "test_score":      st.column_config.NumberColumn("Test", format="%.0f", width="small"),
-        "sleeper_score":   st.column_config.NumberColumn("Sleeper", format="%.0f", width="small"),
-        "hit_pa_pct":      st.column_config.NumberColumn("Hit/PA%", format="%.1f", width="small"),
+        "barrel_pct":      st.column_config.NumberColumn("Barrel%", format="%.1f", width="small", help="Share of batted balls hit at the ideal EV+launch-angle combo for extra bases. The most stable HR predictor in the model."),
+        "pulled_brl_pct":  st.column_config.NumberColumn("Pull Brl%", format="%.1f", width="small", help="Barrels pulled in the air — the exact launch pattern that produces home runs. HR-specific power signal."),
+        "blast_pct":       st.column_config.NumberColumn("Blast%", format="%.1f", width="small", help="Share of competitive swings that are 'blasts' — Statcast's fast-swing + squared-up combos that do the most damage. High = elite bat speed meeting the ball flush."),
+        "hard_hit":        st.column_config.NumberColumn("Hard Hit%", format="%.1f", width="small", help="Share of batted balls hit 95+ mph exit velocity. Raw contact quality."),
+        "pull_air_pct":    st.column_config.NumberColumn("Pull Air%", format="%.1f", width="small", help="Share of batted balls pulled in the air. The launch/direction combo most associated with HRs."),
+        "pull_pct":        st.column_config.NumberColumn("Pull%", format="%.1f", width="small", help="Share of batted balls pulled (any trajectory)."),
+        "fb_pct":          st.column_config.NumberColumn("FB%", format="%.1f", width="small", help="Fly-ball rate. HRs come from fly balls, so higher helps power output."),
+        "gb_pct":          st.column_config.NumberColumn("GB%", format="%.1f", width="small", help="Ground-ball rate. High GB% suppresses HR upside."),
+        "ld_pct":          st.column_config.NumberColumn("LD%", format="%.1f", width="small", help="Line-drive rate. Best for hits/total bases, less for HRs."),
+        "k_pct":           st.column_config.NumberColumn("K%", format="%.1f", width="small", help="Strikeout rate. Higher = more empty at-bats."),
+        "bb_pct":          st.column_config.NumberColumn("BB%", format="%.1f", width="small", help="Walk rate. Plate discipline signal."),
+        "whiff_pct":       st.column_config.NumberColumn("Whiff%", format="%.1f", width="small", help="Swing-and-miss rate on swings."),
+        "avg_ev":          st.column_config.NumberColumn("Avg EV", format="%.1f", width="small", help="Average exit velocity (mph) across all batted balls. Core input to the Laser (105+ mph) target."),
+        "max_hit_speed":   st.column_config.NumberColumn("Max EV", format="%.1f", width="small", help="Hardest-hit ball (mph). Ceiling of raw power."),
+        "avg_hr_distance": st.column_config.NumberColumn("HR Dist", format="%.0f", width="small", help="Average home-run distance (ft) when available from Savant. Feeds the Moonshot (400+ ft) target."),
+        "la":              st.column_config.NumberColumn("LA", format="%.1f", width="small", help="Average launch angle (degrees). ~25-35° is the HR sweet spot."),
+        "iso":             st.column_config.NumberColumn("ISO", format="%.3f", width="small", help="Isolated Power = SLG − AVG. Raw extra-base power, stripping out singles."),
+        "xslg":            st.column_config.NumberColumn("xSLG", format="%.3f", width="small", help="Expected slugging from quality of contact (Statcast)."),
+        "slg":             st.column_config.NumberColumn("SLG", format="%.3f", width="small", help="Slugging percentage (total bases per at-bat)."),
+        "obp":             st.column_config.NumberColumn("OBP", format="%.3f", width="small", help="On-base percentage."),
+        "ops":             st.column_config.NumberColumn("OPS", format="%.3f", width="small", help="On-base plus slugging."),
+        "xwoba":           st.column_config.NumberColumn("xwOBA", format="%.3f", width="small", help="Expected weighted on-base average from quality of contact — a single all-around offensive quality number."),
+        "xwobacon":        st.column_config.NumberColumn("xwOBAcon", format="%.3f", width="small", help="xwOBA on contact only (excludes walks/strikeouts) — pure quality-of-contact."),
+        "best_pitch_xwoba": st.column_config.NumberColumn("Best Pitch xwOBA", format="%.3f", width="small", help="Hitter's xwOBA vs the pitch type they hit best."),
+        "sprint_speed":    st.column_config.NumberColumn("Sprint", format="%.1f", width="small", help="Sprint speed (ft/sec). Speed adds to hit/total-base upside via infield hits and extra bases."),
+        "pitch_match_score": st.column_config.NumberColumn("Pitch Match", format="%.0f", width="small", help="How well this hitter matches up against the pitcher's arsenal (0-100)."),
+        "pitch_hr_score":  st.column_config.NumberColumn("Pitch HR", format="%.0f", width="small", help="HR-tilt of the arsenal matchup — does this pitcher's mix give up HRs to this hitter's profile?"),
+        "expected_total_bases": st.column_config.NumberColumn("xTB", format="%.2f", width="small", help="Expected total bases tonight (excludes walks). Higher = better 2+ bases play."),
+        "recent_hr_weighted_rate": st.column_config.NumberColumn("L15 wHR%", format="%.2f", width="small", help="Recency-weighted HR rate over the last ~15 games — recent form, recent games weighted heavier."),
+        "env_boost":       st.column_config.NumberColumn("Env", format="%.2f", width="small", help="Park + weather HR multiplier. >1.0 favors hitters (warm, thin air, wind out), <1.0 favors pitchers."),
+        "pa":              st.column_config.NumberColumn("PA", format="%d", width="small", help="Plate appearances this season — sample-size context."),
+        "recent_hr":       st.column_config.NumberColumn("Rec HR", format="%d", width="small", help="Home runs in the recent window."),
+        "home_run":        st.column_config.NumberColumn("HR", format="%d", width="small", help="Season home run total."),
+        "test_score":      st.column_config.NumberColumn("Test", format="%.0f", width="small", help="Experimental composite (not shipped in rankings)."),
+        "sleeper_score":   st.column_config.NumberColumn("Sleeper", format="%.0f", width="small", help="Low-owned / under-the-radar HR upside score."),
+        "hit_pa_pct":      st.column_config.NumberColumn("Hit/PA%", format="%.1f", width="small", help="Per-plate-appearance hit rate."),
     }
 
 
