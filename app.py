@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.14-hits-tb-pattern-loops"
+APP_VERSION = "2026.06.10-v44.16-provisional-hr-score-insufficient-rows"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -5628,7 +5628,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.14 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.16 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -7842,7 +7842,24 @@ if all_hitters_for_picks:
         _hr_score = rescale_composite_to_slate(_composite_raw)
         combined_picks["grade_composite"] = _composite_raw  # raw, for audit
         combined_picks["hr_score"] = _hr_score              # PRIMARY display number
-        combined_picks["hr_score_signal"] = _hr_score.apply(hr_score_signal)
+        # v44.16 (user-requested: insufficient-sample rows showed only a letter
+        # grade, no number). compute_comprehensive_hr_composite returns NaN for
+        # hitters with no batted-ball data (can't build a power composite). For
+        # those rows, fall back to a LOW-CONFIDENCE hr_score derived from
+        # hr_game_pct alone, so the row shows a number instead of a blank. It's
+        # marked distinct from a real composite score via hr_score_provisional.
+        _missing = combined_picks["hr_score"].isna()
+        if _missing.any() and "hr_game_pct" in combined_picks.columns:
+            # Map hr_game_pct (roughly 0-30%) onto a damped 0-60 score so a
+            # provisional number never outranks a real, fully-scored hitter.
+            _hgp = pd.to_numeric(combined_picks.loc[_missing, "hr_game_pct"],
+                                 errors="coerce")
+            _prov = (_hgp / 30.0 * 60.0).clip(0, 60).round(0)
+            combined_picks.loc[_missing, "hr_score"] = _prov
+        combined_picks["hr_score_provisional"] = _missing.astype(int)
+        # Signal reads the FILLED hr_score (post-fallback) so provisional rows
+        # get a signal too. Provisional rows get a ~ prefix downstream.
+        combined_picks["hr_score_signal"] = combined_picks["hr_score"].apply(hr_score_signal)
 
         # Per-hitter letter grade with caps applied (kept for backward compat
         # with existing snapshots/exports — display will prefer hr_score)
@@ -12681,6 +12698,25 @@ try:
             help="Type to search. Picks limited to 4 for readability.",
         )
 
+        # v44.15 (user-requested: easier remove without retyping everyone). The
+        # multiselect's native × chips work, but these explicit buttons make
+        # dropping one player (or clearing all) obvious and one-click.
+        if _hh_selected:
+            _rm_cols = st.columns(len(_hh_selected) + 1)
+            for _i, _sel in enumerate(_hh_selected):
+                with _rm_cols[_i]:
+                    if st.button(f"✕ {_sel[:14]}", key=f"_h2h_rm_{_i}",
+                                 help=f"Remove {_sel} from the comparison"):
+                        st.session_state["_h2h_compare_selector"] = [
+                            x for x in _hh_selected if x != _sel
+                        ]
+                        st.rerun()
+            with _rm_cols[-1]:
+                if st.button("Clear all", key="_h2h_clear",
+                             help="Remove everyone and start over"):
+                    st.session_state["_h2h_compare_selector"] = []
+                    st.rerun()
+
         if len(_hh_selected) >= 2:
             _hh_ids = [_display_to_pid[d] for d in _hh_selected]
             _hh_rows = combined_all[
@@ -12800,24 +12836,69 @@ try:
             if _table_rows:
                 _comp_df = pd.DataFrame(_table_rows)
                 st.dataframe(_comp_df, hide_index=True, use_container_width=True)
-                # Tally — but only count rows where at least one hitter had data,
-                # so a player with NaN doesn't get unfairly penalized in the count.
+                # v44.15 (user-requested): tally now tracks TIES explicitly and
+                # declares an overall leader "including ties", plus a copy-text
+                # export of the whole comparison.
                 _wins = {d: 0 for d in _hh_selected}
-                _contested = 0
+                _contested = 0   # rows with a clear single winner
+                _tied = 0        # rows where top value was shared (numeric tie)
                 for row in _table_rows:
-                    if any(str(row.get(d, "")).startswith("🏆") for d in _hh_selected):
+                    _trophies = [d for d in _hh_selected
+                                 if str(row.get(d, "")).startswith("🏆")]
+                    if len(_trophies) == 1:
                         _contested += 1
-                    for d in _hh_selected:
-                        if str(row.get(d, "")).startswith("🏆"):
-                            _wins[d] += 1
+                        _wins[_trophies[0]] += 1
+                    else:
+                        # No single trophy on a numeric row = a tie at the top.
+                        # (Categorical rows like Grade/Profile have no winner by
+                        # design; we only count a "tie" when the row is numeric
+                        # AND at least 2 hitters share the leading value.)
+                        _row_stat = row.get("Stat", "")
+                        _is_numeric_row = any(
+                            _row_stat == lbl and direction is not None
+                            for _, lbl, direction, _ in _h2h_categories
+                        )
+                        if _is_numeric_row:
+                            _tied += 1
+                # Overall leader including ties: most category wins; if the win
+                # count ties between hitters, it's an overall tie.
+                _max_w = max(_wins.values()) if _wins else 0
+                _leaders = [d for d, w in _wins.items() if w == _max_w and _max_w > 0]
                 _wins_str = " · ".join(
-                    f"**{d}**: {w}/{_contested}"
-                    for d, w in _wins.items()
+                    f"**{d}**: {w}" for d, w in sorted(_wins.items(), key=lambda x: -x[1])
                 )
-                st.caption(
-                    f"Category wins (out of {_contested} contested categories): {_wins_str}. "
-                    f"Categorical rows like Grade/Profile/Smash don't have winners."
-                )
+                if len(_leaders) == 1:
+                    _verdict = (
+                        f"🏆 **{_leaders[0]} leads** — wins {_max_w} of "
+                        f"{_contested} decided categories"
+                        + (f" ({_tied} tied)" if _tied else "")
+                    )
+                elif len(_leaders) > 1:
+                    _verdict = (
+                        f"🤝 **Even** — {' & '.join(_leaders)} each win {_max_w} "
+                        f"categories" + (f" ({_tied} tied)" if _tied else "")
+                    )
+                else:
+                    _verdict = "No decided categories (all tied or non-numeric)."
+                st.markdown(_verdict)
+                st.caption(f"Category wins: {_wins_str}  ·  {_tied} tied  ·  "
+                           f"categorical rows (Grade/Profile/Smash) have no winner.")
+
+                # Copy-as-text export
+                _cmp_report = ["HEAD-TO-HEAD: " + " vs ".join(_hh_selected), ""]
+                _colw = max(len(r["Stat"]) for r in _table_rows) + 1
+                _hdr = "Stat".ljust(_colw) + "  " + "  ".join(
+                    d[:16].ljust(16) for d in _hh_selected)
+                _cmp_report.append(_hdr)
+                for row in _table_rows:
+                    _cmp_report.append(
+                        row["Stat"].ljust(_colw) + "  " + "  ".join(
+                            str(row.get(d, "—"))[:16].ljust(16) for d in _hh_selected)
+                    )
+                _cmp_report.append("")
+                _cmp_report.append(_verdict.replace("**", "").replace("🏆 ", "").replace("🤝 ", ""))
+                with st.popover("📋 Copy comparison"):
+                    st.code("\\n".join(_cmp_report), language="text")
             else:
                 st.info(
                     "These players don't have enough comparable data populated "
@@ -13007,7 +13088,11 @@ def build_col_config():
                 "worst ~10, median ~50. This makes the spread interpretable: "
                 "a 92 is genuinely the slate's top tier; a 38 is below average. "
                 "Cap layers apply: hostile env / same-side platoon / mechanical "
-                "fail (pull<35 + EV<88) cap the score regardless of other tiers."
+                "fail (pull<35 + EV<88) cap the score regardless of other tiers.\n\n"
+                "v44.16: insufficient-sample hitters (no batted-ball data for a "
+                "full composite) now show a LOW-CONFIDENCE score derived from "
+                "HR Game% alone (capped at 60 so it never outranks a fully-"
+                "scored hitter). Previously these rows were blank."
             ),
         ),
         "dinger_score": st.column_config.NumberColumn(
