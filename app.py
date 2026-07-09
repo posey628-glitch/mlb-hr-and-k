@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.16-provisional-hr-score-insufficient-rows"
+APP_VERSION = "2026.06.10-v44.18-moonshot-laser-accuracy-tracking"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -1110,6 +1110,94 @@ def compute_dinger_score(df: "pd.DataFrame", context: bool = True) -> "pd.Series
 
     mult = mult.clip(0.70, 1.35)
     return (base * mult).clip(0, 100).round(1)
+
+
+def tag_power_targets(df: "pd.DataFrame") -> "pd.DataFrame":
+    """v44.18: mark each game's Moonshot + Laser target as gradeable columns.
+
+    Adds two int columns to df (in place, returns df):
+      is_moonshot_target — 1 for the single hitter per game most likely to hit
+                           a 400+ ft HR (carry proxy: barrel/pull-air/blast/
+                           pulled-brl/ISO + tonight's matchup, or real
+                           avg_hr_distance when present).
+      is_laser_target    — 1 for the hitter per game most likely to hit a
+                           105+ mph HR (avg_ev/hard_hit + matchup).
+
+    Computed here — UPSTREAM of snapshotting — so these picks flow into the
+    daily snapshot and the learning loop can grade whether the moonshot/laser
+    target actually produced the outcome. The per-game display reads these
+    columns instead of recomputing. Mirrors the v44.05 blend + shrinkage.
+    """
+    df["is_moonshot_target"] = 0
+    df["is_laser_target"] = 0
+    if df is None or df.empty or "game" not in df.columns:
+        return df
+
+    def _pick_for_game(g: "pd.DataFrame", components, min_hr=5.0):
+        _g = g
+        if "is_bench" in _g.columns:
+            _g = _g[~_g["is_bench"].fillna(False).astype(bool)]
+        if "hr_game_pct" in _g.columns:
+            _g = _g[pd.to_numeric(_g["hr_game_pct"], errors="coerce").notna()]
+        if _g.empty:
+            return None
+        # volume for shrinkage
+        _vol = None
+        for _vc in ("pa", "bbe", "batted_balls", "ab"):
+            if _vc in _g.columns:
+                s = pd.to_numeric(_g[_vc], errors="coerce")
+                if s.notna().any():
+                    _vol = s
+                    break
+        shrink = ((_vol / (_vol + 60.0)).clip(0.4, 1.0)
+                  if _vol is not None else pd.Series(1.0, index=_g.index))
+        present = []
+        for col, w in components:
+            if col in _g.columns:
+                s = pd.to_numeric(_g[col], errors="coerce")
+                if s.notna().any():
+                    present.append((s, w))
+        if not present:
+            return None
+        num = pd.Series(0.0, index=_g.index)
+        den = pd.Series(0.0, index=_g.index)
+        for s, w in present:
+            pct = s.rank(pct=True) * 100.0
+            pct = 50.0 + (pct - 50.0) * shrink
+            mask = s.notna()
+            num = num.add((pct.fillna(0) * w) * mask.astype(float), fill_value=0)
+            den = den.add(mask.astype(float) * w, fill_value=0)
+        score = num / den.replace(0, np.nan)
+        hrp = pd.to_numeric(_g.get("hr_game_pct"), errors="coerce")
+        elig = score[hrp >= min_hr].dropna() if hrp is not None else score.dropna()
+        if elig.empty:
+            elig = score.dropna()
+        if elig.empty:
+            return None
+        return elig.idxmax()
+
+    _has_dist = "avg_hr_distance" in df.columns and \
+        pd.to_numeric(df["avg_hr_distance"], errors="coerce").notna().any()
+    _laser_comp = [("avg_ev", 2.5), ("hard_hit", 1.5), ("barrel_pct", 1.0),
+                   ("matchup_opp", 1.0), ("pitch_hr_score", 1.0),
+                   ("env_boost", 0.75), ("recent_hr_weighted_rate", 0.5)]
+    _moon_comp = ([("avg_hr_distance", 2.5)] if _has_dist else
+                  [("barrel_pct", 1.5), ("pull_air_pct", 1.5),
+                   ("pulled_brl_pct", 1.25), ("blast_pct", 1.0),
+                   ("iso", 1.0), ("fb_pct", 0.5), ("avg_ev", 0.5)]) + \
+                 [("matchup_opp", 1.0), ("pitch_hr_score", 1.0),
+                  ("env_boost", 0.75), ("recent_hr_weighted_rate", 0.5)]
+    try:
+        for _gm, _grp in df.groupby("game"):
+            _li = _pick_for_game(_grp, _laser_comp)
+            _mi = _pick_for_game(_grp, _moon_comp)
+            if _li is not None:
+                df.loc[_li, "is_laser_target"] = 1
+            if _mi is not None:
+                df.loc[_mi, "is_moonshot_target"] = 1
+    except Exception:
+        pass
+    return df
 
 
 def safe_float(val) -> Optional[float]:
@@ -4196,6 +4284,38 @@ if show_pattern_analysis:
                 except Exception as _ppe:
                     log_swallowed_error("prop_predictors_section", _ppe, surface=False)
 
+                # v44.18 — MOONSHOT / LASER ACCURACY. Did the per-game power
+                # targets actually homer more than the field? Requires a few
+                # slates of tagged picks with outcomes attached.
+                try:
+                    from pattern_analysis import power_target_accuracy
+                    _pta = power_target_accuracy(merged)
+                    if _pta:
+                        st.markdown("**🌙⚡ Moonshot / Laser target accuracy**")
+                        st.caption(
+                            "Did the per-game power-target picks homer more than "
+                            "the rest of the slate? Lift > 1.0 = the targets find "
+                            "the HR hitters. Needs several slates to be meaningful."
+                        )
+                        for _lbl, _d in _pta.items():
+                            _lift = _d.get("lift")
+                            _lift_s = f"{_lift:.2f}×" if _lift else "—"
+                            st.markdown(
+                                f"- **{_lbl}**: targets homered "
+                                f"{_d['target_hr_rate']*100:.1f}% "
+                                f"(n={_d['n_targets']}) vs field "
+                                f"{_d['field_hr_rate']*100:.1f}% → lift {_lift_s}"
+                            )
+                    else:
+                        st.caption(
+                            "🌙⚡ **Moonshot / Laser accuracy** — will appear once "
+                            "a few slates of tagged targets accumulate outcomes. "
+                            "The picks are now snapshotted each day so their HR "
+                            "hit rate can be graded against the field."
+                        )
+                except Exception as _pae:
+                    log_swallowed_error("power_target_accuracy_section", _pae, surface=False)
+
                 # Analysis, mirroring the eval banner's copy button. The
                 # st.dataframe tables (importance, adaptive top-10) don't
                 # survive clipboard copy, so this rebuilds the key numbers as
@@ -5628,7 +5748,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.16 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.18 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -11247,6 +11367,17 @@ if all_hitters:
         log_swallowed_error("compute_dinger_score", _dse, surface=False)
         combined_all["dinger_score"] = np.nan
 
+    # v44.18: tag per-game Moonshot/Laser targets HERE (upstream of the
+    # snapshot at ~line 11900) so the picks get snapshotted and the learning
+    # loop can grade whether the target actually produced the outcome. The
+    # per-game display reads these columns instead of recomputing.
+    try:
+        combined_all = tag_power_targets(combined_all)
+    except Exception as _pte:
+        log_swallowed_error("tag_power_targets", _pte, surface=False)
+        combined_all["is_moonshot_target"] = 0
+        combined_all["is_laser_target"] = 0
+
     # v42r: "ROBBED HR" diagnostic columns. Park-neutral expected HR vs
     # actual HR. Display/audit-only — does NOT feed into pick_score.
     #
@@ -12667,6 +12798,172 @@ st.divider()
 #   5. pull_air_pct added to models.py display_cols so the derived column
 #      survives into combined_all
 # ============================================================================
+# ============================================================================
+# v44.17 — ASK DINGERMAVEN (data-grounded Q&A bot)
+# ============================================================================
+# Answers questions about TONIGHT'S SLATE directly from combined_all — no API
+# key required for the common question types (top hitters by any stat, a
+# player's numbers, who to target in a matchup, stat/metric definitions).
+# If the user has added an `anthropic_api_key` to Streamlit secrets, natural-
+# language questions that don't match a built-in pattern get routed to Claude
+# with the slate data as grounding context. Without a key, those fall back to
+# a helpful "here's what I can answer" message. This keeps the bot FREE and
+# useful for everyone, with an optional LLM upgrade for power users.
+st.subheader("🤖 Ask DingerMaven")
+st.caption(
+    "Ask about tonight's slate — e.g. *\"top 5 dinger scores\"*, *\"how is "
+    "Judge tonight\"*, *\"who should I target against a lefty\"*, or *\"what is "
+    "barrel%\"*. Answers come straight from tonight's data."
+)
+try:
+    _ask_q = st.text_input(
+        "Your question:",
+        key="_ask_bot_q",
+        placeholder="top 5 dinger scores tonight",
+    )
+    if _ask_q and combined_all is not None and not combined_all.empty:
+        _ans = None
+        _ql = _ask_q.lower().strip()
+
+        # ---- Stat/metric glossary (no data needed) ----
+        _glossary = {
+            "barrel": "**Barrel%** = the share of a hitter's batted balls hit at the ideal exit-velocity + launch-angle combo for extra bases. It's the single most stable HR predictor in the model (Section G reliability ~2.0).",
+            "dinger": "**Dinger Score** = a 0-100 curated HR predictor. Raw power base (avg EV, barrel%, pulled-air barrel%, hard-hit%, ISO, blast%) tilted by tonight's context (recent form, park+weather, matchup) so it moves per slate.",
+            "hr score": "**HR Score** = the primary 0-100 HR ranking. A tier-weighted composite: HR probability (30%), power signals (25%), swing mechanics (12%), matchup (12%), form (10%), environment (6%), discipline (3%), context (2%).",
+            "pick score": "**Pick Score** = the ranking the app actually ships its Top 10 from. Blends HR game%, matchup, power, arsenal, form, environment, and lineup/platoon bonuses.",
+            "iso": "**ISO** (Isolated Power) = SLG minus AVG — measures raw extra-base power, stripping out singles.",
+            "hard hit": "**Hard-Hit%** = share of batted balls at 95+ mph exit velocity.",
+            "pull air": "**Pull-Air%** = share of batted balls pulled in the air — the launch pattern that produces the most home runs.",
+            "matchup_opp": "**Matchup** = the hitter's projected advantage vs tonight's specific pitcher (0-100, higher = better spot).",
+            "env": "**Env Boost** = park + weather multiplier on HR likelihood. >1.0 favors hitters (warm, thin air, wind out), <1.0 favors pitchers.",
+        }
+        for _k, _v in _glossary.items():
+            if ("what is " in _ql or "what's " in _ql or "explain" in _ql or "define" in _ql) and _k in _ql:
+                _ans = _v
+                break
+
+        # ---- "top N by <stat>" ----
+        if _ans is None:
+            import re as _re
+            _stat_aliases = {
+                "dinger": "dinger_score", "dinger score": "dinger_score",
+                "hr score": "hr_score", "hr%": "hr_game_pct",
+                "hr game": "hr_game_pct", "home run": "hr_game_pct",
+                "pick score": "pick_score", "barrel": "barrel_pct",
+                "iso": "iso", "exit velo": "avg_ev", "ev": "avg_ev",
+                "hard hit": "hard_hit", "power": "power_score",
+                "hit%": "hit_game_pct", "total bases": "expected_total_bases",
+            }
+            _n_match = _re.search(r"top\s+(\d+)", _ql)
+            _n = int(_n_match.group(1)) if _n_match else 5
+            _n = min(max(_n, 1), 25)
+            if "top" in _ql or "best" in _ql or "highest" in _ql:
+                _target_col = None
+                for _alias, _col in _stat_aliases.items():
+                    if _alias in _ql and _col in combined_all.columns:
+                        _target_col = _col
+                        break
+                if _target_col is None and "dinger_score" in combined_all.columns:
+                    _target_col = "dinger_score"  # sensible default
+                if _target_col and _target_col in combined_all.columns:
+                    _pool = combined_all.copy()
+                    if "is_bench" in _pool.columns:
+                        _pool = _pool[~_pool["is_bench"].fillna(False).astype(bool)]
+                    _pool = _pool[pd.to_numeric(_pool[_target_col], errors="coerce").notna()]
+                    _topn = _pool.nlargest(_n, _target_col)
+                    if not _topn.empty:
+                        _lines = [f"**Top {len(_topn)} by {_target_col}:**"]
+                        for _i, (_, _r) in enumerate(_topn.iterrows(), 1):
+                            _v = _r[_target_col]
+                            _vs = f"{float(_v):.1f}" if isinstance(_v, (int, float)) else str(_v)
+                            _lines.append(
+                                f"{_i}. **{_r.get('player_name','?')}** "
+                                f"({_r.get('team','')}) — {_vs}"
+                                + (f" · {float(_r['hr_game_pct']):.1f}% HR" if pd.notna(_r.get('hr_game_pct')) else "")
+                            )
+                        _ans = "\\n".join(_lines)
+
+        # ---- "how is <player>" / "<player> stats" ----
+        if _ans is None and "player_name" in combined_all.columns:
+            _names = combined_all["player_name"].dropna().astype(str)
+            _hit = None
+            for _nm in _names:
+                _last = _nm.split()[-1].lower() if _nm.split() else ""
+                if _nm.lower() in _ql or (len(_last) > 3 and _last in _ql):
+                    _hit = _nm
+                    break
+            if _hit:
+                _pr = combined_all[combined_all["player_name"] == _hit].iloc[0]
+                _bits = [f"**{_hit}** ({_pr.get('team','')})"]
+                for _lbl, _c, _f in [
+                    ("HR Score", "hr_score", "{:.0f}"),
+                    ("💥 Dinger", "dinger_score", "{:.0f}"),
+                    ("HR Game%", "hr_game_pct", "{:.1f}%"),
+                    ("Grade", "grade", "{}"),
+                    ("Barrel%", "barrel_pct", "{:.1f}"),
+                    ("ISO", "iso", "{:.3f}"),
+                    ("Avg EV", "avg_ev", "{:.1f}"),
+                    ("Matchup", "matchup_opp", "{:.0f}"),
+                    ("vs", "matchup", "{}"),
+                ]:
+                    _v = _pr.get(_c)
+                    if pd.notna(_v) and _v != "":
+                        try:
+                            _bits.append(f"{_lbl} {_f.format(_v)}")
+                        except Exception:
+                            pass
+                _ans = "  ·  ".join(_bits)
+
+        # ---- LLM fallback (only if user configured a key) ----
+        if _ans is None:
+            _api_key = None
+            try:
+                _api_key = st.secrets.get("anthropic_api_key", "")
+            except Exception:
+                _api_key = ""
+            if _api_key:
+                try:
+                    import anthropic as _anthropic
+                    # Ground the model with a compact slate snapshot
+                    _ctx_cols = [c for c in ["player_name", "team", "hr_score",
+                                 "dinger_score", "hr_game_pct", "grade", "matchup"]
+                                 if c in combined_all.columns]
+                    _ctx = combined_all[_ctx_cols].head(60).to_csv(index=False)
+                    _client = _anthropic.Anthropic(api_key=_api_key)
+                    _msg = _client.messages.create(
+                        model="claude-sonnet-4-6",
+                        max_tokens=600,
+                        messages=[{"role": "user", "content": (
+                            f"You are a helpful assistant inside an MLB home-run "
+                            f"props app. Answer ONLY from this slate data (CSV). "
+                            f"Be concise. If the answer isn't in the data, say so.\\n\\n"
+                            f"SLATE DATA:\\n{_ctx}\\n\\nQUESTION: {_ask_q}"
+                        )}],
+                    )
+                    _ans = "".join(
+                        b.text for b in _msg.content if getattr(b, "type", "") == "text"
+                    )
+                except Exception as _le:
+                    _ans = (
+                        "I couldn't reach the AI service for that question, but I "
+                        "can answer things like *top 5 dinger scores*, *how is "
+                        "[player]*, or *what is barrel%* directly from the data."
+                    )
+            else:
+                _ans = (
+                    "I can answer that kind of question if an Anthropic API key is "
+                    "added to the app's secrets. Without one, I can still answer: "
+                    "**top N by [stat]** (dinger, HR score, barrel, ISO, EV…), "
+                    "**how is [player]**, and **what is [metric]** — all straight "
+                    "from tonight's data, free."
+                )
+
+        if _ans:
+            st.markdown(_ans)
+except Exception as _ask_e:
+    log_swallowed_error("ask_bot", _ask_e, surface=False)
+
+st.markdown("---")
 st.subheader("🆚 Head-to-Head Comparison")
 st.caption(
     "Pick 2-4 hitters to compare side-by-side. The leader in each category "
