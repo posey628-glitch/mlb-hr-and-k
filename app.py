@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.33-composite-placement-and-diag"
+APP_VERSION = "2026.06.10-v44.34-barrel-matchup-score-and-join-fix"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -5871,7 +5871,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.33 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.34 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -11550,6 +11550,53 @@ if all_hitters:
     except Exception as _pce:
         log_swallowed_error("power_composite", _pce, surface=False)
 
+    # v44.34 — NEW METRIC: BARREL MATCHUP SCORE. Designed from the accumulated
+    # Section G data, not guessed. Rationale: pulled_brl_pct is by far the most
+    # RELIABLE HR predictor we've measured (reliability 2.69, and the only one
+    # with a positive trend), yet every existing metric buries it inside a
+    # broad composite. This metric makes it the SPINE — leads with the proven
+    # signals (pulled-barrels, barrels, hard-hit) and AMPLIFIES them by tonight's
+    # pitcher HR-vulnerability (arsenal HR-tilt + barrels allowed). The thesis:
+    # the most reliable power signal, aimed at the most vulnerable arm, is where
+    # HR value concentrates. Runs PARALLEL + gets snapshotted/graded like the
+    # others, so the scorecard tells us if it beats HR Score / Dinger over time.
+    try:
+        def _pctl(col):
+            if col not in combined_all.columns:
+                return None
+            s = pd.to_numeric(combined_all[col], errors="coerce")
+            return s.rank(pct=True) * 100.0 if s.notna().any() else None
+
+        # POWER SPINE — reliability-weighted (from Section G): pulled_brl leads.
+        _spine_parts = [(_pctl("pulled_brl_pct"), 2.7),  # reliab 2.69
+                        (_pctl("barrel_pct"), 1.8),      # reliab 1.80
+                        (_pctl("hard_hit"), 1.6),        # reliab 1.58
+                        (_pctl("avg_ev"), 1.4)]
+        _snum = pd.Series(0.0, index=combined_all.index)
+        _sden = pd.Series(0.0, index=combined_all.index)
+        for _s, _w in _spine_parts:
+            if _s is not None:
+                _m = _s.notna()
+                _snum = _snum.add((_s.fillna(0) * _w) * _m.astype(float), fill_value=0)
+                _sden = _sden.add(_m.astype(float) * _w, fill_value=0)
+        _spine = _snum / _sden.replace(0, np.nan)  # 0-100 power percentile
+
+        # MATCHUP AMPLIFIER — pitcher HR-vulnerability, centered at 1.0 so a
+        # neutral matchup leaves the spine unchanged; a soft arm lifts it, an
+        # ace suppresses it. Modest ±25% so power stays the primary driver.
+        _amp = pd.Series(1.0, index=combined_all.index)
+        _ph = _pctl("pitch_hr_score")  # batter vs this arsenal's HR tilt
+        if _ph is not None:
+            _amp = _amp * (1.0 + 0.15 * ((_ph.fillna(50) - 50) / 50.0))
+        _ba = _pctl("barrel_allowed")  # pitcher barrels allowed
+        if _ba is not None:
+            _amp = _amp * (1.0 + 0.10 * ((_ba.fillna(50) - 50) / 50.0))
+        _amp = _amp.clip(0.75, 1.25)
+
+        combined_all["barrel_matchup_score"] = (_spine * _amp).clip(0, 100).round(1)
+    except Exception as _bmse:
+        log_swallowed_error("barrel_matchup_score", _bmse, surface=False)
+
     # v44.18: tag per-game Moonshot/Laser targets HERE (upstream of the
     # snapshot at ~line 11900) so the picks get snapshotted and the learning
     # loop can grade whether the target actually produced the outcome. The
@@ -14327,6 +14374,7 @@ def build_col_config():
         "avg_ev":          st.column_config.NumberColumn("Avg EV", format="%.1f", width="small", help="Average exit velocity (mph) across all batted balls. Core input to the Laser (105+ mph) target."),
         "avg_hr_ev":       st.column_config.NumberColumn("HR EV", format="%.1f", width="small", help="Average exit velocity (mph) on home runs specifically — how hard this hitter's HRs are struck. Feeds the Laser target alongside overall avg EV."),
         "power_composite": st.column_config.NumberColumn("💥+ Combo", format="%.0f", width="small", help="Composite of HR Score (55%) + Dinger Score (45%) — blends the full matchup-aware model with curated raw power. Highest when both systems agree a hitter is a strong HR play. Runs parallel to the shipped ranking."),
+        "barrel_matchup_score": st.column_config.NumberColumn("🎯 Brl Match", format="%.0f", width="small", help="NEW (v44.34): leads with pulled-barrel% — the most RELIABLE HR predictor in our data (Section G reliability 2.69) — plus barrels/hard-hit/EV, then amplifies by tonight's pitcher HR-vulnerability (arsenal HR-tilt + barrels allowed). The thesis: the most reliable power signal aimed at the most vulnerable arm. Graded parallel to the others."),
         "max_hit_speed":   st.column_config.NumberColumn("Max EV", format="%.1f", width="small", help="Hardest-hit ball (mph). Ceiling of raw power."),
         "avg_hr_distance": st.column_config.NumberColumn("HR Dist", format="%.0f", width="small", help="Average home-run distance (ft) when available from Savant. Feeds the Moonshot (400+ ft) target."),
         "la":              st.column_config.NumberColumn("LA", format="%.1f", width="small", help="Average launch angle (degrees). ~25-35° is the HR sweet spot."),
@@ -14547,7 +14595,7 @@ def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
         # 3) CUSTOM HR COMPOSITES — Dinger (raw power×context) + the
         # HR-Score×Dinger combo, grouped together right after the headline
         # verdict so all the HR-prediction numbers read together (v44.11/44.31).
-        "dinger_score", "power_composite",
+        "dinger_score", "power_composite", "barrel_matchup_score",
         # 4) HIT + TOTAL-BASE OUTLOOK — the "maybe a better non-HR play" read
         "hit_alert", "hit_game_pct", "hit_grade", "tb_grade", "expected_total_bases",
         # 5) FORM / STREAK — recent trajectory (now HR-aware, v44.12)
