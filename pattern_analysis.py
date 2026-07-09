@@ -116,7 +116,7 @@ def merge_snapshots_with_outcomes(snapshots: dict) -> pd.DataFrame:
                 "discipline_score", "lift_score", "matchup_opp",
                 "recent_hr", "recent_hr_weighted_rate",
                 "pitch_hr_score", "pitch_match_score",
-                "env_boost", "opp_pitcher_xwoba", "dinger_score", "power_composite",
+                "env_boost", "opp_pitcher_xwoba", "dinger_score", "power_composite", "barrel_matchup_score",
                 "is_moonshot_target", "is_laser_target",
                 "sleeper_score", "lineup_pos", "is_roster_fill",
             ]:
@@ -472,6 +472,7 @@ def custom_metric_scorecard(merged_df: pd.DataFrame) -> "pd.DataFrame":
         ("pick_score", "Pick Score"),
         ("dinger_score", "Dinger Score"),
         ("power_composite", "HR+Dinger Combo"),
+        ("barrel_matchup_score", "Barrel Matchup"),
     ]
     _out = merged_df.dropna(subset=["homered"]).copy()
     if len(_out) < 20:
@@ -586,7 +587,7 @@ HR_CANDIDATE_FEATURES = [
     "matchup_opp", "power_score", "pitch_hr_score",
     "lift_score", "discipline_score",
     "recent_hr_weighted_rate",
-    "env_boost", "dinger_score", "power_composite",
+    "env_boost", "dinger_score", "power_composite", "barrel_matchup_score",
 ]
 
 
