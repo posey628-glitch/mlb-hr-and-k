@@ -116,7 +116,7 @@ def merge_snapshots_with_outcomes(snapshots: dict) -> pd.DataFrame:
                 "discipline_score", "lift_score", "matchup_opp",
                 "recent_hr", "recent_hr_weighted_rate",
                 "pitch_hr_score", "pitch_match_score",
-                "env_boost", "opp_pitcher_xwoba", "dinger_score",
+                "env_boost", "opp_pitcher_xwoba", "dinger_score", "power_composite",
                 "is_moonshot_target", "is_laser_target",
                 "sleeper_score", "lineup_pos", "is_roster_fill",
             ]:
@@ -453,6 +453,57 @@ def power_target_accuracy(merged_df: pd.DataFrame) -> dict:
     return out
 
 
+def custom_metric_scorecard(merged_df: pd.DataFrame) -> "pd.DataFrame":
+    """v44.32: head-to-head report card for the app's SCORING metrics.
+
+    Shows how well each composite score (hr_score, pick_score, dinger_score,
+    power_composite) actually predicts HRs across accumulated slates — via
+    point-biserial correlation with the `homered` outcome, plus the top-decile
+    hit rate (did the hitters this metric ranked in its top 10% actually homer
+    more?). This is how we tell whether the CUSTOM metrics are earning their
+    keep and whether reweights (like the v44.24 Dinger tune) are helping.
+
+    Returns a DataFrame sorted by correlation, empty if not enough data.
+    """
+    if merged_df is None or merged_df.empty or "homered" not in merged_df.columns:
+        return pd.DataFrame()
+    _metrics = [
+        ("hr_score", "HR Score"),
+        ("pick_score", "Pick Score"),
+        ("dinger_score", "Dinger Score"),
+        ("power_composite", "HR+Dinger Combo"),
+    ]
+    _out = merged_df.dropna(subset=["homered"]).copy()
+    if len(_out) < 20:
+        return pd.DataFrame()
+    _y = pd.to_numeric(_out["homered"], errors="coerce")
+    rows = []
+    for _col, _label in _metrics:
+        if _col not in _out.columns:
+            continue
+        _x = pd.to_numeric(_out[_col], errors="coerce")
+        _pair = pd.concat([_x, _y], axis=1).dropna()
+        if len(_pair) < 20 or _pair.iloc[:, 0].nunique() < 3:
+            continue
+        _corr = float(_pair.iloc[:, 0].corr(_pair.iloc[:, 1]))
+        # top-decile hit rate: HR rate among this metric's top 10% of hitters
+        _n_top = max(1, int(len(_pair) * 0.10))
+        _top = _pair.nlargest(_n_top, _pair.columns[0])
+        _top_rate = float(_top.iloc[:, 1].mean())
+        _base_rate = float(_pair.iloc[:, 1].mean())
+        rows.append({
+            "metric": _label,
+            "corr_with_HR": round(_corr, 4),
+            "top10pct_HR_rate": round(_top_rate, 4),
+            "slate_HR_rate": round(_base_rate, 4),
+            "lift": round(_top_rate / _base_rate, 2) if _base_rate > 0 else None,
+            "n": len(_pair),
+        })
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows).sort_values("corr_with_HR", ascending=False)
+
+
 # ============================================================================
 # Threshold sweep — find the threshold for a feature that maximizes lift
 # ============================================================================
@@ -535,7 +586,7 @@ HR_CANDIDATE_FEATURES = [
     "matchup_opp", "power_score", "pitch_hr_score",
     "lift_score", "discipline_score",
     "recent_hr_weighted_rate",
-    "env_boost", "dinger_score",
+    "env_boost", "dinger_score", "power_composite",
 ]
 
 
