@@ -342,10 +342,31 @@ def build_matchup_table(
     ids = [p["id"] for p in lineup if p.get("id")]
     h = hitter_stats[hitter_stats["player_id"].isin(ids)].copy() if "player_id" in hitter_stats.columns else hitter_stats.copy()
 
+    # v44.34 (distance-data bug, diagnostically confirmed): hitter_stats's
+    # player_id can be pandas nullable Int64 while the lineup's p["id"] is a
+    # plain Python int. On some pandas/Python builds (Streamlit Cloud runs a
+    # newer one) the `==` match below silently returns 0 rows for that type
+    # mismatch — which is why avg_dist/barrel_count were populated in
+    # hitter_stats (251/254) yet 0% survived into the per-hitter rows. Coerce
+    # BOTH the frame's key and the lookup key to a plain int64 so the match is
+    # type-safe regardless of pandas version. Stats merged earlier (barrel_pct
+    # etc.) survived by luck of merge-timing; this makes ALL of them robust.
+    if "player_id" in h.columns:
+        h["_pid_match"] = pd.to_numeric(h["player_id"], errors="coerce")
+
     rows = []
     for i, p in enumerate(lineup, start=1):
-        match = h[h["player_id"] == p["id"]] if "player_id" in h.columns else pd.DataFrame()
+        _pid = p.get("id")
+        try:
+            _pid_num = int(_pid) if _pid is not None else None
+        except (ValueError, TypeError):
+            _pid_num = None
+        if "_pid_match" in h.columns and _pid_num is not None:
+            match = h[h["_pid_match"] == _pid_num]
+        else:
+            match = h[h["player_id"] == p["id"]] if "player_id" in h.columns else pd.DataFrame()
         row = match.iloc[0].to_dict() if len(match) else {"player_id": p.get("id")}
+        row.pop("_pid_match", None)  # drop the helper from the output row
         row["player_name"] = p["name"]
         is_fill = bool(p.get("is_roster_fill", False))
         # Mark whether this row came from a real lineup or roster-padding fallback.
