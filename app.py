@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.22-bot-form-dropdown-tooltips"
+APP_VERSION = "2026.06.10-v44.23-savant-hr-distance-ev-barrels"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -1178,7 +1178,8 @@ def tag_power_targets(df: "pd.DataFrame") -> "pd.DataFrame":
 
     _has_dist = "avg_hr_distance" in df.columns and \
         pd.to_numeric(df["avg_hr_distance"], errors="coerce").notna().any()
-    _laser_comp = [("avg_ev", 2.5), ("hard_hit", 1.5), ("barrel_pct", 1.0),
+    _laser_comp = [("avg_hr_ev", 2.0), ("avg_ev", 2.5), ("hard_hit", 1.5),
+                   ("barrel_pct", 1.0),
                    ("matchup_opp", 1.0), ("pitch_hr_score", 1.0),
                    ("env_boost", 0.75), ("recent_hr_weighted_rate", 0.5)]
     _moon_comp = ([("avg_hr_distance", 2.5)] if _has_dist else
@@ -5769,7 +5770,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.22 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.23 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -11410,7 +11411,8 @@ if all_hitters:
     try:
         _round_1dp = ["barrel_pct", "pulled_brl_pct", "blast_pct", "hard_hit",
                       "pull_air_pct", "pull_pct", "fb_pct", "gb_pct", "ld_pct",
-                      "k_pct", "bb_pct", "whiff_pct", "avg_ev", "max_hit_speed",
+                      "k_pct", "bb_pct", "whiff_pct", "avg_ev", "avg_hr_ev",
+                      "max_hit_speed",
                       "la", "sprint_speed", "hr_game_pct", "hit_game_pct",
                       "hr_pa_pct", "hit_pa_pct", "matchup_opp", "power_score",
                       "lift_score", "discipline_score", "pitch_match_score",
@@ -14062,6 +14064,7 @@ def build_col_config():
         "bb_pct":          st.column_config.NumberColumn("BB%", format="%.1f", width="small", help="Walk rate. Plate discipline signal."),
         "whiff_pct":       st.column_config.NumberColumn("Whiff%", format="%.1f", width="small", help="Swing-and-miss rate on swings."),
         "avg_ev":          st.column_config.NumberColumn("Avg EV", format="%.1f", width="small", help="Average exit velocity (mph) across all batted balls. Core input to the Laser (105+ mph) target."),
+        "avg_hr_ev":       st.column_config.NumberColumn("HR EV", format="%.1f", width="small", help="Average exit velocity (mph) on home runs specifically — how hard this hitter's HRs are struck. Feeds the Laser target alongside overall avg EV."),
         "max_hit_speed":   st.column_config.NumberColumn("Max EV", format="%.1f", width="small", help="Hardest-hit ball (mph). Ceiling of raw power."),
         "avg_hr_distance": st.column_config.NumberColumn("HR Dist", format="%.0f", width="small", help="Average home-run distance (ft) when available from Savant. Feeds the Moonshot (400+ ft) target."),
         "la":              st.column_config.NumberColumn("LA", format="%.1f", width="small", help="Average launch angle (degrees). ~25-35° is the HR sweet spot."),
@@ -14286,7 +14289,7 @@ def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
         # 5) FORM / STREAK — recent trajectory (now HR-aware, v44.12)
         "streak_label",
         # 6) POWER STATS — what drives the HR verdict, grouped together
-        "barrel_pct", "pulled_brl_pct", "iso", "avg_ev", "hard_hit",
+        "barrel_pct", "pulled_brl_pct", "iso", "avg_ev", "avg_hr_ev", "hard_hit",
         "blast_pct", "fb_pct", "la", "xwoba", "xwobacon",
         "avg_hr_distance", "max_hit_speed",
         # 7) MATCHUP CONTEXT — tonight's spot: pitcher, arsenal, environment
