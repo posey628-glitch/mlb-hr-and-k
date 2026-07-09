@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.25-bot-team-hand-fade-confirmed"
+APP_VERSION = "2026.06.10-v44.27-download-button-fix"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -5779,7 +5779,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.25 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.27 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -12356,9 +12356,10 @@ if all_hitters:
                 st.download_button(
                     "📥 Export ALL to Excel",
                     data=buffer.getvalue(),
-                    file_name=f"dingermaven_{_dt.now().strftime('%Y-%m-%d_%H-%M')}.xlsx",
+                    file_name=f"dingermaven_{selected_date}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     help="Hitters + Pitchers + Top lists in one Excel workbook.",
+                    key="dl_excel_all",
                 )
             except Exception as e:
                 st.error(f"Excel export failed: {str(e)[:100]}")
@@ -12375,9 +12376,10 @@ if all_hitters:
                 st.download_button(
                     "📥 Export ALL to CSV",
                     data=csv_buf.getvalue(),
-                    file_name=f"dingermaven_{_dt.now().strftime('%Y-%m-%d_%H-%M')}.csv",
+                    file_name=f"dingermaven_{selected_date}.csv",
                     mime="text/csv",
                     help="Combined CSV - openpyxl not installed for Excel export.",
+                    key="dl_csv_all",
                 )
                 st.caption("ℹ️ Add `openpyxl` to requirements.txt for Excel output")
             except Exception as e:
