@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.20-float-format-and-grade-visible"
+APP_VERSION = "2026.06.10-v44.21-bot-ranking-and-nav-top"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -1676,6 +1676,25 @@ with st.sidebar:
     st.title("💣 DingerMaven")
     selected_date = st.date_input("Slate date", value=date.today())
 
+    # v44.21 (user-requested): jump-menu near the TOP of the sidebar so
+    # navigation is the first thing you reach. Pure HTML anchor links —
+    # clicking scrolls to that section with zero rerun / zero recompute.
+    st.markdown("#### 🧭 Jump to section")
+    st.markdown(
+        "\n".join([
+            "- [🥎 Pitcher Slate](#sec-pitchers)",
+            "- [🏆 Top 10 Picks](#sec-top10)",
+            "- [💎 Sleepers & Best Plays](#sec-sleepers)",
+            "- [🤖 Ask DingerMaven](#sec-ask)",
+            "- [🆚 Head-to-Head Compare](#sec-compare)",
+            "- [🎮 Game-by-Game Matchups](#sec-games)",
+            "- [🛠️ Tools & Diagnostics](#sec-tools)",
+        ]),
+        unsafe_allow_html=True,
+    )
+    st.caption("Click a link to scroll there instantly — no reload.")
+    st.divider()
+
     # ========================================================================
     # OWNER MODE — toggle to expose owner-only features
     #
@@ -2859,32 +2878,6 @@ if use_sprint_speed:
 # ============================================================================
 
 st.title(f"💣 DingerMaven — {selected_date.strftime('%A, %B %d, %Y')}")
-
-# v44.19 (user-requested navigation): a sidebar jump-menu so you don't have
-# to scroll the whole page to reach a section. These are pure HTML anchor
-# links — clicking one scrolls to that section with ZERO rerun and ZERO
-# change to what computes (the load-time concern with tabs doesn't apply
-# here). Full-page st.tabs would require moving the data pipeline above the
-# display, a large risky refactor of a working app; anchor nav gives the
-# "stop scrolling everywhere" benefit safely. Section anchors are emitted
-# just before each st.subheader below.
-try:
-    st.sidebar.markdown("### 🧭 Jump to section")
-    st.sidebar.markdown(
-        "\n".join([
-            "- [🥎 Pitcher Slate](#sec-pitchers)",
-            "- [🏆 Top 10 Picks](#sec-top10)",
-            "- [💎 Sleepers & Best Plays](#sec-sleepers)",
-            "- [🤖 Ask DingerMaven](#sec-ask)",
-            "- [🆚 Head-to-Head Compare](#sec-compare)",
-            "- [🎮 Game-by-Game Matchups](#sec-games)",
-            "- [🛠️ Tools & Diagnostics](#sec-tools)",
-        ]),
-        unsafe_allow_html=True,
-    )
-    st.sidebar.caption("Clicking a link scrolls there instantly — no reload.")
-except Exception:
-    pass
 
 
 # v43.71 — prominent Gist corruption banner.
@@ -5776,7 +5769,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.20 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.21 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -12903,29 +12896,56 @@ try:
                 _ans = _v
                 break
 
-        # ---- "top N by <stat>" ----
+        # ---- ranking questions: "top N by <stat>", "who's most likely to
+        # homer", "best hitters tonight", "who should I play" ----
         if _ans is None:
             import re as _re
             _stat_aliases = {
                 "dinger": "dinger_score", "dinger score": "dinger_score",
                 "hr score": "hr_score", "hr%": "hr_game_pct",
-                "hr game": "hr_game_pct", "home run": "hr_game_pct",
-                "pick score": "pick_score", "barrel": "barrel_pct",
-                "iso": "iso", "exit velo": "avg_ev", "ev": "avg_ev",
-                "hard hit": "hard_hit", "power": "power_score",
-                "hit%": "hit_game_pct", "total bases": "expected_total_bases",
+                "hr game": "hr_game_pct", "pick score": "pick_score",
+                "barrel": "barrel_pct", "iso": "iso",
+                "exit velo": "avg_ev", "ev": "avg_ev", "hard hit": "hard_hit",
+                "power": "power_score", "hit%": "hit_game_pct",
+                "total bases": "expected_total_bases", "2 bases": "expected_total_bases",
+                "two bases": "expected_total_bases", "extra base": "expected_total_bases",
             }
-            _n_match = _re.search(r"top\s+(\d+)", _ql)
+            # Intent phrases that mean "rank the hitters" even without "top".
+            _rank_intent = any(p in _ql for p in [
+                "top", "best", "highest", "most likely", "who should",
+                "who's most", "who is most", "who to", "who should i",
+                "most likely to homer", "go yard", "go deep", "who will homer",
+                "ranking", "rank", "leaders", "who has the",
+            ])
+            # Intent → which column to rank on.
+            _intent_col = None
+            if any(p in _ql for p in ["homer", "home run", "go yard", "go deep",
+                                       "dinger", "hr ", "leave the yard"]):
+                _intent_col = "hr_score" if "hr_score" in combined_all.columns else "hr_game_pct"
+            elif any(p in _ql for p in ["hit", "get a hit", "base hit"]) and "hit_game_pct" in combined_all.columns:
+                _intent_col = "hit_game_pct"
+            elif any(p in _ql for p in ["total base", "2 base", "two base", "extra base"]) and "expected_total_bases" in combined_all.columns:
+                _intent_col = "expected_total_bases"
+
+            _n_match = _re.search(r"(?:top|best)\s+(\d+)", _ql)
             _n = int(_n_match.group(1)) if _n_match else 5
             _n = min(max(_n, 1), 25)
-            if "top" in _ql or "best" in _ql or "highest" in _ql:
+
+            if _rank_intent:
                 _target_col = None
+                # explicit stat alias wins
                 for _alias, _col in _stat_aliases.items():
                     if _alias in _ql and _col in combined_all.columns:
                         _target_col = _col
                         break
-                if _target_col is None and "dinger_score" in combined_all.columns:
-                    _target_col = "dinger_score"  # sensible default
+                # else intent-derived column
+                if _target_col is None:
+                    _target_col = _intent_col
+                # else sensible default: HR ranking (this is a HR app)
+                if _target_col is None:
+                    _target_col = ("hr_score" if "hr_score" in combined_all.columns
+                                   else "dinger_score" if "dinger_score" in combined_all.columns
+                                   else None)
                 if _target_col and _target_col in combined_all.columns:
                     _pool = combined_all.copy()
                     if "is_bench" in _pool.columns:
@@ -12933,14 +12953,28 @@ try:
                     _pool = _pool[pd.to_numeric(_pool[_target_col], errors="coerce").notna()]
                     _topn = _pool.nlargest(_n, _target_col)
                     if not _topn.empty:
-                        _lines = [f"**Top {len(_topn)} by {_target_col}:**"]
+                        _nice = {"hr_score": "HR Score", "hr_game_pct": "HR Game%",
+                                 "dinger_score": "Dinger Score", "pick_score": "Pick Score",
+                                 "hit_game_pct": "Hit%", "expected_total_bases": "xTotal Bases",
+                                 "barrel_pct": "Barrel%", "iso": "ISO", "avg_ev": "Avg EV",
+                                 "hard_hit": "Hard Hit%", "power_score": "Power"}.get(_target_col, _target_col)
+                        _lines = [f"**Most likely to homer tonight (by {_nice}):**"
+                                  if _target_col in ("hr_score", "hr_game_pct", "dinger_score")
+                                  else f"**Top {len(_topn)} by {_nice}:**"]
                         for _i, (_, _r) in enumerate(_topn.iterrows(), 1):
                             _v = _r[_target_col]
                             _vs = f"{float(_v):.1f}" if isinstance(_v, (int, float)) else str(_v)
+                            _extra = []
+                            if _target_col != "hr_game_pct" and pd.notna(_r.get("hr_game_pct")):
+                                _extra.append(f"{float(_r['hr_game_pct']):.1f}% HR")
+                            if _target_col != "dinger_score" and pd.notna(_r.get("dinger_score")):
+                                _extra.append(f"💥{float(_r['dinger_score']):.0f}")
+                            if pd.notna(_r.get("matchup")):
+                                _extra.append(str(_r.get("matchup")))
                             _lines.append(
                                 f"{_i}. **{_r.get('player_name','?')}** "
-                                f"({_r.get('team','')}) — {_vs}"
-                                + (f" · {float(_r['hr_game_pct']):.1f}% HR" if pd.notna(_r.get('hr_game_pct')) else "")
+                                f"({_r.get('team','')}) — {_nice} {_vs}"
+                                + (f" · {' · '.join(_extra)}" if _extra else "")
                             )
                         _ans = "\\n".join(_lines)
 
