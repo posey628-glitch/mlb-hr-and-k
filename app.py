@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.49-reliability-weighted-adaptive"
+APP_VERSION = "2026.06.10-v44.50-platoon-pullbrl-hits-tb-elite-cohort"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -1741,6 +1741,7 @@ with st.sidebar:
             "- [🥎 Pitcher Slate](#sec-pitchers)",
             "- [🏆 Top 10 Picks](#sec-top10)",
             "- [💎 Sleepers & Best Plays](#sec-sleepers)",
+            "- [🔥 Elite Convergence](#sec-elite)",
             "- [🤖 Ask DingerMaven](#sec-ask)",
             "- [🆚 Head-to-Head Compare](#sec-compare)",
             "- [🎮 Game-by-Game Matchups](#sec-games)",
@@ -5962,7 +5963,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.49 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.50 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -7211,17 +7212,39 @@ for _, game in slate.iterrows():
             # only if props.py is broken (surfaced ONCE at startup).
             if _PROPS_HIT_TB_AVAILABLE:
                 try:
-                    # Platoon for hits is weaker than for HR. Use a softer cap.
+                    # v44.50 (user: hits/TB should use each hitter's REAL platoon
+                    # split, not a flat 0.95/1.02). Build a per-player hit-platoon
+                    # multiplier from THIS hitter's actual batting avg vs the
+                    # pitcher's hand relative to his overall avg. A contact hitter
+                    # who really mashes lefties gets a bigger boost than one who
+                    # doesn't — same principle as the HR handedness override.
+                    # Sample-gated and capped so small samples can't distort.
                     _h_bats_now = safe_str(row_dict.get("bats")).upper()
                     _p_thr_now = safe_str(
                         _opp_p_row_local.get("p_throws") or _opp_p_row_local.get("throws")
                     ).upper() if _opp_p_row_local else ""
-                    _ss_for_hit = bool(
-                        _h_bats_now and _p_thr_now
-                        and _h_bats_now != "S"
-                        and _h_bats_now == _p_thr_now
-                    )
-                    _hit_platoon = 0.95 if _ss_for_hit else 1.02
+                    _hit_platoon = 1.0
+                    if _p_thr_now in ("L", "R"):
+                        _side = "lhp" if _p_thr_now == "L" else "rhp"
+                        _side_avg = pd.to_numeric(row_dict.get(f"vs_{_side}_avg"), errors="coerce")
+                        _side_pa = pd.to_numeric(row_dict.get(f"vs_{_side}_pa"), errors="coerce")
+                        _ov_avg = pd.to_numeric(row_dict.get("avg") or row_dict.get("batting_avg"), errors="coerce")
+                        if (pd.notna(_side_avg) and pd.notna(_ov_avg) and _ov_avg > 0
+                                and pd.notna(_side_pa) and _side_pa >= 40):
+                            # ratio of this hitter's vs-hand avg to overall,
+                            # shrunk toward 1.0 by sample size and capped ±12%
+                            _raw_ratio = float(_side_avg) / float(_ov_avg)
+                            _w = min(float(_side_pa) / (float(_side_pa) + 120.0), 0.75)
+                            _blended = 1.0 + _w * (_raw_ratio - 1.0)
+                            _hit_platoon = float(np.clip(_blended, 0.88, 1.12))
+                        else:
+                            # fall back to the soft generic tilt when no real split
+                            _ss_for_hit = bool(
+                                _h_bats_now and _p_thr_now
+                                and _h_bats_now != "S"
+                                and _h_bats_now == _p_thr_now
+                            )
+                            _hit_platoon = 0.95 if _ss_for_hit else 1.02
                     hit_pa = hit_prob_per_pa(
                         row_dict, _opp_p_row_local,
                         park_hits_factor=hitter_park_mult,
@@ -7257,14 +7280,27 @@ for _, game in slate.iterrows():
             # Uses xSLG + pitcher SLG-against. Same fallback pattern as hit signal.
             if _PROPS_HIT_TB_AVAILABLE:
                 try:
+                    # v44.50: Total Bases is a SLUGGING stat, so build its platoon
+                    # multiplier from the hitter's vs-hand SLG (not avg). Same
+                    # per-player, sample-gated, capped approach as the hit
+                    # platoon above. Falls back to the hit multiplier if no slg
+                    # split is available.
+                    _tb_platoon = _hit_platoon
+                    if _p_thr_now in ("L", "R"):
+                        _side = "lhp" if _p_thr_now == "L" else "rhp"
+                        _side_slg = pd.to_numeric(row_dict.get(f"vs_{_side}_slg"), errors="coerce")
+                        _side_pa = pd.to_numeric(row_dict.get(f"vs_{_side}_pa"), errors="coerce")
+                        _ov_slg = pd.to_numeric(row_dict.get("slg"), errors="coerce")
+                        if (pd.notna(_side_slg) and pd.notna(_ov_slg) and _ov_slg > 0
+                                and pd.notna(_side_pa) and _side_pa >= 40):
+                            _raw_ratio = float(_side_slg) / float(_ov_slg)
+                            _w = min(float(_side_pa) / (float(_side_pa) + 120.0), 0.75)
+                            _blended = 1.0 + _w * (_raw_ratio - 1.0)
+                            _tb_platoon = float(np.clip(_blended, 0.85, 1.15))
                     tb_pa_v = total_bases_per_pa(
                         row_dict, _opp_p_row_local,
                         park_hits_factor=hitter_park_mult,
-                        # v43.54: _hit_platoon is now reset to 1.0 at the top of
-                        # every iteration, so the brittle `'_hit_platoon' in dir()`
-                        # guard is no longer needed — the variable is always defined.
-                        # On the hit try-block failure path, it stays 1.0.
-                        platoon_mult=_hit_platoon,
+                        platoon_mult=_tb_platoon,
                     )
                     tb_game_v = total_bases_per_game(tb_pa_v, expected_pa=expected_pa) if tb_pa_v is not None else None
                 except Exception:
@@ -13413,6 +13449,87 @@ st.divider()
 # with the slate data as grounding context. Without a key, those fall back to
 # a helpful "here's what I can answer" message. This keeps the bot FREE and
 # useful for everyone, with an optional LLM upgrade for power users.
+# ============================================================================
+# 🔥 ELITE CONVERGENCE — players clearing high bars across ALL custom metrics
+# ============================================================================
+# v44.50 (user-requested): a focused cohort of the rare hitters where every
+# power model agrees. When HR Score, HR grade, Dinger, Combo, Barrel Match,
+# AND Two-Way all clear strong thresholds at once, that convergence has
+# historically been the highest-conviction signal. Thresholds are tunable —
+# set slightly below "elite" on the newer/less-proven metrics (Two-Way at 75
+# vs 80 for the others) since they have fewer graded slates, and looser on
+# Combo (78) because it's an average of two scores and rarely maxes. Adjust
+# from results.
+try:
+    if "combined_all" in dir() and combined_all is not None and not combined_all.empty:
+        _ec = combined_all[combined_all.get("is_bench", False) == False].copy()
+        # thresholds (tunable)
+        _EC_HR = 80.0        # HR Score
+        _EC_DINGER = 80.0    # Dinger Score
+        _EC_COMBO = 78.0     # Combo (avg of two → rarely maxes, slightly lower)
+        _EC_BRL = 80.0       # Barrel Match
+        _EC_TWO = 75.0       # Two-Way (newer metric, fewer graded slates)
+        _EC_GRADES = ["A+", "A", "A-"]  # "A or better"
+
+        def _num(col):
+            return pd.to_numeric(_ec.get(col), errors="coerce")
+
+        _mask = pd.Series(True, index=_ec.index)
+        _mask &= _num("hr_score") >= _EC_HR
+        if "hr_grade" in _ec.columns:
+            _mask &= _ec["hr_grade"].astype(str).str.strip().isin(_EC_GRADES)
+        _mask &= _num("dinger_score") >= _EC_DINGER
+        if "power_composite" in _ec.columns:
+            _mask &= _num("power_composite") >= _EC_COMBO
+        if "barrel_matchup_score" in _ec.columns:
+            _mask &= _num("barrel_matchup_score") >= _EC_BRL
+        if "two_way_matchup_score" in _ec.columns:
+            _mask &= _num("two_way_matchup_score") >= _EC_TWO
+
+        _elite = _ec[_mask.fillna(False)].copy()
+
+        st.markdown("<div id='sec-elite'></div>", unsafe_allow_html=True)
+        st.subheader("🔥 Elite Convergence")
+        st.caption(
+            f"The rare hitters where EVERY power model agrees — HR Score ≥{_EC_HR:.0f}, "
+            f"HR grade A- or better, Dinger ≥{_EC_DINGER:.0f}, Combo ≥{_EC_COMBO:.0f}, "
+            f"Barrel Match ≥{_EC_BRL:.0f}, and Two-Way ≥{_EC_TWO:.0f}. When all six "
+            f"converge it's the highest-conviction HR signal on the slate. "
+            f"Thresholds are tuned conservatively and adjust from results."
+        )
+        if _elite.empty:
+            st.info(
+                "No hitters clear all six thresholds on this slate. That's normal — "
+                "full convergence is rare and means the bar is doing its job. Check "
+                "the Top 10 and per-game tables for the strongest available plays."
+            )
+        else:
+            _elite = _elite.sort_values("hr_score", ascending=False)
+            _ec_cols = [c for c in [
+                "player_name", "team", "game", "opp_pitcher",
+                "hr_score", "hr_grade", "dinger_score", "power_composite",
+                "barrel_matchup_score", "two_way_matchup_score",
+                "hr_game_pct", "split_confidence",
+            ] if c in _elite.columns]
+            st.dataframe(
+                _elite[_ec_cols], hide_index=True, use_container_width=True,
+                column_config={
+                    "player_name": "Hitter", "team": "Team", "game": "Game",
+                    "opp_pitcher": "Opp Pitcher",
+                    "hr_score": st.column_config.NumberColumn("HR Score", format="%.0f"),
+                    "hr_grade": "Grade",
+                    "dinger_score": st.column_config.NumberColumn("💥 Dinger", format="%.0f"),
+                    "power_composite": st.column_config.NumberColumn("💥+ Combo", format="%.0f"),
+                    "barrel_matchup_score": st.column_config.NumberColumn("🎯 Brl Match", format="%.0f"),
+                    "two_way_matchup_score": st.column_config.NumberColumn("⚖️ Two-Way", format="%.0f"),
+                    "hr_game_pct": st.column_config.NumberColumn("HR%", format="%.1f%%"),
+                    "split_confidence": "Split",
+                },
+            )
+            st.caption(f"🔥 {len(_elite)} hitter(s) meet full convergence this slate.")
+except Exception as _ec_err:
+    log_swallowed_error("elite_convergence_section", _ec_err, surface=False)
+
 st.markdown("<div id='sec-ask'></div>", unsafe_allow_html=True)
 st.subheader("🤖 Ask DingerMaven")
 st.caption(
