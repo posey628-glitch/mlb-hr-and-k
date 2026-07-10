@@ -413,6 +413,35 @@ def researcher_framework_backtest(merged_df: pd.DataFrame) -> dict:
             "reliable": len(nuc_in) >= 30 and len(nuc_out) >= 30,
         }
 
+    # v44.51 (user-requested): grade the ELITE CONVERGENCE cohort — hitters
+    # who clear high bars across ALL custom metrics at once. This tests whether
+    # full multi-model agreement actually produces a higher HR rate (the whole
+    # premise of the section). Thresholds mirror the display section.
+    _ec_cols = ["hr_score", "dinger_score", "power_composite",
+                "barrel_matchup_score", "two_way_matchup_score"]
+    if all(c in merged_df.columns for c in ["hr_score", "homered"]):
+        ec = merged_df.dropna(subset=["hr_score", "homered"]).copy()
+        _ec_mask = pd.to_numeric(ec["hr_score"], errors="coerce") >= 80
+        for _c, _thr in [("dinger_score", 80), ("power_composite", 78),
+                         ("barrel_matchup_score", 80), ("two_way_matchup_score", 75)]:
+            if _c in ec.columns:
+                _ec_mask &= pd.to_numeric(ec[_c], errors="coerce").fillna(0) >= _thr
+        ec_in = ec[_ec_mask.fillna(False)]
+        ec_out = ec[~_ec_mask.fillna(False)]
+        result["elite_convergence"] = {
+            "n_in": len(ec_in),
+            "n_out": len(ec_out),
+            "in_hr_rate": float(ec_in["homered"].mean()) if len(ec_in) else None,
+            "out_hr_rate": float(ec_out["homered"].mean()) if len(ec_out) else None,
+            "lift": (
+                float(ec_in["homered"].mean() / ec_out["homered"].mean())
+                if len(ec_in) and len(ec_out) and ec_out["homered"].mean() > 0
+                else None
+            ),
+            "reliable": len(ec_in) >= 20,  # elite cohort is small by design
+            "threshold_note": "HR≥80, Dinger≥80, Combo≥78, BrlMatch≥80, TwoWay≥75",
+        }
+
     return result
 
 
