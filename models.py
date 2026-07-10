@@ -297,8 +297,10 @@ KNOWN_CONSUMED_COLUMNS = [
     # Handedness override inputs (apply_handedness_overrides)
     "vs_lhp_pa", "vs_lhp_barrel_pct", "vs_lhp_hard_hit",
     "vs_lhp_xwoba", "vs_lhp_avg_ev", "vs_lhp_iso",
+    "vs_lhp_pull_pct", "vs_lhp_pulled_brl_pct",
     "vs_rhp_pa", "vs_rhp_barrel_pct", "vs_rhp_hard_hit",
     "vs_rhp_xwoba", "vs_rhp_avg_ev", "vs_rhp_iso",
+    "vs_rhp_pull_pct", "vs_rhp_pulled_brl_pct",
     # Total bases (props.total_bases_per_pa) — reads slg/xslg
     "xslg",
     # Grade context platoon annotations (grade_context block)
