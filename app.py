@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.45-side-power-and-pitcher-k-eval"
+APP_VERSION = "2026.06.10-v44.46-nan-safe-metrics-and-name-fixes"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -5958,7 +5958,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.45 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.46 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -11721,7 +11721,22 @@ if all_hitters:
         _ph = _pctl("pitch_hr_score")  # batter vs this arsenal's HR tilt
         if _ph is not None:
             _amp = _amp * (1.0 + 0.15 * ((_ph.fillna(50) - 50) / 50.0))
-        _ba = _pctl("barrel_allowed")  # pitcher barrels allowed
+        # v44.46: barrels-allowed mapped from p_slate directly (the combined_all
+        # column isn't populated until later in the pipeline). Same fix as
+        # Two-Way — ensures the amplifier actually uses pitcher vulnerability.
+        _ba = None
+        try:
+            _ps = globals().get("p_slate")
+            if _ps is not None and hasattr(_ps, "columns") and "barrel_allowed" in _ps.columns \
+               and "pitcher_name" in _ps.columns and "opp_pitcher" in combined_all.columns:
+                _bam = _ps.set_index("pitcher_name")["barrel_allowed"].to_dict()
+                _bas = pd.to_numeric(combined_all["opp_pitcher"].map(_bam), errors="coerce")
+                if _bas.notna().any():
+                    _ba = _bas.rank(pct=True) * 100.0
+        except Exception:
+            _ba = None
+        if _ba is None:
+            _ba = _pctl("opp_pitcher_barrel_allowed") or _pctl("barrel_allowed")
         if _ba is not None:
             _amp = _amp * (1.0 + 0.10 * ((_ba.fillna(50) - 50) / 50.0))
         _amp = _amp.clip(0.75, 1.25)
@@ -11853,12 +11868,24 @@ if all_hitters:
                     _aden = _aden.add(_m.astype(float) * _w, fill_value=0)
                 _ars = (_anum / _aden.replace(0, np.nan)).clip(0, 100)
 
-            # v44.44 three-way blend: hitter power (50%), pitcher-allowed-by-hand
-            # vulnerability (30%), arsenal matchup (20%). Weights sum to 1.0;
-            # each component is a 0-100 percentile so the blend stays 0-100.
-            _two_way = (0.50 * _hp.fillna(50)
-                        + 0.30 * _vuln.fillna(50)
-                        + 0.20 * _ars.fillna(50)).clip(0, 100)
+            # v44.46 (user: NaN/missing data must not skew the metric). Instead
+            # of faking a missing component to a neutral 50 (which drags a real
+            # score toward the middle), renormalize the blend weights over ONLY
+            # the components that actually have data for each hitter. A hitter
+            # with no arsenal data is scored on power + vulnerability with their
+            # weights rescaled to sum to 1 — never diluted by a fabricated value.
+            _comps = [(_hp, 0.50), (_vuln, 0.30), (_ars, 0.20)]
+            _twnum = pd.Series(0.0, index=combined_all.index)
+            _twden = pd.Series(0.0, index=combined_all.index)
+            for _c, _w in _comps:
+                if _c is None:
+                    continue
+                _m = _c.notna()
+                _twnum = _twnum.add(_c.fillna(0) * _w * _m.astype(float), fill_value=0)
+                _twden = _twden.add(_m.astype(float) * _w, fill_value=0)
+            # only score hitters who have at least the power component; leave
+            # the rest NaN (honest missing) rather than inventing a number
+            _two_way = (_twnum / _twden.replace(0, np.nan)).clip(0, 100)
             combined_all["two_way_matchup_score"] = _two_way.round(1)
     except Exception as _twe:
         log_swallowed_error("two_way_matchup_score", _twe, surface=False)
