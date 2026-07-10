@@ -629,6 +629,35 @@ def apply_handedness_overrides(matchup_df: pd.DataFrame,
                     + season_vals[blend_mask] * w_season
                 )
                 df.loc[blend_mask, season_col] = blended
+
+    # v44.50 (user: "some players rank high vs a hand they don't homer against").
+    # ROOT CAUSE FOUND: pulled_brl_pct is our single most reliable HR signal
+    # (Section G reliab 2.85, Dinger weight 2.0) but Statcast provides NO
+    # vs-LHP/vs-RHP split for it — so it stayed season-overall for everyone,
+    # regardless of platoon. A pull-power hitter facing a hand he struggles
+    # against kept his full pull-barrel number and ranked too high. Fix: since
+    # barrel_pct and iso DO have splits and both just got blended above, use
+    # the ratio of a hitter's blended barrel_pct to his ORIGINAL barrel_pct as
+    # a proxy for how his pull-power shifts vs this hand, and scale
+    # pulled_brl_pct by that same ratio. No fabricated data — it rides on the
+    # real split movement of a tightly-correlated stat.
+    try:
+        if "pulled_brl_pct" in df.columns and "barrel_pct" in matchup_df.columns:
+            _orig_brl = pd.to_numeric(matchup_df["barrel_pct"], errors="coerce")
+            _new_brl = pd.to_numeric(df["barrel_pct"], errors="coerce")
+            _pbrl = pd.to_numeric(df["pulled_brl_pct"], errors="coerce")
+            # ratio only where the barrel split actually moved and is valid
+            _ratio = (_new_brl / _orig_brl)
+            _ratio = _ratio.where(_ratio.abs() != float("inf"))
+            _adj_mask = (sufficient_mask & _ratio.notna() & _pbrl.notna()
+                         & (_orig_brl > 0))
+            # cap the proxy swing to ±25% so it nudges, never dominates
+            _ratio_capped = _ratio.clip(0.75, 1.25)
+            df.loc[_adj_mask, "pulled_brl_pct"] = (
+                _pbrl[_adj_mask] * _ratio_capped[_adj_mask]
+            )
+    except Exception:
+        pass
     return df
 
 
