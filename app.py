@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.42-distance-bug-FIXED-coalesce"
+APP_VERSION = "2026.06.10-v44.43-two-way-metric-barrel-fix-glossary"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -2182,6 +2182,58 @@ with st.sidebar:
              "- Starter HR/9 × bullpen blend (70/30)\n"
              "- Hitter splits × pitcher arsenal-by-hand × cold streak ceiling\n"
              "- Umpire K × catcher framing × park K"),
+
+            # ================= CUSTOM HR METRICS (v44) =================
+            ("💥 Dinger Score",
+             "0-100 curated HR predictor. A raw-power BASE (avg EV, barrel%, "
+             "pulled-air barrel%, hard-hit%, ISO, blast%, reliability-weighted "
+             "from measured performance) TILTED by tonight's context (recent "
+             "form, park+weather, matchup). Built to surface overlooked power "
+             "hitters the market misses. Ties broken by the most reliable "
+             "predictor (pulled-barrel%) so equally-scored hitters still rank."),
+            ("💥+ Combo (power_composite)",
+             "Blend of HR Score (55%) + Dinger Score (45%). HR Score is the "
+             "broad matchup-aware model; Dinger is curated raw power. Highest "
+             "when BOTH agree a hitter is a strong HR play — a confidence "
+             "signal. NaN-renormalizes if one input is missing."),
+            ("🎯 Brl Match (barrel_matchup_score)",
+             "Leads with pulled-barrel% — the single most RELIABLE HR predictor "
+             "in our accumulated data — plus barrels/hard-hit/EV, then amplifies "
+             "by tonight's pitcher HR-vulnerability (arsenal HR-tilt + barrels "
+             "allowed). Thesis: the most reliable power signal aimed at the most "
+             "vulnerable arm."),
+            ("⚖️ Two-Way (two_way_matchup_score)",
+             "Scores the matchup from BOTH sides, handedness-aware. Blends the "
+             "hitter's power (60%) with how much THIS pitcher allows to hitters "
+             "of that hand (40%) — vs-hand HR/PA + SLG allowed, plus barrel%/"
+             "xwOBA/FB% allowed. A masher facing a pitcher who suppresses that "
+             "side is marked down; facing one who gets crushed by that side, "
+             "marked up. Switch hitters resolve to their platoon-advantage side."),
+            ("🌙 Moonshot / ⚡ Laser Targets",
+             "Per-game HR-type flags. 🌙 Moonshot = the hitter most likely to "
+             "hit a 400+ ft bomb (distance-driven: real avg HR distance when "
+             "available, else barrel/pull-air/blast/ISO + matchup). ⚡ Laser = "
+             "most likely to hit a 105+ mph HR (exit-velocity driven: avg EV, "
+             "avg HR EV, hard-hit% + matchup)."),
+            ("HR Dist / HR EV",
+             "**HR Dist** = average distance (ft) of this hitter's home runs "
+             "this season, from Statcast. Feeds the Moonshot target. **HR EV** "
+             "= average exit velocity (mph) on their home runs specifically — "
+             "how hard their HRs are struck. Feeds the Laser target alongside "
+             "overall avg EV. Both only populate for players who've homered."),
+            ("Pull Brl% / Blast%",
+             "**Pull Brl%** (pulled_brl_pct) = barrels pulled in the air — the "
+             "exact launch pattern that produces home runs, and our most "
+             "reliable HR signal. **Blast%** = share of competitive swings that "
+             "are 'blasts' (Statcast's fast-swing + squared-up combos) — elite "
+             "bat speed meeting the ball flush."),
+            ("Pitcher-Allowed Signals",
+             "What tonight's pitcher gives up, used by the two-sided metrics:\n"
+             "- **barrel_allowed / xwoba_allowed / fb_allowed** — overall hard-"
+             "contact, quality, and fly-balls surrendered\n"
+             "- **vs_lhb_* / vs_rhb_*** — handedness splits (HR/PA, SLG, etc.) "
+             "the pitcher allows to left- vs right-handed batters\n"
+             "- **opp_pitcher_grade** — the opposing pitcher's overall grade"),
         ]
 
         # Filter glossary by search query
@@ -5896,7 +5948,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.42 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.43 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -8096,6 +8148,19 @@ if all_hitters_for_picks:
     # coverage, the matchup display, and the Moonshot target all see real
     # distance. barrel_count/near_hr_est get the same coalescing safety net.
     try:
+        if "player_id" in combined_picks.columns and not hitter_stats.empty \
+           and "player_id" in hitter_stats.columns:
+            _hs_key = pd.to_numeric(hitter_stats["player_id"], errors="coerce")
+            _cp_key = pd.to_numeric(combined_picks["player_id"], errors="coerce")
+            for _col in ["avg_hr_distance", "avg_dist", "barrel_count"]:
+                if _col in hitter_stats.columns:
+                    _m = dict(zip(_hs_key, pd.to_numeric(hitter_stats[_col], errors="coerce")))
+                    _mapped = _cp_key.map(_m)
+                    if _col in combined_picks.columns:
+                        combined_picks[_col] = pd.to_numeric(
+                            combined_picks[_col], errors="coerce").fillna(_mapped)
+                    else:
+                        combined_picks[_col] = _mapped
         if "avg_hr_distance" in combined_picks.columns:
             _ahd = pd.to_numeric(combined_picks["avg_hr_distance"], errors="coerce")
             if "avg_dist" in combined_picks.columns:
@@ -8103,7 +8168,6 @@ if all_hitters_for_picks:
                     combined_picks["avg_dist"], errors="coerce").fillna(_ahd)
             else:
                 combined_picks["avg_dist"] = _ahd
-        # near_hr_est: derive from barrel_count - home_run where missing
         if "barrel_count" in combined_picks.columns:
             _bc = pd.to_numeric(combined_picks["barrel_count"], errors="coerce")
             _hr = pd.to_numeric(combined_picks.get("home_run", 0), errors="coerce").fillna(0)
@@ -9225,28 +9289,6 @@ if combined_picks is not None and not combined_picks.empty:
                     + "grades or rankings."
                 )
 
-            # v44.40: surface the in-function matchup diagnostic — shows whether
-            # avg_dist existed in `h` (filtered hitter_stats) and in `df` (the
-            # built matchup frame) INSIDE build_matchup_table. This is the final
-            # microscope on where avg_dist vanishes.
-            try:
-                from models import last_matchup_diag
-                _mdiag = last_matchup_diag()
-                if _mdiag:
-                    stash_diagnostic(
-                        "pipeline_health",
-                        f"🔬🔬🔬 INSIDE build_matchup_table: "
-                        f"h_has_col={_mdiag.get('h_has_avg_dist_col')}, "
-                        f"h_avg_dist_notna={_mdiag.get('h_avg_dist_notna')}/{_mdiag.get('h_rows')} rows, "
-                        f"df_has_col={_mdiag.get('df_has_avg_dist_col')}, "
-                        f"df_avg_dist_notna={_mdiag.get('df_avg_dist_notna')}/{_mdiag.get('df_rows')} rows, "
-                        f"dist_cols_in_h={_mdiag.get('h_cols_sample')}  "
-                        f"← if h has data but df doesn't, the row-build drops it; "
-                        f"if h has no data, the .isin() filter is the culprit",
-                        level="info",
-                    )
-            except Exception:
-                pass
             try:
                 if _dist_brl_low:
                     from data_fetcher import last_distance_diag
@@ -11678,6 +11720,61 @@ if all_hitters:
     except Exception as _bmse:
         log_swallowed_error("barrel_matchup_score", _bmse, surface=False)
 
+    # v44.43 — NEW METRIC: TWO-WAY MATCHUP SCORE (user's insight — score the
+    # matchup from BOTH sides, handedness-aware). Multiplies the HITTER's power
+    # percentile by how much THIS pitcher ALLOWS to hitters of that hand. Switch
+    # hitters resolve to their platoon-advantage side (opposite the pitcher).
+    try:
+        _hp = None
+        for _pc in ["pulled_brl_pct", "barrel_pct", "avg_ev"]:
+            if _pc in combined_all.columns:
+                _s = pd.to_numeric(combined_all[_pc], errors="coerce")
+                if _s.notna().any():
+                    _r = _s.rank(pct=True) * 100.0
+                    _hp = _r if _hp is None else (_hp + _r)
+        if _hp is not None:
+            _hp = (_hp / 3.0).clip(0, 100)
+        _bats = combined_all.get("bats", pd.Series(index=combined_all.index, dtype=object)).astype(str).str.upper().str[:1]
+        _pthrow = combined_all.get("opp_pitcher_throws", pd.Series(index=combined_all.index, dtype=object)).astype(str).str.upper().str[:1]
+        _eff_side = _bats.copy()
+        _eff_side[_bats == "S"] = _pthrow[_bats == "S"].map({"R": "L", "L": "R"}).fillna("R")
+
+        def _allowed_pctl(lhb_col, rhb_col):
+            if lhb_col not in combined_all.columns or rhb_col not in combined_all.columns:
+                return None
+            _lhb = pd.to_numeric(combined_all[lhb_col], errors="coerce")
+            _rhb = pd.to_numeric(combined_all[rhb_col], errors="coerce")
+            _pick = _lhb.where(_eff_side == "L", _rhb)
+            if _pick.notna().sum() < 5:
+                return None
+            return _pick.rank(pct=True) * 100.0
+
+        _vuln_parts = []
+        _hr_allowed = _allowed_pctl("vs_lhb_hr_per_pa", "vs_rhb_hr_per_pa")
+        if _hr_allowed is not None:
+            _vuln_parts.append((_hr_allowed, 2.5))
+        _slg_allowed = _allowed_pctl("vs_lhb_slg", "vs_rhb_slg")
+        if _slg_allowed is not None:
+            _vuln_parts.append((_slg_allowed, 1.5))
+        for _oc, _w in [("barrel_allowed", 1.5), ("fb_allowed", 1.0), ("xwoba_allowed", 1.0)]:
+            if _oc in combined_all.columns:
+                _s = pd.to_numeric(combined_all[_oc], errors="coerce")
+                if _s.notna().any():
+                    _vuln_parts.append((_s.rank(pct=True) * 100.0, _w))
+
+        if _hp is not None and _vuln_parts:
+            _vnum = pd.Series(0.0, index=combined_all.index)
+            _vden = pd.Series(0.0, index=combined_all.index)
+            for _s, _w in _vuln_parts:
+                _m = _s.notna()
+                _vnum = _vnum.add(_s.fillna(0) * _w * _m.astype(float), fill_value=0)
+                _vden = _vden.add(_m.astype(float) * _w, fill_value=0)
+            _vuln = (_vnum / _vden.replace(0, np.nan)).clip(0, 100)
+            _two_way = (0.60 * _hp.fillna(50) + 0.40 * _vuln.fillna(50)).clip(0, 100)
+            combined_all["two_way_matchup_score"] = _two_way.round(1)
+    except Exception as _twe:
+        log_swallowed_error("two_way_matchup_score", _twe, surface=False)
+
     # v44.35/44.36 (user: "I don't see the combo" → audit found 10+ columns
     # with the same bug). Custom columns computed HERE on combined_all — the
     # scores, plus opp-pitcher context, robbed-HR diagnostics, slate-leader
@@ -11690,7 +11787,7 @@ if all_hitters:
     try:
         _backmap_candidates = [
             "dinger_score", "dinger_score_precise", "power_composite",
-            "barrel_matchup_score", "is_moonshot_target", "is_laser_target",
+            "barrel_matchup_score", "two_way_matchup_score", "is_moonshot_target", "is_laser_target",
             "opp_pitcher_grade", "opp_pitcher_barrel_allowed", "opp_recent_hr",
             "opp_platoon_hr", "xhr_neutral", "hr_conv_ratio", "hr_luck_gap",
             "slate_leader_flag", "sleeper_score", "recently_moved", "il_flag",
@@ -14494,6 +14591,7 @@ def build_col_config():
         "avg_hr_ev":       st.column_config.NumberColumn("HR EV", format="%.1f", width="small", help="Average exit velocity (mph) on home runs specifically — how hard this hitter's HRs are struck. Feeds the Laser target alongside overall avg EV."),
         "power_composite": st.column_config.NumberColumn("💥+ Combo", format="%.0f", width="small", help="Composite of HR Score (55%) + Dinger Score (45%) — blends the full matchup-aware model with curated raw power. Highest when both systems agree a hitter is a strong HR play. Runs parallel to the shipped ranking."),
         "barrel_matchup_score": st.column_config.NumberColumn("🎯 Brl Match", format="%.0f", width="small", help="NEW (v44.34): leads with pulled-barrel% — the most RELIABLE HR predictor in our data (Section G reliability 2.69) — plus barrels/hard-hit/EV, then amplifies by tonight's pitcher HR-vulnerability (arsenal HR-tilt + barrels allowed). The thesis: the most reliable power signal aimed at the most vulnerable arm. Graded parallel to the others."),
+        "two_way_matchup_score": st.column_config.NumberColumn("⚖️ Two-Way", format="%.0f", width="small", help="NEW (v44.43): scores the matchup from BOTH sides, handedness-aware. Blends the hitter's power (60%) with how much THIS pitcher allows to hitters of that hand (40%) — vs-hand HR/PA + SLG allowed, plus barrel%/xwOBA/FB% allowed. A masher facing a pitcher who suppresses that side gets marked down; facing one who gets crushed by that side, marked up. Switch hitters resolve to their platoon-advantage side."),
         "max_hit_speed":   st.column_config.NumberColumn("Max EV", format="%.1f", width="small", help="Hardest-hit ball (mph). Ceiling of raw power."),
         "avg_hr_distance": st.column_config.NumberColumn("HR Dist", format="%.0f", width="small", help="Average home-run distance (ft) when available from Savant. Feeds the Moonshot (400+ ft) target."),
         "la":              st.column_config.NumberColumn("LA", format="%.1f", width="small", help="Average launch angle (degrees). ~25-35° is the HR sweet spot."),
@@ -14714,7 +14812,7 @@ def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
         # 3) CUSTOM HR COMPOSITES — Dinger (raw power×context) + the
         # HR-Score×Dinger combo, grouped together right after the headline
         # verdict so all the HR-prediction numbers read together (v44.11/44.31).
-        "dinger_score", "power_composite", "barrel_matchup_score",
+        "dinger_score", "power_composite", "barrel_matchup_score", "two_way_matchup_score",
         # 4) HIT + TOTAL-BASE OUTLOOK — the "maybe a better non-HR play" read
         "hit_alert", "hit_game_pct", "hit_grade", "tb_grade", "expected_total_bases",
         # 5) FORM / STREAK — recent trajectory (now HR-aware, v44.12)
