@@ -543,7 +543,7 @@ def get_hitter_handedness_statcast(season: int = CURRENT_SEASON,
 def apply_handedness_overrides(matchup_df: pd.DataFrame,
                                  p_throws: str | None,
                                  min_split_pa: int = 30,
-                                 shrinkage_pa: int = 100) -> pd.DataFrame:
+                                 shrinkage_pa: int = 70) -> pd.DataFrame:
     """Per-game: blend season-overall barrel/hard_hit/xwoba/avg_ev/iso
     with handedness-specific values, weighted by sample size.
 
