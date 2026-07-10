@@ -1892,13 +1892,25 @@ def evaluate_pitcher_projections(snapshot: dict, actuals: dict) -> dict:
 
     df = pd.DataFrame(rows)
     df["k_error"] = df["actual_k"] - df["proj_k"]
+
+    # v44.45 (user insight: don't count starts cut short by injury/ejection —
+    # those aren't projection failures). A starter projected for a full outing
+    # who records < 3 IP almost always left early (injury, ejection, rain,
+    # position-player mop-up). Grade K accuracy on COMPLETED-ish starts only
+    # (>= 3 IP), but report how many were excluded so it's transparent.
+    _full = df[pd.to_numeric(df["actual_ip"], errors="coerce") >= 3.0].copy()
+    _n_short = len(df) - len(_full)
+    _grade_df = _full if len(_full) >= 3 else df  # fall back if too few
+
     metrics = {
         "total_pitchers_matched": len(df),
-        "k_projection_rmse": round(((df["k_error"] ** 2).mean()) ** 0.5, 2),
-        "k_projection_bias": round(df["k_error"].mean(), 2),
+        "pitchers_graded": len(_grade_df),
+        "short_starts_excluded": _n_short,
+        "k_projection_rmse": round(((_grade_df["k_error"] ** 2).mean()) ** 0.5, 2),
+        "k_projection_bias": round(_grade_df["k_error"].mean(), 2),
     }
 
-    # K accuracy detail
+    # K accuracy detail (full list, but flag the short ones)
     df_sorted = df.sort_values("proj_k", ascending=False)
     metrics["k_projections_detail"] = [
         {
@@ -1907,6 +1919,7 @@ def evaluate_pitcher_projections(snapshot: dict, actuals: dict) -> dict:
             "actual_k": int(r["actual_k"]),
             "actual_ip": round(r["actual_ip"], 1),
             "diff": round(r["k_error"], 1),
+            "short_start": bool(pd.to_numeric(r["actual_ip"], errors="coerce") < 3.0),
         }
         for _, r in df_sorted.iterrows()
     ]
