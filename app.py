@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.46-nan-safe-metrics-and-name-fixes"
+APP_VERSION = "2026.06.10-v44.47-handedness-weight-and-date-fix"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -1711,20 +1711,22 @@ with st.sidebar:
     st.title("💣 DingerMaven")
     # v44.39 (user: "logging in later pushes me to the next day, but I don't
     # want that until all games are done"). date.today() uses the server's
-    # clock (UTC on Streamlit Cloud) and flips at midnight — so a late-night or
-    # early-morning check jumped you to a day with no games yet, while last
-    # night's slate (and its real HR results) was still what you'd want. Fix:
-    # compute "today" in US/Eastern (MLB's frame), and if it's before ~10 AM ET,
-    # default to the PRIOR day so the just-completed slate stays selected until
-    # the morning. You can still pick any date manually.
+    # clock (UTC on Streamlit Cloud) and flips at midnight — so a late-night
+    # check jumped you to a day with no games yet. But the FIRST fix (v44.39)
+    # over-corrected: a 10 AM cutoff meant a 7:47 AM check AFTER all games
+    # finished still showed yesterday. v44.47: use a 5 AM ET cutoff. MLB games
+    # — even the latest West Coast ones — are reliably complete by ~1-2 AM ET,
+    # so by 5 AM last night's slate is done and you want today's. Between
+    # midnight and 5 AM ET (games may still be finishing / just finished) we
+    # hold on the prior slate. You can still pick any date manually.
     def _default_slate_date():
         try:
             import pytz
             _et = datetime.now(pytz.timezone("US/Eastern"))
         except Exception:
             _et = datetime.utcnow() - timedelta(hours=4)  # ET fallback
-        # Before 10 AM ET, last night's slate is still the active one.
-        if _et.hour < 10:
+        # Only 12 AM–5 AM ET holds on last night's slate (games finishing up).
+        if _et.hour < 5:
             return (_et - timedelta(days=1)).date()
         return _et.date()
 
@@ -5958,7 +5960,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.46 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.47 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
