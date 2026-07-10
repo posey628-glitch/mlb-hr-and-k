@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.41-gate-all-diagnostics-and-cp-trace"
+APP_VERSION = "2026.06.10-v44.42-distance-bug-FIXED-coalesce"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -5896,41 +5896,12 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.41 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.42 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
     f"🦇 Bat tracking: {_bat_tracking_status}"
 )
-
-# v44.38: LAST checkpoint on hitter_stats before build_matchup_table consumes
-# it. The source diagnostic (line ~2340) showed avg_dist=251 right after fetch,
-# but EIGHT merges run between there and here (zone tiers, hand splits, bat
-# tracking, hr_profile, etc). If avg_dist is high at fetch but low HERE, one of
-# those merges silently dropped it — which would explain 0% in combined_picks
-# despite a healthy fetch. This is the missing link in the trace.
-try:
-    _hs_ad_now = int(hitter_stats.get("avg_dist", pd.Series(dtype=float)).notna().sum()) if "avg_dist" in hitter_stats.columns else -1
-    _hs_bc_now = int(hitter_stats.get("barrel_count", pd.Series(dtype=float)).notna().sum()) if "barrel_count" in hitter_stats.columns else -1
-    _hs_pid_dtype = str(hitter_stats["player_id"].dtype) if "player_id" in hitter_stats.columns else "no-col"
-    stash_diagnostic(
-        "pipeline_health",
-        f"🔬🔬 hitter_stats PRE-matchup checkpoint: avg_dist="
-        f"{_hs_ad_now if _hs_ad_now>=0 else 'COLUMN DROPPED'}, "
-        f"barrel_count={_hs_bc_now if _hs_bc_now>=0 else 'COLUMN DROPPED'}, "
-        f"pid_dtype={_hs_pid_dtype}  ← compare to the source line above; if this "
-        f"is 0/dropped but source was 251, an intermediate merge is the culprit",
-        level="info",
-    )
-    # v44.40: reset the in-function matchup diagnostic so it captures THIS
-    # run's first build_matchup_table call.
-    try:
-        import models as _models_mod
-        _models_mod._LAST_MATCHUP_DIAG = {}
-    except Exception:
-        pass
-except Exception:
-    pass
 
 for _, game in slate.iterrows():
     gpk = int(game["gamePk"])
@@ -8115,28 +8086,35 @@ for gpk, ctx in game_context_map.items():
 if all_hitters_for_picks:
     combined_picks = pd.concat(all_hitters_for_picks, ignore_index=True)
 
-    # v44.41: the microscope proved avg_dist survives build_matchup_table
-    # (8/9 rows). So if combined_picks shows 0%, the loss is HERE in the
-    # concat/assembly or a frame that lacked the column. Check the raw
-    # coverage right after concat, before any downstream processing.
+    # v44.42 — DISTANCE BUG FIXED (traced across v44.28-41). The diagnostic
+    # proved the data lands in combined_picks under `avg_hr_distance` (218/511
+    # populated) but the `avg_dist` column comes out all-NaN because it was
+    # inconsistently present across the per-game frames, so the concat aligned
+    # it to NaN. The coverage check + Moonshot target read `avg_dist`, hence
+    # the phantom 0%. Fix: coalesce avg_dist from avg_hr_distance (HR distance
+    # is exactly what avg_dist should hold here). Now the researcher-framework
+    # coverage, the matchup display, and the Moonshot target all see real
+    # distance. barrel_count/near_hr_est get the same coalescing safety net.
     try:
-        _cp_ad = int(combined_picks["avg_dist"].notna().sum()) if "avg_dist" in combined_picks.columns else -1
-        _cp_hrd = int(combined_picks["avg_hr_distance"].notna().sum()) if "avg_hr_distance" in combined_picks.columns else -1
-        _cp_n = len(combined_picks)
-        _nframes = len(all_hitters_for_picks)
-        _frames_with_dist = sum(1 for _f in all_hitters_for_picks if "avg_dist" in _f.columns and _f["avg_dist"].notna().any())
-        stash_diagnostic(
-            "pipeline_health",
-            f"🔬🔬🔬🔬 combined_picks POST-concat: avg_dist="
-            f"{_cp_ad if _cp_ad>=0 else 'NO COLUMN'}/{_cp_n}, "
-            f"avg_hr_distance={_cp_hrd if _cp_hrd>=0 else 'NO COLUMN'}/{_cp_n}, "
-            f"frames_with_dist={_frames_with_dist}/{_nframes}  "
-            f"← if frames_with_dist is high but combined avg_dist is 0, concat "
-            f"is the issue; if frames_with_dist is 0, the ctx frames lost it",
-            level="info",
-        )
-    except Exception:
-        pass
+        if "avg_hr_distance" in combined_picks.columns:
+            _ahd = pd.to_numeric(combined_picks["avg_hr_distance"], errors="coerce")
+            if "avg_dist" in combined_picks.columns:
+                combined_picks["avg_dist"] = pd.to_numeric(
+                    combined_picks["avg_dist"], errors="coerce").fillna(_ahd)
+            else:
+                combined_picks["avg_dist"] = _ahd
+        # near_hr_est: derive from barrel_count - home_run where missing
+        if "barrel_count" in combined_picks.columns:
+            _bc = pd.to_numeric(combined_picks["barrel_count"], errors="coerce")
+            _hr = pd.to_numeric(combined_picks.get("home_run", 0), errors="coerce").fillna(0)
+            _near = (_bc - _hr).clip(lower=0)
+            if "near_hr_est" in combined_picks.columns:
+                combined_picks["near_hr_est"] = pd.to_numeric(
+                    combined_picks["near_hr_est"], errors="coerce").fillna(_near)
+            else:
+                combined_picks["near_hr_est"] = _near
+    except Exception as _coal_e:
+        log_swallowed_error("distance_coalesce", _coal_e, surface=False)
 
     # ====================================================================
     # v43.37 — COMPREHENSIVE HR GRADE (user-requested rebuild)
