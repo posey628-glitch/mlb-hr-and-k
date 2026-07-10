@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.37-top10-column-reorg"
+APP_VERSION = "2026.06.10-v44.39-owner-gating-date-projection"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -1709,7 +1709,26 @@ def pitcher_grade_sort_key(grade):
 
 with st.sidebar:
     st.title("💣 DingerMaven")
-    selected_date = st.date_input("Slate date", value=date.today())
+    # v44.39 (user: "logging in later pushes me to the next day, but I don't
+    # want that until all games are done"). date.today() uses the server's
+    # clock (UTC on Streamlit Cloud) and flips at midnight — so a late-night or
+    # early-morning check jumped you to a day with no games yet, while last
+    # night's slate (and its real HR results) was still what you'd want. Fix:
+    # compute "today" in US/Eastern (MLB's frame), and if it's before ~10 AM ET,
+    # default to the PRIOR day so the just-completed slate stays selected until
+    # the morning. You can still pick any date manually.
+    def _default_slate_date():
+        try:
+            import pytz
+            _et = datetime.now(pytz.timezone("US/Eastern"))
+        except Exception:
+            _et = datetime.utcnow() - timedelta(hours=4)  # ET fallback
+        # Before 10 AM ET, last night's slate is still the active one.
+        if _et.hour < 10:
+            return (_et - timedelta(days=1)).date()
+        return _et.date()
+
+    selected_date = st.date_input("Slate date", value=_default_slate_date())
 
     # v44.21 (user-requested): jump-menu near the TOP of the sidebar so
     # navigation is the first thing you reach. Pure HTML anchor links —
@@ -1940,22 +1959,28 @@ with st.sidebar:
             st.caption("⚠️ No snapshots yet. Auto-save happens when the app loads.")
     except Exception:
         st.caption("Backtest module unavailable")
-    show_backtest = st.checkbox("Show backtest panel", value=False,
-                                  help="See accuracy of past projections vs actual outcomes.")
-    # v43.71 (user-requested): Pattern Analysis used to require show_backtest
-    # AND be collapsed by default — user couldn't find it. Now its own toggle
-    # so it surfaces independently. Default ON so users see the feature at
-    # least once.
-    show_pattern_analysis = st.checkbox(
-        "🔬 Show Pattern Analysis (self-improvement loop)",
-        value=True,
-        help=(
-            "Per-feature correlations, cohort analysis, researcher framework "
-            "backtest, calibration drift — reads accumulated outcomes to "
-            "surface where the model is over/under-predicting. Appears below "
-            "the main slate sections at the bottom of the page."
-        ),
-    )
+    # v44.39 (user: non-owners shouldn't have access to internal tooling).
+    # The backtest panel and Pattern Analysis are development/self-improvement
+    # tools — per-feature correlations, calibration drift, the learning loop.
+    # Useful to the owner, but noise (and a bit of exposed machinery) for a
+    # regular visitor. Gate both behind owner_mode so the public view stays
+    # focused on the picks. Owner still gets everything.
+    if owner_mode:
+        show_backtest = st.checkbox("Show backtest panel", value=False,
+                                      help="See accuracy of past projections vs actual outcomes.")
+        show_pattern_analysis = st.checkbox(
+            "🔬 Show Pattern Analysis (self-improvement loop)",
+            value=True,
+            help=(
+                "Per-feature correlations, cohort analysis, researcher framework "
+                "backtest, calibration drift — reads accumulated outcomes to "
+                "surface where the model is over/under-predicting. Appears below "
+                "the main slate sections at the bottom of the page."
+            ),
+        )
+    else:
+        show_backtest = False
+        show_pattern_analysis = False
 
     # =========================================================================
     # LEGEND & GLOSSARY (v39) — unified reference for every term and flag
@@ -5871,12 +5896,34 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.37 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.39 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
     f"🦇 Bat tracking: {_bat_tracking_status}"
 )
+
+# v44.38: LAST checkpoint on hitter_stats before build_matchup_table consumes
+# it. The source diagnostic (line ~2340) showed avg_dist=251 right after fetch,
+# but EIGHT merges run between there and here (zone tiers, hand splits, bat
+# tracking, hr_profile, etc). If avg_dist is high at fetch but low HERE, one of
+# those merges silently dropped it — which would explain 0% in combined_picks
+# despite a healthy fetch. This is the missing link in the trace.
+try:
+    _hs_ad_now = int(hitter_stats.get("avg_dist", pd.Series(dtype=float)).notna().sum()) if "avg_dist" in hitter_stats.columns else -1
+    _hs_bc_now = int(hitter_stats.get("barrel_count", pd.Series(dtype=float)).notna().sum()) if "barrel_count" in hitter_stats.columns else -1
+    _hs_pid_dtype = str(hitter_stats["player_id"].dtype) if "player_id" in hitter_stats.columns else "no-col"
+    stash_diagnostic(
+        "pipeline_health",
+        f"🔬🔬 hitter_stats PRE-matchup checkpoint: avg_dist="
+        f"{_hs_ad_now if _hs_ad_now>=0 else 'COLUMN DROPPED'}, "
+        f"barrel_count={_hs_bc_now if _hs_bc_now>=0 else 'COLUMN DROPPED'}, "
+        f"pid_dtype={_hs_pid_dtype}  ← compare to the source line above; if this "
+        f"is 0/dropped but source was 251, an intermediate merge is the culprit",
+        level="info",
+    )
+except Exception:
+    pass
 
 for _, game in slate.iterrows():
     gpk = int(game["gamePk"])
@@ -8408,7 +8455,9 @@ if combined_picks is not None and not combined_picks.empty:
             st.caption(
                 "📐 *Forecast = sum of per-hitter game-HR probabilities × 1.05 "
                 "(slight upward for multi-HR games). Range = ±2σ Poisson interval — "
-                "actual total falls in this window ~95% of nights.*"
+                "actual total falls in this window ~95% of nights. This is the "
+                "FULL-slate projection — it counts every game whether or not it's "
+                "already finished, so the number doesn't shrink as games complete.*"
             )
     except Exception:
         pass
@@ -16105,24 +16154,27 @@ with st.expander(_slate_label, expanded=False):
     )
 
 
-# ----- 🔧 Pipeline Health -----
-_pipe_health = _diag.get("pipeline_health", [])
-_pipe_count = len(_pipe_health)
-_pipe_has_warnings = any(
-    d.get("level") in ("warning", "error") for d in _pipe_health
-)
-_pipe_icon = "⚠️" if _pipe_has_warnings else "✅"
-_pipe_label = "🔧 Pipeline Health " + _pipe_icon + " (" + str(_pipe_count) + " item" + ("s" if _pipe_count != 1 else "") + ")"
-with st.expander(_pipe_label, expanded=_pipe_has_warnings):
-    st.caption(
-        "Data-quality checks: handedness-split coverage, "
-        "column-coverage assertions, silent scoring errors. "
-        "⚠️ icon = at least one issue this run."
+# ----- 🔧 Pipeline Health (owner-only: internal data-quality diagnostics) -----
+# v44.39: this panel exposes fetch traces, coverage assertions, and pipeline
+# internals — useful to the owner, not something a regular visitor needs. Gate.
+if owner_mode:
+    _pipe_health = _diag.get("pipeline_health", [])
+    _pipe_count = len(_pipe_health)
+    _pipe_has_warnings = any(
+        d.get("level") in ("warning", "error") for d in _pipe_health
     )
-    _render_diag_list(
-        _pipe_health,
-        "No pipeline-health data yet — run a slate to populate."
-    )
+    _pipe_icon = "⚠️" if _pipe_has_warnings else "✅"
+    _pipe_label = "🔧 Pipeline Health " + _pipe_icon + " (" + str(_pipe_count) + " item" + ("s" if _pipe_count != 1 else "") + ")"
+    with st.expander(_pipe_label, expanded=_pipe_has_warnings):
+        st.caption(
+            "Data-quality checks: handedness-split coverage, "
+            "column-coverage assertions, silent scoring errors. "
+            "⚠️ icon = at least one issue this run."
+        )
+        _render_diag_list(
+            _pipe_health,
+            "No pipeline-health data yet — run a slate to populate."
+        )
 
 
 # ----- 🎛️ Custom Grade Builder (moved from mid-script) -----
