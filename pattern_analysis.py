@@ -327,8 +327,32 @@ def researcher_framework_backtest(merged_df: pd.DataFrame) -> dict:
     result = {"slate_average_hr_rate": float(merged_df["homered"].mean()),
               "n_total": len(merged_df)}
 
-    # Must-Have pass cohort
-    if "must_have_pass" in merged_df.columns:
+    # Must-Have cohort. v44.48: the binary must_have_pass (pass ALL 9 strict
+    # criteria) fires for ~0 hitters, so its "lift" was always n=0 — useless.
+    # Instead, cohort on the COUNT: hitters clearing 7+ of the 9 power criteria
+    # ("Must-Have-strong") vs the rest. That's a meaningful, populated tier and
+    # the count already correlates well as a feature (Section G). Falls back to
+    # the binary pass if the count column isn't present.
+    if "must_have_met" in merged_df.columns:
+        mh = merged_df.dropna(subset=["must_have_met", "homered"])
+        _mh_count = pd.to_numeric(mh["must_have_met"], errors="coerce").fillna(0)
+        _mh_mask = _mh_count >= 7  # strong power profile (7+ of 9)
+        mh_pass = mh[_mh_mask]
+        mh_fail = mh[~_mh_mask]
+        result["must_have"] = {
+            "n_pass": len(mh_pass),
+            "n_fail": len(mh_fail),
+            "pass_hr_rate": float(mh_pass["homered"].mean()) if len(mh_pass) else None,
+            "fail_hr_rate": float(mh_fail["homered"].mean()) if len(mh_fail) else None,
+            "lift": (
+                float(mh_pass["homered"].mean() / mh_fail["homered"].mean())
+                if len(mh_pass) and len(mh_fail) and mh_fail["homered"].mean() > 0
+                else None
+            ),
+            "reliable": len(mh_pass) >= 30 and len(mh_fail) >= 30,
+            "threshold_note": "7+ of 9 power criteria",
+        }
+    elif "must_have_pass" in merged_df.columns:
         mh = merged_df.dropna(subset=["must_have_pass", "homered"])
         _mh_mask = mh["must_have_pass"].fillna(False).astype(bool)
         mh_pass = mh[_mh_mask]
@@ -346,8 +370,32 @@ def researcher_framework_backtest(merged_df: pd.DataFrame) -> dict:
             "reliable": len(mh_pass) >= 30 and len(mh_fail) >= 30,
         }
 
-    # Nuclear tier cohort (NEAR / STRONG / NUCLEAR vs rest)
-    if "nuclear_grade" in merged_df.columns:
+    # Nuclear cohort. v44.48: same issue as Must-Have — the elite grades
+    # (NUCLEAR/STRONG/NEAR need ~10-12 of 14 boxes) fire for ~1 hitter, so the
+    # lift was n=1 and uninformative. Cohort on the nuclear_met COUNT instead:
+    # hitters clearing 9+ of the criteria vs the rest. nuclear_met is the
+    # strongest RISING feature in Section G (+0.065 trend), so this surfaces a
+    # real, populated signal. Falls back to the grade tiers if count absent.
+    if "nuclear_met" in merged_df.columns:
+        nuc = merged_df.dropna(subset=["nuclear_met", "homered"])
+        _nuc_count = pd.to_numeric(nuc["nuclear_met"], errors="coerce").fillna(0)
+        _nuc_mask = _nuc_count >= 9  # strong nuclear profile (9+ criteria)
+        nuc_in = nuc[_nuc_mask]
+        nuc_out = nuc[~_nuc_mask]
+        result["nuclear"] = {
+            "n_in": len(nuc_in),
+            "n_out": len(nuc_out),
+            "in_hr_rate": float(nuc_in["homered"].mean()) if len(nuc_in) else None,
+            "out_hr_rate": float(nuc_out["homered"].mean()) if len(nuc_out) else None,
+            "lift": (
+                float(nuc_in["homered"].mean() / nuc_out["homered"].mean())
+                if len(nuc_in) and len(nuc_out) and nuc_out["homered"].mean() > 0
+                else None
+            ),
+            "reliable": len(nuc_in) >= 30 and len(nuc_out) >= 30,
+            "threshold_note": "9+ nuclear criteria",
+        }
+    elif "nuclear_grade" in merged_df.columns:
         nuc = merged_df.dropna(subset=["nuclear_grade", "homered"])
         elite_grades = ["☢️ NUCLEAR", "💥 STRONG", "🎯 NEAR"]
         nuc_in = nuc[nuc["nuclear_grade"].isin(elite_grades)]
