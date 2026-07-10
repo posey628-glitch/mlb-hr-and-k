@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.44-two-way-arsenal-and-pslate-fix"
+APP_VERSION = "2026.06.10-v44.45-side-power-and-pitcher-k-eval"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -3673,10 +3673,18 @@ if show_backtest:
                             if p_metrics and not p_metrics.get("error"):
                                 st.markdown("#### ⚾ Pitcher K projection accuracy")
                                 pm1, pm2, pm3 = st.columns(3)
-                                pm1.metric("Pitchers tracked", p_metrics.get("total_pitchers_matched", 0))
+                                pm1.metric("Pitchers graded", p_metrics.get("pitchers_graded", p_metrics.get("total_pitchers_matched", 0)))
                                 pm2.metric("K RMSE", f"{p_metrics.get('k_projection_rmse', 0):.2f}")
                                 pm3.metric("K bias", f"{p_metrics.get('k_projection_bias', 0):+.2f}",
                                             help="Positive = model under-projected. Negative = over-projected.")
+                                _n_short = p_metrics.get("short_starts_excluded", 0)
+                                if _n_short:
+                                    st.caption(
+                                        f"⚕️ {_n_short} short start(s) (<3 IP — likely "
+                                        f"injury/ejection/rain) excluded from K accuracy "
+                                        f"so they don't distort the projection error. "
+                                        f"They're still listed below, flagged."
+                                    )
 
                                 detail = p_metrics.get("k_projections_detail", [])
                                 if detail:
@@ -3688,6 +3696,7 @@ if show_backtest:
                                                     "actual_k": "Actual K",
                                                     "actual_ip": st.column_config.NumberColumn("IP", format="%.1f"),
                                                     "diff": st.column_config.NumberColumn("Δ", format="%+.1f"),
+                                                    "short_start": st.column_config.CheckboxColumn("Short?", help="Under 3 IP — excluded from accuracy metric"),
                                                 })
                             if not h_metrics and not p_metrics:
                                 st.warning("Snapshot loaded but no actual outcomes matched. Possible if games haven't been played yet.")
@@ -5949,7 +5958,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.44 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.45 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -11726,19 +11735,52 @@ if all_hitters:
     # percentile by how much THIS pitcher ALLOWS to hitters of that hand. Switch
     # hitters resolve to their platoon-advantage side (opposite the pitcher).
     try:
-        _hp = None
-        for _pc in ["pulled_brl_pct", "barrel_pct", "avg_ev"]:
-            if _pc in combined_all.columns:
-                _s = pd.to_numeric(combined_all[_pc], errors="coerce")
-                if _s.notna().any():
-                    _r = _s.rank(pct=True) * 100.0
-                    _hp = _r if _hp is None else (_hp + _r)
-        if _hp is not None:
-            _hp = (_hp / 3.0).clip(0, 100)
+        # v44.45 (user insight: switch hitters — and really all hitters — often
+        # have different power vs LHP vs RHP). Compute the effective batting
+        # side FIRST, then build the hitter-power component from the SIDE-
+        # SPECIFIC splits (vs_lhp_* / vs_rhp_*) when available, falling back to
+        # overall power where a split is thin. This means a switch hitter who
+        # barrels lefties but not righties is scored on the side he'll actually
+        # bat from tonight.
         _bats = combined_all.get("bats", pd.Series(index=combined_all.index, dtype=object)).astype(str).str.upper().str[:1]
         _pthrow = combined_all.get("opp_pitcher_throws", pd.Series(index=combined_all.index, dtype=object)).astype(str).str.upper().str[:1]
         _eff_side = _bats.copy()
+        # switch hitters bat opposite the pitcher's hand (platoon advantage)
         _eff_side[_bats == "S"] = _pthrow[_bats == "S"].map({"R": "L", "L": "R"}).fillna("R")
+        # the pitcher's hand determines which vs_*hp split to read
+        _vs_hand = _pthrow.map({"L": "lhp", "R": "rhp"})
+
+        def _side_power(overall_col, lhp_col, rhp_col):
+            """Side-specific power stat: use vs-LHP value when facing a lefty,
+            vs-RHP when facing a righty; fall back to the overall column where
+            the split is missing."""
+            _ov = pd.to_numeric(combined_all.get(overall_col), errors="coerce") if overall_col in combined_all.columns else pd.Series(np.nan, index=combined_all.index)
+            _l = pd.to_numeric(combined_all.get(lhp_col), errors="coerce") if lhp_col in combined_all.columns else pd.Series(np.nan, index=combined_all.index)
+            _r = pd.to_numeric(combined_all.get(rhp_col), errors="coerce") if rhp_col in combined_all.columns else pd.Series(np.nan, index=combined_all.index)
+            _side = _l.where(_vs_hand == "lhp", _r)  # facing LHP → vs_lhp value
+            return _side.fillna(_ov)  # fall back to overall where split thin
+
+        _hp = None
+        _hp_n = 0
+        for _ov, _lc, _rc in [
+            ("pulled_brl_pct", None, None),  # no split available — overall
+            ("barrel_pct", "vs_lhp_barrel_pct", "vs_rhp_barrel_pct"),
+            ("avg_ev", "vs_lhp_avg_ev", "vs_rhp_avg_ev"),
+            ("hard_hit", "vs_lhp_hard_hit", "vs_rhp_hard_hit"),
+            ("iso", "vs_lhp_iso", "vs_rhp_iso"),
+        ]:
+            if _lc and _rc:
+                _s = _side_power(_ov, _lc, _rc)
+            elif _ov in combined_all.columns:
+                _s = pd.to_numeric(combined_all[_ov], errors="coerce")
+            else:
+                continue
+            if _s.notna().any():
+                _r = _s.rank(pct=True) * 100.0
+                _hp = _r if _hp is None else (_hp + _r)
+                _hp_n += 1
+        if _hp is not None:
+            _hp = (_hp / max(1, _hp_n)).clip(0, 100)
 
         # v44.44: map pitcher-allowed stats directly from p_slate by opp_pitcher
         # name. Previously this read bare column names off combined_all that
