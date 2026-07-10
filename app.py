@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.39-owner-gating-date-projection"
+APP_VERSION = "2026.06.10-v44.40-inside-matchup-diagnostic"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -5896,7 +5896,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.39 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.40 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -5922,6 +5922,13 @@ try:
         f"is 0/dropped but source was 251, an intermediate merge is the culprit",
         level="info",
     )
+    # v44.40: reset the in-function matchup diagnostic so it captures THIS
+    # run's first build_matchup_table call.
+    try:
+        import models as _models_mod
+        _models_mod._LAST_MATCHUP_DIAG = {}
+    except Exception:
+        pass
 except Exception:
     pass
 
@@ -9217,11 +9224,28 @@ if combined_picks is not None and not combined_picks.empty:
                     + "grades or rankings."
                 )
 
-            # v44.28: focused per-endpoint diagnostic for the distance/barrel/
-            # HR-EV fetch. When coverage is 0%, this shows WHICH Savant endpoint
-            # was tried, what columns it returned, and which column (if any)
-            # matched — so we can see exactly why it's empty and add the right
-            # column name. Only shown when at least one target metric is missing.
+            # v44.40: surface the in-function matchup diagnostic — shows whether
+            # avg_dist existed in `h` (filtered hitter_stats) and in `df` (the
+            # built matchup frame) INSIDE build_matchup_table. This is the final
+            # microscope on where avg_dist vanishes.
+            try:
+                from models import last_matchup_diag
+                _mdiag = last_matchup_diag()
+                if _mdiag:
+                    stash_diagnostic(
+                        "pipeline_health",
+                        f"🔬🔬🔬 INSIDE build_matchup_table: "
+                        f"h_has_col={_mdiag.get('h_has_avg_dist_col')}, "
+                        f"h_avg_dist_notna={_mdiag.get('h_avg_dist_notna')}/{_mdiag.get('h_rows')} rows, "
+                        f"df_has_col={_mdiag.get('df_has_avg_dist_col')}, "
+                        f"df_avg_dist_notna={_mdiag.get('df_avg_dist_notna')}/{_mdiag.get('df_rows')} rows, "
+                        f"dist_cols_in_h={_mdiag.get('h_cols_sample')}  "
+                        f"← if h has data but df doesn't, the row-build drops it; "
+                        f"if h has no data, the .isin() filter is the culprit",
+                        level="info",
+                    )
+            except Exception:
+                pass
             try:
                 if _dist_brl_low:
                     from data_fetcher import last_distance_diag
