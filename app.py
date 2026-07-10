@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.43-two-way-metric-barrel-fix-glossary"
+APP_VERSION = "2026.06.10-v44.44-two-way-arsenal-and-pslate-fix"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -2205,10 +2205,11 @@ with st.sidebar:
             ("⚖️ Two-Way (two_way_matchup_score)",
              "Scores the matchup from BOTH sides, handedness-aware. Blends the "
              "hitter's power (60%) with how much THIS pitcher allows to hitters "
-             "of that hand (40%) — vs-hand HR/PA + SLG allowed, plus barrel%/"
-             "xwOBA/FB% allowed. A masher facing a pitcher who suppresses that "
-             "side is marked down; facing one who gets crushed by that side, "
-             "marked up. Switch hitters resolve to their platoon-advantage side."),
+             "of that hand (30%) — vs-hand HR/PA + SLG, barrel%/xwOBA/FB% allowed "
+             "— AND how the batter fares vs THIS pitcher's pitch mix (20%: "
+             "pitch HR-tilt, arsenal match, best-pitch xwOBA). A masher facing "
+             "a pitcher who suppresses that side with a tough arsenal is marked "
+             "down. Switch hitters resolve to their platoon-advantage side."),
             ("🌙 Moonshot / ⚡ Laser Targets",
              "Per-game HR-type flags. 🌙 Moonshot = the hitter most likely to "
              "hit a 400+ ft bomb (distance-driven: real avg HR distance when "
@@ -5948,7 +5949,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.43 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.44 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -11739,28 +11740,56 @@ if all_hitters:
         _eff_side = _bats.copy()
         _eff_side[_bats == "S"] = _pthrow[_bats == "S"].map({"R": "L", "L": "R"}).fillna("R")
 
-        def _allowed_pctl(lhb_col, rhb_col):
-            if lhb_col not in combined_all.columns or rhb_col not in combined_all.columns:
+        # v44.44: map pitcher-allowed stats directly from p_slate by opp_pitcher
+        # name. Previously this read bare column names off combined_all that
+        # (a) weren't there yet at this point in the pipeline and (b) live under
+        # the opp_pitcher_ prefix — so the vulnerability core silently fell back
+        # to neutral. Mapping from p_slate here guarantees real data.
+        def _pmap(col):
+            _ps = globals().get("p_slate")
+            if "opp_pitcher" not in combined_all.columns or _ps is None \
+               or not hasattr(_ps, "columns") or col not in _ps.columns \
+               or "pitcher_name" not in _ps.columns:
                 return None
-            _lhb = pd.to_numeric(combined_all[lhb_col], errors="coerce")
-            _rhb = pd.to_numeric(combined_all[rhb_col], errors="coerce")
+            _m = _ps.set_index("pitcher_name")[col].to_dict()
+            return pd.to_numeric(combined_all["opp_pitcher"].map(_m), errors="coerce")
+
+        def _allowed_pctl_from_pslate(lhb_col, rhb_col):
+            _lhb = _pmap(lhb_col)
+            _rhb = _pmap(rhb_col)
+            if _lhb is None or _rhb is None:
+                return None
             _pick = _lhb.where(_eff_side == "L", _rhb)
             if _pick.notna().sum() < 5:
                 return None
             return _pick.rank(pct=True) * 100.0
 
         _vuln_parts = []
-        _hr_allowed = _allowed_pctl("vs_lhb_hr_per_pa", "vs_rhb_hr_per_pa")
+        _hr_allowed = _allowed_pctl_from_pslate("vs_lhb_hr_per_pa", "vs_rhb_hr_per_pa")
         if _hr_allowed is not None:
             _vuln_parts.append((_hr_allowed, 2.5))
-        _slg_allowed = _allowed_pctl("vs_lhb_slg", "vs_rhb_slg")
+        _slg_allowed = _allowed_pctl_from_pslate("vs_lhb_slg", "vs_rhb_slg")
         if _slg_allowed is not None:
             _vuln_parts.append((_slg_allowed, 1.5))
         for _oc, _w in [("barrel_allowed", 1.5), ("fb_allowed", 1.0), ("xwoba_allowed", 1.0)]:
-            if _oc in combined_all.columns:
-                _s = pd.to_numeric(combined_all[_oc], errors="coerce")
+            _s = _pmap(_oc)
+            if _s is not None and _s.notna().any():
+                _vuln_parts.append((_s.rank(pct=True) * 100.0, _w))
+
+        # v44.44: ARSENAL component — how this batter does against THIS
+        # pitcher's specific pitch mix (the dimension the user flagged as
+        # missing). pitch_hr_score = HR-tilt of the arsenal matchup;
+        # pitch_match_score = overall matchup quality vs the arsenal;
+        # best_pitch_xwoba = how well the hitter punishes the pitch they see
+        # best. These already fold in handedness (arsenal is fetched by the
+        # pitcher's hand upstream), so they complete the two-sided picture.
+        _ars_parts = []
+        for _ac, _w in [("pitch_hr_score", 2.0), ("pitch_match_score", 1.2),
+                        ("best_pitch_xwoba", 1.0)]:
+            if _ac in combined_all.columns:
+                _s = pd.to_numeric(combined_all[_ac], errors="coerce")
                 if _s.notna().any():
-                    _vuln_parts.append((_s.rank(pct=True) * 100.0, _w))
+                    _ars_parts.append((_s.rank(pct=True) * 100.0, _w))
 
         if _hp is not None and _vuln_parts:
             _vnum = pd.Series(0.0, index=combined_all.index)
@@ -11770,7 +11799,24 @@ if all_hitters:
                 _vnum = _vnum.add(_s.fillna(0) * _w * _m.astype(float), fill_value=0)
                 _vden = _vden.add(_m.astype(float) * _w, fill_value=0)
             _vuln = (_vnum / _vden.replace(0, np.nan)).clip(0, 100)
-            _two_way = (0.60 * _hp.fillna(50) + 0.40 * _vuln.fillna(50)).clip(0, 100)
+
+            # arsenal percentile (0-100); neutral 50 if no arsenal data
+            _ars = pd.Series(np.nan, index=combined_all.index)
+            if _ars_parts:
+                _anum = pd.Series(0.0, index=combined_all.index)
+                _aden = pd.Series(0.0, index=combined_all.index)
+                for _s, _w in _ars_parts:
+                    _m = _s.notna()
+                    _anum = _anum.add(_s.fillna(0) * _w * _m.astype(float), fill_value=0)
+                    _aden = _aden.add(_m.astype(float) * _w, fill_value=0)
+                _ars = (_anum / _aden.replace(0, np.nan)).clip(0, 100)
+
+            # v44.44 three-way blend: hitter power (50%), pitcher-allowed-by-hand
+            # vulnerability (30%), arsenal matchup (20%). Weights sum to 1.0;
+            # each component is a 0-100 percentile so the blend stays 0-100.
+            _two_way = (0.50 * _hp.fillna(50)
+                        + 0.30 * _vuln.fillna(50)
+                        + 0.20 * _ars.fillna(50)).clip(0, 100)
             combined_all["two_way_matchup_score"] = _two_way.round(1)
     except Exception as _twe:
         log_swallowed_error("two_way_matchup_score", _twe, surface=False)
@@ -12256,13 +12302,19 @@ if all_hitters:
             # v43.11: pitcher's vs-LHB / vs-RHB HR data — for Hitters export.
             # Same name-based mapping pattern that handles renamed pitchers etc.
             for side in ("lhb", "rhb"):
-                for stat in ("pa", "hr", "hr_per_pa"):
+                for stat in ("pa", "hr", "hr_per_pa", "slg", "avg", "obp"):
                     src = f"vs_{side}_{stat}"
                     if src in p_slate.columns:
                         _m = p_slate.set_index("pitcher_name")[src].to_dict()
                         combined_all[f"opp_pitcher_vs_{side}_{stat}"] = (
                             combined_all["opp_pitcher"].map(_m)
                         )
+            # v44.44: also surface overall pitcher-allowed contact-quality
+            # signals on each hitter row so the Two-Way metric can read them.
+            for _psrc in ("fb_allowed", "xwoba_allowed"):
+                if _psrc in p_slate.columns:
+                    _m = p_slate.set_index("pitcher_name")[_psrc].to_dict()
+                    combined_all[f"opp_pitcher_{_psrc}"] = combined_all["opp_pitcher"].map(_m)
             # NEW: surface pitcher platoon HR vulnerability and recent HR streak
             # on each hitter row so it's visible in the matchup table.
             if "platoon_hr_flag" in p_slate.columns:
@@ -14591,7 +14643,7 @@ def build_col_config():
         "avg_hr_ev":       st.column_config.NumberColumn("HR EV", format="%.1f", width="small", help="Average exit velocity (mph) on home runs specifically — how hard this hitter's HRs are struck. Feeds the Laser target alongside overall avg EV."),
         "power_composite": st.column_config.NumberColumn("💥+ Combo", format="%.0f", width="small", help="Composite of HR Score (55%) + Dinger Score (45%) — blends the full matchup-aware model with curated raw power. Highest when both systems agree a hitter is a strong HR play. Runs parallel to the shipped ranking."),
         "barrel_matchup_score": st.column_config.NumberColumn("🎯 Brl Match", format="%.0f", width="small", help="NEW (v44.34): leads with pulled-barrel% — the most RELIABLE HR predictor in our data (Section G reliability 2.69) — plus barrels/hard-hit/EV, then amplifies by tonight's pitcher HR-vulnerability (arsenal HR-tilt + barrels allowed). The thesis: the most reliable power signal aimed at the most vulnerable arm. Graded parallel to the others."),
-        "two_way_matchup_score": st.column_config.NumberColumn("⚖️ Two-Way", format="%.0f", width="small", help="NEW (v44.43): scores the matchup from BOTH sides, handedness-aware. Blends the hitter's power (60%) with how much THIS pitcher allows to hitters of that hand (40%) — vs-hand HR/PA + SLG allowed, plus barrel%/xwOBA/FB% allowed. A masher facing a pitcher who suppresses that side gets marked down; facing one who gets crushed by that side, marked up. Switch hitters resolve to their platoon-advantage side."),
+        "two_way_matchup_score": st.column_config.NumberColumn("⚖️ Two-Way", format="%.0f", width="small", help="NEW (v44.43): scores the matchup from BOTH sides + arsenal, handedness-aware. Three parts: the hitter's power (50%), how much THIS pitcher allows to hitters of that hand (30%: vs-hand HR/PA + SLG, plus barrel%/xwOBA/FB% allowed), and how the batter fares vs THIS pitcher's pitch mix (20%: pitch HR-tilt, arsenal match, best-pitch xwOBA). A masher facing a pitcher who suppresses that side AND has a tough arsenal gets marked down. Switch hitters resolve to their platoon-advantage side."),
         "max_hit_speed":   st.column_config.NumberColumn("Max EV", format="%.1f", width="small", help="Hardest-hit ball (mph). Ceiling of raw power."),
         "avg_hr_distance": st.column_config.NumberColumn("HR Dist", format="%.0f", width="small", help="Average home-run distance (ft) when available from Savant. Feeds the Moonshot (400+ ft) target."),
         "la":              st.column_config.NumberColumn("LA", format="%.1f", width="small", help="Average launch angle (degrees). ~25-35° is the HR sweet spot."),
