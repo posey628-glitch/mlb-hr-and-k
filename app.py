@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.40-inside-matchup-diagnostic"
+APP_VERSION = "2026.06.10-v44.41-gate-all-diagnostics-and-cp-trace"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -5896,7 +5896,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.40 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.41 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -8114,6 +8114,29 @@ for gpk, ctx in game_context_map.items():
 
 if all_hitters_for_picks:
     combined_picks = pd.concat(all_hitters_for_picks, ignore_index=True)
+
+    # v44.41: the microscope proved avg_dist survives build_matchup_table
+    # (8/9 rows). So if combined_picks shows 0%, the loss is HERE in the
+    # concat/assembly or a frame that lacked the column. Check the raw
+    # coverage right after concat, before any downstream processing.
+    try:
+        _cp_ad = int(combined_picks["avg_dist"].notna().sum()) if "avg_dist" in combined_picks.columns else -1
+        _cp_hrd = int(combined_picks["avg_hr_distance"].notna().sum()) if "avg_hr_distance" in combined_picks.columns else -1
+        _cp_n = len(combined_picks)
+        _nframes = len(all_hitters_for_picks)
+        _frames_with_dist = sum(1 for _f in all_hitters_for_picks if "avg_dist" in _f.columns and _f["avg_dist"].notna().any())
+        stash_diagnostic(
+            "pipeline_health",
+            f"🔬🔬🔬🔬 combined_picks POST-concat: avg_dist="
+            f"{_cp_ad if _cp_ad>=0 else 'NO COLUMN'}/{_cp_n}, "
+            f"avg_hr_distance={_cp_hrd if _cp_hrd>=0 else 'NO COLUMN'}/{_cp_n}, "
+            f"frames_with_dist={_frames_with_dist}/{_nframes}  "
+            f"← if frames_with_dist is high but combined avg_dist is 0, concat "
+            f"is the issue; if frames_with_dist is 0, the ctx frames lost it",
+            level="info",
+        )
+    except Exception:
+        pass
 
     # ====================================================================
     # v43.37 — COMPREHENSIVE HR GRADE (user-requested rebuild)
@@ -16132,11 +16155,13 @@ if _valid_games:
 
 st.divider()
 st.markdown("<div id='sec-tools'></div>", unsafe_allow_html=True)
-st.header("🛠️ Tools & Diagnostics")
+st.header("🛠️ Tools & Diagnostics" if owner_mode else "🛠️ Tools")
 st.caption(
-    "Secondary controls and observability. Build a custom grade, "
-    "inspect slate-wide audits, see pipeline health warnings, "
-    "and access admin/recovery tools."
+    ("Secondary controls and observability. Build a custom grade, "
+     "inspect slate-wide audits, see pipeline health warnings, "
+     "and access admin/recovery tools.") if owner_mode else
+    "Build your own custom grade by picking the metrics and weights you "
+    "care about."
 )
 
 _diag = st.session_state.get("_diagnostics", {})
@@ -16162,20 +16187,21 @@ def _render_diag_list(items, empty_msg):
             st.markdown(f"· {_msg}")
 
 
-# ----- 📊 Slate Audit -----
-_slate_audit = _diag.get("slate_audit", [])
-_slate_count = len(_slate_audit)
-_slate_label = "📊 Slate Audit (" + str(_slate_count) + " item" + ("s" if _slate_count != 1 else "") + ")"
-with st.expander(_slate_label, expanded=False):
-    st.caption(
-        "Distribution checks on this slate's scoring outputs. "
-        "Sanity-check that HR Scores spread reasonably, smash flags "
-        "aren't over-firing, etc."
-    )
-    _render_diag_list(
-        _slate_audit,
-        "No slate-audit data yet — run a slate to populate."
-    )
+# ----- 📊 Slate Audit (owner-only: internal distribution diagnostics) -----
+if owner_mode:
+    _slate_audit = _diag.get("slate_audit", [])
+    _slate_count = len(_slate_audit)
+    _slate_label = "📊 Slate Audit (" + str(_slate_count) + " item" + ("s" if _slate_count != 1 else "") + ")"
+    with st.expander(_slate_label, expanded=False):
+        st.caption(
+            "Distribution checks on this slate's scoring outputs. "
+            "Sanity-check that HR Scores spread reasonably, smash flags "
+            "aren't over-firing, etc."
+        )
+        _render_diag_list(
+            _slate_audit,
+            "No slate-audit data yet — run a slate to populate."
+        )
 
 
 # ----- 🔧 Pipeline Health (owner-only: internal data-quality diagnostics) -----
@@ -16593,8 +16619,11 @@ with st.expander("🎛️ Custom Grade Builder — pick your own metrics", expan
         st.caption("No slate data loaded yet.")
 
 
-# ----- 🆘 Admin & Recovery -----
-with st.expander("🆘 Admin & Recovery — emergency tools", expanded=False):
+# ----- 🆘 Admin & Recovery (owner-only: destructive emergency tools) -----
+# v44.41: contains a gist-reset that permanently wipes all history. Must never
+# be reachable by a non-owner. Gate the entire block.
+if owner_mode:
+  with st.expander("🆘 Admin & Recovery — emergency tools", expanded=False):
     st.caption(
         "Use these only when the normal flow is broken. "
         "Emergency gist reset wipes all backtest history — last resort."
