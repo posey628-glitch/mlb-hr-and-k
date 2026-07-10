@@ -491,6 +491,14 @@ def get_hitter_handedness_statcast(season: int = CURRENT_SEASON,
                         col_map["xwoba"] = c
                     elif "launch_speed" in cl or "avg_ev" in cl or "exit_velocity" in cl:
                         col_map["avg_ev"] = c
+                    # v44.51: capture pull% and ISO by hand so we can derive the
+                    # REAL vs-hand pulled_brl_pct (= pull_air% × barrel% / 100),
+                    # replacing the v44.50 proxy with true split data.
+                    elif cl in ("pull_percent", "pull_pct", "pulled_percent",
+                                "pull_air_percent") and "pull" not in col_map:
+                        col_map["pull"] = c
+                    elif cl in ("iso", "isolated_power") and "iso" not in col_map:
+                        col_map["iso"] = c
                 # Need at least player_id + barrel to be useful
                 if "player_id" not in col_map or "barrel" not in col_map:
                     continue
@@ -499,11 +507,16 @@ def get_hitter_handedness_statcast(season: int = CURRENT_SEASON,
                     df[col_map["player_id"]], errors="coerce"
                 ).astype("Int64")
                 out["barrel_pct"] = pd.to_numeric(df[col_map["barrel"]], errors="coerce")
-                for stat in ("hard_hit", "xwoba", "avg_ev"):
+                for stat in ("hard_hit", "xwoba", "avg_ev", "pull", "iso"):
                     if stat in col_map:
                         out[stat] = pd.to_numeric(df[col_map[stat]], errors="coerce")
                     else:
                         out[stat] = pd.NA
+                # v44.51: derive real vs-hand pulled_brl_pct where pull% present
+                if "pull" in col_map:
+                    out["pulled_brl_pct"] = (
+                        out["pull"] * out["barrel_pct"] / 100.0
+                    ).round(2)
                 return out.dropna(subset=["player_id"])
             except Exception:
                 continue
@@ -523,6 +536,9 @@ def get_hitter_handedness_statcast(season: int = CURRENT_SEASON,
             "hard_hit": "vs_lhp_hard_hit",
             "xwoba": "vs_lhp_xwoba",
             "avg_ev": "vs_lhp_avg_ev",
+            "pull": "vs_lhp_pull_pct",
+            "iso": "vs_lhp_iso",
+            "pulled_brl_pct": "vs_lhp_pulled_brl_pct",
         })
     if not df_r.empty:
         df_r = df_r.rename(columns={
@@ -530,6 +546,9 @@ def get_hitter_handedness_statcast(season: int = CURRENT_SEASON,
             "hard_hit": "vs_rhp_hard_hit",
             "xwoba": "vs_rhp_xwoba",
             "avg_ev": "vs_rhp_avg_ev",
+            "pull": "vs_rhp_pull_pct",
+            "iso": "vs_rhp_iso",
+            "pulled_brl_pct": "vs_rhp_pulled_brl_pct",
         })
 
     # Outer merge on player_id — keep all hitters that appeared on either side
@@ -630,34 +649,46 @@ def apply_handedness_overrides(matchup_df: pd.DataFrame,
                 )
                 df.loc[blend_mask, season_col] = blended
 
-    # v44.50 (user: "some players rank high vs a hand they don't homer against").
-    # ROOT CAUSE FOUND: pulled_brl_pct is our single most reliable HR signal
-    # (Section G reliab 2.85, Dinger weight 2.0) but Statcast provides NO
-    # vs-LHP/vs-RHP split for it — so it stayed season-overall for everyone,
-    # regardless of platoon. A pull-power hitter facing a hand he struggles
-    # against kept his full pull-barrel number and ranked too high. Fix: since
-    # barrel_pct and iso DO have splits and both just got blended above, use
-    # the ratio of a hitter's blended barrel_pct to his ORIGINAL barrel_pct as
-    # a proxy for how his pull-power shifts vs this hand, and scale
-    # pulled_brl_pct by that same ratio. No fabricated data — it rides on the
-    # real split movement of a tightly-correlated stat.
-    try:
-        if "pulled_brl_pct" in df.columns and "barrel_pct" in matchup_df.columns:
-            _orig_brl = pd.to_numeric(matchup_df["barrel_pct"], errors="coerce")
-            _new_brl = pd.to_numeric(df["barrel_pct"], errors="coerce")
-            _pbrl = pd.to_numeric(df["pulled_brl_pct"], errors="coerce")
-            # ratio only where the barrel split actually moved and is valid
-            _ratio = (_new_brl / _orig_brl)
-            _ratio = _ratio.where(_ratio.abs() != float("inf"))
-            _adj_mask = (sufficient_mask & _ratio.notna() & _pbrl.notna()
-                         & (_orig_brl > 0))
-            # cap the proxy swing to ±25% so it nudges, never dominates
-            _ratio_capped = _ratio.clip(0.75, 1.25)
-            df.loc[_adj_mask, "pulled_brl_pct"] = (
-                _pbrl[_adj_mask] * _ratio_capped[_adj_mask]
+    # v44.50/44.51 (user: "some players rank high vs a hand they don't homer
+    # against"). ROOT CAUSE: pulled_brl_pct is our most reliable HR signal
+    # (Section G reliab 2.85, Dinger weight 2.0) but historically had no
+    # vs-hand split, so it stayed season-overall regardless of platoon.
+    # v44.51: we now FETCH the real vs-hand pulled_brl_pct (derived from pull%
+    # × barrel% by hand in the split fetch). Use it directly with the same
+    # Bayesian blend as the other stats. Only if that real split is missing do
+    # we fall back to the v44.50 proxy (scale by barrel_pct's movement).
+    _real_pbrl_col = f"vs_{side}_pulled_brl_pct"
+    if ("pulled_brl_pct" in df.columns and _real_pbrl_col in df.columns
+            and pd.to_numeric(df[_real_pbrl_col], errors="coerce").notna().any()):
+        _season_pbrl = pd.to_numeric(df["pulled_brl_pct"], errors="coerce")
+        _hand_pbrl = pd.to_numeric(df[_real_pbrl_col], errors="coerce")
+        _pbrl_mask = sufficient_mask & _hand_pbrl.notna() & _season_pbrl.notna()
+        if _pbrl_mask.any():
+            _hp = pa_vals[_pbrl_mask]
+            _wh = _hp / (_hp + shrinkage_pa)
+            df.loc[_pbrl_mask, "pulled_brl_pct"] = (
+                _hand_pbrl[_pbrl_mask] * _wh
+                + _season_pbrl[_pbrl_mask] * (1 - _wh)
             )
-    except Exception:
-        pass
+    else:
+        # Fallback proxy (v44.50): scale pulled_brl_pct by how much barrel_pct
+        # moved vs this hand, capped ±25%. Used only when the real split is
+        # unavailable for a hitter.
+        try:
+            if "pulled_brl_pct" in df.columns and "barrel_pct" in matchup_df.columns:
+                _orig_brl = pd.to_numeric(matchup_df["barrel_pct"], errors="coerce")
+                _new_brl = pd.to_numeric(df["barrel_pct"], errors="coerce")
+                _pbrl = pd.to_numeric(df["pulled_brl_pct"], errors="coerce")
+                _ratio = (_new_brl / _orig_brl)
+                _ratio = _ratio.where(_ratio.abs() != float("inf"))
+                _adj_mask = (sufficient_mask & _ratio.notna() & _pbrl.notna()
+                             & (_orig_brl > 0))
+                _ratio_capped = _ratio.clip(0.75, 1.25)
+                df.loc[_adj_mask, "pulled_brl_pct"] = (
+                    _pbrl[_adj_mask] * _ratio_capped[_adj_mask]
+                )
+        except Exception:
+            pass
     return df
 
 
