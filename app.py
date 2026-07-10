@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.47-handedness-weight-and-date-fix"
+APP_VERSION = "2026.06.10-v44.48-must-have-nuclear-cohort-fix"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -4013,10 +4013,11 @@ if show_pattern_analysis:
                             lift = mh.get("lift")
                             lift_str = f"{lift:.2f}×" if lift else "—"
                             reliable = "✅" if mh.get("reliable") else "⚠️ small sample"
+                            _note = mh.get("threshold_note", "pass all criteria")
                             st.markdown(
-                                f"**Must-Have filter:** "
-                                f"passers homered **{pass_rate:.1%}** (n={n_pass}) "
-                                f"vs non-passers **{fail_rate:.1%}** (n={n_fail}) "
+                                f"**Must-Have filter** ({_note}): "
+                                f"strong-profile hitters homered **{pass_rate:.1%}** (n={n_pass}) "
+                                f"vs the rest **{fail_rate:.1%}** (n={n_fail}) "
                                 f"→ **lift {lift_str}** {reliable}"
                             )
                         nuc = rf_results.get("nuclear", {})
@@ -4028,8 +4029,9 @@ if show_pattern_analysis:
                             lift = nuc.get("lift")
                             lift_str = f"{lift:.2f}×" if lift else "—"
                             reliable = "✅" if nuc.get("reliable") else "⚠️ small sample"
+                            _nnote = nuc.get("threshold_note", "NEAR/STRONG/NUCLEAR")
                             st.markdown(
-                                f"**Nuclear tier (NEAR/STRONG/NUCLEAR):** "
+                                f"**Nuclear tier ({_nnote}):** "
                                 f"in-tier homered **{in_rate:.1%}** (n={n_in}) "
                                 f"vs rest **{out_rate:.1%}** (n={n_out}) "
                                 f"→ **lift {lift_str}** {reliable}"
@@ -5960,7 +5962,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.47 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.48 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
