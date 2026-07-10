@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.50-platoon-pullbrl-hits-tb-elite-cohort"
+APP_VERSION = "2026.06.10-v44.51-real-vshand-pullbrl-elite-grading-copy"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -4038,6 +4038,22 @@ if show_pattern_analysis:
                                 f"→ **lift {lift_str}** {reliable}"
                             )
 
+                        ec = rf_results.get("elite_convergence", {})
+                        if ec:
+                            n_in = ec.get("n_in", 0)
+                            n_out = ec.get("n_out", 0)
+                            in_rate = ec.get("in_hr_rate") or 0
+                            out_rate = ec.get("out_hr_rate") or 0
+                            lift = ec.get("lift")
+                            lift_str = f"{lift:.2f}×" if lift else "—"
+                            reliable = "✅" if ec.get("reliable") else "⚠️ small sample (elite cohort is small by design)"
+                            st.markdown(
+                                f"**🔥 Elite Convergence** ({ec.get('threshold_note','all metrics high')}): "
+                                f"convergence hitters homered **{in_rate:.1%}** (n={n_in}) "
+                                f"vs rest **{out_rate:.1%}** (n={n_out}) "
+                                f"→ **lift {lift_str}** {reliable}"
+                            )
+
                     # ====== Section B: Per-prop accuracy ======
                     st.markdown("---")
                     st.markdown("### B. Per-prop projection accuracy")
@@ -5963,7 +5979,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.50 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.51 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -10193,9 +10209,19 @@ if combined_picks is not None and not combined_picks.empty:
             },
         )
 
-        # =====================================================================
-        # v43.6: PICK AUDIT EXPANDER — answers "why is this guy in the top 10?"
-        # ---------------------------------------------------------------------
+        # v44.51 (user-requested): copy the Top 10 as text.
+        with st.expander("📋 Copy Top 10 as text", expanded=False):
+            st.caption("Click the copy icon in the top-right of the box below.")
+            _t10_lines = ["🏆 TOP 10 PICKS"]
+            for _, _r in disp.iterrows():
+                _t10_lines.append(
+                    f"{int(_r.get('rank',0)):2}. {str(_r.get('player_name','?')):22} "
+                    f"{str(_r.get('team','')):4} vs {str(_r.get('opp_pitcher','')):16} | "
+                    f"pick {_r.get('pick_score',0):.1f} "
+                    f"HR% {_r.get('hr_game_pct',0):.1f} "
+                    f"{str(_r.get('matchup',''))}"
+                )
+            st.code("\n".join(_t10_lines), language="text")
         # For each top 10 pick, surface the dominant pick_score components
         # plus context (sample size, platoon side, opp pitcher quality, flags)
         # so the user can immediately see WHAT is driving the ranking.
@@ -13527,6 +13553,23 @@ try:
                 },
             )
             st.caption(f"🔥 {len(_elite)} hitter(s) meet full convergence this slate.")
+
+            # v44.51 (user-requested): copy the section as text.
+            with st.expander("📋 Copy this section as text", expanded=False):
+                st.caption("Click the copy icon in the top-right of the box below.")
+                _ec_lines = ["🔥 ELITE CONVERGENCE — " + str(len(_elite)) + " hitter(s)"]
+                for _, _r in _elite.iterrows():
+                    _ec_lines.append(
+                        f"{str(_r.get('player_name','?')):22} "
+                        f"{str(_r.get('team','')):4} vs {str(_r.get('opp_pitcher','')):18} | "
+                        f"HR {_r.get('hr_score',0):.0f} ({_r.get('hr_grade','')}) "
+                        f"Dinger {_r.get('dinger_score',0):.0f} "
+                        f"Combo {_r.get('power_composite',0):.0f} "
+                        f"Brl {_r.get('barrel_matchup_score',0):.0f} "
+                        f"TwoWay {_r.get('two_way_matchup_score',0):.0f} "
+                        f"| HR% {_r.get('hr_game_pct',0):.1f}"
+                    )
+                st.code("\n".join(_ec_lines), language="text")
 except Exception as _ec_err:
     log_swallowed_error("elite_convergence_section", _ec_err, surface=False)
 
