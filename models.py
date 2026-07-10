@@ -20,6 +20,16 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+# v44.40: one-shot diagnostic capturing whether avg_dist survives inside
+# build_matchup_table (the confirmed loss point). App reads this via
+# last_matchup_diag() and surfaces it in Pipeline Health.
+_LAST_MATCHUP_DIAG: dict = {}
+
+
+def last_matchup_diag() -> dict:
+    """Return the most recent build_matchup_table avg_dist diagnostic."""
+    return dict(_LAST_MATCHUP_DIAG)
+
 
 SCORING_WEIGHTS = {
     # v43.23 (audit-driven, user-validated rebalance):
@@ -384,6 +394,28 @@ def build_matchup_table(
         rows.append(row)
     df = pd.DataFrame(rows)
 
+    # v44.40: surgical one-shot diagnostic — is avg_dist present in `h` (the
+    # filtered hitter_stats) and in the freshly-built `df`? Stashed to a module
+    # global the app reads, so we see EXACTLY where avg_dist vanishes inside
+    # this function. Only captures the first call (largest, a real lineup).
+    try:
+        global _LAST_MATCHUP_DIAG
+        if not _LAST_MATCHUP_DIAG:
+            _h_ad = int(h["avg_dist"].notna().sum()) if "avg_dist" in h.columns else -1
+            _df_ad = int(df["avg_dist"].notna().sum()) if "avg_dist" in df.columns else -1
+            _h_has = "avg_dist" in h.columns
+            _df_has = "avg_dist" in df.columns
+            _LAST_MATCHUP_DIAG = {
+                "h_has_avg_dist_col": _h_has,
+                "h_avg_dist_notna": _h_ad,
+                "h_rows": len(h),
+                "df_has_avg_dist_col": _df_has,
+                "df_avg_dist_notna": _df_ad,
+                "df_rows": len(df),
+                "h_cols_sample": [c for c in h.columns if "dist" in c.lower()][:6],
+            }
+    except Exception:
+        pass
     # Pitcher context columns (same value for whole lineup)
     if pitcher_row is not None and not pitcher_row.empty:
         df["pitcher_xwoba"] = pitcher_row.get("xwoba", np.nan)
