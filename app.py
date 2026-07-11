@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.51-real-vshand-pullbrl-elite-grading-copy"
+APP_VERSION = "2026.06.10-v44.52-pull-display-cols-and-codereview-fixes"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -4651,7 +4651,7 @@ if show_pattern_analysis:
                     if len(_pa_report) > 2:
                         with st.expander("📋 Copy pattern analysis as text (tables paste intact)", expanded=False):
                             st.caption("Click the copy icon in the top-right of the box below.")
-                            st.code("\\n".join(_pa_report), language="text")
+                            st.code("\n".join(_pa_report), language="text")
                 except Exception:
                     pass
         except Exception as _pa_err:
@@ -5979,7 +5979,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.51 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.52 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -7076,6 +7076,11 @@ for _, game in slate.iterrows():
             # WRONG batter's platoon multiplier was applied to total_bases.
             # Reset to 1.0 here so failure paths can't leak.
             _hit_platoon = 1.0
+            # v44.52 (code review): also reset _p_thr_now each iteration. It's
+            # assigned inside the hit-prob try block; if that block raises before
+            # assignment, the TB block below would otherwise read the PREVIOUS
+            # batter's pitcher hand and apply the wrong platoon split.
+            _p_thr_now = ""
             pa = safe_float(row_dict.get("pa"))
             sample = int(pa) if pa is not None else None
             bats = row_dict.get("bats", "R") or "R"
@@ -13488,22 +13493,31 @@ st.divider()
 # from results.
 try:
     if "combined_all" in dir() and combined_all is not None and not combined_all.empty:
-        _ec = combined_all[combined_all.get("is_bench", False) == False].copy()
+        # v44.52 (code review): use the explicit is_bench column check, not
+        # combined_all.get("is_bench", False) == False — if the column is
+        # missing that returns scalar False, and combined_all[True] raises a
+        # KeyError that silently kills the whole section (the v43.78 pattern).
+        if "is_bench" in combined_all.columns:
+            _ec = combined_all[~combined_all["is_bench"].fillna(False).astype(bool)].copy()
+        else:
+            _ec = combined_all.copy()
         # thresholds (tunable)
         _EC_HR = 80.0        # HR Score
         _EC_DINGER = 80.0    # Dinger Score
         _EC_COMBO = 78.0     # Combo (avg of two → rarely maxes, slightly lower)
         _EC_BRL = 80.0       # Barrel Match
         _EC_TWO = 75.0       # Two-Way (newer metric, fewer graded slates)
-        _EC_GRADES = ["A+", "A", "A-"]  # "A or better"
+        # v44.52 (code review): the grade column is "grade" (not "hr_grade"),
+        # and the scale is A+/A/B+/B/... (no "A-"). "A or better" = A+ or A.
+        _EC_GRADES = ["A+", "A"]
 
         def _num(col):
             return pd.to_numeric(_ec.get(col), errors="coerce")
 
         _mask = pd.Series(True, index=_ec.index)
         _mask &= _num("hr_score") >= _EC_HR
-        if "hr_grade" in _ec.columns:
-            _mask &= _ec["hr_grade"].astype(str).str.strip().isin(_EC_GRADES)
+        if "grade" in _ec.columns:
+            _mask &= _ec["grade"].astype(str).str.strip().isin(_EC_GRADES)
         _mask &= _num("dinger_score") >= _EC_DINGER
         if "power_composite" in _ec.columns:
             _mask &= _num("power_composite") >= _EC_COMBO
@@ -13533,7 +13547,7 @@ try:
             _elite = _elite.sort_values("hr_score", ascending=False)
             _ec_cols = [c for c in [
                 "player_name", "team", "game", "opp_pitcher",
-                "hr_score", "hr_grade", "dinger_score", "power_composite",
+                "hr_score", "grade", "dinger_score", "power_composite",
                 "barrel_matchup_score", "two_way_matchup_score",
                 "hr_game_pct", "split_confidence",
             ] if c in _elite.columns]
@@ -13543,7 +13557,7 @@ try:
                     "player_name": "Hitter", "team": "Team", "game": "Game",
                     "opp_pitcher": "Opp Pitcher",
                     "hr_score": st.column_config.NumberColumn("HR Score", format="%.0f"),
-                    "hr_grade": "Grade",
+                    "grade": "Grade",
                     "dinger_score": st.column_config.NumberColumn("💥 Dinger", format="%.0f"),
                     "power_composite": st.column_config.NumberColumn("💥+ Combo", format="%.0f"),
                     "barrel_matchup_score": st.column_config.NumberColumn("🎯 Brl Match", format="%.0f"),
@@ -13562,7 +13576,7 @@ try:
                     _ec_lines.append(
                         f"{str(_r.get('player_name','?')):22} "
                         f"{str(_r.get('team','')):4} vs {str(_r.get('opp_pitcher','')):18} | "
-                        f"HR {_r.get('hr_score',0):.0f} ({_r.get('hr_grade','')}) "
+                        f"HR {_r.get('hr_score',0):.0f} ({_r.get('grade','')}) "
                         f"Dinger {_r.get('dinger_score',0):.0f} "
                         f"Combo {_r.get('power_composite',0):.0f} "
                         f"Brl {_r.get('barrel_matchup_score',0):.0f} "
@@ -13661,7 +13675,7 @@ try:
                             + (f" · {float(_r['hr_game_pct']):.1f}% HR" if pd.notna(_r.get('hr_game_pct')) else "")
                             + (f" · {_r.get('matchup','')}" if pd.notna(_r.get('matchup')) else "")
                         )
-                    _ans = "\\n".join(_lines)
+                    _ans = "\n".join(_lines)
 
         # ---- "who's hot" (form) ----
         if _ans is None and ("hot" in _ql or "streak" in _ql or "on fire" in _ql) and \
@@ -13680,7 +13694,7 @@ try:
                         f"- **{_r.get('player_name','?')}** ({_r.get('team','')}) "
                         f"— {_r.get('streak_label','')}"
                         + (f" · HR Score {float(_r['hr_score']):.0f}" if pd.notna(_r.get('hr_score')) else ""))
-                _ans = "\\n".join(_lines)
+                _ans = "\n".join(_lines)
 
         # ---- best park / environment ----
         if _ans is None and ("park" in _ql or "coors" in _ql or "environment" in _ql or "weather" in _ql) and \
@@ -13700,7 +13714,7 @@ try:
                         f"- **{_r.get('player_name','?')}** ({_r.get('team','')}) "
                         f"— env {float(_r.get('env_boost',1)):.2f}×"
                         + (f" · {float(_r['hr_game_pct']):.1f}% HR" if pd.notna(_r.get('hr_game_pct')) else ""))
-                _ans = "\\n".join(_lines)
+                _ans = "\n".join(_lines)
 
         # ---- v44.25: team / game targeting ("best hitters in COL @ LAD",
         # "who to target on the Yankees") ----
@@ -13734,7 +13748,7 @@ try:
                         f"— HR Score {float(_r.get('hr_score', 0)):.0f}"
                         + (f" · {float(_r['hr_game_pct']):.1f}% HR" if pd.notna(_r.get('hr_game_pct')) else "")
                         + (f" · 💥{float(_r['dinger_score']):.0f}" if pd.notna(_r.get('dinger_score')) else ""))
-                _ans = "\\n".join(_lines)
+                _ans = "\n".join(_lines)
 
         # ---- v44.25: handedness ("best hitters vs lefties / vs RHP") ----
         if _ans is None and ("bats" in combined_all.columns) and \
@@ -13758,7 +13772,7 @@ try:
                         f"- **{_r.get('player_name','?')}** ({_r.get('team','')}, "
                         f"{_r.get('bats','?')}) — HR Score {float(_r.get('hr_score',0)):.0f}"
                         + (f" · {float(_r['hr_game_pct']):.1f}% HR" if pd.notna(_r.get('hr_game_pct')) else ""))
-                _ans = "\\n".join(_lines)
+                _ans = "\n".join(_lines)
 
         # ---- v44.25: fade / avoid (inverse — lowest scores) ----
         if _ans is None and any(w in _ql for w in ["avoid", "fade", "stay away", "worst", "don't play", "dont play"]):
@@ -13778,7 +13792,7 @@ try:
                         f"- {_r.get('player_name','?')} ({_r.get('team','')}) "
                         f"— HR Score {float(_r.get('hr_score',0)):.0f}"
                         + (f" · {float(_r['hr_game_pct']):.1f}% HR" if pd.notna(_r.get('hr_game_pct')) else ""))
-                _ans = "\\n".join(_lines)
+                _ans = "\n".join(_lines)
 
         # ---- v44.25: confirmed lineups ----
         if _ans is None and "confirm" in _ql and "lineup_confirmed" in combined_all.columns:
@@ -13794,7 +13808,7 @@ try:
                         f"- **{_r.get('player_name','?')}** ({_r.get('team','')}) "
                         f"— HR Score {float(_r.get('hr_score',0)):.0f}"
                         + (f" · {float(_r['hr_game_pct']):.1f}% HR" if pd.notna(_r.get('hr_game_pct')) else ""))
-                _ans = "\\n".join(_lines)
+                _ans = "\n".join(_lines)
             else:
                 _ans = "No confirmed lineups yet — check back closer to game time."
 
@@ -13878,7 +13892,7 @@ try:
                                 f"({_r.get('team','')}) — {_nice} {_vs}"
                                 + (f" · {' · '.join(_extra)}" if _extra else "")
                             )
-                        _ans = "\\n".join(_lines)
+                        _ans = "\n".join(_lines)
 
         # ---- "how is <player>" / "<player> stats" ----
         if _ans is None and "player_name" in combined_all.columns:
@@ -14193,7 +14207,7 @@ try:
                 _cmp_report.append("")
                 _cmp_report.append(_verdict.replace("**", "").replace("🏆 ", "").replace("🤝 ", ""))
                 with st.popover("📋 Copy comparison"):
-                    st.code("\\n".join(_cmp_report), language="text")
+                    st.code("\n".join(_cmp_report), language="text")
             else:
                 st.info(
                     "These players don't have enough comparable data populated "
@@ -15892,7 +15906,7 @@ if _valid_games:
                         _lines.append(f"🌙 **Moonshot target** (400+ ft): {_moon_s}")
                     if _laser_s:
                         _lines.append(f"⚡ **Laser target** (105+ mph): {_laser_s}")
-                    st.markdown("  \\n".join(_lines))
+                    st.markdown("  \n".join(_lines))
                     if _dist is None:
                         st.caption(
                             "_Moonshot blends barrel/pull-air/blast/ISO (distance "
@@ -15969,7 +15983,7 @@ if _valid_games:
                                 + (f"  hr% {float(_r['hr_game_pct']):>4.1f}" if pd.notna(_r.get('hr_game_pct')) else "")
                             )
                         with st.popover("📋 Copy"):
-                            st.code("\\n".join(_drep), language="text")
+                            st.code("\n".join(_drep), language="text")
         except Exception as _dge:
             log_swallowed_error("per_game_dinger_section", _dge, surface=False)
 
