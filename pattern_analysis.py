@@ -89,7 +89,17 @@ def merge_snapshots_with_outcomes(snapshots: dict) -> pd.DataFrame:
             pid = pick.get("player_id")
             if not pid:
                 continue
-            outcome = hitter_outcomes.get(str(pid)) or hitter_outcomes.get(int(pid)) or {}
+            # v44.59 (code review #7): coerce the pid ONCE so a float-
+            # deserialized id ("592450.0") or a non-numeric id can't crash the
+            # merge (int(pid) used to raise) or silently miss (str(pid) of a
+            # float never matched string keys). Try int form, then string form.
+            outcome = {}
+            try:
+                _pid_i = int(float(pid))
+                outcome = (hitter_outcomes.get(str(_pid_i))
+                           or hitter_outcomes.get(_pid_i) or {})
+            except (TypeError, ValueError):
+                outcome = hitter_outcomes.get(str(pid)) or {}
             if not outcome:
                 continue  # snapshot has outcomes but not for this player
 
@@ -109,7 +119,7 @@ def merge_snapshots_with_outcomes(snapshots: dict) -> pd.DataFrame:
                 "fb_pct", "gb_pct", "ld_pct",
                 "must_have_met", "must_have_total", "must_have_pass",
                 "nuclear_met", "nuclear_total", "nuclear_grade",
-                "hit_game_pct", "tb_game_pct",
+                "hit_game_pct", "tb_game_pct", "expected_total_bases", "tb_pa",
                 "hr_pa_pct", "power_score",
                 "xwoba", "xslg", "slg", "obp", "ops",
                 "k_pct", "bb_pct", "whiff_pct",
