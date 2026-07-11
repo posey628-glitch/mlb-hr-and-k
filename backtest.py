@@ -9,7 +9,7 @@ For long-term tracking across container restarts, this same data can be
 mirrored to a Gist or GitHub repo (future enhancement).
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import json
 import pandas as pd
@@ -123,7 +123,7 @@ def last_gist_read_error() -> str | None:
     return _LAST_GIST_READ_ERROR
 
 
-def _gist_read_all() -> dict | None:
+def _gist_read_all_uncached() -> dict | None:
     """Fetch the gist contents and return the parsed snapshot dict.
 
     Returns:
@@ -193,7 +193,24 @@ def _gist_read_all() -> dict | None:
                 f"Response: {r.text[:200]}"
             )
             return None
-        files = r.json().get("files", {})
+        # v44.54 (code review #8): parse the API ENVELOPE separately from the
+        # content. If r.json() (the GitHub API response wrapper) fails — e.g. a
+        # proxy/GitHub returns a 200 with a non-JSON body — that is NOT gist
+        # corruption, and `content` would be unbound. Handling it here means the
+        # content-parse auto-wipe below can never fire with unbound `content`
+        # (which previously NameError'd → _content_len=0 → wrongly wiped intact
+        # data). This keeps the destructive recovery scoped ONLY to a genuine
+        # json.loads(content) failure on real, bound content.
+        try:
+            _envelope = r.json()
+        except Exception:
+            _LAST_GIST_READ_ERROR = (
+                "GitHub API returned a 200 with a non-JSON envelope. NOT gist "
+                "corruption and NOT wiping — data is intact on GitHub, just "
+                "unreadable this run."
+            )
+            return None
+        files = _envelope.get("files", {})
         target = files.get(GIST_FILENAME)
         if not target:
             # Gist exists but doesn't have our file — first save scenario.
@@ -224,66 +241,111 @@ def _gist_read_all() -> dict | None:
             content = target.get("content", "")
         if not content.strip():
             return {}
-        return json.loads(content)
+        # v44.54: parse the CONTENT in its own try so the auto-wipe recovery
+        # only ever sees a real json.loads(content) failure with bound content.
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError as e:
+            # v43.88 CRITICAL GUARD: if the unparseable content is LARGE
+            # (≥850KB), this is almost certainly GitHub-side truncation of a
+            # >1MB file, NOT corruption. The full data is intact on GitHub.
+            # Auto-wiping here (the v43.75 behavior) DESTROYS real data.
+            # Only auto-wipe when the content is small — a genuinely mangled
+            # small file is unrecoverable anyway.
+            try:
+                _content_len = len(content.encode("utf-8"))
+            except Exception:
+                # content somehow unusable — do NOT wipe on uncertainty
+                _LAST_GIST_READ_ERROR = (
+                    "Gist content unreadable for length check — NOT wiping "
+                    "out of caution."
+                )
+                return None
+            if _content_len >= 850_000:
+                _LAST_GIST_READ_ERROR = (
+                    f"Gist content ({_content_len:,} bytes) failed to parse — "
+                    f"this is truncation-shaped (file likely >1MB), NOT corruption. "
+                    f"NOT wiping. Data is intact on GitHub. ({e})"
+                )
+                return None
+            # v43.75: AUTO-RECOVERY for genuinely corrupt SMALL content.
+            _LAST_GIST_READ_ERROR = (
+                f"Gist content is not valid JSON ({e}). "
+                "v43.75 auto-recovery: wiped to empty and continuing. Prior "
+                "snapshots were already unreachable due to corruption."
+            )
+            # Attempt auto-reset. If the reset itself fails (network/auth),
+            # fall back to returning None so callers don't accidentally wipe.
+            try:
+                reset_payload = {
+                    "files": {
+                        GIST_FILENAME: {"content": "{}"}
+                    }
+                }
+                rr = requests.patch(
+                    f"{GIST_API}/{gist_id}",
+                    headers={
+                        "Authorization": f"token {token}",
+                        "Accept": "application/vnd.github.v3+json",
+                    },
+                    json=reset_payload,
+                    timeout=15,
+                )
+                if rr.status_code in (200, 201):
+                    # Recovery succeeded. Return empty dict so subsequent saves
+                    # write fresh and don't think they're wiping a populated gist.
+                    return {}
+            except Exception:
+                pass
+            # Auto-reset failed; preserve previous behavior of returning None
+            # to protect against unintended data wipes.
+            return None
     except requests.exceptions.Timeout:
         _LAST_GIST_READ_ERROR = "Network timeout to api.github.com (>10s)"
         return None
     except requests.exceptions.ConnectionError as e:
         _LAST_GIST_READ_ERROR = f"Network connection failed: {type(e).__name__}"
         return None
-    except json.JSONDecodeError as e:
-        # v43.88 CRITICAL GUARD: if the unparseable content is LARGE
-        # (≥850KB), this is almost certainly GitHub-side truncation of a
-        # >1MB file, NOT corruption. The full data is intact on GitHub.
-        # Auto-wiping here (the v43.75 behavior) DESTROYS real data.
-        # Only auto-wipe when the content is small — a genuinely mangled
-        # small file is unrecoverable anyway.
-        try:
-            _content_len = len(content.encode("utf-8"))
-        except Exception:
-            _content_len = 0
-        if _content_len >= 850_000:
-            _LAST_GIST_READ_ERROR = (
-                f"Gist content ({_content_len:,} bytes) failed to parse — "
-                f"this is truncation-shaped (file likely >1MB), NOT corruption. "
-                f"NOT wiping. Data is intact on GitHub. ({e})"
-            )
-            return None
-        # v43.75: AUTO-RECOVERY for genuinely corrupt SMALL content.
-        _LAST_GIST_READ_ERROR = (
-            f"Gist content is not valid JSON ({e}). "
-            "v43.75 auto-recovery: wiped to empty and continuing. Prior "
-            "snapshots were already unreachable due to corruption."
-        )
-        # Attempt auto-reset. If the reset itself fails (network/auth),
-        # fall back to returning None so callers don't accidentally wipe.
-        try:
-            reset_payload = {
-                "files": {
-                    GIST_FILENAME: {"content": "{}"}
-                }
-            }
-            rr = requests.patch(
-                f"{GIST_API}/{gist_id}",
-                headers={
-                    "Authorization": f"token {token}",
-                    "Accept": "application/vnd.github.v3+json",
-                },
-                json=reset_payload,
-                timeout=15,
-            )
-            if rr.status_code in (200, 201):
-                # Recovery succeeded. Return empty dict so subsequent saves
-                # write fresh and don't think they're wiping a populated gist.
-                return {}
-        except Exception:
-            pass
-        # Auto-reset failed; preserve previous behavior of returning None
-        # to protect against unintended data wipes.
-        return None
     except Exception as e:
         _LAST_GIST_READ_ERROR = f"Unexpected exception: {type(e).__name__}: {e}"
         return None
+
+
+# v44.57 (code review #12): _gist_read_all is called ~13× per script run
+# (list_snapshots, load_snapshot, saves, discovery, custom metrics) — each was
+# a separate HTTP GET to GitHub, adding latency and rate-limit exposure.
+# Memoize the read for the duration of a run. The cache is invalidated whenever
+# _gist_write_all succeeds (so post-write reads see fresh data). Returns a deep
+# copy so callers that mutate the dict (all_snaps[key] = ...) can't corrupt the
+# cached copy.
+_GIST_READ_CACHE: dict | None = None
+_GIST_READ_CACHE_SET = False
+
+
+def _gist_read_all() -> dict | None:
+    global _GIST_READ_CACHE, _GIST_READ_CACHE_SET
+    if _GIST_READ_CACHE_SET:
+        # return a copy so callers can't mutate the cache
+        if _GIST_READ_CACHE is None:
+            return None
+        import copy as _copy
+        return _copy.deepcopy(_GIST_READ_CACHE)
+    _result = _gist_read_all_uncached()
+    # Only cache successful reads. A None (failure) is NOT cached — a transient
+    # error shouldn't poison every subsequent read this run; let it retry.
+    if _result is not None:
+        _GIST_READ_CACHE = _result
+        _GIST_READ_CACHE_SET = True
+        import copy as _copy
+        return _copy.deepcopy(_result)
+    return None
+
+
+def _invalidate_gist_read_cache():
+    """Clear the memoized gist read (called after any successful write)."""
+    global _GIST_READ_CACHE, _GIST_READ_CACHE_SET
+    _GIST_READ_CACHE = None
+    _GIST_READ_CACHE_SET = False
 
 
 def _gist_write_all(snapshots: dict) -> bool:
@@ -329,6 +391,9 @@ def _gist_write_all(snapshots: dict) -> bool:
             timeout=15,
         )
         r.raise_for_status()
+        # v44.57: a successful write means the memoized read is now stale —
+        # invalidate so any subsequent read this run refetches fresh data.
+        _invalidate_gist_read_cache()
         return True
     except Exception:
         return False
@@ -468,6 +533,7 @@ def emergency_reset_gist() -> tuple[bool, str]:
             timeout=15,
         )
         if r.status_code in (200, 201):
+            _invalidate_gist_read_cache()  # v44.57: gist wiped, cache stale
             return True, "Gist reset to empty {}. Future saves should now succeed."
         return False, f"Reset failed with HTTP {r.status_code}: {r.text[:200]}"
     except Exception as e:
@@ -568,7 +634,7 @@ def _snapshot_key_for_now(snapshot_date) -> str:
         et_now = datetime.now(pytz.timezone("US/Eastern"))
     except Exception:
         # Fallback: assume ET is UTC-4 (EDT)
-        et_now = datetime.utcnow() - timedelta(hours=4)
+        et_now = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=4)
     return f"{snapshot_date}T{et_now.hour:02d}"
 
 
@@ -760,7 +826,7 @@ def save_snapshot(snapshot_date, matchup_df: pd.DataFrame,
         payload = {
             "date": str(snapshot_date),
             "key": key,
-            "saved_at": datetime.utcnow().isoformat(),
+            "saved_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
             # v43.7: data continuity tags — lets the rolling aggregator
             # label/filter by version. None for backward compat with
             # snapshots saved before this field was added.
@@ -1034,7 +1100,7 @@ def auto_attach_outcomes_to_past_snapshots(max_dates: int = 14) -> dict:
                         continue
                     payload["hitter_outcomes"] = h_out_str
                     payload["pitcher_outcomes"] = p_out_str
-                    payload["outcomes_attached_at"] = datetime.utcnow().isoformat() + "Z"
+                    payload["outcomes_attached_at"] = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
                     snaps[snap_key] = payload
                     result["n_attached"] += 1
                     any_updated = True
@@ -1167,7 +1233,7 @@ def auto_run_pattern_discovery() -> dict:
                     payload = load_snapshot(snap_key) or {}
                     payload = dict(payload)
                     payload["hitter_outcomes"] = h_out_str
-                    payload["outcomes_attached_at"] = datetime.utcnow().isoformat() + "Z"
+                    payload["outcomes_attached_at"] = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
                     enriched[snap_key] = payload
                     gist_updates[snap_key] = payload
                     result["n_fetched_live"] += 1
@@ -1371,7 +1437,7 @@ def save_custom_metric(name: str, weights: dict) -> bool:
         entry = {
             "name": str(name)[:60],
             "weights": {str(k): float(v) for k, v in weights.items()},
-            "saved_at": datetime.utcnow().isoformat() + "Z",
+            "saved_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
         }
         if durable_storage_configured():
             snaps = _gist_read_all() or {}
@@ -1497,17 +1563,143 @@ def load_prop_pattern_history(prop: str = "hr") -> list:
     return []
 
 
+def _extract_all_from_feeds(target_date) -> dict:
+    """v44.55 (code review #11): fetch every game's feed/live for a date ONCE,
+    in parallel, and extract BOTH batting and pitching lines in a single pass.
+
+    Previously fetch_hitter_outcomes and fetch_pitcher_outcomes each fetched
+    the SAME feed/live per game, sequentially — ~15 games × 2 fetchers × 1-2s
+    = 30-60s, called inside auto-eval + back-fill + pattern discovery. This
+    consolidates to one fetch per game, parallelized (15 workers), and cached
+    by date (past dates are immutable once final, so a 1-hour TTL is safe).
+
+    Returns {"hitters": {pid: {...}}, "pitchers": {pid: {...}}}.
+    """
+    target_date_str = str(target_date).split("T")[0]
+    try:
+        url = (
+            f"https://statsapi.mlb.com/api/v1/schedule"
+            f"?sportId=1&date={target_date_str}&hydrate=team,probablePitcher"
+        )
+        r = requests.get(url, headers=HEADERS, timeout=20)
+        r.raise_for_status()
+        data = r.json()
+    except Exception:
+        return {"hitters": {}, "pitchers": {}}
+
+    game_pks = []
+    for date_block in data.get("dates", []):
+        for g in date_block.get("games", []):
+            _pk = g.get("gamePk")
+            if _pk:
+                game_pks.append(_pk)
+
+    def _fetch_one(game_pk):
+        try:
+            box_url = f"https://statsapi.mlb.com/api/v1.1/game/{game_pk}/feed/live"
+            br = requests.get(box_url, headers=HEADERS, timeout=15)
+            br.raise_for_status()
+            return br.json()
+        except Exception:
+            return None
+
+    boxes = []
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=15) as ex:
+            boxes = list(ex.map(_fetch_one, game_pks))
+    except Exception:
+        # Fallback to sequential if threading is unavailable for any reason
+        boxes = [_fetch_one(pk) for pk in game_pks]
+
+    hitters, pitchers = {}, {}
+    for box in boxes:
+        if not box:
+            continue
+        try:
+            liveData = box.get("liveData", {})
+            boxscore = liveData.get("boxscore", {}) or {}
+            for side in ("away", "home"):
+                team_block = boxscore.get("teams", {}).get(side, {}) or {}
+                players = team_block.get("players", {}) or {}
+                for pid_key, player in players.items():
+                    pid = (player.get("person") or {}).get("id")
+                    if not pid:
+                        continue
+                    stats = (player.get("stats") or {})
+                    # ----- batting -----
+                    bat = stats.get("batting") or {}
+                    if bat:
+                        doubles_ = int(bat.get("doubles") or 0)
+                        triples_ = int(bat.get("triples") or 0)
+                        hr_ = int(bat.get("homeRuns") or 0)
+                        h_ = int(bat.get("hits") or 0)
+                        singles_ = max(0, h_ - doubles_ - triples_ - hr_)
+                        total_bases = singles_ + 2*doubles_ + 3*triples_ + 4*hr_
+                        hitters[pid] = {
+                            "hr": hr_, "ab": int(bat.get("atBats") or 0), "h": h_,
+                            "k": int(bat.get("strikeOuts") or 0),
+                            "bb": int(bat.get("baseOnBalls") or 0),
+                            "rbi": int(bat.get("rbi") or 0),
+                            "doubles": doubles_, "triples": triples_,
+                            "total_bases": total_bases,
+                            "runs": int(bat.get("runs") or 0),
+                            "homered": hr_ > 0, "got_hit": h_ > 0,
+                            "got_2plus_bases": total_bases >= 2,
+                            "got_3plus_bases": total_bases >= 3,
+                        }
+                    # ----- pitching (starters only) -----
+                    pit = stats.get("pitching") or {}
+                    if pit and pit.get("gamesStarted", 0):
+                        try:
+                            ip_str = str(pit.get("inningsPitched") or "0.0")
+                            whole, _, frac = ip_str.partition(".")
+                            ip = float(whole) + (float(frac or 0) / 3.0)
+                        except Exception:
+                            ip = 0.0
+                        pitchers[pid] = {
+                            "ip": ip, "k": int(pit.get("strikeOuts") or 0),
+                            "er": int(pit.get("earnedRuns") or 0),
+                            "bb": int(pit.get("baseOnBalls") or 0),
+                            "hr": int(pit.get("homeRuns") or 0),
+                            "h": int(pit.get("hits") or 0),
+                        }
+        except Exception:
+            continue
+    return {"hitters": hitters, "pitchers": pitchers}
+
+
+# v44.55: cache the unified feed extraction by date. Past dates are immutable
+# once games are final, so a 1-hour TTL is safe and eliminates the repeated
+# 30-60s refetch across auto-eval + back-fill + pattern discovery in one run.
+if st is not None and hasattr(st, "cache_data"):
+    _extract_all_from_feeds = st.cache_data(ttl=3600)(_extract_all_from_feeds)
+
+
 def fetch_hitter_outcomes(target_date) -> dict:
     """
     For a given date, fetch which hitters homered and their game line.
     Returns {player_id: {"hr": int, "ab": int, "h": int, "k": int, "bb": int, "rbi": int}}
 
-    v42g BUGFIX: accepts either a date-only key ("2026-06-08") OR an hourly
-    snapshot key ("2026-06-08T17"). The hour portion is stripped before
-    querying MLB Stats API. Without this fix, hourly snapshot keys were
-    sent to MLB with `?date=2026-06-08T17` which the API rejects, returning
-    no outcomes — explaining the "No actual outcomes returned" error.
+    v44.55: now delegates to the unified cached+parallel feed extractor so the
+    same game feeds aren't fetched twice (once here, once for pitchers).
     """
+    return _extract_all_from_feeds(target_date).get("hitters", {})
+
+
+def fetch_pitcher_outcomes(target_date) -> dict:
+    """
+    For a given date, fetch what each starting pitcher actually did.
+    Returns {player_id: {"ip": float, "k": int, "er": int, "bb": int, "hr": int, "h": int}}
+
+    v44.55: delegates to the unified cached+parallel feed extractor (shares the
+    same fetched feeds with fetch_hitter_outcomes — no double fetch).
+    """
+    return _extract_all_from_feeds(target_date).get("pitchers", {})
+
+
+def _fetch_hitter_outcomes_legacy(target_date) -> dict:
+    """Pre-v44.55 sequential implementation, kept for reference/fallback."""
     # Strip hour portion if present (v42 hourly snapshots use "DATE T HH" format)
     target_date_str = str(target_date).split("T")[0]
     try:
@@ -1581,7 +1773,7 @@ def fetch_hitter_outcomes(target_date) -> dict:
     return out
 
 
-def fetch_pitcher_outcomes(target_date) -> dict:
+def _fetch_pitcher_outcomes_legacy(target_date) -> dict:
     """
     For a given date, fetch what each starting pitcher actually did.
     Returns {player_id: {"ip": float, "k": int, "er": int, "bb": int, "hr": int, "h": int}}
@@ -1951,7 +2143,25 @@ def _rolling_aggregate_uncached(snapshot_dates_key: str, max_days: int) -> dict:
         snapshot = load_snapshot(sd)
         if not snapshot:
             continue
-        hitter_actuals = fetch_hitter_outcomes(sd)
+        # v44.57 (code review #13): prefer the outcomes already stored on the
+        # snapshot (v43.70+ back-fills hitter_outcomes) over a live refetch.
+        # Faster and works even when the MLB API is flaky. Fall back to a live
+        # fetch only when the snapshot doesn't carry outcomes yet.
+        hitter_actuals = None
+        _stored = snapshot.get("hitter_outcomes") if isinstance(snapshot, dict) else None
+        if _stored:
+            try:
+                # stored keys are strings; evaluate_* expects int player_ids
+                hitter_actuals = {}
+                for _pid, _row in _stored.items():
+                    try:
+                        hitter_actuals[int(_pid)] = _row
+                    except (TypeError, ValueError):
+                        hitter_actuals[_pid] = _row
+            except Exception:
+                hitter_actuals = None
+        if not hitter_actuals:
+            hitter_actuals = fetch_hitter_outcomes(sd)
         if not hitter_actuals:
             continue
         h_metrics = evaluate_hitter_projections(snapshot, hitter_actuals)
