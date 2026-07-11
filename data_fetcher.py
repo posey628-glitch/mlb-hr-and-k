@@ -155,7 +155,7 @@ def safe_request(url: str, timeout: int = 20, max_retries: int = 3,
 # and the user can flag the issue for proper investigation.
 
 @st.cache_data(ttl=21600)  # 6hr — zone data updates daily
-def get_pitcher_zone_tiers(season: int = CURRENT_SEASON, _stats_day: str = "") -> pd.DataFrame:
+def get_pitcher_zone_tiers(season: int = CURRENT_SEASON, stats_day: str = "") -> pd.DataFrame:
     """Pitcher % of pitches by zone tier (heart, shadow, chase, waste).
 
     Returns DataFrame with columns:
@@ -216,7 +216,7 @@ def get_pitcher_zone_tiers(season: int = CURRENT_SEASON, _stats_day: str = "") -
 
 
 @st.cache_data(ttl=21600)
-def get_hitter_zone_tiers(season: int = CURRENT_SEASON, _stats_day: str = "") -> pd.DataFrame:
+def get_hitter_zone_tiers(season: int = CURRENT_SEASON, stats_day: str = "") -> pd.DataFrame:
     """Hitter wOBA or run value by zone tier.
 
     Returns DataFrame with columns:
@@ -301,7 +301,7 @@ def get_pitcher_zone_distribution(pitcher_id: int,
       season: which season's data (defaults to current)
     """
     try:
-        df = get_pitcher_zone_tiers(season=season, _stats_day=_stats_day_key())
+        df = get_pitcher_zone_tiers(season=season, stats_day=_stats_day_key())
         if df is None or df.empty:
             return {}
         rows = df[df["player_id"] == int(pitcher_id)]
@@ -331,7 +331,7 @@ def get_hitter_zone_performance(hitter_id: int,
       season: which season's data (defaults to current)
     """
     try:
-        df = get_hitter_zone_tiers(season=season, _stats_day=_stats_day_key())
+        df = get_hitter_zone_tiers(season=season, stats_day=_stats_day_key())
         if df is None or df.empty:
             return {}
         rows = df[df["player_id"] == int(hitter_id)]
@@ -428,7 +428,7 @@ def zone_fit_score(pitcher_id: int, hitter_id: int,
 
 @st.cache_data(ttl=21600)  # 6hr — handedness splits stable day-over-day
 def get_hitter_handedness_statcast(season: int = CURRENT_SEASON,
-                                     _stats_day: str = "") -> pd.DataFrame:
+                                     stats_day: str = "") -> pd.DataFrame:
     """Pull hitter Statcast contact-quality metrics split by pitcher handedness.
 
     Returns DataFrame with columns:
@@ -491,11 +491,19 @@ def get_hitter_handedness_statcast(season: int = CURRENT_SEASON,
                         col_map["xwoba"] = c
                     elif "launch_speed" in cl or "avg_ev" in cl or "exit_velocity" in cl:
                         col_map["avg_ev"] = c
-                    # v44.51: capture pull% and ISO by hand so we can derive the
-                    # REAL vs-hand pulled_brl_pct (= pull_air% × barrel% / 100),
-                    # replacing the v44.50 proxy with true split data.
-                    elif cl in ("pull_percent", "pull_pct", "pulled_percent",
-                                "pull_air_percent") and "pull" not in col_map:
+                    # v44.51/44.58: capture pull-air% (and overall pull% as a
+                    # separate fallback) so we can derive the REAL vs-hand
+                    # pulled_brl_pct = pull_air% × barrel% / 100. CRITICAL
+                    # (code review #4): the SEASON derivation prefers
+                    # pull_air_percent (~12-22%), NOT overall pull_percent
+                    # (~35-45%). We must match that scale or the Bayesian blend
+                    # in apply_handedness_overrides mixes two different stats and
+                    # corrupts the most-weighted Dinger input. So keep pull_air
+                    # and pull_percent in SEPARATE slots and derive only from
+                    # pull_air (falling back to overall pull only if air is absent).
+                    elif cl == "pull_air_percent" and "pull_air" not in col_map:
+                        col_map["pull_air"] = c
+                    elif cl in ("pull_percent", "pull_pct", "pulled_percent") and "pull" not in col_map:
                         col_map["pull"] = c
                     elif cl in ("iso", "isolated_power") and "iso" not in col_map:
                         col_map["iso"] = c
@@ -507,15 +515,20 @@ def get_hitter_handedness_statcast(season: int = CURRENT_SEASON,
                     df[col_map["player_id"]], errors="coerce"
                 ).astype("Int64")
                 out["barrel_pct"] = pd.to_numeric(df[col_map["barrel"]], errors="coerce")
-                for stat in ("hard_hit", "xwoba", "avg_ev", "pull", "iso"):
+                for stat in ("hard_hit", "xwoba", "avg_ev", "pull_air", "pull", "iso"):
                     if stat in col_map:
                         out[stat] = pd.to_numeric(df[col_map[stat]], errors="coerce")
                     else:
                         out[stat] = pd.NA
-                # v44.51: derive real vs-hand pulled_brl_pct where pull% present
-                if "pull" in col_map:
+                # v44.58: derive vs-hand pulled_brl_pct from pull_air ONLY
+                # (matches the season formula's scale). If pull_air is absent for
+                # this endpoint, we do NOT derive from overall pull_percent —
+                # that would be a ~2x scale mismatch — leaving pulled_brl_pct
+                # NaN so the override falls back to its (scale-safe) barrel-ratio
+                # proxy instead of blending mismatched scales.
+                if "pull_air" in col_map:
                     out["pulled_brl_pct"] = (
-                        out["pull"] * out["barrel_pct"] / 100.0
+                        out["pull_air"] * out["barrel_pct"] / 100.0
                     ).round(2)
                 return out.dropna(subset=["player_id"])
             except Exception:
@@ -537,6 +550,7 @@ def get_hitter_handedness_statcast(season: int = CURRENT_SEASON,
             "xwoba": "vs_lhp_xwoba",
             "avg_ev": "vs_lhp_avg_ev",
             "pull": "vs_lhp_pull_pct",
+            "pull_air": "vs_lhp_pull_air_pct",
             "iso": "vs_lhp_iso",
             "pulled_brl_pct": "vs_lhp_pulled_brl_pct",
         })
@@ -547,6 +561,7 @@ def get_hitter_handedness_statcast(season: int = CURRENT_SEASON,
             "xwoba": "vs_rhp_xwoba",
             "avg_ev": "vs_rhp_avg_ev",
             "pull": "vs_rhp_pull_pct",
+            "pull_air": "vs_rhp_pull_air_pct",
             "iso": "vs_rhp_iso",
             "pulled_brl_pct": "vs_rhp_pulled_brl_pct",
         })
@@ -1809,7 +1824,8 @@ def _num(v):
         return None
 
 
-def get_hitter_stats(season: int = CURRENT_SEASON, _stats_day: str = "") -> pd.DataFrame:
+@st.cache_data(ttl=3600)
+def get_hitter_stats(season: int = CURRENT_SEASON, stats_day: str = "") -> pd.DataFrame:
     """
     Pull season-level Statcast hitter stats with ALL columns needed for the
     dashboard: standard rates, expected stats, batted-ball quality, pulled
@@ -2368,7 +2384,7 @@ def get_hitter_stats(season: int = CURRENT_SEASON, _stats_day: str = "") -> pd.D
 # ----------------------------------------------------------------------------
 
 @st.cache_data(ttl=3600)
-def get_pitcher_stats(season: int = CURRENT_SEASON, _stats_day: str = "") -> pd.DataFrame:
+def get_pitcher_stats(season: int = CURRENT_SEASON, stats_day: str = "") -> pd.DataFrame:
     """Season-level Statcast pitcher stats - expanded.
 
     Now requests stats that let us derive ERA-equivalents independently of
@@ -3618,7 +3634,7 @@ def get_pitch_run_values(season: int = CURRENT_SEASON) -> pd.DataFrame:
 # ----------------------------------------------------------------------------
 
 @st.cache_data(ttl=3600)
-def get_hitter_traditional(season: int = CURRENT_SEASON, _stats_day: str = "") -> pd.DataFrame:
+def get_hitter_traditional(season: int = CURRENT_SEASON, stats_day: str = "") -> pd.DataFrame:
     """Pull season AVG, OBP, SLG, HR, RBI, R for all hitters.
 
     Uses playerPool=All to catch non-qualifying hitters (early-season,
@@ -3666,7 +3682,7 @@ def get_hitter_traditional(season: int = CURRENT_SEASON, _stats_day: str = "") -
 
 
 @st.cache_data(ttl=900)  # Shortened from 3600 to 15min so failures recover faster
-def get_pitcher_traditional(season: int = CURRENT_SEASON, _stats_day: str = "") -> pd.DataFrame:
+def get_pitcher_traditional(season: int = CURRENT_SEASON, stats_day: str = "") -> pd.DataFrame:
     """Pull season ERA, WHIP, HR/9, K/9, BB/9 for all pitchers.
 
     Uses playerPool=All so non-qualifying pitchers (early-season, callups,
@@ -3735,10 +3751,10 @@ def get_pitcher_traditional(season: int = CURRENT_SEASON, _stats_day: str = "") 
     return _normalize_player_df(df)
 
 
-def get_pitcher_traditional_safe(season: int = CURRENT_SEASON, _stats_day: str = "") -> pd.DataFrame:
+def get_pitcher_traditional_safe(season: int = CURRENT_SEASON, stats_day: str = "") -> pd.DataFrame:
     """Wrapper that catches the cache-bust exception and returns empty df."""
     try:
-        return get_pitcher_traditional(season, _stats_day=_stats_day)
+        return get_pitcher_traditional(season, stats_day=stats_day)
     except Exception:
         return pd.DataFrame()
 
@@ -4567,7 +4583,7 @@ def get_game_roof_status(game_pk: int) -> dict:
 # =============================================================================
 
 @st.cache_data(ttl=900)  # 15min — roster moves can happen mid-day
-def get_recent_transactions(days_back: int = 2, _stats_day: str = "") -> pd.DataFrame:
+def get_recent_transactions(days_back: int = 2, stats_day: str = "") -> pd.DataFrame:
     """
     Pull all MLB roster transactions from the last N days.
 
