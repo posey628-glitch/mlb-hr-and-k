@@ -847,7 +847,7 @@ def compute_adaptive_score(current_slate: pd.DataFrame,
         # score from rolling_feature_importance; normalize to a ~0.5-1.5
         # multiplier so it modulates rather than dominates the corr weight.
         _corr_w = abs(float(row["avg_corr"]))
-        _reliab = float(row.get("reliab", 1.0)) if "reliab" in row.index else 1.0
+        _reliab = float(row.get("reliability", 1.0)) if "reliability" in row.index else 1.0
         # map reliab (typically 1.0-2.9) to a 0.5-1.5 multiplier around 1.0
         _reliab_mult = 0.5 + min(max(_reliab, 0.0), 3.0) / 3.0
         weights.append(_corr_w * _reliab_mult)
