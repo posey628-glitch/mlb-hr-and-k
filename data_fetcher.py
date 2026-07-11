@@ -61,6 +61,21 @@ HEADERS = {
     "Accept": "application/json, text/csv, */*",
 }
 
+def current_season() -> int:
+    """v44.62: resolve the season dynamically at CALL time.
+
+    CURRENT_SEASON below is evaluated once at import; a container alive across
+    Jan 1 would then serve last year's season to every fetcher whose default is
+    `season=CURRENT_SEASON` (Python binds defaults once, at def time). Functions
+    that must stay correct across a year boundary default to `season=None` and
+    call current_season() at the top of their body instead.
+    """
+    return datetime.now().year
+
+
+# Kept for back-compat with the many `season: int = CURRENT_SEASON` defaults.
+# NOTE: this is the import-time year. Season-sensitive fetchers should default
+# to None and resolve via current_season() rather than relying on this.
 CURRENT_SEASON = datetime.now().year
 
 
@@ -155,7 +170,7 @@ def safe_request(url: str, timeout: int = 20, max_retries: int = 3,
 # and the user can flag the issue for proper investigation.
 
 @st.cache_data(ttl=21600)  # 6hr — zone data updates daily
-def get_pitcher_zone_tiers(season: int = CURRENT_SEASON, stats_day: str = "") -> pd.DataFrame:
+def get_pitcher_zone_tiers(season: int = None, stats_day: str = "") -> pd.DataFrame:
     """Pitcher % of pitches by zone tier (heart, shadow, chase, waste).
 
     Returns DataFrame with columns:
@@ -163,6 +178,7 @@ def get_pitcher_zone_tiers(season: int = CURRENT_SEASON, stats_day: str = "") ->
       pitcher_chase_pct, pitcher_waste_pct
     Empty on failure — caller treats empty as "no zone data available."
     """
+    season = season if season is not None else current_season()  # v44.62
     # Try a few candidate URL patterns. The first that returns parseable CSV wins.
     candidate_urls = [
         # Custom leaderboard with zone selections
@@ -216,7 +232,7 @@ def get_pitcher_zone_tiers(season: int = CURRENT_SEASON, stats_day: str = "") ->
 
 
 @st.cache_data(ttl=21600)
-def get_hitter_zone_tiers(season: int = CURRENT_SEASON, stats_day: str = "") -> pd.DataFrame:
+def get_hitter_zone_tiers(season: int = None, stats_day: str = "") -> pd.DataFrame:
     """Hitter wOBA or run value by zone tier.
 
     Returns DataFrame with columns:
@@ -224,6 +240,7 @@ def get_hitter_zone_tiers(season: int = CURRENT_SEASON, stats_day: str = "") -> 
       hitter_chase_woba, hitter_waste_woba (or barrel% equivalents)
     Empty on failure.
     """
+    season = season if season is not None else current_season()  # v44.62
     candidate_urls = [
         f"https://baseballsavant.mlb.com/leaderboard/swing-take"
         f"?year={season}&type=batter&min=100&csv=true",
@@ -427,7 +444,7 @@ def zone_fit_score(pitcher_id: int, hitter_id: int,
 # tells you immediately if the fetcher connected.
 
 @st.cache_data(ttl=21600)  # 6hr — handedness splits stable day-over-day
-def get_hitter_handedness_statcast(season: int = CURRENT_SEASON,
+def get_hitter_handedness_statcast(season: int = None,
                                      stats_day: str = "") -> pd.DataFrame:
     """Pull hitter Statcast contact-quality metrics split by pitcher handedness.
 
@@ -442,6 +459,7 @@ def get_hitter_handedness_statcast(season: int = CURRENT_SEASON,
     vs-LHP and vs-RHP separately, then merge on player_id. Each side may
     succeed or fail independently — partial data is better than none.
     """
+    season = season if season is not None else current_season()  # v44.62
     def _fetch_one_side(pitch_hand: str) -> pd.DataFrame:
         """Fetch Statcast contact quality for hitters vs one pitcher hand.
 
@@ -1848,7 +1866,7 @@ def _num(v):
 
 
 @st.cache_data(ttl=3600)
-def get_hitter_stats(season: int = CURRENT_SEASON, stats_day: str = "") -> pd.DataFrame:
+def get_hitter_stats(season: int = None, stats_day: str = "") -> pd.DataFrame:
     """
     Pull season-level Statcast hitter stats with ALL columns needed for the
     dashboard: standard rates, expected stats, batted-ball quality, pulled
@@ -1859,6 +1877,7 @@ def get_hitter_stats(season: int = CURRENT_SEASON, stats_day: str = "") -> pd.Da
     treat a new day as a cache miss — so morning users get fresh stats without
     waiting for the 1-hour TTL.
     """
+    season = season if season is not None else current_season()  # v44.62
     # v43.66 (researcher framework): added avg_hit_distance (for Must-Have
     # threshold ≥315 ft / Nuclear ≥330 ft) and barrels (raw barrel COUNT,
     # used to derive a near_hr_est = max(0, barrels - home_run) for the
@@ -2407,7 +2426,7 @@ def get_hitter_stats(season: int = CURRENT_SEASON, stats_day: str = "") -> pd.Da
 # ----------------------------------------------------------------------------
 
 @st.cache_data(ttl=3600)
-def get_pitcher_stats(season: int = CURRENT_SEASON, stats_day: str = "") -> pd.DataFrame:
+def get_pitcher_stats(season: int = None, stats_day: str = "") -> pd.DataFrame:
     """Season-level Statcast pitcher stats - expanded.
 
     Now requests stats that let us derive ERA-equivalents independently of
@@ -2415,6 +2434,7 @@ def get_pitcher_stats(season: int = CURRENT_SEASON, stats_day: str = "") -> pd.D
     earned_runs, home_run, etc. This way if MLB Stats API is unreachable
     (which happens on Streamlit Cloud), we still have everything we need.
     """
+    season = season if season is not None else current_season()  # v44.62
     selections = (
         # Core Statcast
         "pa,k_percent,bb_percent,woba,xwoba,xiso,xba,xslg,xobp,xera,"
@@ -2627,7 +2647,7 @@ def _fetch_pitcher_splits_single(pitcher_id: int, season: int) -> dict:
 
 
 @st.cache_data(ttl=3600)
-def get_pitcher_handedness_splits(season: int = CURRENT_SEASON,
+def get_pitcher_handedness_splits(season: int = None,
                                     pitcher_ids: tuple = (),
                                     _cache_version: str = "v1") -> pd.DataFrame:
     """
@@ -2642,6 +2662,7 @@ def get_pitcher_handedness_splits(season: int = CURRENT_SEASON,
 
     _cache_version: bump when adding new fields to invalidate cache.
     """
+    season = season if season is not None else current_season()  # v44.62
     if not pitcher_ids:
         return pd.DataFrame()
 
@@ -2763,7 +2784,7 @@ def _fetch_hitter_splits_single(hitter_id: int, season: int) -> dict:
 
 
 @st.cache_data(ttl=3600)
-def get_hitter_handedness_splits(season: int = CURRENT_SEASON,
+def get_hitter_handedness_splits(season: int = None,
                                    hitter_ids: tuple = (),
                                    _cache_version: str = "v1") -> pd.DataFrame:
     """
@@ -2782,6 +2803,7 @@ def get_hitter_handedness_splits(season: int = CURRENT_SEASON,
 
     Pass hitter_ids from today's slate to avoid hammering the API.
     """
+    season = season if season is not None else current_season()  # v44.62
     if not hitter_ids:
         return pd.DataFrame()
 
@@ -2913,7 +2935,7 @@ def _fetch_day_night_splits_single(player_id: int, season: int, group: str = "hi
 
 
 @st.cache_data(ttl=3600)
-def get_hitter_day_night_splits(season: int = CURRENT_SEASON,
+def get_hitter_day_night_splits(season: int = None,
                                   hitter_ids: tuple = (),
                                   _cache_version: str = "v2") -> pd.DataFrame:
     """
@@ -2922,6 +2944,7 @@ def get_hitter_day_night_splits(season: int = CURRENT_SEASON,
 
     _cache_version: bump when adding new fields to invalidate Streamlit cache.
     """
+    season = season if season is not None else current_season()  # v44.62
     if not hitter_ids:
         return pd.DataFrame()
     rows = []
@@ -2940,7 +2963,7 @@ def get_hitter_day_night_splits(season: int = CURRENT_SEASON,
 
 
 @st.cache_data(ttl=3600)
-def get_pitcher_day_night_splits(season: int = CURRENT_SEASON,
+def get_pitcher_day_night_splits(season: int = None,
                                    pitcher_ids: tuple = (),
                                    _cache_version: str = "v2") -> pd.DataFrame:
     """
@@ -2948,6 +2971,7 @@ def get_pitcher_day_night_splits(season: int = CURRENT_SEASON,
 
     _cache_version: bump when adding new fields to invalidate Streamlit cache.
     """
+    season = season if season is not None else current_season()  # v44.62
     if not pitcher_ids:
         return pd.DataFrame()
     rows = []
@@ -3232,7 +3256,7 @@ def get_pitchers_il_status(pitcher_ids: tuple, season: int = CURRENT_SEASON,
 # ----------------------------------------------------------------------------
 
 @st.cache_data(ttl=900)  # v44.60: 15min so a transient failure recovers fast
-def get_pitcher_arsenal(season: int = CURRENT_SEASON) -> pd.DataFrame:
+def get_pitcher_arsenal(season: int = None) -> pd.DataFrame:
     """
     Returns one row per pitcher x pitch_type with: usage %, swstr%, hh%,
     velocity, spin rate, xwOBAcon, run value per 100, etc.
@@ -3241,6 +3265,7 @@ def get_pitcher_arsenal(season: int = CURRENT_SEASON) -> pd.DataFrame:
     won't cache an empty frame) instead of a bare raise_for_status that
     crashed callers. Use get_pitcher_arsenal_safe for a crash-proof call.
     """
+    season = season if season is not None else current_season()  # v44.62
     url = (
         "https://baseballsavant.mlb.com/leaderboard/pitch-arsenal-stats"
         f"?type=pitcher&pitchType=&year={season}&team=&min=10&hand="
@@ -3277,7 +3302,7 @@ def get_pitcher_arsenal_safe(season: int = CURRENT_SEASON) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=3600)
-def get_pitcher_arsenal_vs_hand(season: int = CURRENT_SEASON,
+def get_pitcher_arsenal_vs_hand(season: int = None,
                                   batter_hand: str = "R") -> pd.DataFrame:
     """
     Pitcher arsenal split by hitter handedness.
@@ -3296,6 +3321,7 @@ def get_pitcher_arsenal_vs_hand(season: int = CURRENT_SEASON,
     Returns a DataFrame matching get_pitcher_arsenal() schema, but with
     only the rows where the pitcher faced batters of `batter_hand` ("L" or "R").
     """
+    season = season if season is not None else current_season()  # v44.62
     if batter_hand not in ("L", "R"):
         return pd.DataFrame()
     # Savant's pitch-arsenal-stats endpoint accepts &stand=L or &stand=R to
@@ -3680,7 +3706,7 @@ def get_pitch_run_values(season: int = CURRENT_SEASON) -> pd.DataFrame:
 # ----------------------------------------------------------------------------
 
 @st.cache_data(ttl=900)  # v44.59: 15min (was 3600) so failures recover faster
-def get_hitter_traditional(season: int = CURRENT_SEASON, stats_day: str = "") -> pd.DataFrame:
+def get_hitter_traditional(season: int = None, stats_day: str = "") -> pd.DataFrame:
     """Pull season AVG, OBP, SLG, HR, RBI, R for all hitters.
 
     Uses playerPool=All to catch non-qualifying hitters (early-season,
@@ -3690,6 +3716,7 @@ def get_hitter_traditional(season: int = CURRENT_SEASON, stats_day: str = "") ->
     Streamlit won't cache an empty frame for an hour (a transient MLB API
     hiccup used to poison the cache). Callers use get_hitter_traditional_safe.
     """
+    season = season if season is not None else current_season()  # v44.62
     url = (
         "https://statsapi.mlb.com/api/v1/stats"
         f"?stats=season&group=hitting&season={season}&sportIds=1"
@@ -3756,7 +3783,7 @@ def get_hitter_traditional_safe(season: int = CURRENT_SEASON, stats_day: str = "
 
 
 @st.cache_data(ttl=900)  # Shortened from 3600 to 15min so failures recover faster
-def get_pitcher_traditional(season: int = CURRENT_SEASON, stats_day: str = "") -> pd.DataFrame:
+def get_pitcher_traditional(season: int = None, stats_day: str = "") -> pd.DataFrame:
     """Pull season ERA, WHIP, HR/9, K/9, BB/9 for all pitchers.
 
     Uses playerPool=All so non-qualifying pitchers (early-season, callups,
@@ -3764,6 +3791,7 @@ def get_pitcher_traditional(season: int = CURRENT_SEASON, stats_day: str = "") -
     return empty, we DON'T cache - by raising an exception that streamlit
     won't cache, then catching it to return empty. Next refresh tries again.
     """
+    season = season if season is not None else current_season()  # v44.62
     url = (
         "https://statsapi.mlb.com/api/v1/stats"
         f"?stats=season&group=pitching&season={season}&sportIds=1"
