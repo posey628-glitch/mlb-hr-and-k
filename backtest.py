@@ -117,6 +117,9 @@ def durable_storage_configured() -> bool:
 # Lets the UI surface the EXACT error code (401=token, 404=gist gone,
 # 429=rate limit) instead of the generic "network/auth/rate limit" message.
 _LAST_GIST_READ_ERROR: str | None = None
+# v44.60: games excluded from outcome extraction because MLB marked them
+# postponed/suspended/cancelled (so their hitters aren't graded as "no HR").
+_LAST_OUTCOME_EXCLUDED_GAMES: list = []
 
 def last_gist_read_error() -> str | None:
     """Returns the most recent gist read failure reason, or None if last read succeeded."""
@@ -1588,11 +1591,33 @@ def _extract_all_from_feeds(target_date) -> dict:
         return {"hitters": {}, "pitchers": {}}
 
     game_pks = []
+    _excluded_status = []
     for date_block in data.get("dates", []):
         for g in date_block.get("games", []):
             _pk = g.get("gamePk")
-            if _pk:
-                game_pks.append(_pk)
+            if not _pk:
+                continue
+            # v44.60 (user: don't let postponed/cancelled games count as
+            # "didn't homer"). Only pull outcomes from games MLB marks Final/
+            # completed. A postponed or suspended game has no valid full box
+            # score, so grading a hitter from it would either miss them (fine)
+            # or record a partial/false negative (bad). Gate on game status.
+            _status = (g.get("status") or {})
+            _coded = str(_status.get("codedGameState") or "").upper()  # F=Final, D=postponed, etc.
+            _abstract = str(_status.get("abstractGameState") or "").upper()
+            _detailed = str(_status.get("detailedState") or "").lower()
+            _is_final = (_coded == "F") or (_abstract == "FINAL") or ("final" in _detailed and "postpon" not in _detailed)
+            _is_bad = any(w in _detailed for w in ("postpon", "cancel", "suspend")) or _coded in ("D", "C", "U", "T")
+            if _is_bad or not _is_final:
+                _excluded_status.append((_pk, _detailed or _coded))
+                continue
+            game_pks.append(_pk)
+    # Stash which games were excluded so it can be surfaced if needed.
+    global _LAST_OUTCOME_EXCLUDED_GAMES
+    try:
+        _LAST_OUTCOME_EXCLUDED_GAMES = _excluded_status
+    except Exception:
+        pass
 
     def _fetch_one(game_pk):
         try:
