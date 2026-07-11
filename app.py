@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.64-data-integrity-audit-line"
+APP_VERSION = "2026.06.10-v44.66-gist-memory-fix-smash-diag"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -5997,7 +5997,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.64 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.66 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -8684,10 +8684,14 @@ if combined_picks is not None and not combined_picks.empty:
     slate_leader_cats = []     # list of (label, pid, name, value, fmt)
     slate_leader_pid_map = {}  # pid → list of category labels
 
-    def _track_leader(label, pid, name, value, fmt="{:.2f}"):
+    def _track_leader(label, pid, name, value, fmt="{:.2f}", is_bench=False):
         if pid is None or pd.isna(pid) or name is None:
             return
-        slate_leader_cats.append((label, int(pid), name, value, fmt))
+        # v44.65 (user: don't overlook a bench/projected player who leads a
+        # category — they may still play or be listed on DK). Tag the name so
+        # the leader display shows their roster status.
+        _disp_name = name if not is_bench else f"{name} ⚠️bench/proj"
+        slate_leader_cats.append((label, int(pid), _disp_name, value, fmt))
         slate_leader_pid_map.setdefault(int(pid), []).append(label)
 
     # Dedupe hitters by player_id for accurate slate-wide ranking
@@ -8706,8 +8710,9 @@ if combined_picks is not None and not combined_picks.empty:
             return
         sub = sub.sort_values(col, ascending=ascending)
         top = sub.iloc[0]
+        _is_bench = bool(top.get("is_bench", False)) if "is_bench" in sub.columns else False
         _track_leader(label, top.get("player_id"), top.get("player_name"),
-                       top[col], fmt)
+                       top[col], fmt, is_bench=_is_bench)
 
     # Hitter quality leaders
     _leader_by(_combined_lead, "barrel_pct",  "💥 Slate-best Barrel%",       fmt="{:.1f}%")
@@ -9116,6 +9121,40 @@ if combined_picks is not None and not combined_picks.empty:
                 lambda p: new_smash_per_pid.get(int(p), "")
                 if p is not None and not pd.isna(p) else ""
             )
+
+            # v44.66 (user: "only 1 strong, 0 elite — is that right or broken?").
+            # Surface the tier counts + WHY the higher tiers are empty, so a rare
+            # ELITE/STRONG is understood as honest selectivity, not a silent bug.
+            try:
+                _ss = combined_picks["smash_spot"].fillna("").astype(str)
+                _n_elite = int(_ss.str.contains("ELITE").sum())
+                _n_strong = int(_ss.str.contains("STRONG").sum())
+                _n_smash = int((_ss.str.contains("🔥") & ~_ss.str.contains("STRONG|ELITE")).sum())
+                # why is elite/strong empty? check the gates across the slate
+                _has_exploitplus = False
+                _has_fav_env = False
+                if "opp_pitcher_grade" in combined_picks.columns:
+                    _has_exploitplus = bool((combined_picks["opp_pitcher_grade"] == "EXPLOIT+").any())
+                if "env_boost" in combined_picks.columns:
+                    _has_fav_env = bool((pd.to_numeric(combined_picks["env_boost"], errors="coerce") >= 1.05).any())
+                _why = []
+                if _n_elite == 0:
+                    if not _has_exploitplus:
+                        _why.append("no pitcher graded EXPLOIT+ tonight (ELITE requires it)")
+                    elif not _has_fav_env:
+                        _why.append("no park/weather ≥1.05 favorable env tonight (ELITE/STRONG need it)")
+                    else:
+                        _why.append("EXPLOIT+ pitchers exist but no hitter cleared HR%≥19% + favorable env")
+                _why_str = ("  Why higher tiers are sparse: " + "; ".join(_why)) if _why else ""
+                stash_diagnostic(
+                    "pipeline_health",
+                    f"🔥 Smash Spots: {_n_elite} ELITE · {_n_strong} STRONG · {_n_smash} SMASH."
+                    f"{_why_str}  This gates on pitcher grade + env + HR%, so sparse "
+                    f"higher tiers on a neutral-park/tough-pitcher night is correct, not a bug.",
+                    level="caption",
+                )
+            except Exception:
+                pass
 
             # Back-map smash to every matchup_df via player_id.
             # v43.49: use the all_matchup_frames helper so we can't forget
