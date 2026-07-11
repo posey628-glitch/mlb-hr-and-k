@@ -16,7 +16,7 @@ Results are cached via Streamlit's @st.cache_data with TTLs tuned per source:
 from __future__ import annotations
 
 import io
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 from typing import Optional
 
 import pandas as pd
@@ -42,7 +42,7 @@ def _stats_day_key() -> str:
             now_et = datetime.now(ZoneInfo("America/New_York"))
         except Exception:
             # Fallback: assume UTC-4 (ET in summer); good enough for cache
-            now_et = datetime.utcnow() - timedelta(hours=4)
+            now_et = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=4)
         # If it's before 5 AM ET, Statcast may still be updating — use yesterday
         if now_et.hour < 5:
             return (now_et - timedelta(days=1)).strftime("%Y-%m-%d")
