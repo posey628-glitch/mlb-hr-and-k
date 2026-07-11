@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.62-dynamic-current-season"
+APP_VERSION = "2026.06.10-v44.63-honest-blast-grading-imputed-flag"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -2618,10 +2618,22 @@ if use_bat_tracking:
             )
             # Compute median of populated values, impute into NaN rows
             try:
+                # v44.63 (user: make sure imputed values don't skew a player's
+                # individual data or the correlations). PRESERVE the real,
+                # un-imputed blast_pct in a parallel column FIRST. The imputed
+                # version is used for the display composite (so a missing-data
+                # hitter isn't scored on a different denominator — the reviewer's
+                # fairness fix), but the REAL-only column is what gets snapshotted
+                # and graded, so 380 fabricated identical medians can't dilute
+                # the blast_pct correlation or drag an elite hitter's graded
+                # profile toward the mean.
+                hitter_stats["blast_pct_real"] = hitter_stats["blast_pct"]
                 _bp_median = float(hitter_stats["blast_pct"].dropna().median())
                 if not pd.isna(_bp_median):
                     _na_count = int(hitter_stats["blast_pct"].isna().sum())
                     hitter_stats["blast_pct"] = hitter_stats["blast_pct"].fillna(_bp_median)
+                    # mark which rows were imputed so downstream can flag them
+                    hitter_stats["blast_pct_imputed"] = hitter_stats["blast_pct_real"].isna()
                     _bat_tracking_status += f" (median-imputed {_na_count})"
             except Exception:
                 pass
@@ -5985,7 +5997,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.62 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.63 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -12115,11 +12127,21 @@ if all_hitters:
             else:
                 _missing_masks[_label] = [True] * len(combined_all)
         _split_list = _split_missing.tolist()
+        # v44.63: also note when a hitter's bat-tracking (blast%/swing) was
+        # median-imputed rather than real — their swing-quality inputs are
+        # fabricated averages, so a rank leaning on those deserves a caution
+        # flag even if the core power stats are all present.
+        if "blast_pct_imputed" in combined_all.columns:
+            _imputed_list = combined_all["blast_pct_imputed"].fillna(False).astype(bool).tolist()
+        else:
+            _imputed_list = [False] * len(combined_all)
         _notes = []
         for _i in range(len(combined_all)):
             _miss = [lbl for lbl, mask in _missing_masks.items() if mask[_i]]
             if _split_list[_i]:
                 _miss.append("handedness split")
+            if _imputed_list[_i]:
+                _miss.append("swing data imputed")
             _notes.append(", ".join(_miss))
         combined_all["data_missing_note"] = _notes
     except Exception as _dce:
