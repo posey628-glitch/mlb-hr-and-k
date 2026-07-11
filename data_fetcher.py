@@ -605,12 +605,13 @@ def apply_handedness_overrides(matchup_df: pd.DataFrame,
       blended = (hand_pa × hand_value + shrinkage_pa × season_value)
                 / (hand_pa + shrinkage_pa)
 
-    With shrinkage_pa=100 (default):
-      30 PA hand sample  → 23% weight to handedness, 77% to season-overall
-      60 PA              → 38% / 62%
-      100 PA             → 50% / 50%
-      200 PA             → 67% / 33%
-      300+ PA            → 75%+ / 25%-
+    With shrinkage_pa=70 (default, v44.47 — lowered from 100 so platoon-correct
+    data drives more of the blend):
+      30 PA hand sample  → 30% weight to handedness, 70% to season-overall
+      70 PA              → 50% / 50%
+      100 PA             → 59% / 41%
+      200 PA             → 74% / 26%
+      300+ PA            → 81%+ / 19%-
 
     This means flukey small samples can shift the grade but can't dominate
     it. Established split hitters (200+ PA) still get most of the override
@@ -1464,13 +1465,35 @@ def get_slate(game_date: Optional[str] = None) -> pd.DataFrame:
                     globals()["_SLATE_DROPPED_GAMES"] += _dropped
                 except Exception:
                     pass
+    # v44.60 (code review #6): also embed the dropped count in the DataFrame's
+    # .attrs. get_slate is @st.cache_data, so on a cache HIT the body above
+    # doesn't run and the module global _SLATE_DROPPED_GAMES keeps a stale value
+    # from a different date's build. .attrs travels WITH the cached frame, so
+    # slate_dropped_games() can read the correct per-slate count either way.
+    try:
+        df.attrs["dropped_games"] = int(globals().get("_SLATE_DROPPED_GAMES", 0) or 0)
+    except Exception:
+        pass
     return df
 
 
-def slate_dropped_games() -> int:
-    """v44.01: count of games dropped from the last slate build for being
+def slate_dropped_games(slate_df: "pd.DataFrame | None" = None) -> int:
+    """v44.01: count of games dropped from the slate build for being
     postponed/cancelled/suspended. Surfaced in Pipeline Health so the user
-    understands why a matchup isn't shown."""
+    understands why a matchup isn't shown.
+
+    v44.60 (code review #6): prefer the count embedded in the passed slate's
+    .attrs (correct even on a cache hit) over the module global (which can be
+    stale from a different date's build). Falls back to the global if no slate
+    is passed or it carries no attr.
+    """
+    if slate_df is not None:
+        try:
+            _v = slate_df.attrs.get("dropped_games")
+            if _v is not None:
+                return int(_v)
+        except Exception:
+            pass
     return int(globals().get("_SLATE_DROPPED_GAMES", 0) or 0)
 
 
@@ -3208,26 +3231,49 @@ def get_pitchers_il_status(pitcher_ids: tuple, season: int = CURRENT_SEASON,
 # Pitcher arsenal (pitch-mix, velo, spin, swing/miss per pitch type)
 # ----------------------------------------------------------------------------
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=900)  # v44.60: 15min so a transient failure recovers fast
 def get_pitcher_arsenal(season: int = CURRENT_SEASON) -> pd.DataFrame:
     """
     Returns one row per pitcher x pitch_type with: usage %, swstr%, hh%,
     velocity, spin rate, xwOBAcon, run value per 100, etc.
+
+    v44.60 (code review #10): retries and RAISES on failure (so Streamlit
+    won't cache an empty frame) instead of a bare raise_for_status that
+    crashed callers. Use get_pitcher_arsenal_safe for a crash-proof call.
     """
     url = (
         "https://baseballsavant.mlb.com/leaderboard/pitch-arsenal-stats"
         f"?type=pitcher&pitchType=&year={season}&team=&min=10&hand="
         "&csv=true"
     )
-    r = requests.get(url, headers=HEADERS, timeout=30)
-    r.raise_for_status()
-    df = pd.read_csv(io.StringIO(r.text))
-    if "last_name, first_name" in df.columns:
-        df["player_name"] = df["last_name, first_name"].apply(
-            lambda s: " ".join(reversed([p.strip() for p in str(s).split(",")]))
-            if isinstance(s, str) and "," in s else s
-        )
-    return df
+    last_err = None
+    for attempt in range(3):
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=30)
+            r.raise_for_status()
+            df = pd.read_csv(io.StringIO(r.text))
+            if df is not None and not df.empty:
+                if "last_name, first_name" in df.columns:
+                    df["player_name"] = df["last_name, first_name"].apply(
+                        lambda s: " ".join(reversed([p.strip() for p in str(s).split(",")]))
+                        if isinstance(s, str) and "," in s else s
+                    )
+                return df
+        except Exception as e:
+            last_err = e
+            if attempt < 2:
+                import time
+                time.sleep(1.0)
+            continue
+    raise RuntimeError(f"get_pitcher_arsenal failed after retries (last error: {last_err})")
+
+
+def get_pitcher_arsenal_safe(season: int = CURRENT_SEASON) -> pd.DataFrame:
+    """Crash-proof wrapper: returns empty df instead of raising."""
+    try:
+        return get_pitcher_arsenal(season)
+    except Exception:
+        return pd.DataFrame()
 
 
 @st.cache_data(ttl=3600)
@@ -4265,7 +4311,18 @@ def fill_pitcher_stats_for_slate(pitcher_stats: pd.DataFrame, slate: pd.DataFram
                 hand = (person.get("pitchHand") or {}).get("code")
                 if pid is None or not hand:
                     continue
-                existing = df[df["player_id"] == pid] if "player_id" in df.columns else pd.DataFrame()
+                # v44.60 (code review #11): coerce before comparing. After
+                # concatenating fallback rows (plain int) onto Savant rows
+                # (Int64), a bare == can miss on dtype drift — same class as
+                # the v44.34 build_matchup_table fix.
+                if "player_id" in df.columns:
+                    _pidnum = pd.to_numeric(df["player_id"], errors="coerce")
+                    try:
+                        existing = df[_pidnum == int(float(pid))]
+                    except (TypeError, ValueError):
+                        existing = pd.DataFrame()
+                else:
+                    existing = pd.DataFrame()
                 if existing.empty:
                     df = pd.concat([df, pd.DataFrame([{"player_id": pid, "p_throws": hand}])],
                                       ignore_index=True)
@@ -4275,7 +4332,15 @@ def fill_pitcher_stats_for_slate(pitcher_stats: pd.DataFrame, slate: pd.DataFram
             pass
 
     for pid in starter_ids:
-        existing = df[df["player_id"] == pid] if "player_id" in df.columns else pd.DataFrame()
+        # v44.60 (code review #11): coerce before comparing (dtype drift).
+        if "player_id" in df.columns:
+            _pidnum2 = pd.to_numeric(df["player_id"], errors="coerce")
+            try:
+                existing = df[_pidnum2 == int(float(pid))]
+            except (TypeError, ValueError):
+                existing = pd.DataFrame()
+        else:
+            existing = pd.DataFrame()
         needs_fill = (
             existing.empty
             or pd.isna(existing.iloc[0].get("k9"))
