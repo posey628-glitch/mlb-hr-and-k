@@ -114,7 +114,7 @@ def merge_snapshots_with_outcomes(snapshots: dict) -> pd.DataFrame:
             # full candidate set plus pick_score decomposition context.
             for col in [
                 "player_name", "team", "hr_score", "hr_game_pct", "pick_score",
-                "grade", "barrel_pct", "iso", "avg_ev", "blast_pct",
+                "grade", "barrel_pct", "iso", "avg_ev", "blast_pct", "blast_pct_real",
                 "pull_pct", "pull_air_pct", "pulled_brl_pct", "hard_hit",
                 "fb_pct", "gb_pct", "ld_pct",
                 "must_have_met", "must_have_total", "must_have_pass",
@@ -145,6 +145,14 @@ def merge_snapshots_with_outcomes(snapshots: dict) -> pd.DataFrame:
     if not rows:
         return pd.DataFrame()
     df = pd.DataFrame(rows)
+    # v44.63 (user: imputed bat-tracking shouldn't skew data/correlations).
+    # For GRADING, use the real (un-imputed) blast_pct. blast_pct_real is NaN
+    # for hitters without bat-tracking, so those rows drop out of the blast_pct
+    # correlation instead of contributing a fabricated median that dilutes the
+    # signal and can misrank an elite hitter. If blast_pct_real isn't present
+    # (older snapshots pre-v44.63), keep the existing (imputed) blast_pct.
+    if "blast_pct_real" in df.columns:
+        df["blast_pct"] = df["blast_pct_real"]
     # v43.95 (diagnostic-exposed): the same player-game appeared once PER
     # HOURLY SNAPSHOT of a date (6 snapshots of 2 slates → 1116 "rows" from
     # ~470 unique player-games). That inflated n ~2.4×, overweighted
