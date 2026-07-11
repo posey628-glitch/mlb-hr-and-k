@@ -1802,7 +1802,7 @@ def _build_label(per_criterion_results, met, total):
 
 
 def add_must_have_criteria(df: pd.DataFrame) -> pd.DataFrame:
-    """Mark each hitter against the researcher's 10-point MUST-HAVE checklist.
+    """Mark each hitter against the researcher's 9-criteria MUST-HAVE checklist.
 
     Adds columns:
       - must_have_<metric>  bool|None for each of the 10 metrics
@@ -1877,7 +1877,7 @@ def add_must_have_criteria(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def add_nuclear_criteria(df: pd.DataFrame) -> pd.DataFrame:
-    """Mark each hitter against the researcher's 14-point NUCLEAR checklist.
+    """Mark each hitter against the researcher's 12-criteria NUCLEAR checklist.
 
     Designed to surface "only the best 3-8 HR plays" — much stricter than
     Must-Have. Common to see 0-2 hitters pass all 14 on a typical slate.
