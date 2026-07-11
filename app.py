@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.63-honest-blast-grading-imputed-flag"
+APP_VERSION = "2026.06.10-v44.64-data-integrity-audit-line"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -5997,7 +5997,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.63 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.64 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -12146,6 +12146,64 @@ if all_hitters:
         combined_all["data_missing_note"] = _notes
     except Exception as _dce:
         log_swallowed_error("data_completeness", _dce, surface=False)
+
+    # v44.64 (user-requested standing safeguard): audit the scoring frame for
+    # fabricated / imputed / missing values on the KEY stats and surface a
+    # per-stat coverage line in Pipeline Health. If any future change starts
+    # imputing a value or a fetch silently stops going through, this line makes
+    # it visible every run instead of requiring a manual audit. Real coverage
+    # is reported honestly; a known imputation (blast_pct) is labeled as such.
+    try:
+        _audit_stats = [
+            ("barrel_pct", "Barrel%"),
+            ("pulled_brl_pct", "PullBrl%"),
+            ("avg_ev", "EV"),
+            ("hard_hit", "HardHit%"),
+            ("iso", "ISO"),
+            ("xwoba", "xwOBA"),
+            ("xslg", "xSLG"),
+            ("blast_pct", "Blast%"),
+            ("hr_score", "HRScore"),
+            ("dinger_score", "Dinger"),
+        ]
+        # only grade starters (bench naturally sparse), if the flag exists
+        if "is_bench" in combined_all.columns:
+            _audit_frame = combined_all[~combined_all["is_bench"].fillna(False).astype(bool)]
+        else:
+            _audit_frame = combined_all
+        _n_aud = len(_audit_frame)
+        _audit_bits = []
+        _flagged = False
+        if _n_aud > 0:
+            for _col, _lbl in _audit_stats:
+                if _col not in _audit_frame.columns:
+                    _audit_bits.append(f"{_lbl}=✗missing-col")
+                    _flagged = True
+                    continue
+                _real = pd.to_numeric(_audit_frame[_col], errors="coerce").notna().sum()
+                _pct = int(round(100 * _real / _n_aud))
+                _tag = ""
+                # blast_pct is knowingly median-imputed for display; report the
+                # REAL coverage from blast_pct_real so the number isn't misleading
+                if _col == "blast_pct" and "blast_pct_real" in _audit_frame.columns:
+                    _real_bp = pd.to_numeric(_audit_frame["blast_pct_real"], errors="coerce").notna().sum()
+                    _pct = int(round(100 * _real_bp / _n_aud))
+                    _tag = " (real; rest median-imputed for scoring)"
+                if _pct < 50:
+                    _flagged = True
+                _audit_bits.append(f"{_lbl} {_pct}%{_tag}")
+            _integrity_msg = (
+                "🧪 Data integrity (real-value coverage on "
+                f"{_n_aud} starters): " + " · ".join(_audit_bits) +
+                " · a stat far below its neighbors = a fetch not going through; "
+                "no ✗ and no fabricated fills means scores run on real data."
+            )
+            stash_diagnostic(
+                "pipeline_health", _integrity_msg,
+                level="warning" if _flagged else "caption",
+            )
+    except Exception as _aud_err:
+        log_swallowed_error("data_integrity_audit", _aud_err, surface=False)
 
     # v44.20 (user-reported: 3.1700000 trailing zeros). The column_config
     # format specifiers fix the on-screen dataframe display, but exports,
