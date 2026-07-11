@@ -1107,6 +1107,11 @@ def build_matchup_table(
         # v43.5 "central handedness fix" was 4/5 inert. Adding them now.
         "vs_lhp_barrel_pct", "vs_lhp_hard_hit", "vs_lhp_xwoba", "vs_lhp_avg_ev",
         "vs_rhp_barrel_pct", "vs_rhp_hard_hit", "vs_rhp_xwoba", "vs_rhp_avg_ev",
+        # v44.52: vs-hand pull% + derived pulled-barrel% (v44.51). These feed
+        # the handedness override's real pulled_brl_pct blend — must survive
+        # the display_cols filter or the override falls back to the proxy.
+        "vs_lhp_pull_pct", "vs_lhp_pulled_brl_pct",
+        "vs_rhp_pull_pct", "vs_rhp_pulled_brl_pct",
         # HR PROFILE — avg HR distance + max exit velo (June 2026)
         "avg_hr_distance", "max_hit_speed",
         "hr_profile", "hr_profile_label",
