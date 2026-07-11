@@ -328,19 +328,25 @@ _GIST_READ_CACHE_SET = False
 def _gist_read_all() -> dict | None:
     global _GIST_READ_CACHE, _GIST_READ_CACHE_SET
     if _GIST_READ_CACHE_SET:
-        # return a copy so callers can't mutate the cache
         if _GIST_READ_CACHE is None:
             return None
-        import copy as _copy
-        return _copy.deepcopy(_GIST_READ_CACHE)
+        # v44.66 CRITICAL FIX: return a SHALLOW copy, not deepcopy. The prior
+        # deepcopy cloned the ENTIRE accumulated snapshot dict (all days, all
+        # player-games) on every read — ~13 reads/run — which spiked memory and
+        # got worse as the gist grew, causing the app to be killed/rebooted more
+        # often over time. Callers mutate only the TOP LEVEL (all_snaps[key] =
+        # payload / del all_snaps[key]) before writing back, so a shallow copy
+        # fully protects the cache from those mutations at O(keys) cost instead
+        # of O(entire nested structure). The nested snapshot values are treated
+        # as read-only by callers, which is the existing contract.
+        return dict(_GIST_READ_CACHE)
     _result = _gist_read_all_uncached()
     # Only cache successful reads. A None (failure) is NOT cached — a transient
     # error shouldn't poison every subsequent read this run; let it retry.
     if _result is not None:
         _GIST_READ_CACHE = _result
         _GIST_READ_CACHE_SET = True
-        import copy as _copy
-        return _copy.deepcopy(_result)
+        return dict(_result)
     return None
 
 
@@ -1101,6 +1107,12 @@ def auto_attach_outcomes_to_past_snapshots(max_dates: int = 14) -> dict:
                     # Don't overwrite existing outcomes (idempotent)
                     if payload.get("hitter_outcomes"):
                         continue
+                    # v44.66: shallow-copy the payload before mutating so we
+                    # don't touch the shared cached object (the read is now a
+                    # shallow copy for memory reasons). The write below
+                    # invalidates the cache regardless, but this keeps the cache
+                    # clean in the interim.
+                    payload = dict(payload)
                     payload["hitter_outcomes"] = h_out_str
                     payload["pitcher_outcomes"] = p_out_str
                     payload["outcomes_attached_at"] = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
