@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.59-hitter-trad-safe-pid-coerce-data-completeness"
+APP_VERSION = "2026.06.10-v44.60-postponed-exclusion-arsenal-safe-slate-attrs"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -120,7 +120,7 @@ except ImportError:
     def get_pitcher_stats(*a, **k): return pd.DataFrame()
 
 try:
-    from data_fetcher import get_pitcher_arsenal
+    from data_fetcher import get_pitcher_arsenal_safe as get_pitcher_arsenal
 except ImportError:
     def get_pitcher_arsenal(*a, **k): return pd.DataFrame()
 
@@ -5985,7 +5985,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.59 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.60 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -9475,7 +9475,7 @@ if combined_picks is not None and not combined_picks.empty:
     # what removed the phantom 2nd Brewers/Gasser game).
     try:
         from data_fetcher import slate_dropped_games
-        _dropped_games = slate_dropped_games()
+        _dropped_games = slate_dropped_games(slate if "slate" in dir() else None)
         if _dropped_games > 0:
             stash_diagnostic(
                 "pipeline_health",
@@ -15468,7 +15468,7 @@ with st.expander("🔍 Pitcher Lookup — scout any team's pitcher", expanded=Fa
 
                     # Show arsenal if available
                     try:
-                        from data_fetcher import get_pitcher_arsenal
+                        from data_fetcher import get_pitcher_arsenal_safe as get_pitcher_arsenal
                         arsenals = get_pitcher_arsenal()
                         if not arsenals.empty:
                             p_arsenal = arsenals[arsenals["player_id"] == sel_pid]
