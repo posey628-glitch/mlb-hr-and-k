@@ -346,7 +346,21 @@ def researcher_framework_backtest(merged_df: pd.DataFrame) -> dict:
     if "must_have_met" in merged_df.columns:
         mh = merged_df.dropna(subset=["must_have_met", "homered"])
         _mh_count = pd.to_numeric(mh["must_have_met"], errors="coerce").fillna(0)
-        _mh_mask = _mh_count >= 7  # strong power profile (7+ of 9)
+        # v44.61: a FIXED 7/9 cutoff produced n=3 (0.7%) — too small to measure.
+        # Pick the threshold that puts roughly the top 8-12% of players in-tier,
+        # so the cohort is always populated enough to have a meaningful lift. We
+        # walk down from the max count until the in-tier group is at least ~8%
+        # of players (floor of 20 for stability), but never below 5 criteria
+        # (below that it's no longer a "strong profile"). This is data-driven:
+        # if a slate is weak, the bar auto-lowers; if stacked, it stays high.
+        _target_n = max(20, int(0.08 * len(mh)))
+        _mh_thresh = 7
+        for _t in (7, 6, 5):
+            if (_mh_count >= _t).sum() >= _target_n:
+                _mh_thresh = _t
+                break
+            _mh_thresh = _t  # keep walking down to the floor (5)
+        _mh_mask = _mh_count >= _mh_thresh
         mh_pass = mh[_mh_mask]
         mh_fail = mh[~_mh_mask]
         result["must_have"] = {
@@ -360,7 +374,7 @@ def researcher_framework_backtest(merged_df: pd.DataFrame) -> dict:
                 else None
             ),
             "reliable": len(mh_pass) >= 30 and len(mh_fail) >= 30,
-            "threshold_note": "7+ of 9 power criteria",
+            "threshold_note": f"{_mh_thresh}+ of 9 power criteria (adaptive)",
         }
     elif "must_have_pass" in merged_df.columns:
         mh = merged_df.dropna(subset=["must_have_pass", "homered"])
@@ -389,7 +403,18 @@ def researcher_framework_backtest(merged_df: pd.DataFrame) -> dict:
     if "nuclear_met" in merged_df.columns:
         nuc = merged_df.dropna(subset=["nuclear_met", "homered"])
         _nuc_count = pd.to_numeric(nuc["nuclear_met"], errors="coerce").fillna(0)
-        _nuc_mask = _nuc_count >= 9  # strong nuclear profile (9+ criteria)
+        # v44.61: fixed 9/12 gave n=0. Adaptive cutoff targeting the top ~8%
+        # (floor 15), walking down from 9 to a floor of 6 so the cohort is
+        # always measurable. nuclear_met is the strongest RISING feature in
+        # Section G, so a populated version of this is worth surfacing.
+        _nuc_target = max(15, int(0.08 * len(nuc)))
+        _nuc_thresh = 9
+        for _t in (9, 8, 7, 6):
+            if (_nuc_count >= _t).sum() >= _nuc_target:
+                _nuc_thresh = _t
+                break
+            _nuc_thresh = _t
+        _nuc_mask = _nuc_count >= _nuc_thresh
         nuc_in = nuc[_nuc_mask]
         nuc_out = nuc[~_nuc_mask]
         result["nuclear"] = {
@@ -403,7 +428,7 @@ def researcher_framework_backtest(merged_df: pd.DataFrame) -> dict:
                 else None
             ),
             "reliable": len(nuc_in) >= 30 and len(nuc_out) >= 30,
-            "threshold_note": "9+ nuclear criteria",
+            "threshold_note": f"{_nuc_thresh}+ nuclear criteria (adaptive)",
         }
     elif "nuclear_grade" in merged_df.columns:
         nuc = merged_df.dropna(subset=["nuclear_grade", "homered"])
