@@ -1032,7 +1032,8 @@ def build_matchup_table(
         # populated when sidebar opt-in toggle is enabled AND Savant
         # fetch succeeds. Otherwise NaN, _score_from_weights handles that
         # gracefully and they appear empty in the export.
-        "blast_pct", "bat_speed", "fast_swing_pct", "squared_up_pct",
+        "blast_pct", "blast_pct_real", "blast_pct_imputed",
+        "bat_speed", "fast_swing_pct", "squared_up_pct",
         # v43.51 (reviewer-validated): IAA was double-filtered — dropped in
         # the app.py merge AND missing from display_cols. Now wired in both
         # places. If Savant still doesn't return it, the column is just NaN
