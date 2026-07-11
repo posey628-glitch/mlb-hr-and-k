@@ -485,6 +485,44 @@ def researcher_framework_backtest(merged_df: pd.DataFrame) -> dict:
             "threshold_note": "HR≥80, Dinger≥80, Combo≥78, BrlMatch≥80, TwoWay≥75",
         }
 
+    # v44.67 (user: pattern-analyze day/night + home/away). Segment the slate
+    # HR rate by game context to reveal whether these situational factors carry
+    # real signal worth adding to the model. Reported as split rates + lift.
+    def _segment(col, in_label, out_label):
+        if col not in merged_df.columns:
+            return None
+        seg = merged_df.dropna(subset=[col, "homered"]).copy()
+        if seg.empty:
+            return None
+        # coerce to boolean-ish
+        _truthy = seg[col].apply(
+            lambda v: True if v in (True, "True", "true", 1, "1") else
+            (False if v in (False, "False", "false", 0, "0") else None)
+        )
+        seg = seg[_truthy.notna()]
+        if seg.empty:
+            return None
+        grp_in = seg[_truthy[_truthy.notna()] == True]
+        grp_out = seg[_truthy[_truthy.notna()] == False]
+        if not len(grp_in) or not len(grp_out):
+            return None
+        r_in = float(grp_in["homered"].mean())
+        r_out = float(grp_out["homered"].mean())
+        return {
+            "in_label": in_label, "out_label": out_label,
+            "in_rate": r_in, "out_rate": r_out,
+            "n_in": len(grp_in), "n_out": len(grp_out),
+            "lift": (r_in / r_out) if r_out > 0 else None,
+            "reliable": len(grp_in) >= 30 and len(grp_out) >= 30,
+        }
+
+    _home_seg = _segment("is_home", "Home", "Away")
+    if _home_seg:
+        result["context_home_away"] = _home_seg
+    _day_seg = _segment("is_day_game", "Day game", "Night game")
+    if _day_seg:
+        result["context_day_night"] = _day_seg
+
     return result
 
 
