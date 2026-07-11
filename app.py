@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.58-cache-decorator-statsday-adaptive-pullscale"
+APP_VERSION = "2026.06.10-v44.59-hitter-trad-safe-pid-coerce-data-completeness"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -149,7 +149,7 @@ except ImportError:
 
 # Optional newer functions added in updated data_fetcher.py
 try:
-    from data_fetcher import get_hitter_traditional, get_pitcher_traditional_safe as get_pitcher_traditional
+    from data_fetcher import get_hitter_traditional_safe as get_hitter_traditional, get_pitcher_traditional_safe as get_pitcher_traditional
     HAVE_TRADITIONAL = True
 except ImportError:
     try:
@@ -5985,7 +5985,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.58 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.59 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -10044,7 +10044,7 @@ if combined_picks is not None and not combined_picks.empty:
             # correlation warning, arsenal edge, GB caution, split confidence,
             # IL note).
             "slate_leader_flag", "convergence_label", "same_game_flag",
-            "arsenal_flag", "gb_flag", "split_confidence", "il_flag",
+            "arsenal_flag", "gb_flag", "split_confidence", "data_completeness", "il_flag",
         ] if c in top10.columns]
         disp = top10[cols_to_show].copy()
 
@@ -10116,6 +10116,20 @@ if combined_picks is not None and not combined_picks.empty:
                         "Thresholds are SEASON-AWARE: lower in April (everyone "
                         "is thin), higher in August (samples accumulate). "
                         "Currently in June: thin <35 PA, small <65 PA."
+                    ),
+                ),
+                "data_completeness": st.column_config.TextColumn(
+                    "📊 Data", width="small",
+                    help=(
+                        "Whether this hitter's core power inputs went through: "
+                        "barrel%, pull-barrel%, exit velo, hard-hit%, ISO, plus "
+                        "the handedness split vs tonight's pitcher.\n\n"
+                        "✅ full = all key inputs present\n"
+                        "⚠️ partial = some missing; score is using fallbacks\n"
+                        "🚨 thin = mostly missing — the rank may be inflated or "
+                        "deflated by missing data, so treat it with caution.\n\n"
+                        "This exists so a high rank on incomplete data is visible "
+                        "rather than assumed solid."
                     ),
                 ),
                 "handedness_divergence": st.column_config.TextColumn(
@@ -11987,6 +12001,7 @@ if all_hitters:
             "opp_pitcher_grade", "opp_pitcher_barrel_allowed", "opp_recent_hr",
             "opp_platoon_hr", "xhr_neutral", "hr_conv_ratio", "hr_luck_gap",
             "slate_leader_flag", "sleeper_score", "recently_moved", "il_flag",
+            "data_completeness",
         ]
         _score_cols = [c for c in _backmap_candidates
                        if c in combined_all.columns and "player_id" in combined_all.columns]
@@ -12041,6 +12056,74 @@ if all_hitters:
         log_swallowed_error("tag_power_targets", _pte, surface=False)
         combined_all["is_moonshot_target"] = 0
         combined_all["is_laser_target"] = 0
+
+    # v44.59 (user: "if something isn't going through for a player and it's
+    # skewing the data, we should be made aware so we don't pick the wrong guy").
+    # Build a per-player DATA COMPLETENESS flag from the key scoring inputs. If
+    # a core power signal is missing, that hitter's score is running on partial
+    # data and their rank may be inflated/deflated by fallbacks — surface it so
+    # a high rank on thin data is visible, not assumed solid.
+    try:
+        # the inputs that most drive HR Score / Dinger / the platoon adjustment
+        _core_inputs = [
+            ("barrel_pct", "barrel%"),
+            ("pulled_brl_pct", "pull-barrel%"),
+            ("avg_ev", "exit velo"),
+            ("hard_hit", "hard-hit%"),
+            ("iso", "ISO"),
+        ]
+        # handedness split presence for the hand they face tonight
+        _pthrow_dc = combined_all.get("opp_pitcher_throws", pd.Series(index=combined_all.index, dtype=object)).astype(str).str.upper().str[:1]
+        _missing_labels = []
+        _missing_count = pd.Series(0, index=combined_all.index)
+        for _col, _label in _core_inputs:
+            if _col in combined_all.columns:
+                _isna = pd.to_numeric(combined_all[_col], errors="coerce").isna()
+            else:
+                _isna = pd.Series(True, index=combined_all.index)
+            _missing_count = _missing_count + _isna.astype(int)
+        # handedness split coverage for tonight's pitcher hand
+        _split_missing = pd.Series(False, index=combined_all.index)
+        for _hand, _side in (("L", "lhp"), ("R", "rhp")):
+            _sel = _pthrow_dc == _hand
+            _sc = f"vs_{_side}_barrel_pct"
+            if _sc in combined_all.columns:
+                _split_missing = _split_missing | (_sel & pd.to_numeric(combined_all[_sc], errors="coerce").isna())
+            else:
+                _split_missing = _split_missing | _sel
+        # completeness label: how many of the 5 core inputs are present + split
+        _total_core = len(_core_inputs)
+        _present = _total_core - _missing_count
+        def _completeness_label(present, total, split_ok):
+            if present >= total and split_ok:
+                return "✅ full"
+            if present >= total - 1 and split_ok:
+                return "✅ full"
+            if present >= max(2, total - 2):
+                return "⚠️ partial"
+            return "🚨 thin"
+        combined_all["data_completeness"] = [
+            _completeness_label(_p, _total_core, not _sm)
+            for _p, _sm in zip(_present, _split_missing)
+        ]
+        # a compact note of what's missing, for the tooltip/detail. Build per
+        # core input as a vectorized boolean, then assemble the label list.
+        _missing_masks = {}
+        for _col, _label in _core_inputs:
+            if _col in combined_all.columns:
+                _missing_masks[_label] = pd.to_numeric(combined_all[_col], errors="coerce").isna().tolist()
+            else:
+                _missing_masks[_label] = [True] * len(combined_all)
+        _split_list = _split_missing.tolist()
+        _notes = []
+        for _i in range(len(combined_all)):
+            _miss = [lbl for lbl, mask in _missing_masks.items() if mask[_i]]
+            if _split_list[_i]:
+                _miss.append("handedness split")
+            _notes.append(", ".join(_miss))
+        combined_all["data_missing_note"] = _notes
+    except Exception as _dce:
+        log_swallowed_error("data_completeness", _dce, surface=False)
 
     # v44.20 (user-reported: 3.1700000 trailing zeros). The column_config
     # format specifiers fix the on-screen dataframe display, but exports,
@@ -14927,6 +15010,7 @@ def build_col_config():
         "avg_hr_ev":       st.column_config.NumberColumn("HR EV", format="%.1f", width="small", help="Average exit velocity (mph) on home runs specifically — how hard this hitter's HRs are struck. Feeds the Laser target alongside overall avg EV."),
         "power_composite": st.column_config.NumberColumn("💥+ Combo", format="%.0f", width="small", help="Composite of HR Score (55%) + Dinger Score (45%) — blends the full matchup-aware model with curated raw power. Highest when both systems agree a hitter is a strong HR play. Runs parallel to the shipped ranking."),
         "barrel_matchup_score": st.column_config.NumberColumn("🎯 Brl Match", format="%.0f", width="small", help="NEW (v44.34): leads with pulled-barrel% — the most RELIABLE HR predictor in our data (Section G reliability 2.69) — plus barrels/hard-hit/EV, then amplifies by tonight's pitcher HR-vulnerability (arsenal HR-tilt + barrels allowed). The thesis: the most reliable power signal aimed at the most vulnerable arm. Graded parallel to the others."),
+        "data_completeness": st.column_config.TextColumn("📊 Data", width="small", help="Data completeness for this hitter's core power inputs (barrel%, pull-barrel%, EV, hard-hit%, ISO) + the handedness split vs tonight's pitcher. ✅ full = all present. ⚠️ partial = some missing (score uses fallbacks). 🚨 thin = mostly missing — treat the rank with caution, it may be inflated/deflated by missing data."),
         "two_way_matchup_score": st.column_config.NumberColumn("⚖️ Two-Way", format="%.0f", width="small", help="NEW (v44.43): scores the matchup from BOTH sides + arsenal, handedness-aware. Three parts: the hitter's power (50%), how much THIS pitcher allows to hitters of that hand (30%: vs-hand HR/PA + SLG, plus barrel%/xwOBA/FB% allowed), and how the batter fares vs THIS pitcher's pitch mix (20%: pitch HR-tilt, arsenal match, best-pitch xwOBA). A masher facing a pitcher who suppresses that side AND has a tough arsenal gets marked down. Switch hitters resolve to their platoon-advantage side."),
         "max_hit_speed":   st.column_config.NumberColumn("Max EV", format="%.1f", width="small", help="Hardest-hit ball (mph). Ceiling of raw power."),
         "avg_hr_distance": st.column_config.NumberColumn("HR Dist", format="%.0f", width="small", help="Average home-run distance (ft) when available from Savant. Feeds the Moonshot (400+ ft) target."),
@@ -15162,7 +15246,7 @@ def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
         "best_pitch", "best_pitch_xwoba", "worst_pitch", "mini_arsenal",
         # 8) SITUATIONAL FLAGS
         "smash_spot", "arsenal_flag", "gb_flag", "day_night_flag",
-        "contact_flag", "split_confidence", "slate_leader_flag",
+        "contact_flag", "split_confidence", "data_completeness", "slate_leader_flag",
         # 9) HR PROFILE / RESEARCHER FRAMEWORK checkpoints
         "hr_criteria_label",
         "must_have_label", "must_have_met", "must_have_pass",
