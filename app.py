@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.57-gist-memoize-stored-outcomes-rename"
+APP_VERSION = "2026.06.10-v44.58-cache-decorator-statsday-adaptive-pullscale"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -2424,7 +2424,7 @@ if slate.empty:
 
 # Statcast pulls — wrap with try/except so transient timeouts don't crash app
 try:
-    hitter_stats = get_hitter_stats(_stats_day=_stats_day_key()) if not slate.empty else pd.DataFrame()
+    hitter_stats = get_hitter_stats(stats_day=_stats_day_key()) if not slate.empty else pd.DataFrame()
 
     # v44.31: pinpoint diagnostic to isolate WHERE distance data is lost.
     # The fetch trace shows dist_merged=251 inside get_hitter_stats, but
@@ -2473,7 +2473,7 @@ except (ConnectionError, requests.exceptions.RequestException) as _e:
     st.stop()
 
 try:
-    pitcher_stats = get_pitcher_stats(_stats_day=_stats_day_key()) if not slate.empty else pd.DataFrame()
+    pitcher_stats = get_pitcher_stats(stats_day=_stats_day_key()) if not slate.empty else pd.DataFrame()
 except (ConnectionError, requests.exceptions.RequestException) as _e:
     st.error(
         f"⚠️ **Baseball Savant (pitcher data) is currently unreachable.**\n\n"
@@ -2493,8 +2493,8 @@ except Exception:
 # (plate_discipline_flag remains as the primary working zone signal).
 try:
     from data_fetcher import get_pitcher_zone_tiers, get_hitter_zone_tiers
-    pitcher_zone_tiers = get_pitcher_zone_tiers(_stats_day=_stats_day_key()) if not slate.empty else pd.DataFrame()
-    hitter_zone_tiers = get_hitter_zone_tiers(_stats_day=_stats_day_key()) if not slate.empty else pd.DataFrame()
+    pitcher_zone_tiers = get_pitcher_zone_tiers(stats_day=_stats_day_key()) if not slate.empty else pd.DataFrame()
+    hitter_zone_tiers = get_hitter_zone_tiers(stats_day=_stats_day_key()) if not slate.empty else pd.DataFrame()
     _zone_fetch_status = (
         "✅ working" if (not pitcher_zone_tiers.empty and not hitter_zone_tiers.empty)
         else "⚠️ partial" if (not pitcher_zone_tiers.empty or not hitter_zone_tiers.empty)
@@ -2532,7 +2532,7 @@ if not hitter_zone_tiers.empty and "player_id" in hitter_stats.columns:
 try:
     from data_fetcher import get_hitter_handedness_statcast
     hitter_hand_statcast = (
-        get_hitter_handedness_statcast(_stats_day=_stats_day_key())
+        get_hitter_handedness_statcast(stats_day=_stats_day_key())
         if not slate.empty else pd.DataFrame()
     )
     if hitter_hand_statcast.empty:
@@ -2815,8 +2815,8 @@ if _pitcher_dn_il_err:
         st.caption(f"⚠️ Day/Night+IL fetch issue: {_pitcher_dn_il_err}")
 
 # Traditional stats
-hitter_trad = get_hitter_traditional(_stats_day=_stats_day_key()) if not slate.empty else pd.DataFrame()
-pitcher_trad = get_pitcher_traditional(_stats_day=_stats_day_key()) if not slate.empty else pd.DataFrame()
+hitter_trad = get_hitter_traditional(stats_day=_stats_day_key()) if not slate.empty else pd.DataFrame()
+pitcher_trad = get_pitcher_traditional(stats_day=_stats_day_key()) if not slate.empty else pd.DataFrame()
 
 # Merge traditional stats - force player_id types to match
 # CRITICAL: use combine_first style merge so we never overwrite Savant values
@@ -3462,7 +3462,7 @@ elif _eval_error:
 if show_transactions:
     try:
         from data_fetcher import get_recent_transactions
-        txn_df = get_recent_transactions(days_back=2, _stats_day=_stats_day_key())
+        txn_df = get_recent_transactions(days_back=2, stats_day=_stats_day_key())
     except Exception:
         txn_df = pd.DataFrame()
     if not txn_df.empty:
@@ -5985,7 +5985,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.57 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.58 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
