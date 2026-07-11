@@ -879,6 +879,97 @@ def rolling_feature_importance(correlation_history: list,
     )
 
 
+def propose_dinger_weights(importance_df: pd.DataFrame,
+                           current_weights: dict,
+                           weight_sum: float = 10.0,
+                           min_days: int = 5) -> dict:
+    """v44.68 (user endgame: synthesize our OWN properly-weighted metric).
+
+    Takes accumulated feature importance and proposes what the Dinger power
+    weights WOULD be if derived purely from the data — weighting each feature
+    by |correlation| × reliability (predictive AND stable), normalized to the
+    same total as the current shipped weights so they're directly comparable.
+
+    Returns a dict with, per feature: current weight, proposed weight, the
+    delta, and the evidence (corr, reliability, days). This is a RECOMMENDATION
+    for the user to evaluate — it does NOT auto-change the shipped model. The
+    point is to make "what does the data say the weights should be?" a concrete,
+    comparable answer instead of a guess.
+
+    Guardrails:
+      - only features with >= min_days of history and |corr| >= 0.03 count
+      - a feature the data has no signal on keeps its current weight (we don't
+        zero out a stat just because it's new/thin — that would be overfitting
+        to a short window)
+      - proposed weights are normalized to weight_sum so scale matches current
+    """
+    result = {"features": {}, "reliable": False, "note": ""}
+    if importance_df is None or importance_df.empty:
+        result["note"] = "No feature-importance history yet — need graded slates."
+        return result
+
+    imp = importance_df.set_index("feature") if "feature" in importance_df.columns else importance_df
+    # Build a raw score per CURRENT feature: |corr| × reliability.
+    raw = {}
+    _min_days_seen = 999
+    for feat, cur_w in current_weights.items():
+        if feat in imp.index:
+            row = imp.loc[feat]
+            _corr = abs(float(row.get("avg_corr", 0.0)))
+            _reliab = float(row.get("reliability", 1.0))
+            _days = int(row.get("n_days", 0))
+            _min_days_seen = min(_min_days_seen, _days)
+            if _days >= min_days and _corr >= 0.03:
+                # reliability modulates but doesn't dominate (0.5–1.5 band)
+                _reliab_mult = 0.5 + min(max(_reliab, 0.0), 3.0) / 3.0
+                raw[feat] = _corr * _reliab_mult
+            else:
+                # thin evidence → fall back to current weight's implied share
+                raw[feat] = None
+        else:
+            raw[feat] = None
+
+    # For features with no usable evidence, keep their CURRENT share so we don't
+    # overfit. Normalize the evidence-backed features across the remaining budget.
+    _cur_total = float(sum(current_weights.values())) or 1.0
+    _evidence_feats = {f: v for f, v in raw.items() if v is not None}
+    _kept_feats = {f: current_weights[f] for f in raw if raw[f] is None}
+    _kept_budget = sum(_kept_feats.values()) / _cur_total * weight_sum
+    _evidence_budget = weight_sum - _kept_budget
+    _evidence_raw_total = float(sum(_evidence_feats.values())) or 1.0
+
+    for feat, cur_w in current_weights.items():
+        if feat in _evidence_feats:
+            proposed = _evidence_budget * (_evidence_feats[feat] / _evidence_raw_total)
+            ev = imp.loc[feat]
+            evidence = {
+                "corr": round(float(ev.get("avg_corr", 0.0)), 4),
+                "reliability": round(float(ev.get("reliability", 0.0)), 2),
+                "days": int(ev.get("n_days", 0)),
+            }
+        else:
+            # kept at current share (rescaled to weight_sum)
+            proposed = cur_w / _cur_total * weight_sum
+            evidence = {"corr": None, "reliability": None, "days": 0,
+                        "note": "thin evidence — kept current"}
+        result["features"][feat] = {
+            "current": round(float(cur_w), 2),
+            "proposed": round(float(proposed), 2),
+            "delta": round(float(proposed) - float(cur_w), 2),
+            "evidence": evidence,
+        }
+
+    # reliable only if every evidence feature has enough days
+    result["reliable"] = (_min_days_seen >= 15 and len(_evidence_feats) >= 3)
+    result["note"] = (
+        f"Proposed from {len(_evidence_feats)} evidence-backed feature(s); "
+        f"{len(_kept_feats)} kept at current (thin data). "
+        + ("Enough history to take seriously." if result["reliable"]
+           else "Still early — treat as directional, not final.")
+    )
+    return result
+
+
 def compute_adaptive_score(current_slate: pd.DataFrame,
                             importance_df: pd.DataFrame,
                             top_n_features: int = 5) -> pd.Series:
