@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.69-chunk-people-fetch-docstrings"
+APP_VERSION = "2026.06.10-v44.71-il-hard-exclude-top10"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -4088,6 +4088,59 @@ if show_pattern_analysis:
                                     f"→ **lift {_lstr}** {_rel}"
                                 )
 
+                    # ====== Per-player patterns (v44.70) ======
+                    # User: patterns fit certain players and not others — the
+                    # league-wide correlation averages over individual variation.
+                    # Surface the players the model most over/under-rates.
+                    try:
+                        from pattern_analysis import per_player_patterns
+                        _pp = per_player_patterns(merged, min_games=8)
+                        if _pp.get("players"):
+                            st.markdown("---")
+                            st.markdown("### 👤 Per-player patterns — where the model mis-fits individuals")
+                            st.caption(
+                                f"Players with ≥{_pp['min_games']} graded games, ranked by how far "
+                                "their ACTUAL HR rate diverges from what the model projected. "
+                                "**Positive edge = the model UNDER-rates this player** (they homer "
+                                "more than we say); negative = over-rates. These are the hitters whose "
+                                "individual pattern doesn't match the league-wide model — the ones "
+                                "worth a manual look. Small samples are noisy; trust these more as "
+                                f"game counts grow. ({_pp['n_qualified']} players qualified so far.)"
+                            )
+                            _pp_rows = []
+                            for _p in _pp["players"][:25]:
+                                _pp_rows.append({
+                                    "Player": _p["player"],
+                                    "Games": _p["n"],
+                                    "Actual HR%": _p["actual_hr_rate"] * 100,
+                                    "Proj HR%": _p.get("proj_hr_rate", float("nan")) * 100
+                                    if _p.get("proj_hr_rate") is not None else float("nan"),
+                                    "Edge": _p.get("edge", float("nan")) * 100
+                                    if _p.get("edge") is not None else float("nan"),
+                                })
+                            st.dataframe(
+                                pd.DataFrame(_pp_rows), hide_index=True, use_container_width=True,
+                                column_config={
+                                    "Games": st.column_config.NumberColumn(format="%d"),
+                                    "Actual HR%": st.column_config.NumberColumn(format="%.1f%%"),
+                                    "Proj HR%": st.column_config.NumberColumn(format="%.1f%%"),
+                                    "Edge": st.column_config.NumberColumn(
+                                        format="%+.1f%%",
+                                        help="Actual minus projected. + = model under-rates, − = over-rates.",
+                                    ),
+                                },
+                            )
+                        elif _pp.get("n_qualified") == 0:
+                            st.markdown("---")
+                            st.markdown("### 👤 Per-player patterns")
+                            st.caption(
+                                "No player has ≥8 graded games yet — per-player patterns need "
+                                "more history before individual signal separates from noise. "
+                                "This section fills in as slates accumulate."
+                            )
+                    except Exception as _pp_err:
+                        log_swallowed_error("per_player_patterns", _pp_err, surface=False)
+
                     # ====== Section B: Per-prop accuracy ======
                     st.markdown("---")
                     st.markdown("### B. Per-prop projection accuracy")
@@ -6069,7 +6122,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.69 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.71 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -10027,10 +10080,37 @@ if combined_picks is not None and not combined_picks.empty:
             except Exception:
                 pass
 
+        # v44.71: HARD-EXCLUDE IL / inactive players from the Top 10 pool.
+        # The -15 pick_score penalty (applied earlier) SOFTENS an inactive
+        # player's rank but doesn't remove them — an elite hitter at ~105 minus
+        # 15 is still ~90 and can land in the Top 10, so you'd be betting a guy
+        # who isn't playing (on IL / optioned / DFA'd). il_flag is conservative:
+        # it's only set when a player is confirmed OFF the active roster and
+        # fails open (blank) whenever roster data is missing or the id can't be
+        # matched — so this can't accidentally drop an active player. They still
+        # appear (flagged 🏥) in the matchup tables for visibility; they just
+        # don't rank in the picks you actually bet.
+        _q_pool = q
+        if "il_flag" in q.columns:
+            _active_mask = q["il_flag"].fillna("").astype(str) == ""
+            _n_excluded = int((~_active_mask).sum())
+            if _n_excluded > 0:
+                _q_pool = q[_active_mask]
+                try:
+                    stash_diagnostic(
+                        "pipeline_health",
+                        f"🏥 Top 10 exclusion: {_n_excluded} IL/inactive player(s) "
+                        f"held out of the pick pool (confirmed off active roster). "
+                        f"They still show flagged in matchup tables — just not bettable picks.",
+                        level="caption",
+                    )
+                except Exception:
+                    pass
+
         # Diversity rule: max 2 picks per game so the top 5 doesn't pile up
         # on one matchup. Greedy selection: sort by pick_score, take in order,
         # skipping any that would exceed 2-per-game.
-        q_sorted = q.sort_values("pick_score", ascending=False)
+        q_sorted = _q_pool.sort_values("pick_score", ascending=False)
         picks = []
         game_count = {}
         # First pass: max 2 per game (diversity rule)
