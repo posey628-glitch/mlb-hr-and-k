@@ -705,7 +705,7 @@ def save_snapshot(snapshot_date, matchup_df: pd.DataFrame,
                 "hr_score", "grade",
                 "must_have_met", "must_have_total", "must_have_pass",
                 "nuclear_met", "nuclear_total", "nuclear_grade",
-                "hit_game_pct", "tb_game_pct",
+                "hit_game_pct", "expected_total_bases", "tb_pa",
                 # v43.83 (user-requested self-improvement): the pattern-
                 # discovery loop needs the FULL predictor set to measure
                 # which features actually predict outcomes. Previously only
