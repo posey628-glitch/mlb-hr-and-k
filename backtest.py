@@ -798,6 +798,7 @@ def save_snapshot(snapshot_date, matchup_df: pd.DataFrame,
                 "recent_hr", "recent_hr_weighted_rate",
                 "pitch_hr_score", "pitch_match_score",
                 "lineup_confirmed",  # v43.93: segment confirmed-vs-projected accuracy
+                "is_home", "is_day_game",  # v44.67: home/away + day/night segmentation
                 # Environment for env-boosted correlations
                 "env_boost", "opp_pitcher_xwoba",
                 "dinger_score",  # v44.11: grade Dinger Score
