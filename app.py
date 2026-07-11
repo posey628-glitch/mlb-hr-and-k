@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.66-gist-memory-fix-smash-diag"
+APP_VERSION = "2026.06.10-v44.67-context-pattern-home-day"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -4072,6 +4072,22 @@ if show_pattern_analysis:
                                 f"→ **lift {lift_str}** {reliable}"
                             )
 
+                        # v44.67: situational context segments (home/away, day/night)
+                        for _ck, _emoji in [("context_home_away", "🏠"),
+                                            ("context_day_night", "🌞")]:
+                            _seg = rf_results.get(_ck)
+                            if _seg:
+                                _lift = _seg.get("lift")
+                                _lstr = f"{_lift:.2f}×" if _lift else "—"
+                                _rel = "✅" if _seg.get("reliable") else "⚠️ small sample"
+                                st.markdown(
+                                    f"**{_emoji} {_seg['in_label']} vs {_seg['out_label']}**: "
+                                    f"{_seg['in_label']} homered **{_seg['in_rate']:.1%}** "
+                                    f"(n={_seg['n_in']}) vs {_seg['out_label']} "
+                                    f"**{_seg['out_rate']:.1%}** (n={_seg['n_out']}) "
+                                    f"→ **lift {_lstr}** {_rel}"
+                                )
+
                     # ====== Section B: Per-prop accuracy ======
                     st.markdown("---")
                     st.markdown("### B. Per-prop projection accuracy")
@@ -5997,7 +6013,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.66 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.67 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -8217,6 +8233,20 @@ for gpk, ctx in game_context_map.items():
         # confirmed-vs-unconfirmed prediction accuracy.
         x["lineup_confirmed"] = bool(ctx.get(f"{team_side}_lineup_confirmed"))
         x["team"] = g_row[f"{team_side}_team_abbr"]
+        # v44.67 (user: pattern-analyze day/night + home/away). Attach clean
+        # binary context columns so the pattern analysis can measure whether HR
+        # rate differs home vs away and day vs night. These get snapshotted and
+        # graded like any other feature.
+        x["is_home"] = (team_side == "home")
+        try:
+            _gt = ""
+            if "game_type" in x.columns and x["game_type"].notna().any():
+                _gt = str(x["game_type"].dropna().iloc[0]).lower()
+            else:
+                _gt = str(ctx.get("game_type", "")).lower()
+            x["is_day_game"] = (_gt == "day") if _gt in ("day", "night") else pd.NA
+        except Exception:
+            x["is_day_game"] = pd.NA
         opp_side = "home" if team_side == "away" else "away"
         x["opp_pitcher"] = g_row.get(f"{opp_side}_pitcher", "TBD") or "TBD"
         opp_p_row = ctx.get(f"{opp_side}_p_row") or {}
