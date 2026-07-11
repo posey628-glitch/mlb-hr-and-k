@@ -3923,20 +3923,27 @@ def fill_hitter_bats(lineups: list, ids: set | None = None) -> dict:
                         continue
     if not ids:
         return {}
-    try:
-        ids_str = ",".join(str(p) for p in ids)
-        url = f"https://statsapi.mlb.com/api/v1/people?personIds={ids_str}"
-        r = requests.get(url, headers=HEADERS, timeout=15)
-        r.raise_for_status()
-        out = {}
-        for person in r.json().get("people", []):
-            pid = person.get("id")
-            side = (person.get("batSide") or {}).get("code")
-            if pid and side:
-                out[pid] = side
-        return out
-    except Exception:
-        return {}
+    # v44.69: chunk to 100 ids per request. A full slate (~300+ hitters) in one
+    # URL can exceed practical URL-length limits and fail the ENTIRE fetch,
+    # leaving every hitter without batting handedness. Chunking keeps each URL
+    # safe; a single chunk failing only loses that chunk, not all of it.
+    out = {}
+    _id_list = list(ids)
+    for _i in range(0, len(_id_list), 100):
+        _chunk = _id_list[_i:_i + 100]
+        try:
+            ids_str = ",".join(str(p) for p in _chunk)
+            url = f"https://statsapi.mlb.com/api/v1/people?personIds={ids_str}"
+            r = requests.get(url, headers=HEADERS, timeout=15)
+            r.raise_for_status()
+            for person in r.json().get("people", []):
+                pid = person.get("id")
+                side = (person.get("batSide") or {}).get("code")
+                if pid and side:
+                    out[pid] = side
+        except Exception:
+            continue  # lose only this chunk, keep the rest
+    return out
 
 
 @st.cache_data(ttl=86400)
@@ -3947,26 +3954,30 @@ def fetch_player_debut_years(ids: tuple) -> dict:
     """
     if not ids:
         return {}
-    try:
-        ids_str = ",".join(str(p) for p in ids)
-        url = (
-            f"https://statsapi.mlb.com/api/v1/people?personIds={ids_str}"
-            "&hydrate=mlbDebutDate"
-        )
-        r = requests.get(url, headers=HEADERS, timeout=15)
-        r.raise_for_status()
-        out = {}
-        for person in r.json().get("people", []):
-            pid = person.get("id")
-            debut = person.get("mlbDebutDate")
-            if pid and debut:
-                try:
-                    out[pid] = int(debut[:4])
-                except (ValueError, TypeError):
-                    continue
-        return out
-    except Exception:
-        return {}
+    # v44.69: chunk to 100 ids (same URL-length safety as fill_hitter_bats)
+    out = {}
+    _id_list = list(ids)
+    for _i in range(0, len(_id_list), 100):
+        _chunk = _id_list[_i:_i + 100]
+        try:
+            ids_str = ",".join(str(p) for p in _chunk)
+            url = (
+                f"https://statsapi.mlb.com/api/v1/people?personIds={ids_str}"
+                "&hydrate=mlbDebutDate"
+            )
+            r = requests.get(url, headers=HEADERS, timeout=15)
+            r.raise_for_status()
+            for person in r.json().get("people", []):
+                pid = person.get("id")
+                debut = person.get("mlbDebutDate")
+                if pid and debut:
+                    try:
+                        out[pid] = int(debut[:4])
+                    except (ValueError, TypeError):
+                        continue
+        except Exception:
+            continue  # lose only this chunk
+    return out
 
 
 def is_rookie(debut_year: int | None, current_year: int = CURRENT_SEASON) -> bool:
