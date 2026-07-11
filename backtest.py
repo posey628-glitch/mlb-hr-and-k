@@ -783,7 +783,7 @@ def save_snapshot(snapshot_date, matchup_df: pd.DataFrame,
                 # xwoba, slg, etc. These are the actual candidate features
                 # for the adaptive score. Compact JSON keeps the payload
                 # under the Gist size budget even with these additions.
-                "avg_ev", "hard_hit", "blast_pct",
+                "avg_ev", "hard_hit", "blast_pct", "blast_pct_real",
                 "pull_pct", "pull_air_pct", "pulled_brl_pct",
                 "fb_pct", "gb_pct", "ld_pct",
                 "xwoba", "xslg", "slg", "obp", "ops",
