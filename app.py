@@ -7,7 +7,7 @@ DingerMaven dashboard - Streamlit main entry.
 from __future__ import annotations
 
 import io
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 import numpy as np
@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.52-pull-display-cols-and-codereview-fixes"
+APP_VERSION = "2026.06.10-v44.57-gist-memoize-stored-outcomes-rename"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -1000,6 +1000,12 @@ def log_swallowed_error(where: str, exc: Exception, surface: bool = True) -> Non
     """
     try:
         _SWALLOWED_ERRORS.append((where, f"{type(exc).__name__}: {exc}"))
+        # v44.56 (code review #15): this is a module-level list that persists
+        # across reruns within a container and was never trimmed. Cap it so a
+        # long-lived container can't accumulate errors unboundedly (keep the
+        # most recent 200 — plenty for diagnostics).
+        if len(_SWALLOWED_ERRORS) > 200:
+            del _SWALLOWED_ERRORS[:-200]
         if surface:
             stash_diagnostic(
                 "pipeline_health",
@@ -1724,7 +1730,7 @@ with st.sidebar:
             import pytz
             _et = datetime.now(pytz.timezone("US/Eastern"))
         except Exception:
-            _et = datetime.utcnow() - timedelta(hours=4)  # ET fallback
+            _et = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=4)  # ET fallback
         # Only 12 AM–5 AM ET holds on last night's slate (games finishing up).
         if _et.hour < 5:
             return (_et - timedelta(days=1)).date()
@@ -5979,7 +5985,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.52 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.57 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -8997,10 +9003,14 @@ if combined_picks is not None and not combined_picks.empty:
             and "grade" in p_slate.columns
             and "opp_pitcher" in combined_picks.columns):
         try:
-            _grade_map = p_slate.set_index("pitcher_name")["grade"].to_dict()
+            # v44.57 (code review #10): renamed from _grade_map to avoid
+            # shadowing the earlier player_id→grade map (~line 8343). Both work
+            # today because usage is sequential, but the shared name was a
+            # refactor landmine.
+            _pitcher_grade_map = p_slate.set_index("pitcher_name")["grade"].to_dict()
             _hr9_map = p_slate.set_index("pitcher_name")["hr9"].to_dict() if "hr9" in p_slate.columns else {}
             _barrel_a_map = p_slate.set_index("pitcher_name")["barrel_allowed"].to_dict() if "barrel_allowed" in p_slate.columns else {}
-            combined_picks["opp_pitcher_grade"] = combined_picks["opp_pitcher"].map(_grade_map)
+            combined_picks["opp_pitcher_grade"] = combined_picks["opp_pitcher"].map(_pitcher_grade_map)
             combined_picks["opp_pitcher_hr9"] = combined_picks["opp_pitcher"].map(_hr9_map)
             combined_picks["opp_pitcher_barrel_allowed"] = combined_picks["opp_pitcher"].map(_barrel_a_map)
 
@@ -12005,6 +12015,28 @@ if all_hitters:
     # per-game display reads these columns instead of recomputing.
     try:
         combined_all = tag_power_targets(combined_all)
+        # v44.53 (code review #4): tag_power_targets runs AFTER the main
+        # back-map, so is_moonshot_target/is_laser_target aren't on the per-game
+        # ctx frames the display reads. Map them now, by player_id, so the
+        # per-game Moonshot/Laser display reads the SAME tag the learning loop
+        # graded — display and grading can no longer disagree.
+        try:
+            if "player_id" in combined_all.columns:
+                _tag_key = pd.to_numeric(combined_all["player_id"], errors="coerce")
+                for _tcol in ("is_moonshot_target", "is_laser_target"):
+                    if _tcol in combined_all.columns:
+                        _tmap = dict(zip(_tag_key, pd.to_numeric(combined_all[_tcol], errors="coerce")))
+                        for _gpk, _gctx in game_context_map.items():
+                            for _side in ("away_matchup", "home_matchup",
+                                          "away_bench_matchup", "home_bench_matchup"):
+                                _frame = _gctx.get(_side)
+                                if _frame is None or _frame.empty or "player_id" not in _frame.columns:
+                                    continue
+                                _fk = pd.to_numeric(_frame["player_id"], errors="coerce")
+                                _frame[_tcol] = _fk.map(_tmap).fillna(0)
+                                _gctx[_side] = _frame
+        except Exception as _tagmap_e:
+            log_swallowed_error("power_target_tag_backmap", _tagmap_e, surface=False)
     except Exception as _pte:
         log_swallowed_error("tag_power_targets", _pte, surface=False)
         combined_all["is_moonshot_target"] = 0
@@ -13849,9 +13881,14 @@ try:
 
             if _rank_intent:
                 _target_col = None
-                # explicit stat alias wins
+                # explicit stat alias wins. v44.56 (code review #9): match on
+                # WORD BOUNDARIES, not raw substring — otherwise "iso" matches
+                # "comparison", "ev" matches many words, "hit" matches "white".
+                import re as _re_alias
                 for _alias, _col in _stat_aliases.items():
-                    if _alias in _ql and _col in combined_all.columns:
+                    if _col not in combined_all.columns:
+                        continue
+                    if _re_alias.search(r"\b" + _re_alias.escape(_alias.strip()) + r"\b", _ql):
                         _target_col = _col
                         break
                 # else intent-derived column
@@ -14874,18 +14911,18 @@ def build_col_config():
         # format specifier fixes the DISPLAY cleanly across every table
         # without touching the underlying values (which stay full-precision
         # for correct math). One-decimal for percents, three for rate stats.
-        "barrel_pct":      st.column_config.NumberColumn("Barrel%", format="%.1f", width="small", help="Share of batted balls hit at the ideal EV+launch-angle combo for extra bases. The most stable HR predictor in the model."),
+        "barrel_pct":      st.column_config.NumberColumn("Barrel%", format="%.1f%%", width="small", help="Share of batted balls hit at the ideal EV+launch-angle combo for extra bases. The most stable HR predictor in the model."),
         "pulled_brl_pct":  st.column_config.NumberColumn("Pull Brl%", format="%.1f", width="small", help="Barrels pulled in the air — the exact launch pattern that produces home runs. HR-specific power signal."),
         "blast_pct":       st.column_config.NumberColumn("Blast%", format="%.1f", width="small", help="Share of competitive swings that are 'blasts' — Statcast's fast-swing + squared-up combos that do the most damage. High = elite bat speed meeting the ball flush."),
-        "hard_hit":        st.column_config.NumberColumn("Hard Hit%", format="%.1f", width="small", help="Share of batted balls hit 95+ mph exit velocity. Raw contact quality."),
+        "hard_hit":        st.column_config.NumberColumn("Hard Hit%", format="%.1f%%", width="small", help="Share of batted balls hit 95+ mph exit velocity. Raw contact quality."),
         "pull_air_pct":    st.column_config.NumberColumn("Pull Air%", format="%.1f", width="small", help="Share of batted balls pulled in the air. The launch/direction combo most associated with HRs."),
         "pull_pct":        st.column_config.NumberColumn("Pull%", format="%.1f", width="small", help="Share of batted balls pulled (any trajectory)."),
-        "fb_pct":          st.column_config.NumberColumn("FB%", format="%.1f", width="small", help="Fly-ball rate. HRs come from fly balls, so higher helps power output."),
+        "fb_pct":          st.column_config.NumberColumn("FB%", format="%.1f%%", width="small", help="Fly-ball rate. HRs come from fly balls, so higher helps power output."),
         "gb_pct":          st.column_config.NumberColumn("GB%", format="%.1f", width="small", help="Ground-ball rate. High GB% suppresses HR upside."),
         "ld_pct":          st.column_config.NumberColumn("LD%", format="%.1f", width="small", help="Line-drive rate. Best for hits/total bases, less for HRs."),
-        "k_pct":           st.column_config.NumberColumn("K%", format="%.1f", width="small", help="Strikeout rate. Higher = more empty at-bats."),
-        "bb_pct":          st.column_config.NumberColumn("BB%", format="%.1f", width="small", help="Walk rate. Plate discipline signal."),
-        "whiff_pct":       st.column_config.NumberColumn("Whiff%", format="%.1f", width="small", help="Swing-and-miss rate on swings."),
+        "k_pct":           st.column_config.NumberColumn("K%", format="%.1f%%", width="small", help="Strikeout rate. Higher = more empty at-bats."),
+        "bb_pct":          st.column_config.NumberColumn("BB%", format="%.1f%%", width="small", help="Walk rate. Plate discipline signal."),
+        "whiff_pct":       st.column_config.NumberColumn("Whiff%", format="%.1f%%", width="small", help="Swing-and-miss rate on swings."),
         "avg_ev":          st.column_config.NumberColumn("Avg EV", format="%.1f", width="small", help="Average exit velocity (mph) across all batted balls. Core input to the Laser (105+ mph) target."),
         "avg_hr_ev":       st.column_config.NumberColumn("HR EV", format="%.1f", width="small", help="Average exit velocity (mph) on home runs specifically — how hard this hitter's HRs are struck. Feeds the Laser target alongside overall avg EV."),
         "power_composite": st.column_config.NumberColumn("💥+ Combo", format="%.0f", width="small", help="Composite of HR Score (55%) + Dinger Score (45%) — blends the full matchup-aware model with curated raw power. Highest when both systems agree a hitter is a strong HR play. Runs parallel to the shipped ranking."),
@@ -14913,7 +14950,7 @@ def build_col_config():
         "home_run":        st.column_config.NumberColumn("HR", format="%d", width="small", help="Season home run total."),
         "test_score":      st.column_config.NumberColumn("Test", format="%.0f", width="small", help="Experimental composite (not shipped in rankings)."),
         "sleeper_score":   st.column_config.NumberColumn("Sleeper", format="%.0f", width="small", help="Low-owned / under-the-radar HR upside score."),
-        "hit_pa_pct":      st.column_config.NumberColumn("Hit/PA%", format="%.1f", width="small", help="Per-plate-appearance hit rate."),
+        "hit_pa_pct":      st.column_config.NumberColumn("Hit/PA%", format="%.1f%%", width="small", help="Per-plate-appearance hit rate."),
     }
 
 
@@ -15836,39 +15873,53 @@ if _valid_games:
                         return None
                     return _pt.loc[eligible.idxmax()]
 
-                # Power / contact-quality signals
-                _ev = _z("avg_ev"); _hh = _z("hard_hit")
-                _brl = _z("barrel_pct"); _pa = _z("pull_air_pct")
-                _bl = _z("blast_pct"); _pbrl = _z("pulled_brl_pct")
-                _iso = _z("iso"); _fb = _z("fb_pct")
-                _dist = _z("avg_hr_distance")
-                # Tonight's-matchup signals (the part that was missing)
-                _mopp = _z("matchup_opp")       # batter vs THIS pitcher
-                _parse = _z("pitch_hr_score")   # batter vs THIS arsenal (HR-tilt)
-                _pmatch = _z("pitch_match_score")
-                _env = _z("env_boost")          # park + weather
-                _rhr = _z("recent_hr_weighted_rate")
+                # v44.53 (code review #4): READ the pre-tagged targets rather
+                # than recomputing. tag_power_targets() already picked each
+                # game's moonshot/laser on combined_all and those columns were
+                # snapshotted + graded by the learning loop. Recomputing here
+                # with a slightly different blend meant the DISPLAYED player
+                # could differ from the GRADED player. Read the tags so display
+                # and learning loop always agree. Fall back to the local
+                # recompute only if the tag columns are absent (older frames).
+                _moon = None
+                _laser = None
+                if "is_moonshot_target" in _pt.columns:
+                    _mrows = _pt[pd.to_numeric(_pt["is_moonshot_target"], errors="coerce") == 1]
+                    if not _mrows.empty:
+                        _moon = _mrows.iloc[0]
+                if "is_laser_target" in _pt.columns:
+                    _lrows = _pt[pd.to_numeric(_pt["is_laser_target"], errors="coerce") == 1]
+                    if not _lrows.empty:
+                        _laser = _lrows.iloc[0]
 
-                # ⚡ LASER (105+ mph) — exit velocity is the spine, but now
-                # blended with matchup + arsenal + environment so it favors a
-                # hard-hitter in a GOOD spot over a hard-hitter facing an ace.
-                _laser = _pick([
-                    (_ev, 2.5), (_hh, 1.5), (_brl, 1.0),
-                    (_mopp, 1.0), (_parse, 1.0), (_env, 0.75),
-                    (_rhr, 0.5),
-                ])
-                # 🌙 MOONSHOT (400+ ft) — carry drivers (barrel/pull-air/blast/
-                # pulled-barrel/ISO/FB), plus the same matchup context. Uses
-                # real avg_hr_distance when Savant returns it, else the proxy.
-                _moon_components = (
-                    [(_dist, 2.5)] if _dist is not None else
-                    [(_brl, 1.5), (_pa, 1.5), (_pbrl, 1.25), (_bl, 1.0),
-                     (_iso, 1.0), (_fb, 0.5), (_ev, 0.5)]
-                )
-                _moon_components += [
-                    (_mopp, 1.0), (_parse, 1.0), (_env, 0.75), (_rhr, 0.5),
-                ]
-                _moon = _pick(_moon_components)
+                # Fallback recompute (only if tags weren't present on the frame)
+                if _moon is None or _laser is None:
+                    _ev = _z("avg_ev"); _hh = _z("hard_hit")
+                    _brl = _z("barrel_pct"); _pa = _z("pull_air_pct")
+                    _bl = _z("blast_pct"); _pbrl = _z("pulled_brl_pct")
+                    _iso = _z("iso"); _fb = _z("fb_pct")
+                    _dist = _z("avg_hr_distance")
+                    _mopp = _z("matchup_opp")
+                    _parse = _z("pitch_hr_score")
+                    _pmatch = _z("pitch_match_score")
+                    _env = _z("env_boost")
+                    _rhr = _z("recent_hr_weighted_rate")
+                    if _laser is None:
+                        _laser = _pick([
+                            (_ev, 2.5), (_hh, 1.5), (_brl, 1.0),
+                            (_mopp, 1.0), (_parse, 1.0), (_env, 0.75),
+                            (_rhr, 0.5),
+                        ])
+                    if _moon is None:
+                        _moon_components = (
+                            [(_dist, 2.5)] if _dist is not None else
+                            [(_brl, 1.5), (_pa, 1.5), (_pbrl, 1.25), (_bl, 1.0),
+                             (_iso, 1.0), (_fb, 0.5), (_ev, 0.5)]
+                        )
+                        _moon_components += [
+                            (_mopp, 1.0), (_parse, 1.0), (_env, 0.75), (_rhr, 0.5),
+                        ]
+                        _moon = _pick(_moon_components)
 
                 def _tag(row, kind):
                     if row is None:
@@ -16149,7 +16200,11 @@ if _valid_games:
                     pid_int = int(pid)
                 except (TypeError, ValueError):
                     return None
-                match = p_slate[p_slate["pitcher_id"] == pid_int]
+                # v44.56 (code review #16): coerce the column before comparing,
+                # matching the hardened pattern used elsewhere. A raw == against
+                # an Int64/float-with-NaN column can silently miss on dtype drift.
+                _pid_col = pd.to_numeric(p_slate["pitcher_id"], errors="coerce")
+                match = p_slate[_pid_col == pid_int]
                 if match.empty:
                     return None
                 base = match.iloc[0].get("grade") or "—"
