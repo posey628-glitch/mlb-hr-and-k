@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.67-context-pattern-home-day"
+APP_VERSION = "2026.06.10-v44.68-proposed-weights-synthesizer"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -4333,6 +4333,62 @@ if show_pattern_analysis:
                                     },
                                 )
 
+                                # ====== Proposed Weights (v44.68) ======
+                                # User endgame: synthesize our OWN properly-
+                                # weighted metric from evidence. Show what the
+                                # Dinger power weights WOULD be if derived from
+                                # the data, side by side with current shipped.
+                                try:
+                                    from pattern_analysis import propose_dinger_weights
+                                    _cur_w = dict(DINGER_BASE_WEIGHTS)
+                                    _prop = propose_dinger_weights(importance_df, _cur_w)
+                                    st.markdown("---")
+                                    st.markdown("### 🧮 Proposed Weights — what the data suggests")
+                                    st.caption(
+                                        "The Dinger power weights the model SHIP with, vs. what "
+                                        "they'd be if derived purely from accumulated evidence "
+                                        "(|correlation| × reliability, normalized to the same total). "
+                                        "This is a **recommendation to evaluate, not an auto-change** — "
+                                        "the shipped model only moves when you decide the evidence is "
+                                        "strong enough. Big deltas on a reliable signal = a reweight "
+                                        "worth considering."
+                                    )
+                                    if _prop.get("features"):
+                                        _rel_badge = ("🟢 reliable enough to consider"
+                                                      if _prop.get("reliable")
+                                                      else "🟡 still early — directional only")
+                                        st.markdown(f"**{_rel_badge}** · {_prop.get('note','')}")
+                                        _prop_rows = []
+                                        for _f, _d in _prop["features"].items():
+                                            _ev = _d.get("evidence", {})
+                                            _prop_rows.append({
+                                                "Feature": _f,
+                                                "Current": _d["current"],
+                                                "Proposed": _d["proposed"],
+                                                "Δ": _d["delta"],
+                                                "Corr": _ev.get("corr"),
+                                                "Reliab": _ev.get("reliability"),
+                                            })
+                                        _prop_df = pd.DataFrame(_prop_rows)
+                                        st.dataframe(
+                                            _prop_df, hide_index=True, use_container_width=True,
+                                            column_config={
+                                                "Current": st.column_config.NumberColumn(format="%.2f"),
+                                                "Proposed": st.column_config.NumberColumn(format="%.2f"),
+                                                "Δ": st.column_config.NumberColumn(format="%+.2f"),
+                                                "Corr": st.column_config.NumberColumn(format="%.3f"),
+                                                "Reliab": st.column_config.NumberColumn(format="%.2f"),
+                                            },
+                                        )
+                                        st.caption(
+                                            "How to read Δ: **+** = the data wants this stat weighted "
+                                            "MORE than it currently is; **−** = less. When a feature "
+                                            "shows a large, stable Δ over 15+ days, that's your cue to "
+                                            "adopt the proposed weight into DINGER_BASE_WEIGHTS."
+                                        )
+                                except Exception as _pw_err:
+                                    log_swallowed_error("proposed_weights", _pw_err, surface=False)
+
                                 # ====== Section H: Adaptive score (v43.83) ======
                                 st.markdown("---")
                                 st.markdown("### H. Adaptive Score — data-driven composite from top predictors")
@@ -6013,7 +6069,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.67 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.68 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
