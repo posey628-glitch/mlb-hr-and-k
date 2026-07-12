@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.81-slatewide-smash-spots"
+APP_VERSION = "2026.06.10-v44.84-perfect-storm-filter"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -4333,6 +4333,66 @@ if show_pattern_analysis:
                                 f"low-profile (n={_it['lo_profile_fav_env']['n']}){_compound}"
                             )
 
+                        # v44.82: Smash Spot tier validation — does ELITE actually
+                        # homer more than STRONG more than SMASH? (user: backtest it)
+                        _st_res = rf_results.get("smash_tiers")
+                        if _st_res and _st_res.get("tiers"):
+                            _sr = _st_res.get("slate_rate", 0)
+                            _tier_lines = []
+                            for _t in _st_res["tiers"]:
+                                _lift = _t.get("lift")
+                                _ls = f"{_lift:.2f}×" if _lift else "—"
+                                _rel = "✅" if _t.get("reliable") else "⚠️"
+                                _tier_lines.append(
+                                    f"{_t['tier']} {_t['hr_rate']:.1%} "
+                                    f"(n={_t['n']}, {_ls} {_rel})"
+                                )
+                            st.markdown(
+                                f"**🔥 Smash Spot tiers** vs slate {_sr:.1%}: "
+                                + " · ".join(_tier_lines)
+                                + " — validates whether ELITE truly beats STRONG "
+                                "beats SMASH. ✅ = n≥20 (trustworthy), ⚠️ = small sample."
+                            )
+
+                        # v44.83: how do CONSENSUS hitters do vs EXPLOIT+ pitchers
+                        # and in favorable env? (user: does consensus compound
+                        # with good conditions?)
+                        _cc = rf_results.get("consensus_conditions")
+                        if _cc:
+                            _b = _cc.get("consensus_bar", {})
+                            _parts = []
+                            _ce = _cc.get("consensus_vs_exploit")
+                            if _ce:
+                                _l = _ce.get("lift")
+                                _ls = f"{_l:.2f}×" if _l else "—"
+                                _rel = "✅" if _ce.get("reliable") else "⚠️"
+                                _parts.append(
+                                    f"vs EXPLOIT+ pitcher **{_ce['exploit_rate']:.1%}** "
+                                    f"(n={_ce['exploit_n']}) vs other {_ce['other_rate']:.1%} "
+                                    f"(n={_ce['other_n']}) → **{_ls}** {_rel}"
+                                )
+                            _cv = _cc.get("consensus_vs_env")
+                            if _cv:
+                                _l = _cv.get("lift")
+                                _ls = f"{_l:.2f}×" if _l else "—"
+                                _rel = "✅" if _cv.get("reliable") else "⚠️"
+                                _parts.append(
+                                    f"in favorable env **{_cv['fav_rate']:.1%}** "
+                                    f"(n={_cv['fav_n']}) vs poor {_cv['unfav_rate']:.1%} "
+                                    f"(n={_cv['unfav_n']}) → **{_ls}** {_rel}"
+                                )
+                            if _parts:
+                                _hr = _b.get("hr_rate")
+                                _hrs = f"{_hr:.1%}" if _hr is not None else "—"
+                                st.markdown(
+                                    f"**🎯 Consensus plays × conditions** "
+                                    f"(high-consensus = ≥{_b.get('bar',4):.0f} systems, "
+                                    f"{_b.get('n',0)} hitters, {_hrs} overall): "
+                                    + " · ".join(_parts)
+                                    + " — tests whether consensus plays homer EVEN "
+                                    "MORE when the matchup/park aligns."
+                                )
+
                     # ====== Per-player patterns (v44.70) ======
                     # User: patterns fit certain players and not others — the
                     # league-wide correlation averages over individual variation.
@@ -5112,6 +5172,43 @@ if show_pattern_analysis:
                                 _pa_report.append("")
                                 _pa_report.append("CONTEXT & MATCHUP SEGMENTS")
                                 _pa_report.extend(_seg_lines)
+                            # v44.82: smash tier validation
+                            _sts = rf_results.get("smash_tiers")
+                            if _sts and _sts.get("tiers"):
+                                _pa_report.append("")
+                                _pa_report.append(
+                                    f"SMASH SPOT TIERS (slate {_sts.get('slate_rate',0):.1%})"
+                                )
+                                for _t in _sts["tiers"]:
+                                    _l = _t.get("lift")
+                                    _pa_report.append(
+                                        f"  {_t['tier']:<8} {_t['hr_rate']:.1%} "
+                                        f"(n={_t['n']}) lift {f'{_l:.2f}x' if _l else '—'}"
+                                        + ("" if _t.get("reliable") else " [small]")
+                                    )
+                            # v44.83: consensus × conditions
+                            _ccx = rf_results.get("consensus_conditions")
+                            if _ccx:
+                                _pa_report.append("")
+                                _pa_report.append("CONSENSUS PLAYS × CONDITIONS")
+                                _ce = _ccx.get("consensus_vs_exploit")
+                                if _ce:
+                                    _l = _ce.get("lift")
+                                    _pa_report.append(
+                                        f"  vs EXPLOIT+: {_ce['exploit_rate']:.1%} "
+                                        f"(n={_ce['exploit_n']}) vs {_ce['other_rate']:.1%} "
+                                        f"(n={_ce['other_n']}) lift "
+                                        f"{f'{_l:.2f}x' if _l else '—'}"
+                                    )
+                                _cv = _ccx.get("consensus_vs_env")
+                                if _cv:
+                                    _l = _cv.get("lift")
+                                    _pa_report.append(
+                                        f"  in fav env: {_cv['fav_rate']:.1%} "
+                                        f"(n={_cv['fav_n']}) vs {_cv['unfav_rate']:.1%} "
+                                        f"(n={_cv['unfav_n']}) lift "
+                                        f"{f'{_l:.2f}x' if _l else '—'}"
+                                    )
                     except Exception:
                         pass
 
@@ -6503,7 +6600,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.81 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.84 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -10471,6 +10568,23 @@ if combined_picks is not None and not combined_picks.empty:
                 "must_have_met",    # v44.75: baseline power profile (count)
                 "nuclear_met",      # v44.75: elite power profile (count)
             ]
+            # v44.83 DELIBERATELY EXCLUDED (would double-count — the consensus
+            # counts agreement across INDEPENDENT angles, so a metric that is
+            # BUILT FROM other votes must not also vote):
+            #   • hr_score — the flagship composite, but it's ~67% built from
+            #     hr_game_pct (30%) + matchup_opp/pitch_hr_score (12%) + power
+            #     (25%), ALL already voting here. Adding it would give those
+            #     hitters ~1.67× weight. hr_score is the SYNTHESIS of these
+            #     angles (shown as the primary Top-10 ranking); the consensus
+            #     answers a different question — how many independent lenses
+            #     agree — so it stays out.
+            #   • smash_spot — categorical flag (ELITE/STRONG/SMASH), not a
+            #     0-100 ranking; also built from matchup+hr%+env already voting.
+            #     Kept as its own ELITE section instead.
+            #   • power_composite — literally 0.55·hr_score + 0.45·dinger_score
+            #     → pure double-count.
+            #   • moonshot/laser — overlap barrel/power; revisit once their HR
+            #     correlation is proven in Section G.
             for col_name in _conv_cols:
                 if col_name in q.columns and q[col_name].notna().any():
                     top15_ids = set(
@@ -11273,10 +11387,73 @@ if combined_picks is not None and not combined_picks.empty:
         except Exception:
             pass
 
-        # v44.78 (user: want a slate-wide Top 10 Moonshots & Lasers, not just
-        # the one-per-game flag). Rank ALL starters by the moonshot/laser
-        # composite so the best overall surface — even if two come from the
-        # same game. Distinct from the per-game 🌙/⚡ flags above the games.
+        # v44.84 (user: list consensus/convergence players who ALSO face an
+        # EXPLOIT+ pitcher AND play in good park+weather). The "perfect storm"
+        # cross-filter: multi-method agreement + exploitable pitcher + favorable
+        # environment, all at once. The highest-conviction subset.
+        try:
+            if ("convergence_label" in q.columns
+                    and "opp_pitcher_grade" in q.columns
+                    and "env_boost" in q.columns):
+                _ps = q.copy()
+                _has_consensus = _ps["convergence_label"].fillna("") != ""
+                # v44.84 (user choice): both exploitable tiers, EXPLOIT and
+                # EXPLOIT+. str.contains("EXPLOIT") catches both (EXPLOIT+ is a
+                # superstring of EXPLOIT). Excludes MIXED/TOUGH/ELITE/NEUTRAL.
+                _exploit_plus = _ps["opp_pitcher_grade"].astype(str).str.contains(
+                    "EXPLOIT", na=False)
+                _env = pd.to_numeric(_ps["env_boost"], errors="coerce").fillna(1.0)
+                _fav_env = _env >= 1.05
+                _storm = _ps[_has_consensus & _exploit_plus & _fav_env].copy()
+                st.markdown("---")
+                if not _storm.empty:
+                    # sort by consensus strength, then HR%
+                    if "convergence_count" in _storm.columns:
+                        _storm = _storm.sort_values(
+                            ["convergence_count", "hr_game_pct"],
+                            ascending=[False, False])
+                    st.markdown(
+                        f"### ⛈️ Perfect Storm — Consensus × EXPLOIT+ × Good Conditions ({len(_storm)})"
+                    )
+                    st.caption(
+                        "The highest-conviction subset: hitters the Consensus Board "
+                        "already flags (multiple independent methods agree) who ALSO "
+                        "face an exploitable pitcher (EXPLOIT or EXPLOIT+ tier) AND play "
+                        "in a favorable environment (park × weather × wind ≥ 1.05). "
+                        "All three align at once. Ranked by consensus strength, then HR%."
+                    )
+                    _storm_cols = [c for c in [
+                        "convergence_label", "player_name", "team", "game",
+                        "opp_pitcher", "opp_pitcher_grade", "hr_game_pct",
+                        "pick_score", "env_boost", "smash_spot", "barrel_pct",
+                    ] if c in _storm.columns]
+                    st.dataframe(
+                        _storm[_storm_cols].reset_index(drop=True),
+                        hide_index=True, use_container_width=True,
+                        column_config={
+                            "convergence_label": st.column_config.TextColumn("Consensus", width="small"),
+                            "player_name": st.column_config.TextColumn("Hitter"),
+                            "team": st.column_config.TextColumn("Tm", width="small"),
+                            "opp_pitcher_grade": st.column_config.TextColumn("Pitcher", width="small"),
+                            "hr_game_pct": st.column_config.NumberColumn("HR%", format="%.1f%%"),
+                            "pick_score": st.column_config.NumberColumn("Pick", format="%.1f", width="small"),
+                            "env_boost": st.column_config.NumberColumn("Env×", format="%.2f", width="small",
+                                                                       help=COLUMN_HELP.get("env_boost")),
+                            "barrel_pct": st.column_config.NumberColumn("Brl%", format="%.1f%%"),
+                        },
+                    )
+                else:
+                    st.markdown("### ⛈️ Perfect Storm — Consensus × EXPLOIT+ × Good Conditions")
+                    st.caption(
+                        "No hitters tonight hit all three at once (consensus-flagged + "
+                        "exploitable pitcher (EXPLOIT/EXPLOIT+) + favorable env ≥1.05). "
+                        "This is a strict, fairly rare alignment — on many slates it's "
+                        "empty or 1-3 names. When it does hit, it's among the strongest "
+                        "signals the app produces. Check the Consensus Board and ELITE "
+                        "Smash sections above for the next tier down."
+                    )
+        except Exception:
+            pass
         # NOTE: moonshot_score/laser_score are computed by tag_power_targets,
         # which runs LATER (on combined_all) — so they're not on q yet here.
         # Run it on a copy of q now so this section has the scores. (The later
@@ -11345,9 +11522,41 @@ if combined_picks is not None and not combined_picks.empty:
                 _n_e = int((_sw["_tier"] == 3).sum())
                 _n_s = int((_sw["_tier"] == 2).sum())
                 _n_m = int((_sw["_tier"] == 1).sum())
+
+                # v44.82 (user: want a section with only the ELITE picks). A
+                # prominent ELITE-only shortlist — the highest-conviction plays,
+                # shown directly (not buried in an expander) when any exist.
+                _elite = _sw[_sw["_tier"] == 3]
+                if not _elite.empty:
+                    st.markdown("---")
+                    st.markdown(f"### 🔥🔥🔥 Today's ELITE Smash Picks ({len(_elite)})")
+                    st.caption(
+                        "The highest-conviction plays: facing an EXPLOIT+ pitcher (most "
+                        "exploitable tier) AND a favorable environment (park×weather ≥1.05) "
+                        "AND HR Game% ≥19%. All three align — the rarest, strongest smash "
+                        "spots. Ranked by HR%."
+                    )
+                    _el_cols = [c for c in [
+                        "player_name", "team", "game", "opp_pitcher",
+                        "hr_game_pct", "pick_score", "grade", "barrel_pct", "env_boost",
+                    ] if c in _elite.columns]
+                    st.dataframe(
+                        _elite[_el_cols].reset_index(drop=True),
+                        hide_index=True, use_container_width=True,
+                        column_config={
+                            "player_name": st.column_config.TextColumn("Hitter"),
+                            "team": st.column_config.TextColumn("Tm", width="small"),
+                            "hr_game_pct": st.column_config.NumberColumn("HR%", format="%.1f%%"),
+                            "pick_score": st.column_config.NumberColumn("Pick", format="%.1f", width="small"),
+                            "barrel_pct": st.column_config.NumberColumn("Brl%", format="%.1f%%"),
+                            "env_boost": st.column_config.NumberColumn("Env×", format="%.2f", width="small",
+                                                                       help=COLUMN_HELP.get("env_boost")),
+                        },
+                    )
+
                 with st.expander(
-                    f"🔥 Smash Spots (slate-wide) — {_n_e} ELITE · {_n_s} STRONG · {_n_m} SMASH",
-                    expanded=(_n_e > 0 or _n_s > 0)
+                    f"🔥 All Smash Spots (slate-wide) — {_n_e} ELITE · {_n_s} STRONG · {_n_m} SMASH",
+                    expanded=(_n_e == 0 and _n_s > 0)
                 ):
                     st.caption(
                         "ALL triple-threat smash spots across the whole slate, ranked "
