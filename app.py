@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.78-slate-moonshots-copytext-fix"
+APP_VERSION = "2026.06.10-v44.79-pitcher-analysis-moonshot-bugfix"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -2089,6 +2089,35 @@ with st.sidebar:
              "to measure whether it actually helps HR prediction; if its correlation is "
              "~0, its weight should shrink. Suppressed for hitters under 100 PA or with "
              "weak contact on BOTH barrel% and ISO (so it can't surface slap hitters)."),
+
+            ("🌙⚡ Top 10 Moonshots / Lasers (slate-wide)",
+             "Two ranked lists near the Top 10.\n"
+             "- 🌙 **Moonshot** — profile for a 400+ ft bomb (distance: barrel, pull-air, "
+             "blast, ISO) × tonight's matchup.\n"
+             "- ⚡ **Laser** — profile for a 105+ mph line-drive HR (exit velo, hard-hit) × "
+             "matchup.\n\n"
+             "Unlike the per-game 🌙/⚡ flags above each game (which show ONE hitter per "
+             "game), these rank the whole slate — so two hitters from the same loaded "
+             "matchup can both appear. Score is a 0-100 percentile composite."),
+
+            ("⚾ Pitcher Factors → HRs Allowed",
+             "In Pattern Analysis. Correlates each opposing-pitcher HR-vulnerability stat "
+             "against the actual HRs that pitcher gave up over accumulated slates.\n"
+             "- **Positive corr** = higher value → MORE HRs allowed (barrel-allowed, "
+             "fly-ball rate, xwOBA-allowed).\n"
+             "- **Negative corr** = higher value → FEWER HRs (K%, whiff%, HR-suppress).\n\n"
+             "This is the pitcher side of HR prediction — it tells us which pitcher stats "
+             "actually matter, so we can weight them when folding the matchup into the "
+             "combined metric. Needs ~40 pitcher-games to be reliable."),
+
+            ("👤 Per-Player Patterns",
+             "In Pattern Analysis. For each hitter with ≥8 graded games, compares their "
+             "ACTUAL HR rate to what the model projected.\n"
+             "- **Positive edge** = model UNDER-rates them (homer more than we say).\n"
+             "- **Negative edge** = model OVER-rates them.\n\n"
+             "Surfaces the players whose individual pattern doesn't fit the league-wide "
+             "model — the ones the model consistently misjudges. Trust more as each "
+             "player's game count grows."),
 
             ("🔗 Correlation Flag (same-pitcher)",
              "Warns when two Top 10 picks face the SAME PITCHER (same team, "
@@ -4242,6 +4271,51 @@ if show_pattern_analysis:
                     except Exception as _pp_err:
                         log_swallowed_error("per_player_patterns", _pp_err, surface=False)
 
+                    # ====== Pitcher HR-allowed analysis (v44.79) ======
+                    # User: analyze all pitching stats toward predicting HRs.
+                    # Which pitcher factors actually predict the HRs they give up?
+                    try:
+                        from backtest import build_pitcher_hr_analysis
+                        _pha = build_pitcher_hr_analysis()
+                        if _pha.get("factors"):
+                            st.markdown("---")
+                            st.markdown("### ⚾ Pitcher factors — what predicts HRs allowed")
+                            _rel = ("🟢 reliable" if _pha.get("reliable")
+                                    else "🟡 early — directional only")
+                            st.caption(
+                                f"{_rel} · Correlates each opposing-pitcher HR-vulnerability "
+                                f"factor against the actual HRs that pitcher allowed "
+                                f"(n={_pha['n']} pitcher-games). POSITIVE corr = higher value "
+                                "means MORE HRs allowed (e.g. barrel-allowed, fly-ball rate); "
+                                "NEGATIVE = higher value means FEWER (e.g. K%, whiff%, HR-suppress). "
+                                "This is the pitcher side of HR prediction — the factors here are "
+                                "what we'll weight when folding the matchup into the combined metric."
+                            )
+                            _pha_rows = [{
+                                "Pitcher Factor": _f["factor"],
+                                "Corr w/ HRs allowed": _f["corr_with_hr_allowed"],
+                                "N": _f["n"],
+                            } for _f in _pha["factors"]]
+                            st.dataframe(
+                                pd.DataFrame(_pha_rows), hide_index=True,
+                                use_container_width=True,
+                                column_config={
+                                    "Corr w/ HRs allowed": st.column_config.NumberColumn(format="%+.3f"),
+                                    "N": st.column_config.NumberColumn(format="%d"),
+                                },
+                            )
+                        elif _pha.get("n", 0) > 0:
+                            st.markdown("---")
+                            st.markdown("### ⚾ Pitcher factors — what predicts HRs allowed")
+                            st.caption(
+                                f"Only {_pha['n']} pitcher-games with outcomes so far — need "
+                                "more history before pitcher-factor correlations are meaningful. "
+                                "Fills in as slates accumulate (pitcher factors were expanded in "
+                                "the snapshot as of v44.79, so this grows going forward)."
+                            )
+                    except Exception as _pha_err:
+                        log_swallowed_error("pitcher_hr_analysis", _pha_err, surface=False)
+
                     # ====== Section B: Per-prop accuracy ======
                     st.markdown("---")
                     st.markdown("### B. Per-prop projection accuracy")
@@ -4962,6 +5036,24 @@ if show_pattern_analysis:
                                         f"proposed {_d['proposed']:>4.2f} "
                                         f"Δ {_d['delta']:>+5.2f}"
                                     )
+                    except Exception:
+                        pass
+
+                    # v44.79: pitcher HR-allowed factor analysis
+                    try:
+                        from backtest import build_pitcher_hr_analysis as _bpha
+                        _phar = _bpha()
+                        if _phar.get("factors"):
+                            _pa_report.append("")
+                            _rel = "reliable" if _phar.get("reliable") else "early"
+                            _pa_report.append(
+                                f"PITCHER FACTORS → HRs ALLOWED ({_rel}, n={_phar['n']})"
+                            )
+                            for _f in _phar["factors"][:10]:
+                                _pa_report.append(
+                                    f"  {_f['factor']:<18} corr "
+                                    f"{_f['corr_with_hr_allowed']:+.3f} (n={_f['n']})"
+                                )
                     except Exception:
                         pass
 
@@ -6296,7 +6388,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.78 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.79 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -11065,16 +11157,22 @@ if combined_picks is not None and not combined_picks.empty:
         # the one-per-game flag). Rank ALL starters by the moonshot/laser
         # composite so the best overall surface — even if two come from the
         # same game. Distinct from the per-game 🌙/⚡ flags above the games.
+        # NOTE: moonshot_score/laser_score are computed by tag_power_targets,
+        # which runs LATER (on combined_all) — so they're not on q yet here.
+        # Run it on a copy of q now so this section has the scores. (The later
+        # combined_all call is what feeds the snapshot; this is display-only.)
         try:
-            _src = q_sorted if "q_sorted" in dir() and not q_sorted.empty else q
+            _msrc = q.copy()
+            if "moonshot_score" not in _msrc.columns and "game" in _msrc.columns:
+                _msrc = tag_power_targets(_msrc)
             for _kind, _col, _emoji, _desc in [
                 ("Moonshots", "moonshot_score", "🌙",
                  "most likely to hit a 400+ ft bomb (distance profile × matchup)"),
                 ("Lasers", "laser_score", "⚡",
                  "most likely to hit a 105+ mph laser (exit-velocity × matchup)"),
             ]:
-                if _col in _src.columns and _src[_col].notna().any():
-                    _top = _src.dropna(subset=[_col]).nlargest(10, _col)
+                if _col in _msrc.columns and _msrc[_col].notna().any():
+                    _top = _msrc.dropna(subset=[_col]).nlargest(10, _col)
                     if not _top.empty:
                         with st.expander(f"{_emoji} Top 10 {_kind} (slate-wide) — {_desc}",
                                          expanded=False):
