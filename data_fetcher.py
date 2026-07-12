@@ -975,7 +975,7 @@ def last_bat_tracking_columns() -> list:
     return list(_LAST_BAT_TRACKING_COLS)
 
 @st.cache_data(ttl=86400)  # 24hr — bat tracking is a slow-moving stat
-def get_bat_tracking(season: int | None = None) -> tuple[pd.DataFrame, str, list]:
+def get_bat_tracking(season: int | None = None, stats_day: str | None = None) -> tuple[pd.DataFrame, str, list]:
     """Fetch Statcast bat tracking leaderboard.
 
     Returns (df, status_message, savant_columns):
@@ -1098,7 +1098,14 @@ def get_bat_tracking(season: int | None = None) -> tuple[pd.DataFrame, str, list
         f"&sortColumn={blast_candidates[0]}&sortDirection=desc&csv=true",
     ]
 
-    for url in candidate_urls:
+    for _url_idx, url in enumerate(candidate_urls):
+        # v44.90: extract the min= value from this URL for the diagnostic, so
+        # the status message reveals which qualifier actually succeeded (min=10
+        # vs the min=q fallback). Tells us if coverage is capped by the filter
+        # or by Savant's data availability.
+        import re as _re
+        _mm = _re.search(r'min=([^&]+)', url)
+        _url_min = _mm.group(1) if _mm else "?"
         try:
             r = requests.get(url, headers=HEADERS, timeout=25)
             if r.status_code != 200:
@@ -1292,7 +1299,7 @@ def get_bat_tracking(season: int | None = None) -> tuple[pd.DataFrame, str, list
                     f"Matched blast col: '{blast_col}'."
                 )
                 return pd.DataFrame(), f"❌ no rows after filtering — {_reason}", list(df.columns)
-            return out, f"✅ {len(out)} hitters", list(df.columns)
+            return out, f"✅ {len(out)} hitters (min={_url_min})", list(df.columns)
         except Exception:
             # Try next URL
             continue
