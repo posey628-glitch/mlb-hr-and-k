@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.84-perfect-storm-filter"
+APP_VERSION = "2026.06.10-v44.85-smash-tier-string-mismatch-fix"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -6600,7 +6600,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.84 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.85 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -9769,9 +9769,9 @@ if combined_picks is not None and not combined_picks.empty:
                     # Never smash against an ace, regardless of HR Score
                     new_smash_per_pid[int(_pid)] = ""
                 elif _sc >= 85 and pitcher_favorable and env_favorable:
-                    new_smash_per_pid[int(_pid)] = "🔥🔥🔥 ELITE"
+                    new_smash_per_pid[int(_pid)] = "🔥🔥🔥 ELITE SMASH"
                 elif _sc >= 75 and pitcher_favorable and env_neutral:
-                    new_smash_per_pid[int(_pid)] = "🔥🔥 STRONG"
+                    new_smash_per_pid[int(_pid)] = "🔥🔥 STRONG SMASH"
                 elif _sc >= 65 and pitcher_favorable and env_neutral:
                     new_smash_per_pid[int(_pid)] = "🔥 SMASH"
                 else:
@@ -11515,8 +11515,18 @@ if combined_picks is not None and not combined_picks.empty:
         try:
             if "smash_spot" in q.columns and (q["smash_spot"].fillna("") != "").any():
                 _sw = q[q["smash_spot"].fillna("") != ""].copy()
-                _tier_rank = {"🔥🔥🔥 ELITE SMASH": 3, "🔥🔥 STRONG SMASH": 2, "🔥 SMASH": 1}
-                _sw["_tier"] = _sw["smash_spot"].map(_tier_rank).fillna(0)
+                # v44.85: match by CONTAINS not exact string. The smash_spot
+                # recompute stores "🔥🔥🔥 ELITE" / "🔥🔥 STRONG" / "🔥 SMASH"
+                # (no " SMASH" suffix on the top tiers), while an earlier code
+                # path used "...ELITE SMASH". Exact-match mapping silently missed
+                # the stored variant → showed 0 ELITE/0 STRONG even though they
+                # exist (Pipeline Health, which uses contains, counted them). Use
+                # contains so BOTH variants are caught.
+                _ss_str = _sw["smash_spot"].fillna("").astype(str)
+                _sw["_tier"] = 0
+                _sw.loc[_ss_str.str.contains("ELITE"), "_tier"] = 3
+                _sw.loc[_ss_str.str.contains("STRONG"), "_tier"] = 2
+                _sw.loc[_ss_str.str.contains("🔥") & ~_ss_str.str.contains("ELITE|STRONG"), "_tier"] = 1
                 _sw = _sw.sort_values(["_tier", "hr_game_pct"],
                                       ascending=[False, False])
                 _n_e = int((_sw["_tier"] == 3).sum())
@@ -14086,8 +14096,14 @@ if all_hitters:
                     if combined_all is not None and "smash_spot" in combined_all.columns:
                         smash_export = combined_all[combined_all["smash_spot"] != ""].copy()
                         if not smash_export.empty:
-                            tier_order = {"🔥🔥🔥 ELITE SMASH": 3, "🔥🔥 STRONG SMASH": 2, "🔥 SMASH": 1}
-                            smash_export["_tier"] = smash_export["smash_spot"].map(tier_order).fillna(0)
+                            # v44.85: assign tier by contains (stored strings are
+                            # "🔥🔥🔥 ELITE" / "🔥🔥 STRONG" / "🔥 SMASH", no SMASH
+                            # suffix on top tiers — exact-match mapping missed them).
+                            _se_str = smash_export["smash_spot"].fillna("").astype(str)
+                            smash_export["_tier"] = 0
+                            smash_export.loc[_se_str.str.contains("ELITE"), "_tier"] = 3
+                            smash_export.loc[_se_str.str.contains("STRONG"), "_tier"] = 2
+                            smash_export.loc[_se_str.str.contains("🔥") & ~_se_str.str.contains("ELITE|STRONG"), "_tier"] = 1
                             # Sort: tier desc, then HR Game% desc
                             smash_export = smash_export.sort_values(
                                 ["_tier", "hr_game_pct"], ascending=[False, False]
@@ -14563,8 +14579,12 @@ if all_hitters:
         )
         smash_df = qualified[qualified["smash_spot"] != ""].copy()
         # Sort by: ELITE first, then STRONG, then SMASH; within each tier by HR Game%
-        tier_order = {"🔥🔥🔥 ELITE SMASH": 3, "🔥🔥 STRONG SMASH": 2, "🔥 SMASH": 1}
-        smash_df["_tier"] = smash_df["smash_spot"].map(tier_order).fillna(0)
+        # v44.85: contains-based (stored strings have no " SMASH" suffix on top tiers)
+        _sd_str = smash_df["smash_spot"].fillna("").astype(str)
+        smash_df["_tier"] = 0
+        smash_df.loc[_sd_str.str.contains("ELITE"), "_tier"] = 3
+        smash_df.loc[_sd_str.str.contains("STRONG"), "_tier"] = 2
+        smash_df.loc[_sd_str.str.contains("🔥") & ~_sd_str.str.contains("ELITE|STRONG"), "_tier"] = 1
         smash_df = smash_df.sort_values(
             ["_tier", "hr_game_pct"], ascending=[False, False]
         )
