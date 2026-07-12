@@ -842,6 +842,7 @@ def save_snapshot(snapshot_date, matchup_df: pd.DataFrame,
                 "barrel_matchup_score",  # v44.34: grade new metric
                 "two_way_matchup_score",  # v44.43: grade two-way metric
                 "is_moonshot_target", "is_laser_target",  # v44.18: grade power targets
+                "moonshot_score", "laser_score",  # v44.78: slate-wide power-type scores
             ] if c in matchup_df.columns]
             # Build compact column-oriented storage with rounded values
             _sub = _df[keep_cols].where(_df[keep_cols].notna(), None)
