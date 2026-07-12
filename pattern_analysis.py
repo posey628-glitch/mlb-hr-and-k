@@ -612,15 +612,18 @@ def researcher_framework_backtest(merged_df: pd.DataFrame) -> dict:
         _ss_str = ss["smash_spot"].fillna("").astype(str)
         _slate_rate = float(ss["homered"].mean()) if len(ss) else 0.0
         _tiers = [
-            ("ELITE", "ELITE SMASH"),
-            ("STRONG", "STRONG SMASH"),
+            ("ELITE", "ELITE"),
+            ("STRONG", "STRONG"),
             ("SMASH", "SMASH"),
         ]
         _smash_result = {"slate_rate": _slate_rate, "tiers": []}
         for _label, _needle in _tiers:
-            # match this tier but not a higher one (STRONG SMASH contains SMASH)
+            # v44.85: match by tier KEYWORD alone. Stored strings are
+            # "🔥🔥🔥 ELITE", "🔥🔥 STRONG", "🔥 SMASH" — the top tiers have no
+            # " SMASH" suffix, so matching "ELITE SMASH" found nothing. The base
+            # tier is the fire-emoji rows that are neither ELITE nor STRONG.
             if _label == "SMASH":
-                _mask = _ss_str.str.contains("SMASH") & ~_ss_str.str.contains("ELITE|STRONG")
+                _mask = _ss_str.str.contains("🔥") & ~_ss_str.str.contains("ELITE|STRONG")
             else:
                 _mask = _ss_str.str.contains(_needle)
             _grp = ss[_mask]
