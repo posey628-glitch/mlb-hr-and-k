@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.74-matchup-interaction-analysis"
+APP_VERSION = "2026.06.10-v44.76-sleeper-audit-glossary-updates"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -2011,13 +2011,33 @@ with st.sidebar:
         # Glossary entries: (heading, body_markdown).
         # Each entry shows IFF its heading or body matches the search query.
         glossary = [
-            ("🎯 Convergence Tier",
-             "How many independent ranking systems put this player in their top 15.\n"
-             "- 🎯🎯🎯 **5/5** — Every angle agrees. Rare. Elite play.\n"
-             "- 🎯🎯 **4/5** — Strong consensus across 4 systems.\n"
-             "- 🎯 **3/5** — Moderate consensus across 3 systems.\n"
-             "- (empty) — 0-2 systems only.\n\n"
-             "**Systems counted:** hr_game_pct, power_score, lift_score, matchup_opp, pitch_hr_score."),
+            ("🎯 Consensus / Convergence Tier",
+             "How many INDEPENDENT scoring methods put this player in tonight's top 15. "
+             "It counts AGREEMENT across distinct methods — it does NOT add the scores "
+             "together (that would double-count, since several overlap).\n"
+             "- 🎯🎯🎯 — in ≥70% of methods. Every angle agrees. Rare, high-conviction.\n"
+             "- 🎯🎯 — in ≥50% of methods. Strong consensus.\n"
+             "- 🎯 — in ≥40% of methods. Moderate consensus.\n"
+             "- (empty) — below 40%; a single-axis play, not a consensus one.\n\n"
+             "**Methods counted (up to 10):** hr_game_pct, power_score, lift_score, "
+             "matchup_opp, pitch_hr_score, dinger_score, barrel_matchup_score, "
+             "two_way_matchup_score, must_have_met, nuclear_met. "
+             "See the 🎯 Consensus Board near the Top 10 for the ranked list."),
+            ("💤 Sleeper Score",
+             "This is a VALUE / under-the-radar metric, NOT a raw power signal — an "
+             "important distinction. It's tonight's HR-projection percentile MINUS the "
+             "hitter's season-HR-total percentile.\n"
+             "- **Positive** = the model likes them tonight MORE than their modest season "
+             "HR total would suggest — an overlooked / undervalued play (good matchup, "
+             "park, or form the public isn't pricing in).\n"
+             "- **Negative** = a known slugger whose season reputation already reflects "
+             "tonight's setup — less 'sleeper' edge.\n\n"
+             "**Why it's only 5% of pick_score, and being audited:** a hitter's season HR "
+             "total doesn't cause tonight's homer, so this isn't a direct HR predictor — "
+             "it's a leverage/roster-value angle. We now correlation-track it (Section G) "
+             "to measure whether it actually helps HR prediction; if its correlation is "
+             "~0, its weight should shrink. Suppressed for hitters under 100 PA or with "
+             "weak contact on BOTH barrel% and ISO (so it can't surface slap hitters)."),
 
             ("🔗 Correlation Flag (same-pitcher)",
              "Warns when two Top 10 picks face the SAME PITCHER (same team, "
@@ -6152,7 +6172,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.74 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.76 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -10095,8 +10115,27 @@ if combined_picks is not None and not combined_picks.empty:
             # two players named "Garcia") or encoding variance could cause
             # silent matching errors. player_id is unique by definition.
             convergence_systems = []
-            for col_name in ("hr_game_pct", "power_score", "lift_score",
-                              "matchup_opp", "pitch_hr_score"):
+            # v44.75 (user: combine Dinger + HR + matchup + env + Nuclear +
+            # Must-Have into one consensus ranking). Rather than SUM these
+            # overlapping scores (which double-counts — pick_score already
+            # contains HR Score, power, matchup, env), we count how many
+            # INDEPENDENT methods rank a hitter top-tier. Each method is a
+            # different angle; agreement across many = a strong multi-method
+            # play. This extends the original 5 with our validated custom
+            # metrics and the profile tiers.
+            _conv_cols = [
+                "hr_game_pct",      # direct HR probability
+                "power_score",      # raw hitter power
+                "lift_score",       # contact-quality × elevation × pitcher FB
+                "matchup_opp",      # environment-boosted matchup (park+weather)
+                "pitch_hr_score",   # pitch-arsenal exploit
+                "dinger_score",     # v44.75: curated season-power composite
+                "barrel_matchup_score",   # v44.75: barrel × pitcher-allowed
+                "two_way_matchup_score",  # v44.75: handedness-aware two-way
+                "must_have_met",    # v44.75: baseline power profile (count)
+                "nuclear_met",      # v44.75: elite power profile (count)
+            ]
+            for col_name in _conv_cols:
                 if col_name in q.columns and q[col_name].notna().any():
                     top15_ids = set(
                         q.dropna(subset=[col_name])
@@ -10114,12 +10153,19 @@ if combined_picks is not None and not combined_picks.empty:
                     return 0
                 return sum(1 for s in convergence_systems if pid in s)
 
+            # v44.75: with more systems (up to 10), rescale the label tiers so
+            # they stay meaningful. Elite = in ≥70% of systems, strong ≥50%,
+            # moderate ≥40%. Uses the actual system count so it adapts if some
+            # metrics are missing on a given slate.
             def _convergence_label(count):
-                if count >= 5:
+                if n_systems <= 0:
+                    return ""
+                _frac = count / n_systems
+                if _frac >= 0.70:
                     return f"🎯🎯🎯 {count}/{n_systems}"
-                if count == 4:
+                if _frac >= 0.50:
                     return f"🎯🎯 {count}/{n_systems}"
-                if count == 3:
+                if _frac >= 0.40:
                     return f"🎯 {count}/{n_systems}"
                 return ""
 
@@ -10833,59 +10879,59 @@ if combined_picks is not None and not combined_picks.empty:
         # systems. Adaptively shows 5/5 if available, otherwise 4/5,
         # otherwise an explanatory line if neither.
         try:
-            if "convergence_count" in q_sorted.columns and q_sorted["convergence_count"].max() >= 3:
-                max_conv = int(q_sorted["convergence_count"].max())
-                # Show all players at the max convergence tier
-                if max_conv >= 4:
-                    conv_top = q_sorted[q_sorted["convergence_count"] >= max(4, max_conv)].head(5)
-                    tier_label = "Maximum Convergence (4-5/5)"
-                    tier_emoji = "🎯🎯🎯" if max_conv == 5 else "🎯🎯"
-                else:
-                    # max_conv == 3, show those
-                    conv_top = q_sorted[q_sorted["convergence_count"] == 3].head(5)
-                    tier_label = "Best Convergence Tonight (3/5)"
-                    tier_emoji = "🎯"
+            if "convergence_count" in q_sorted.columns and q_sorted["convergence_count"].notna().any():
+                _max_sys = int(q_sorted["convergence_count"].max())
+                # v44.75: with up to 10 systems, "strong consensus" = a hitter
+                # in a meaningful fraction. Show anyone the label tagged (≥40%
+                # of systems) — the label logic already applied the fractional
+                # threshold. Rank by convergence_count, then pick_score.
+                _labeled = q_sorted[q_sorted["convergence_label"].fillna("") != ""]
+                conv_top = _labeled.sort_values(
+                    ["convergence_count", "pick_score"], ascending=[False, False]
+                ).head(10) if not _labeled.empty else _labeled
 
                 if not conv_top.empty:
                     st.markdown(
-                        f"#### {tier_emoji} {tier_label} — players surviving "
-                        f"the most independent rankings"
+                        "#### 🎯 Consensus Board — the plays the most methods agree on"
                     )
                     st.caption(
-                        "These players appear in the top 15 of multiple "
-                        "independent ranking systems (hr_game_pct, power_score, "
-                        "lift_score, matchup_opp, pitch_hr_score). The article "
-                        "principle: players hard to eliminate are stronger "
-                        "than picks that excel on a single axis."
+                        "Ranks hitters by how many INDEPENDENT scoring methods put "
+                        "them in tonight's top 15 — pick_score's angles (HR%, power, "
+                        "lift, matchup, pitch-arsenal) PLUS the custom metrics "
+                        "(Dinger, Barrel-Matchup, Two-Way) PLUS the profile tiers "
+                        "(Must-Have, Nuclear). This does NOT re-sum overlapping scores "
+                        "(which would double-count) — it counts AGREEMENT across "
+                        "distinct methods. A hitter high across many is a stronger "
+                        "multi-method play than one that spikes on a single axis. "
+                        "The 🎯 tier = in ≥40% of methods, 🎯🎯 ≥50%, 🎯🎯🎯 ≥70%."
                     )
                     conv_cols = [c for c in [
                         "convergence_label", "player_name", "team", "game",
                         "opp_pitcher", "pick_score", "hr_game_pct",
-                        "matchup", "lift_score", "barrel_pct", "hr_form",
+                        "dinger_score", "nuclear_grade", "smash_spot",
+                        "matchup", "barrel_pct",
                     ] if c in conv_top.columns]
                     st.dataframe(
                         conv_top[conv_cols].reset_index(drop=True),
                         hide_index=True, use_container_width=True,
                         column_config={
                             "convergence_label": st.column_config.TextColumn(
-                                "Tier", width="small",
+                                "Consensus", width="small",
                             ),
                             "player_name": st.column_config.TextColumn("Player"),
                             "pick_score": st.column_config.NumberColumn(
                                 "Pick", format="%.1f", width="small"),
                             "hr_game_pct": st.column_config.NumberColumn(
                                 "HR%", format="%.2f", width="small"),
-                            "lift_score": st.column_config.NumberColumn(
-                                "Lift", format="%.1f", width="small"),
+                            "dinger_score": st.column_config.NumberColumn(
+                                "Dinger", format="%.0f", width="small"),
                             "barrel_pct": st.column_config.NumberColumn(
                                 "Brl%", format="%.1f", width="small"),
-                            "hr_form": st.column_config.NumberColumn(
-                                "Form", format="%.0f", width="small"),
                         },
                     )
             else:
                 st.caption(
-                    "🎯 No 3/5+ convergence plays on tonight's slate — each "
+                    "🎯 No strong-consensus plays on tonight's slate — each "
                     "high-projection player excels on a different axis."
                 )
         except Exception:
