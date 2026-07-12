@@ -523,7 +523,160 @@ def researcher_framework_backtest(merged_df: pd.DataFrame) -> dict:
     if _day_seg:
         result["context_day_night"] = _day_seg
 
+    # v44.74 (user: do individual matchups — pitcher, park, weather — actually
+    # move HR outcomes?). Measure matchup quality two ways:
+    #   1. Overall: do hitters in a favorable environment (env_boost high) or
+    #      facing an exploitable pitcher homer more than those who aren't?
+    #   2. INTERACTION: does a good matchup lift HR rate MORE for high-profile
+    #      hitters than for low-profile ones? This is the real question — a
+    #      great park should help a masher more than a slap hitter.
+    def _matchup_seg(col, threshold, in_label, out_label, ge=True):
+        if col not in merged_df.columns:
+            return None
+        seg = merged_df.dropna(subset=[col, "homered"]).copy()
+        _val = pd.to_numeric(seg[col], errors="coerce")
+        seg = seg[_val.notna()]
+        if seg.empty:
+            return None
+        _val = pd.to_numeric(seg[col], errors="coerce")
+        _mask = (_val >= threshold) if ge else (_val <= threshold)
+        grp_in, grp_out = seg[_mask], seg[~_mask]
+        if not len(grp_in) or not len(grp_out):
+            return None
+        r_in, r_out = float(grp_in["homered"].mean()), float(grp_out["homered"].mean())
+        return {
+            "in_label": in_label, "out_label": out_label,
+            "in_rate": r_in, "out_rate": r_out,
+            "n_in": len(grp_in), "n_out": len(grp_out),
+            "lift": (r_in / r_out) if r_out > 0 else None,
+            "reliable": len(grp_in) >= 30 and len(grp_out) >= 30,
+        }
+
+    # 1. Favorable environment (park × weather × pull-wind ≥ 1.05)
+    _env_seg = _matchup_seg("env_boost", 1.05, "Favorable env (≥1.05)", "Neutral/poor env")
+    if _env_seg:
+        result["matchup_env"] = _env_seg
+
+    # 2. Exploitable pitcher (grade EXPLOIT / EXPLOIT+)
+    if "opp_pitcher_grade" in merged_df.columns:
+        seg = merged_df.dropna(subset=["opp_pitcher_grade", "homered"]).copy()
+        _exploit = seg["opp_pitcher_grade"].astype(str).str.contains("EXPLOIT", na=False)
+        grp_in, grp_out = seg[_exploit], seg[~_exploit]
+        if len(grp_in) and len(grp_out):
+            r_in, r_out = float(grp_in["homered"].mean()), float(grp_out["homered"].mean())
+            result["matchup_pitcher"] = {
+                "in_label": "Vs exploitable pitcher", "out_label": "Vs tough/neutral pitcher",
+                "in_rate": r_in, "out_rate": r_out,
+                "n_in": len(grp_in), "n_out": len(grp_out),
+                "lift": (r_in / r_out) if r_out > 0 else None,
+                "reliable": len(grp_in) >= 30 and len(grp_out) >= 30,
+            }
+
+    # 3. INTERACTION: profile × matchup. Split hitters into high-profile
+    # (must_have_met >= adaptive bar) vs rest, THEN within each, compare
+    # favorable-env vs not. If the env lift is bigger for high-profile hitters,
+    # that's evidence matchup and profile COMPOUND — the thing the user suspects.
+    if ("must_have_met" in merged_df.columns and "env_boost" in merged_df.columns):
+        inter = merged_df.dropna(subset=["must_have_met", "env_boost", "homered"]).copy()
+        if not inter.empty:
+            _mh = pd.to_numeric(inter["must_have_met"], errors="coerce").fillna(0)
+            _env = pd.to_numeric(inter["env_boost"], errors="coerce").fillna(1.0)
+            # high profile = top third by must_have_met (data-adaptive)
+            _hi_bar = _mh.quantile(0.66) if _mh.nunique() > 2 else _mh.median()
+            _hi = _mh >= _hi_bar
+            _fav = _env >= 1.05
+            def _rate(mask):
+                _s = inter[mask]
+                return (float(_s["homered"].mean()), len(_s)) if len(_s) else (None, 0)
+            hi_fav_r, hi_fav_n = _rate(_hi & _fav)
+            hi_unf_r, hi_unf_n = _rate(_hi & ~_fav)
+            lo_fav_r, lo_fav_n = _rate(~_hi & _fav)
+            lo_unf_r, lo_unf_n = _rate(~_hi & ~_fav)
+            if all(x is not None for x in [hi_fav_r, hi_unf_r, lo_fav_r, lo_unf_r]):
+                result["matchup_interaction"] = {
+                    "hi_profile_fav_env": {"rate": hi_fav_r, "n": hi_fav_n},
+                    "hi_profile_poor_env": {"rate": hi_unf_r, "n": hi_unf_n},
+                    "lo_profile_fav_env": {"rate": lo_fav_r, "n": lo_fav_n},
+                    "lo_profile_poor_env": {"rate": lo_unf_r, "n": lo_unf_n},
+                    "hi_env_lift": (hi_fav_r / hi_unf_r) if hi_unf_r and hi_unf_r > 0 else None,
+                    "lo_env_lift": (lo_fav_r / lo_unf_r) if lo_unf_r and lo_unf_r > 0 else None,
+                    "reliable": min(hi_fav_n, hi_unf_n, lo_fav_n, lo_unf_n) >= 20,
+                }
+
     return result
+
+
+def per_player_patterns(merged_df: pd.DataFrame,
+                        min_games: int = 8,
+                        max_players: int = 40) -> dict:
+    """v44.70 (user: patterns fit certain players and not others — league-wide
+    correlation averages over real individual variation).
+
+    For each hitter with enough graded games, measure how their ACTUAL HR rate
+    compares to what the model PROJECTED for them (hr_game_pct). This surfaces
+    the players the model systematically over- or under-rates — the ones where
+    the league-wide pattern doesn't fit.
+
+    Why min_games matters: a per-player rate from 3 games is noise. We only
+    report players at/above min_games so the signal is real. As history grows,
+    more players cross the threshold and this becomes richer.
+
+    Returns:
+      {
+        "players": [ {player, n, actual_hr_rate, proj_hr_rate, edge, ...}... ],
+        "n_qualified": int, "min_games": int,
+      }
+    where edge = actual - projected (positive = model UNDER-rates this player,
+    negative = model OVER-rates them). Sorted by |edge| so the biggest model
+    mismatches surface first — those are the players whose individual pattern
+    diverges most from the league-wide model.
+    """
+    out = {"players": [], "n_qualified": 0, "min_games": min_games}
+    if merged_df is None or merged_df.empty:
+        return out
+    if "player_id" not in merged_df.columns or "homered" not in merged_df.columns:
+        return out
+
+    df = merged_df.dropna(subset=["homered"]).copy()
+    if df.empty:
+        return out
+
+    # projected per-game HR probability, if we snapshotted it
+    _has_proj = "hr_game_pct" in df.columns
+
+    rows = []
+    for pid, grp in df.groupby("player_id"):
+        n = len(grp)
+        if n < min_games:
+            continue
+        actual = float(grp["homered"].mean())
+        name = ""
+        if "player_name" in grp.columns and grp["player_name"].notna().any():
+            name = str(grp["player_name"].dropna().iloc[0])
+        rec = {
+            "player_id": pid,
+            "player": name or str(pid),
+            "n": n,
+            "actual_hr_rate": round(actual, 4),
+        }
+        if _has_proj:
+            _proj = pd.to_numeric(grp["hr_game_pct"], errors="coerce").mean()
+            # hr_game_pct is stored 0-100; convert to 0-1 rate for comparison
+            _proj_rate = float(_proj) / 100.0 if _proj == _proj else None
+            if _proj_rate is not None:
+                rec["proj_hr_rate"] = round(_proj_rate, 4)
+                rec["edge"] = round(actual - _proj_rate, 4)
+        rows.append(rec)
+
+    # sort by |edge| (biggest model mismatch first); fall back to actual rate
+    if rows and "edge" in rows[0]:
+        rows.sort(key=lambda r: abs(r.get("edge", 0)), reverse=True)
+    else:
+        rows.sort(key=lambda r: r.get("actual_hr_rate", 0), reverse=True)
+
+    out["players"] = rows[:max_players]
+    out["n_qualified"] = len(rows)
+    return out
 
 
 # ============================================================================
