@@ -795,7 +795,7 @@ def save_snapshot(snapshot_date, matchup_df: pd.DataFrame,
                 "is_roster_fill",  # v42: track which snapshots had real lineups
                 "is_bench",        # v43.12: bench / late-swap candidate flag
                 "power_score", "hr_game_pct", "hr_pa_pct",
-                "matchup", "sleeper_score", "barrel_pct", "iso",
+                "matchup", "sleeper_score", "convergence_count", "barrel_pct", "iso",
                 # v41 Patch 2: pick_score + per-component decomposition
                 "pick_score",
                 "ps_hr_game", "ps_matchup_opp", "ps_power", "ps_pitch_hr",
