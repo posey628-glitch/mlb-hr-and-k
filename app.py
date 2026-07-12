@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.77-full-metric-coverage-tracking"
+APP_VERSION = "2026.06.10-v44.78-slate-moonshots-copytext-fix"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -1216,6 +1216,42 @@ def tag_power_targets(df: "pd.DataFrame") -> "pd.DataFrame":
             return None
         return elig.idxmax()
 
+    def _score_for_group(g: "pd.DataFrame", components):
+        # v44.78: same composite as _pick_for_game but returns the FULL score
+        # series (aligned to g's index), not just the winner — for slate-wide
+        # ranking. Bench excluded (matches the per-game flag behavior).
+        _g = g
+        if "is_bench" in _g.columns:
+            _g = _g[~_g["is_bench"].fillna(False).astype(bool)]
+        if _g.empty:
+            return None
+        _vol = None
+        for _vc in ("pa", "bbe", "batted_balls", "ab"):
+            if _vc in _g.columns:
+                s = pd.to_numeric(_g[_vc], errors="coerce")
+                if s.notna().any():
+                    _vol = s
+                    break
+        shrink = ((_vol / (_vol + 60.0)).clip(0.4, 1.0)
+                  if _vol is not None else pd.Series(1.0, index=_g.index))
+        present = []
+        for col, w in components:
+            if col in _g.columns:
+                s = pd.to_numeric(_g[col], errors="coerce")
+                if s.notna().any():
+                    present.append((s, w))
+        if not present:
+            return None
+        num = pd.Series(0.0, index=_g.index)
+        den = pd.Series(0.0, index=_g.index)
+        for s, w in present:
+            pct = s.rank(pct=True) * 100.0
+            pct = 50.0 + (pct - 50.0) * shrink
+            mask = s.notna()
+            num = num.add((pct.fillna(0) * w) * mask.astype(float), fill_value=0)
+            den = den.add(mask.astype(float) * w, fill_value=0)
+        return num / den.replace(0, np.nan)
+
     _has_dist = "avg_hr_distance" in df.columns and \
         pd.to_numeric(df["avg_hr_distance"], errors="coerce").notna().any()
     _laser_comp = [("avg_hr_ev", 2.0), ("avg_ev", 2.5), ("hard_hit", 1.5),
@@ -1229,6 +1265,12 @@ def tag_power_targets(df: "pd.DataFrame") -> "pd.DataFrame":
                  [("matchup_opp", 1.0), ("pitch_hr_score", 1.0),
                   ("env_boost", 0.75), ("recent_hr_weighted_rate", 0.5)]
     try:
+        # v44.78: also compute the composite score for EVERY hitter (not just
+        # the per-game winner) so we can build a slate-wide Top 10 ranking. The
+        # per-game flags stay for backward compat; the score columns enable the
+        # overall list (where one game could supply two top plays).
+        _moon_scores = pd.Series(np.nan, index=df.index)
+        _laser_scores = pd.Series(np.nan, index=df.index)
         for _gm, _grp in df.groupby("game"):
             _li = _pick_for_game(_grp, _laser_comp)
             _mi = _pick_for_game(_grp, _moon_comp)
@@ -1236,6 +1278,15 @@ def tag_power_targets(df: "pd.DataFrame") -> "pd.DataFrame":
                 df.loc[_li, "is_laser_target"] = 1
             if _mi is not None:
                 df.loc[_mi, "is_moonshot_target"] = 1
+            # score every hitter in the group (reuse the composite helper)
+            _ms = _score_for_group(_grp, _moon_comp)
+            _ls = _score_for_group(_grp, _laser_comp)
+            if _ms is not None:
+                _moon_scores.loc[_grp.index] = _ms
+            if _ls is not None:
+                _laser_scores.loc[_grp.index] = _ls
+        df["moonshot_score"] = _moon_scores.round(1)
+        df["laser_score"] = _laser_scores.round(1)
     except Exception:
         pass
     return df
@@ -4841,6 +4892,79 @@ if show_pattern_analysis:
                     except Exception:
                         pass
 
+                    # v44.78: context segments + matchup interaction (were in
+                    # the UI but NOT in copy-text — user asked, and they weren't).
+                    try:
+                        if "rf_results" in dir() and not rf_results.get("error"):
+                            _seg_lines = []
+                            for _ck, _lbl in [("context_home_away", "Home/Away"),
+                                              ("context_day_night", "Day/Night"),
+                                              ("matchup_env", "Favorable env"),
+                                              ("matchup_pitcher", "Exploitable pitcher")]:
+                                _s = rf_results.get(_ck)
+                                if _s:
+                                    _l = _s.get("lift")
+                                    _seg_lines.append(
+                                        f"  {_lbl}: {_s['in_label']} "
+                                        f"{_s['in_rate']:.1%} (n={_s['n_in']}) vs "
+                                        f"{_s['out_label']} {_s['out_rate']:.1%} "
+                                        f"(n={_s['n_out']}) → lift "
+                                        f"{f'{_l:.2f}x' if _l else '—'}"
+                                    )
+                            _it = rf_results.get("matchup_interaction")
+                            if _it:
+                                _hl, _ll = _it.get("hi_env_lift"), _it.get("lo_env_lift")
+                                _seg_lines.append(
+                                    f"  Profile×Matchup: env lifts hi-profile "
+                                    f"{f'{_hl:.2f}x' if _hl else '—'} vs lo-profile "
+                                    f"{f'{_ll:.2f}x' if _ll else '—'}"
+                                )
+                            if _seg_lines:
+                                _pa_report.append("")
+                                _pa_report.append("CONTEXT & MATCHUP SEGMENTS")
+                                _pa_report.extend(_seg_lines)
+                    except Exception:
+                        pass
+
+                    # v44.78: per-player patterns (model over/under-rated hitters)
+                    try:
+                        from pattern_analysis import per_player_patterns as _ppf
+                        _ppr = _ppf(merged, min_games=8)
+                        if _ppr.get("players"):
+                            _pa_report.append("")
+                            _pa_report.append(
+                                f"PER-PLAYER PATTERNS (≥8 games, "
+                                f"{_ppr['n_qualified']} qualified)"
+                            )
+                            for _p in _ppr["players"][:15]:
+                                _e = _p.get("edge")
+                                _pa_report.append(
+                                    f"  {str(_p['player'])[:20]:<20} "
+                                    f"n={_p['n']:>2} actual {_p['actual_hr_rate']*100:>4.1f}% "
+                                    + (f"edge {_e*100:>+5.1f}%" if _e is not None else "")
+                                )
+                    except Exception:
+                        pass
+
+                    # v44.78: Proposed Weights (the reweight recommendation)
+                    try:
+                        from pattern_analysis import propose_dinger_weights as _pdw
+                        if "importance_df" in dir() and importance_df is not None \
+                           and not importance_df.empty:
+                            _pr = _pdw(importance_df, dict(DINGER_BASE_WEIGHTS))
+                            if _pr.get("features"):
+                                _pa_report.append("")
+                                _rel = "RELIABLE" if _pr.get("reliable") else "early/directional"
+                                _pa_report.append(f"PROPOSED WEIGHTS ({_rel})")
+                                for _f, _d in _pr["features"].items():
+                                    _pa_report.append(
+                                        f"  {_f:<18} current {_d['current']:>4.2f} "
+                                        f"proposed {_d['proposed']:>4.2f} "
+                                        f"Δ {_d['delta']:>+5.2f}"
+                                    )
+                    except Exception:
+                        pass
+
                     if len(_pa_report) > 2:
                         with st.expander("📋 Copy pattern analysis as text (tables paste intact)", expanded=False):
                             st.caption("Click the copy icon in the top-right of the box below.")
@@ -6172,7 +6296,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.77 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.78 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -10937,11 +11061,54 @@ if combined_picks is not None and not combined_picks.empty:
         except Exception:
             pass
 
-        # POWER OUTSIDERS — highest HR Game% NOT in Top 10. The pick_score
-        # formula penalizes non-EXPLOIT matchups, so a hitter facing a
-        # MIXED-grade pitcher can have the slate's #2-3 raw HR Game% and
-        # still miss Top 10 (Juan Soto vs Logan Gilbert in June 2026 was the
-        # canonical recurring case — flagged in 4+ exports across one day).
+        # v44.78 (user: want a slate-wide Top 10 Moonshots & Lasers, not just
+        # the one-per-game flag). Rank ALL starters by the moonshot/laser
+        # composite so the best overall surface — even if two come from the
+        # same game. Distinct from the per-game 🌙/⚡ flags above the games.
+        try:
+            _src = q_sorted if "q_sorted" in dir() and not q_sorted.empty else q
+            for _kind, _col, _emoji, _desc in [
+                ("Moonshots", "moonshot_score", "🌙",
+                 "most likely to hit a 400+ ft bomb (distance profile × matchup)"),
+                ("Lasers", "laser_score", "⚡",
+                 "most likely to hit a 105+ mph laser (exit-velocity × matchup)"),
+            ]:
+                if _col in _src.columns and _src[_col].notna().any():
+                    _top = _src.dropna(subset=[_col]).nlargest(10, _col)
+                    if not _top.empty:
+                        with st.expander(f"{_emoji} Top 10 {_kind} (slate-wide) — {_desc}",
+                                         expanded=False):
+                            st.caption(
+                                f"The 10 highest {_kind.lower()[:-1]} scores across the "
+                                "ENTIRE slate, ranked overall. Unlike the per-game "
+                                f"{_emoji} flag (one hitter per game), this can show two "
+                                "from the same game if that matchup is loaded. Score is a "
+                                "0-100 percentile composite; higher = stronger profile for "
+                                "this specific HR type, matchup included."
+                            )
+                            _cols = [c for c in [
+                                _col, "player_name", "team", "game", "opp_pitcher",
+                                "hr_game_pct", "pick_score", "barrel_pct", "avg_ev",
+                            ] if c in _top.columns]
+                            st.dataframe(
+                                _top[_cols].reset_index(drop=True),
+                                hide_index=True, use_container_width=True,
+                                column_config={
+                                    _col: st.column_config.NumberColumn(
+                                        _kind[:-1] + " Score", format="%.1f", width="small"),
+                                    "player_name": st.column_config.TextColumn("Player"),
+                                    "hr_game_pct": st.column_config.NumberColumn(
+                                        "HR%", format="%.1f", width="small"),
+                                    "pick_score": st.column_config.NumberColumn(
+                                        "Pick", format="%.1f", width="small"),
+                                    "barrel_pct": st.column_config.NumberColumn(
+                                        "Brl%", format="%.1f", width="small"),
+                                    "avg_ev": st.column_config.NumberColumn(
+                                        "EV", format="%.1f", width="small"),
+                                },
+                            )
+        except Exception:
+            pass
         #
         # Upgraded from a single-line caption (v27) to a full callout box
         # listing the top 3 raw-HR% outsiders, so users can't miss them.
