@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.90-bat-tracking-cache-buster-diag"
+APP_VERSION = "2026.06.10-v44.91-copy-buttons-slate-audit-fix"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -3953,6 +3953,36 @@ if show_backtest:
                             if not h_metrics and not p_metrics:
                                 st.warning("Snapshot loaded but no actual outcomes matched. Possible if games haven't been played yet.")
 
+                            # v44.91: copyable text of the backtest results
+                            # (user: the rendered metrics won't copy cleanly).
+                            _bt_lines = [f"📈 BACKTEST — {snap_choice}"]
+                            if h_metrics and not h_metrics.get("error"):
+                                _bt_lines.append(
+                                    f"Hitters tracked: {h_metrics.get('hitters_who_played', 0)} · "
+                                    f"Total HRs: {h_metrics.get('total_actual_hrs', 0)} · "
+                                    f"Slate HR rate: {h_metrics.get('actual_hr_rate_pct', 0)}% · "
+                                    f"Top-10 HR pick hit rate: {h_metrics.get('top10_hr_hit_rate', 0)}%"
+                                )
+                                _br = h_metrics.get("brier_score")
+                                if _br is not None:
+                                    _bt_lines.append(f"Brier score: {_br:.4f}")
+                                for _b in h_metrics.get("hr_pct_bands", []):
+                                    _bt_lines.append(
+                                        f"  band {_b.get('band','?')}: "
+                                        f"predicted {_b.get('predicted_pct','?')}% "
+                                        f"actual {_b.get('actual_pct','?')}% "
+                                        f"(n={_b.get('n','?')})"
+                                    )
+                            if p_metrics and not p_metrics.get("error"):
+                                _bt_lines.append(
+                                    f"Pitchers graded: {p_metrics.get('pitchers_graded', p_metrics.get('total_pitchers_matched', 0))} · "
+                                    f"K RMSE: {p_metrics.get('k_projection_rmse', 0):.2f} · "
+                                    f"K bias: {p_metrics.get('k_projection_bias', 0):+.2f}"
+                                )
+                            if len(_bt_lines) > 1:
+                                with st.expander("📋 Copy backtest results as text", expanded=False):
+                                    st.code("\n".join(_bt_lines), language=None)
+
             # ============================================================
             # ROLLING AGGREGATE — multi-day model performance
             # ============================================================
@@ -6616,7 +6646,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.90 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.91 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -9863,10 +9893,15 @@ if combined_picks is not None and not combined_picks.empty:
                     _mdf["smash_spot"] = new_smash
 
             # Diagnostic: how many smash flags fired total
-            _smash_counts = combined_picks["smash_spot"].value_counts().to_dict()
-            _elite_n = _smash_counts.get("🔥🔥🔥 ELITE", 0)
-            _strong_n = _smash_counts.get("🔥🔥 STRONG", 0)
-            _smash_n = _smash_counts.get("🔥 SMASH", 0)
+            # v44.91: count by CONTAINS, not exact string. v44.85 standardized
+            # the stored value to "🔥🔥🔥 ELITE SMASH" (with suffix), so the old
+            # exact-match .get("🔥🔥🔥 ELITE") returned 0 — Slate Audit showed
+            # 0 ELITE/0 STRONG while Pipeline Health (contains) correctly showed
+            # the real counts. Contains matching keeps them consistent.
+            _ss_all = combined_picks["smash_spot"].fillna("").astype(str)
+            _elite_n = int(_ss_all.str.contains("ELITE").sum())
+            _strong_n = int(_ss_all.str.contains("STRONG").sum())
+            _smash_n = int((_ss_all.str.contains("🔥") & ~_ss_all.str.contains("ELITE|STRONG")).sum())
             _total = _elite_n + _strong_n + _smash_n
             stash_diagnostic(
                 "slate_audit",
@@ -17822,6 +17857,17 @@ if owner_mode:
             _slate_audit,
             "No slate-audit data yet — run a slate to populate."
         )
+        # v44.91: copyable text version (user: the rendered version won't copy
+        # cleanly). st.code gives a one-tap copy icon.
+        if _slate_audit:
+            with st.expander("📋 Copy Slate Audit as text", expanded=False):
+                _sa_lines = [_slate_label]
+                for _d in _slate_audit:
+                    _lvl = _d.get("level", "caption")
+                    _m = _d.get("message", "")
+                    _prefix = "⚠️ " if _lvl == "warning" else ("🚨 " if _lvl == "error" else "")
+                    _sa_lines.append(f"· {_prefix}{_m}")
+                st.code("\n".join(_sa_lines), language=None)
 
 
 # ----- 🔧 Pipeline Health (owner-only: internal data-quality diagnostics) -----
