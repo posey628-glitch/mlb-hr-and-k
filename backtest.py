@@ -751,9 +751,39 @@ def save_snapshot(snapshot_date, matchup_df: pd.DataFrame,
 
         hitters_compact = None
         if matchup_df is not None and not matchup_df.empty:
+            # v44.70 (user: analyze ALL players league-wide, not just starters/
+            # top lists). Previously bench players were dropped from the
+            # snapshot entirely, so a bench hitter who actually PLAYED (late
+            # swap, injury replacement, DH) was never learned from. Now we keep
+            # starters + bench, each carrying is_bench so downstream can still
+            # segment. The outcome merge already skips any player with no game
+            # outcome, so bench players who SAT are auto-excluded — but ones who
+            # PLAYED contribute real league-wide pattern data.
+            #
+            # SIZE GUARD: including all bench (~150 rows) could push the gist
+            # write toward its prune target and cost history days. So we cap the
+            # snapshot at _SNAPSHOT_ROW_CAP rows, keeping all starters plus the
+            # highest-pick_score bench players (the ones most likely to matter /
+            # be swapped in). This widens the sample from starters-only to
+            # ~league-wide while keeping the payload bounded and deterministic.
             _df = matchup_df
-            if "is_bench" in _df.columns:
-                _df = _df[~_df["is_bench"].fillna(False).astype(bool)]
+            _SNAPSHOT_ROW_CAP = 420
+            if len(_df) > _SNAPSHOT_ROW_CAP:
+                # keep all starters; fill remaining budget with top bench by pick_score
+                if "is_bench" in _df.columns:
+                    _starters = _df[~_df["is_bench"].fillna(False).astype(bool)]
+                    _bench = _df[_df["is_bench"].fillna(False).astype(bool)]
+                    _bench_budget = max(0, _SNAPSHOT_ROW_CAP - len(_starters))
+                    if _bench_budget > 0 and not _bench.empty:
+                        _sort_col = "pick_score" if "pick_score" in _bench.columns else None
+                        if _sort_col:
+                            _bench = _bench.sort_values(_sort_col, ascending=False)
+                        _bench = _bench.head(_bench_budget)
+                        _df = pd.concat([_starters, _bench], ignore_index=True)
+                    else:
+                        _df = _starters
+                else:
+                    _df = _df.head(_SNAPSHOT_ROW_CAP)
             keep_cols = [c for c in [
                 "player_id", "player_name", "team", "opp", "lineup_pos",
                 # v43.4: 'game' is REQUIRED for the v43.3 pick_score diversity
@@ -801,6 +831,10 @@ def save_snapshot(snapshot_date, matchup_df: pd.DataFrame,
                 "is_home", "is_day_game",  # v44.67: home/away + day/night segmentation
                 # Environment for env-boosted correlations
                 "env_boost", "opp_pitcher_xwoba",
+                # v44.74: matchup-quality signals so we can measure whether a
+                # good matchup lifts HR rate WITHIN a profile tier (user: do
+                # individual matchups actually move outcomes?).
+                "opp_pitcher_grade", "smash_spot",
                 "dinger_score",  # v44.11: grade Dinger Score
                 "power_composite",  # v44.32: grade HR+Dinger composite
                 "barrel_matchup_score",  # v44.34: grade new metric
