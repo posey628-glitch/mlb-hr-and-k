@@ -603,6 +603,91 @@ def researcher_framework_backtest(merged_df: pd.DataFrame) -> dict:
                     "reliable": min(hi_fav_n, hi_unf_n, lo_fav_n, lo_unf_n) >= 20,
                 }
 
+    # v44.82 (user: are we backtesting the ELITE smash picks?). Measure whether
+    # each Smash Spot tier actually homers at a higher rate than the slate — the
+    # key validation of whether "ELITE SMASH" is genuinely elite. Each tier is
+    # compared against the overall slate HR rate.
+    if "smash_spot" in merged_df.columns:
+        ss = merged_df.dropna(subset=["homered"]).copy()
+        _ss_str = ss["smash_spot"].fillna("").astype(str)
+        _slate_rate = float(ss["homered"].mean()) if len(ss) else 0.0
+        _tiers = [
+            ("ELITE", "ELITE SMASH"),
+            ("STRONG", "STRONG SMASH"),
+            ("SMASH", "SMASH"),
+        ]
+        _smash_result = {"slate_rate": _slate_rate, "tiers": []}
+        for _label, _needle in _tiers:
+            # match this tier but not a higher one (STRONG SMASH contains SMASH)
+            if _label == "SMASH":
+                _mask = _ss_str.str.contains("SMASH") & ~_ss_str.str.contains("ELITE|STRONG")
+            else:
+                _mask = _ss_str.str.contains(_needle)
+            _grp = ss[_mask]
+            _n = len(_grp)
+            if _n > 0:
+                _rate = float(_grp["homered"].mean())
+                _smash_result["tiers"].append({
+                    "tier": _label,
+                    "n": _n,
+                    "hr_rate": _rate,
+                    "lift": (_rate / _slate_rate) if _slate_rate > 0 else None,
+                    "reliable": _n >= 20,
+                })
+        if _smash_result["tiers"]:
+            result["smash_tiers"] = _smash_result
+
+    # v44.83 (user: how do Consensus/convergence players do vs EXPLOIT+ pitchers
+    # and in favorable park/weather?). Cross-cut the consensus hitters by matchup
+    # conditions to see if high-agreement plays do EVEN BETTER when the spot is
+    # favorable — i.e. does consensus + good conditions compound?
+    if "convergence_count" in merged_df.columns:
+        cc = merged_df.dropna(subset=["convergence_count", "homered"]).copy()
+        _cc = pd.to_numeric(cc["convergence_count"], errors="coerce").fillna(0)
+        # "High consensus" = agreement from ≥40% of systems. With ~10-11 systems
+        # that's ≥4-5. Use a data-adaptive bar (top third) so it works as the
+        # system count evolves.
+        _hi_bar = max(4, _cc.quantile(0.66)) if _cc.nunique() > 2 else 4
+        _hi_consensus = _cc >= _hi_bar
+        _base = {"n": int(_hi_consensus.sum()),
+                 "hr_rate": float(cc[_hi_consensus]["homered"].mean()) if _hi_consensus.any() else None,
+                 "bar": float(_hi_bar)}
+        _cond = {"consensus_bar": _base}
+
+        # vs EXPLOIT+ pitcher
+        if "opp_pitcher_grade" in cc.columns:
+            _exp = cc["opp_pitcher_grade"].astype(str).str.contains("EXPLOIT", na=False)
+            _hc_exp = cc[_hi_consensus & _exp]
+            _hc_notexp = cc[_hi_consensus & ~_exp]
+            if len(_hc_exp) and len(_hc_notexp):
+                _r_exp = float(_hc_exp["homered"].mean())
+                _r_not = float(_hc_notexp["homered"].mean())
+                _cond["consensus_vs_exploit"] = {
+                    "exploit_rate": _r_exp, "exploit_n": len(_hc_exp),
+                    "other_rate": _r_not, "other_n": len(_hc_notexp),
+                    "lift": (_r_exp / _r_not) if _r_not > 0 else None,
+                    "reliable": min(len(_hc_exp), len(_hc_notexp)) >= 15,
+                }
+
+        # in favorable env (park × weather ≥ 1.05)
+        if "env_boost" in cc.columns:
+            _env = pd.to_numeric(cc["env_boost"], errors="coerce").fillna(1.0)
+            _fav = _env >= 1.05
+            _hc_fav = cc[_hi_consensus & _fav]
+            _hc_unf = cc[_hi_consensus & ~_fav]
+            if len(_hc_fav) and len(_hc_unf):
+                _r_fav = float(_hc_fav["homered"].mean())
+                _r_unf = float(_hc_unf["homered"].mean())
+                _cond["consensus_vs_env"] = {
+                    "fav_rate": _r_fav, "fav_n": len(_hc_fav),
+                    "unfav_rate": _r_unf, "unfav_n": len(_hc_unf),
+                    "lift": (_r_fav / _r_unf) if _r_unf > 0 else None,
+                    "reliable": min(len(_hc_fav), len(_hc_unf)) >= 15,
+                }
+
+        if len(_cond) > 1:  # more than just the bar
+            result["consensus_conditions"] = _cond
+
     return result
 
 
