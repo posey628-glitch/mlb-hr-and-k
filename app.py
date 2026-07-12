@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.71-il-hard-exclude-top10"
+APP_VERSION = "2026.06.10-v44.72-pipeline-health-copy-text"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -6122,7 +6122,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.71 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.72 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -17024,6 +17024,26 @@ if owner_mode:
             _pipe_health,
             "No pipeline-health data yet — run a slate to populate."
         )
+
+        # v44.72 (user request): copy-text button for the whole Pipeline Health
+        # report, so it's one tap to paste elsewhere (matches the results
+        # copy-text pattern). st.code() renders a built-in copy button.
+        if _pipe_health:
+            with st.expander("📋 Copy Pipeline Health as text", expanded=False):
+                _pipe_lines = [
+                    f"🔧 Pipeline Health {_pipe_icon} ({_pipe_count} item"
+                    + ("s" if _pipe_count != 1 else "") + ")"
+                ]
+                for _d in _pipe_health:
+                    _lvl = _d.get("level", "caption")
+                    _m = _d.get("message", "")
+                    _prefix = ""
+                    if _lvl == "warning":
+                        _prefix = "⚠️ "
+                    elif _lvl == "error":
+                        _prefix = "🚨 "
+                    _pipe_lines.append(f"· {_prefix}{_m}")
+                st.code("\n".join(_pipe_lines), language=None)
 
 
 # ----- 🎛️ Custom Grade Builder (moved from mid-script) -----
