@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.89-bat-tracking-coverage-widen"
+APP_VERSION = "2026.06.10-v44.90-bat-tracking-cache-buster-diag"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -2811,7 +2811,7 @@ if use_bat_tracking:
         # the IAA diagnostic in Pipeline Health sees fresh data on cache hits.
         if not slate.empty:
             bat_track_df, _bat_tracking_status, _savant_cols = get_bat_tracking(
-                season=selected_date.year
+                season=selected_date.year, stats_day=_stats_day_key()
             )
         else:
             bat_track_df, _bat_tracking_status, _savant_cols = (
@@ -6616,7 +6616,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.89 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.90 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
