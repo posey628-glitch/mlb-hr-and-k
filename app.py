@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.85-smash-tier-string-mismatch-fix"
+APP_VERSION = "2026.06.10-v44.87-allstar-break-gametype-guard"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -6600,7 +6600,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.85 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.87 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -14574,8 +14574,9 @@ if all_hitters:
             "**ELITE SMASH** = EXPLOIT+ + favorable env (≥1.05) + HR%≥19%. "
             "**STRONG SMASH** = EXPLOIT/+ + favorable env (≥1.05) + HR%≥15%. "
             "**SMASH** = EXPLOIT/+ + (favorable env OR park) + HR%≥15%. "
-            "**Max 2 hitters per team** (the top 2 by HR Game% on any team facing an "
-            "exploit pitcher — avoids stacking the same lineup)."
+            "Shows up to 8 per tier, **max 2 hitters per team within each tier** "
+            "(avoids stacking one lineup). For the complete unlimited list, see the "
+            "🔥 All Smash Spots (slate-wide) section near the top."
         )
         smash_df = qualified[qualified["smash_spot"] != ""].copy()
         # Sort by: ELITE first, then STRONG, then SMASH; within each tier by HR Game%
@@ -14589,14 +14590,24 @@ if all_hitters:
             ["_tier", "hr_game_pct"], ascending=[False, False]
         )
         # CRITICAL: Limit to top 2 per team to avoid stacking same lineup.
-        # User asked: "limit the smashes to 1 or 2 per team just the top 2"
-        # We use groupby + head(2) which keeps the top 2 hitters per team
-        # (already pre-sorted by tier then HR%).
-        smash_df = smash_df.groupby("team", group_keys=False).head(2)
-        # Re-sort the final result so tiers display in order
+        # v44.86 (user: "only shows elite and strong smashes"). Apply the 2/team
+        # cap WITHIN each tier, not globally. A global 2/team cap sent each team's
+        # two slots to their highest tier (ELITE), starving STRONG/SMASH entirely
+        # on loaded nights. Per-tier capping gives each tier its own team-diverse
+        # top slice, so ELITE, STRONG, and SMASH all appear. The slate-wide
+        # section above still has the complete unlimited view.
+        _tier_frames = []
+        for _tv in (3, 2, 1):
+            _tf = smash_df[smash_df["_tier"] == _tv]
+            if _tf.empty:
+                continue
+            _tf = _tf.groupby("team", group_keys=False).head(2).head(8)
+            _tier_frames.append(_tf)
+        if _tier_frames:
+            smash_df = pd.concat(_tier_frames)
         smash_df = smash_df.sort_values(
             ["_tier", "hr_game_pct"], ascending=[False, False]
-        ).head(15)
+        )
         smash_cols = [c for c in [
             "smash_spot", "player_name", "team", "game", "opp_pitcher",
             "hr_game_pct", "grade", "barrel_pct", "env_mult", "matchup_opp",
