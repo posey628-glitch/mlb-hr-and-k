@@ -1072,11 +1072,27 @@ def get_bat_tracking(season: int | None = None) -> tuple[pd.DataFrame, str, list
     candidate_urls = [
         # Primary: custom leaderboard with bat-tracking selections.
         # Same endpoint that already works for hard_hit/barrel_pct etc.
+        # v44.89: min=10 (was min=q). "q" = fully qualified (~3.1 PA/team-game),
+        # which excludes part-time and recently-promoted starters — dropping
+        # blast_pct real-coverage on the night's starters to ~60% (rest median-
+        # imputed). min=10 widens the net to any hitter with 10+ PA of bat-
+        # tracking, capturing more real starters while keeping the sample big
+        # enough to be meaningful. Cuts imputation in Dinger Score + HR Crit #4.
+        f"https://baseballsavant.mlb.com/leaderboard/custom"
+        f"?year={season}&type=batter&filter=&min=10"
+        f"&selections={selections}"
+        f"&chart=false&x=player_name&y=player_name&r=no&csv=true",
+        # Fallback: dedicated bat-tracking leaderboard URL
+        f"https://baseballsavant.mlb.com/leaderboard/bat-tracking"
+        f"?attackZone=&batSide=&season={season}&team=&min=10"
+        f"&sortColumn={blast_candidates[0]}&sortDirection=desc&csv=true",
+        # v44.89 safety net: the ORIGINAL min=q URLs, kept as final fallbacks.
+        # If min=10 ever errors or returns an unexpected schema, we still get
+        # the known-good qualified data (60% coverage beats a broken fetch).
         f"https://baseballsavant.mlb.com/leaderboard/custom"
         f"?year={season}&type=batter&filter=&min=q"
         f"&selections={selections}"
         f"&chart=false&x=player_name&y=player_name&r=no&csv=true",
-        # Fallback: dedicated bat-tracking leaderboard URL
         f"https://baseballsavant.mlb.com/leaderboard/bat-tracking"
         f"?attackZone=&batSide=&season={season}&team=&min=q"
         f"&sortColumn={blast_candidates[0]}&sortDirection=desc&csv=true",
