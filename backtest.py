@@ -690,6 +690,59 @@ def snapshot_hitters(payload: dict) -> list[dict]:
     return []
 
 
+def build_pitcher_hr_analysis() -> dict:
+    """v44.79: merge pitcher snapshot records with their actual HRs-allowed
+    outcomes across all snapshots, then run the correlation analysis. Returns
+    the pitcher_hr_allowed_analysis result (which pitcher factors predict HRs).
+
+    Mirrors the hitter pattern-analysis path but for the pitcher side. Reads
+    from the same gist snapshots; each snapshot's "pitchers" list holds the
+    factors, and "pitcher_outcomes" holds actual HRs allowed keyed by pid.
+    """
+    try:
+        from pattern_analysis import pitcher_hr_allowed_analysis
+    except Exception:
+        return {}
+    snaps = _gist_read_all() or {}
+    if not snaps:
+        return {}
+    rows = []
+    for key, payload in snaps.items():
+        if key.startswith("_") or not isinstance(payload, dict):
+            continue
+        pitchers = payload.get("pitchers") or []
+        p_out_raw = payload.get("pitcher_outcomes")
+        if not pitchers or not p_out_raw:
+            continue
+        # pitcher_outcomes is a JSON string keyed by pid → {hr: n, ...}
+        try:
+            import json as _json
+            p_out = _json.loads(p_out_raw) if isinstance(p_out_raw, str) else p_out_raw
+        except Exception:
+            continue
+        if not isinstance(p_out, dict):
+            continue
+        for rec in pitchers:
+            if not isinstance(rec, dict):
+                continue
+            pid = rec.get("player_id")
+            if pid is None:
+                continue
+            _o = p_out.get(str(pid)) or p_out.get(pid)
+            if not isinstance(_o, dict):
+                continue
+            _hr = _o.get("hr", _o.get("actual_hr_allowed"))
+            if _hr is None:
+                continue
+            _r = dict(rec)
+            _r["actual_hr_allowed"] = _hr
+            rows.append(_r)
+    if not rows:
+        return {"factors": [], "n": 0, "reliable": False}
+    import pandas as _pd
+    return pitcher_hr_allowed_analysis(_pd.DataFrame(rows))
+
+
 def save_snapshot(snapshot_date, matchup_df: pd.DataFrame,
                     pitcher_slate_df: pd.DataFrame,
                     snapshot_key: str | None = None,
@@ -860,6 +913,13 @@ def save_snapshot(snapshot_date, matchup_df: pd.DataFrame,
                 "player_id", "pitcher_name", "team", "opp",
                 "test_score", "kHR", "hr_suppress",
                 "proj_k", "role", "reliability",
+                # v44.79: HR-vulnerability factors so we can grade whether they
+                # predict HRs the pitcher actually allows. These are the pitcher
+                # side of HR prediction — the foundation for folding pitcher
+                # matchup into the combined metric.
+                "grade", "barrel_allowed", "xwoba_allowed", "fb_allowed",
+                "hard_hit_allowed", "hr_per_9", "slg_allowed",
+                "whiff_pct", "k_pct", "csw_pct",
             ] if c in pitcher_slate_df.columns]
             _psub = pitcher_slate_df[keep_cols].where(
                 pitcher_slate_df[keep_cols].notna(), None
