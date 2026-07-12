@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.91-copy-buttons-slate-audit-fix"
+APP_VERSION = "2026.06.10-v44.92-backtest-copy-persist"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -3980,8 +3980,24 @@ if show_backtest:
                                     f"K bias: {p_metrics.get('k_projection_bias', 0):+.2f}"
                                 )
                             if len(_bt_lines) > 1:
-                                with st.expander("📋 Copy backtest results as text", expanded=False):
-                                    st.code("\n".join(_bt_lines), language=None)
+                                # v44.92: stash in session_state so the copy
+                                # button persists across reruns (content inside
+                                # an st.button block vanishes on the next rerun,
+                                # so an inline copy button was never usable).
+                                st.session_state["_backtest_copy_text"] = "\n".join(_bt_lines)
+                                st.session_state["_backtest_copy_label"] = snap_choice
+
+                # v44.92: persistent copy button — renders whenever a backtest
+                # has been evaluated this session, OUTSIDE the st.button block so
+                # it survives reruns (the inline one vanished immediately).
+                _bt_copy = st.session_state.get("_backtest_copy_text")
+                if _bt_copy:
+                    with st.expander(
+                        f"📋 Copy backtest results as text "
+                        f"({st.session_state.get('_backtest_copy_label','last run')})",
+                        expanded=False,
+                    ):
+                        st.code(_bt_copy, language=None)
 
             # ============================================================
             # ROLLING AGGREGATE — multi-day model performance
@@ -6646,7 +6662,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.91 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.92 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
