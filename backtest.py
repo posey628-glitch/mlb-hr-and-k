@@ -800,6 +800,8 @@ def save_snapshot(snapshot_date, matchup_df: pd.DataFrame,
                 "pick_score",
                 "ps_hr_game", "ps_matchup_opp", "ps_power", "ps_pitch_hr",
                 "ps_form", "ps_sleeper", "ps_lift", "ps_env",
+                "ps_discipline", "ps_bonus_recent_hr", "ps_bonus_platoon",
+                "ps_bonus_lineup", "ps_penalty_il",  # v44.77: all pick_score parts
                 "ps_bonus_lineup", "ps_bonus_platoon",
                 "ps_bonus_recent_hr", "ps_penalty_il",
                 # v43.74: critical for Pattern Analysis to read accumulated
