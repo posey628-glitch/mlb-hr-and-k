@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.87-allstar-break-gametype-guard"
+APP_VERSION = "2026.06.10-v44.88-allstar-break-full-audit"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -2120,10 +2120,26 @@ with st.sidebar:
             try:
                 latest_date = datetime.strptime(existing[-1], "%Y-%m-%d").date()
                 days_old = (today - latest_date).days
+                # v44.88: All-Star break awareness. No regular games ~Jul 14-16,
+                # 2026, so a multi-day snapshot gap during/right after the break
+                # is EXPECTED, not stale-from-neglect. Avoid a misleading warning.
+                import datetime as _dt
+                _asb_start = _dt.date(2026, 7, 14)
+                _asb_end = _dt.date(2026, 7, 16)
+                _in_or_near_break = (
+                    (_asb_start <= today <= _asb_end)
+                    or (latest_date <= _asb_end and today <= _asb_end + _dt.timedelta(days=2))
+                )
                 if days_old == 0:
                     st.caption("✅ Today's snapshot exists — backtest data is current.")
                 elif days_old == 1:
                     st.caption("✅ Last snapshot: yesterday.")
+                elif _in_or_near_break:
+                    st.caption(
+                        f"🟡 Last snapshot: {days_old} day(s) ago — this spans the "
+                        "All-Star break (no regular games ~Jul 14-16). Not stale; "
+                        "accumulation resumes when games return ~Jul 17."
+                    )
                 elif days_old <= 3:
                     st.caption(f"🟡 Last snapshot: {days_old} days ago. Load the app today to capture it.")
                 else:
@@ -6600,7 +6616,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.87 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.88 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
