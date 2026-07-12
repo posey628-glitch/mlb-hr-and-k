@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.72-pipeline-health-copy-text"
+APP_VERSION = "2026.06.10-v44.74-matchup-interaction-analysis"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -4011,7 +4011,11 @@ if show_pattern_analysis:
                         "or reaching Nuclear tier actually homer at a higher "
                         "rate than the slate average? If lift ≫ 1.0, the "
                         "framework adds signal. If ≈1.0, the framework is "
-                        "vanity. If <1.0, it's actively misleading."
+                        "vanity. If <1.0, it's actively misleading. "
+                        "(**Must-Have** = baseline power profile, 9 criteria, moderate bar. "
+                        "**Nuclear** = elite power profile, 12 criteria, much stricter bar — "
+                        "rare. Full explanation in the main board's 🎯 Researcher's Profile "
+                        "Summary.)"
                     )
                     rf_results = researcher_framework_backtest(merged)
                     if rf_results.get("error"):
@@ -4074,7 +4078,9 @@ if show_pattern_analysis:
 
                         # v44.67: situational context segments (home/away, day/night)
                         for _ck, _emoji in [("context_home_away", "🏠"),
-                                            ("context_day_night", "🌞")]:
+                                            ("context_day_night", "🌞"),
+                                            ("matchup_env", "🌪️"),
+                                            ("matchup_pitcher", "🎯")]:
                             _seg = rf_results.get(_ck)
                             if _seg:
                                 _lift = _seg.get("lift")
@@ -4087,6 +4093,30 @@ if show_pattern_analysis:
                                     f"**{_seg['out_rate']:.1%}** (n={_seg['n_out']}) "
                                     f"→ **lift {_lstr}** {_rel}"
                                 )
+
+                        # v44.74: the INTERACTION — does a good matchup help
+                        # high-profile hitters MORE than low-profile ones?
+                        _it = rf_results.get("matchup_interaction")
+                        if _it:
+                            _hi_l = _it.get("hi_env_lift")
+                            _lo_l = _it.get("lo_env_lift")
+                            _hi_s = f"{_hi_l:.2f}×" if _hi_l else "—"
+                            _lo_s = f"{_lo_l:.2f}×" if _lo_l else "—"
+                            _it_rel = "✅" if _it.get("reliable") else "⚠️ small sample"
+                            _compound = ""
+                            if _hi_l and _lo_l:
+                                if _hi_l > _lo_l * 1.1:
+                                    _compound = " → **matchup compounds with profile** (good spots help mashers more)"
+                                elif _lo_l > _hi_l * 1.1:
+                                    _compound = " → matchup helps weaker profiles more (unexpected)"
+                                else:
+                                    _compound = " → matchup helps both tiers similarly"
+                            st.markdown(
+                                f"**🔬 Profile × Matchup interaction** {_it_rel}: "
+                                f"favorable env lifts HR rate **{_hi_s}** for high-profile hitters "
+                                f"(n={_it['hi_profile_fav_env']['n']}) vs **{_lo_s}** for "
+                                f"low-profile (n={_it['lo_profile_fav_env']['n']}){_compound}"
+                            )
 
                     # ====== Per-player patterns (v44.70) ======
                     # User: patterns fit certain players and not others — the
@@ -6122,7 +6152,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.72 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.74 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -8981,6 +9011,45 @@ if combined_picks is not None and not combined_picks.empty:
                         "(elite park, terrible pitcher) the profile alone misses, "
                         "or vice versa."
                     )
+                    # v44.73 (user: make the difference crystal clear). Plain-
+                    # language explainer of the two profile tiers, shown right
+                    # where the lists live so it's never ambiguous.
+                    with st.expander("❓ Must-Have vs Nuclear — what's the difference?", expanded=False):
+                        st.markdown(
+                            "**Both are power-profile checklists** — they score a hitter purely on "
+                            "their own batted-ball skill (barrel rate, exit velo, pull-in-air, ISO, "
+                            "etc.), with **no** matchup, park, or weather involved. The difference is "
+                            "**how high the bar is set.**\n\n"
+                            "**✅ Must-Have — the *baseline* power profile (9 criteria).**\n"
+                            "\"Does this hitter have the fundamental traits to hit a home run?\" "
+                            "Moderate thresholds: barrel ≥15%, ISO ≥.200, hard-hit ≥40%, "
+                            "pull-in-air ≥50%, fly-ball ≥40%, and a few more. A hitter who **passes "
+                            "Must-Have** (clears enough of the 9) has a legit HR-capable profile. "
+                            "Many good power hitters clear this on a given night.\n\n"
+                            "**☢️ Nuclear — the *elite* power profile (12 criteria).**\n"
+                            "\"Is this an absolute bomber right now?\" Much **stricter** thresholds "
+                            "(barrel ≥18%, ISO ≥.300, hard-hit ≥55%, avg EV ≥94, SLG ≥.600) **plus "
+                            "extra checks Must-Have doesn't even look at** (season HR count, average "
+                            "exit velocity, slugging). Very few hitters clear it — it's designed to "
+                            "surface only **3–8 plays per slate at most, often zero.**\n\n"
+                            "**The simple way to think about it:** Must-Have = \"has the profile to go "
+                            "yard.\" Nuclear = \"has the profile of a guy who's mashing bombs.\" "
+                            "Nuclear is the higher, rarer bar — every Nuclear hitter would also pass "
+                            "Must-Have, but almost no Must-Have hitters reach Nuclear.\n\n"
+                            "**Which to use for picks:** the Nuclear tier list is your shortest, "
+                            "highest-conviction shortlist when it's populated. When it's empty or "
+                            "thin (normal), fall back to the Must-Have passers and the "
+                            "Top-10-by-Must-Have list below for the strongest available profiles. "
+                            "Either way, cross-check against HR Score, which adds the matchup/park/"
+                            "weather edge these pure-profile lists ignore."
+                        )
+                        st.caption(
+                            "Tracked in Pattern Analysis: both the count (must_have_met / nuclear_met) "
+                            "and the pass/tier cohorts are graded against actual HR outcomes over time "
+                            "— that's the \"Must-Have: passers X% · Nuclear: in-tier Y%\" lift you see "
+                            "in Section A, which tells you whether clearing these bars actually "
+                            "predicts homers."
+                        )
 
                     # ===== A: hitters who PASS Must-Have =====
                     # v43.78 (auditor-found): the .get(...) == True pattern
