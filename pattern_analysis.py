@@ -906,6 +906,21 @@ HR_CANDIDATE_FEATURES = [
     # sleeper_score's correlation is ~0 or negative, that's evidence its 5%
     # weight should shrink or go to zero.
     "sleeper_score", "convergence_count",
+    # v44.77 (user: EVERY metric must be analyzed). The pick_score SUB-components
+    # — so we can see which specific parts of pick_score predict HRs and which
+    # are dead weight. This is how we'll eventually audit + reweight pick_score
+    # itself from evidence, not intuition.
+    "ps_power", "ps_hr_game", "ps_matchup_opp", "ps_pitch_hr",
+    "ps_form", "ps_lift", "ps_env", "ps_sleeper", "ps_discipline",
+    "ps_bonus_recent_hr", "ps_bonus_platoon", "ps_bonus_lineup",
+    # Plate-discipline + contact-mix stats: do they predict HRs at all?
+    "k_pct", "bb_pct", "whiff_pct", "gb_pct", "ld_pct",
+    "obp", "ops", "recent_hr",
+    # Hit / total-base projections (relevant once we build Hit/TB scores)
+    "hit_game_pct", "expected_total_bases", "tb_pa",
+    # Power-target flags + pitch-match
+    "is_moonshot_target", "is_laser_target", "pitch_match_score",
+    "opp_pitcher_xwoba", "must_have_total", "nuclear_total",
 ]
 
 
