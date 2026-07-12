@@ -1707,6 +1707,17 @@ def _extract_all_from_feeds(target_date) -> dict:
             _pk = g.get("gamePk")
             if not _pk:
                 continue
+            # v44.87 (user: All-Star break shouldn't skew the data). Only grade
+            # REGULAR-SEASON games. gameType "R" = regular season; "A" = All-Star,
+            # "S" = spring, "E"/"F"/"D"/"L"/"W" = exhibition/postseason. During the
+            # ASB (and the ASG on ~July 14), the schedule feed returns the All-Star
+            # Game — without this filter its HRs would be graded as outcomes vs our
+            # predictions, corrupting pattern analysis + backtests. The season-stat
+            # fetch already filters gameType=R; this outcome path was missing it.
+            _game_type = str(g.get("gameType") or "").upper()
+            if _game_type and _game_type != "R":
+                _excluded_status.append((_pk, f"gameType={_game_type}"))
+                continue
             # v44.60 (user: don't let postponed/cancelled games count as
             # "didn't homer"). Only pull outcomes from games MLB marks Final/
             # completed. A postponed or suspended game has no valid full box
