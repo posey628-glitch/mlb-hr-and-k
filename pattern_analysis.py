@@ -679,6 +679,63 @@ def per_player_patterns(merged_df: pd.DataFrame,
     return out
 
 
+def pitcher_hr_allowed_analysis(pitcher_merged_df: "pd.DataFrame") -> dict:
+    """v44.79 (user: analyze all pitching stats toward predicting HRs).
+
+    Correlates each pitcher HR-vulnerability factor against the actual number
+    of HRs the pitcher allowed. This is the pitcher-side mirror of the hitter
+    feature-importance analysis: it tells us WHICH pitcher stats actually
+    predict the HRs they give up — the foundation for eventually folding a
+    validated pitcher-matchup signal into the combined HR-prediction metric.
+
+    Expects a merged frame with pitcher factor columns + an outcome column
+    'actual_hr_allowed' (attached from pitcher_outcomes).
+
+    Returns per-factor correlation with HRs-allowed, plus sample size and a
+    reliability flag, sorted by |correlation|.
+    """
+    out = {"factors": [], "n": 0, "reliable": False}
+    if pitcher_merged_df is None or pitcher_merged_df.empty:
+        return out
+    _outcome = "actual_hr_allowed"
+    if _outcome not in pitcher_merged_df.columns:
+        return out
+    df = pitcher_merged_df.dropna(subset=[_outcome]).copy()
+    if len(df) < 5:
+        out["n"] = len(df)
+        return out
+
+    # Pitcher factors that plausibly predict HRs allowed. Higher barrel/xwoba/
+    # fb/hard-hit/hr9/slg allowed = more HRs; higher k/whiff/csw/hr_suppress =
+    # fewer. We report the raw correlation so the SIGN tells the story.
+    _factors = [
+        "barrel_allowed", "xwoba_allowed", "fb_allowed", "hard_hit_allowed",
+        "hr_per_9", "slg_allowed", "hr_suppress", "test_score",
+        "whiff_pct", "k_pct", "csw_pct", "proj_k",
+    ]
+    _y = pd.to_numeric(df[_outcome], errors="coerce")
+    rows = []
+    for f in _factors:
+        if f not in df.columns:
+            continue
+        _x = pd.to_numeric(df[f], errors="coerce")
+        _pair = pd.concat([_x, _y], axis=1).dropna()
+        if len(_pair) < 5 or _pair.iloc[:, 0].nunique() < 2:
+            continue
+        try:
+            _c = float(_pair.iloc[:, 0].corr(_pair.iloc[:, 1]))
+        except Exception:
+            continue
+        if _c == _c:  # not NaN
+            rows.append({"factor": f, "corr_with_hr_allowed": round(_c, 4),
+                         "n": len(_pair)})
+    rows.sort(key=lambda r: abs(r["corr_with_hr_allowed"]), reverse=True)
+    out["factors"] = rows
+    out["n"] = len(df)
+    out["reliable"] = len(df) >= 40
+    return out
+
+
 # ============================================================================
 # Prop-level accuracy summary
 # ============================================================================
