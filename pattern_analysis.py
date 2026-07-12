@@ -920,6 +920,7 @@ HR_CANDIDATE_FEATURES = [
     "hit_game_pct", "expected_total_bases", "tb_pa",
     # Power-target flags + pitch-match
     "is_moonshot_target", "is_laser_target", "pitch_match_score",
+    "moonshot_score", "laser_score",  # v44.78: slate-wide power-type composites
     "opp_pitcher_xwoba", "must_have_total", "nuclear_total",
 ]
 
