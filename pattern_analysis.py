@@ -900,6 +900,12 @@ HR_CANDIDATE_FEATURES = [
     "lift_score", "discipline_score",
     "recent_hr_weighted_rate",
     "env_boost", "dinger_score", "power_composite", "barrel_matchup_score", "two_way_matchup_score",
+    # v44.76 (user: does sleeper_score actually affect HR probability? — and
+    # audit whether every pick_score component earns its weight). Track the
+    # remaining pick_score inputs so their real HR correlation is visible. If
+    # sleeper_score's correlation is ~0 or negative, that's evidence its 5%
+    # weight should shrink or go to zero.
+    "sleeper_score", "convergence_count",
 ]
 
 
