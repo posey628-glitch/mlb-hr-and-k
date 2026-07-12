@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.79-pitcher-analysis-moonshot-bugfix"
+APP_VERSION = "2026.06.10-v44.81-slatewide-smash-spots"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -517,7 +517,122 @@ COLUMN_HELP = {
              "B+ 17-21%, B 13-17%, C+ 10-13%, C 7-10%, D 4-7%, F < 4%.",
     "smash_spot": "🔥🔥🔥 elite three-way smash (hitter + pitcher + park "
                   "all align). 🔥🔥 strong, 🔥 modest.",
+    # === v44.80: custom scores + newer metrics (were missing hover help) ===
+    "hr_score": "The primary HR ranking (0-100), matchup-aware. Blends the "
+                "hitter's power profile with tonight's pitcher, park, and weather. "
+                "⬆️ HIGHER = better HR play. This is the headline model score.",
+    "dinger_score": "Curated season-power composite (0-100) from the highest-"
+                    "reliability HR signals (pulled-barrel%, EV, barrel%, hard-hit, "
+                    "ISO, blast%). Pure raw-power lens. ⬆️ HIGHER = better.",
+    "power_composite": "'💥+ Combo' (0-100): 55% HR Score + 45% Dinger Score. "
+                       "Blends the matchup-aware and pure-power views. ⬆️ HIGHER = better.",
+    "barrel_matchup_score": "'🎯 Brl Match' (0-100): the hitter's barrel ability × "
+                            "how many barrels this pitcher allows. ⬆️ HIGHER = better "
+                            "barrel matchup.",
+    "two_way_matchup_score": "'⚖️ Two-Way' (0-100), handedness-aware: hitter power "
+                             "(50%) + pitcher HR-allowed by hand (30%) + arsenal (20%). "
+                             "⬆️ HIGHER = better platoon-adjusted matchup.",
+    "moonshot_score": "Profile for a 400+ ft bomb (0-100): distance-driven — barrel, "
+                      "pull-air, blast, ISO + tonight's matchup. ⬆️ HIGHER = more likely "
+                      "to hit a long HR. See the slate-wide Top 10 Moonshots list.",
+    "laser_score": "Profile for a 105+ mph line-drive HR (0-100): exit-velocity driven — "
+                   "avg EV, hard-hit% + matchup. ⬆️ HIGHER = more likely to hit a hard, "
+                   "low HR. See the slate-wide Top 10 Lasers list.",
+    "pulled_brl_pct": "Pulled-barrel rate — barrels hit to the pull side, in the air. "
+                      "The single most HR-predictive contact metric. ⬆️ HIGHER = better. "
+                      "Elite ≥ 12%, good ≥ 8%.",
+    "blast_pct": "Blast rate — % of swings that are 'blasts' (fast swing + squared-up "
+                 "contact). Bat-tracking quality signal. ⬆️ HIGHER = better. Elite ≥ 15%. "
+                 "(Median-imputed when Savant bat-tracking is missing — see 📊 Data flag.)",
+    "xwoba": "Expected wOBA — Statcast's contact-quality-based value estimate. "
+             "⬆️ HIGHER = better overall hitter. Elite ≥ .370, good ≥ .330.",
+    "xslg": "Expected SLG — Statcast's contact-based slugging estimate. Strips out "
+            "luck/defense. ⬆️ HIGHER = more power. Elite ≥ .500, good ≥ .430.",
+    "slg": "Slugging percentage (total bases per AB). ⬆️ HIGHER = more power. "
+           "Elite ≥ .500, good ≥ .430.",
+    "obp": "On-base percentage. ⬆️ HIGHER = reaches base more. Elite ≥ .370.",
+    "ops": "On-base plus slugging (OBP + SLG). Overall offensive quality. "
+           "⬆️ HIGHER = better. Elite ≥ .870, good ≥ .760.",
+    "whiff_pct": "Whiff rate — % of swings that miss. ⬇️ LOWER = more contact "
+                 "(more chances to homer). High whiff = big power but boom-or-bust. "
+                 "Elite ≤ 22%, poor ≥ 30%.",
+    "discipline_score": "Plate-discipline composite (0-100) from K% and BB%. "
+                        "⬆️ HIGHER = better strike-zone control. Feeds pick_score (6%).",
+    "pitch_hr_score": "How HR-prone the pitcher's arsenal is for this hitter (0-100), "
+                      "by pitch type. ⬆️ HIGHER = more exploitable arsenal.",
+    "pitch_match_score": "Hitter's performance vs the specific pitch types this pitcher "
+                         "throws most. ⬆️ HIGHER = better pitch-type matchup.",
+    "recent_hr": "HRs hit in the last 15 days. Recent power form. ⬆️ HIGHER = hotter.",
+    "must_have_met": "How many of the 9 baseline power-profile criteria this hitter "
+                     "clears (barrel ≥15%, ISO ≥.200, hard-hit ≥40%, etc.). ⬆️ HIGHER = "
+                     "stronger fundamental HR profile. Clearing most = 'Must-Have pass.'",
+    "nuclear_met": "How many of the 12 ELITE power criteria this hitter clears "
+                   "(barrel ≥18%, ISO ≥.300, hard-hit ≥55%, EV ≥94, SLG ≥.600, etc.). "
+                   "⬆️ HIGHER = elite bomber profile. Rare to clear many.",
+    "nuclear_grade": "Nuclear tier: ☢️ NUCLEAR (all 12) / 💥 STRONG (≤2 missed) / "
+                     "🎯 NEAR (≤4 missed). Blank = didn't reach NEAR. The rarest, "
+                     "highest-conviction power profiles.",
+    "convergence_count": "How many INDEPENDENT scoring methods (up to 10) rank this "
+                         "hitter top-15 tonight. ⬆️ HIGHER = broader multi-method "
+                         "agreement. See the 🎯 Consensus Board.",
+    "convergence_label": "Consensus tier: 🎯🎯🎯 (≥70% of methods agree) / 🎯🎯 (≥50%) / "
+                         "🎯 (≥40%). More 🎯 = stronger multi-method consensus.",
+    "expected_total_bases": "Projected total bases this game (singles=1 … HR=4). "
+                            "⬆️ HIGHER = more extra-base production expected.",
+    "hit_game_pct": "Probability the hitter gets ≥1 hit this game. ⬆️ HIGHER = safer "
+                    "contact play (distinct from HR upside).",
+    "data_completeness": "Data-quality flag for this hitter: ✅ full / ⚠️ partial / "
+                         "🚨 thin. Shows whether the core scoring inputs and handedness "
+                         "splits are real vs missing/imputed. Hover the 📊 note for details.",
 }
+
+
+def _enrich_config(config: dict | None) -> dict:
+    """v44.80: inject hover help (from COLUMN_HELP) into a column_config dict.
+
+    For every column that already has a st.column_config entry but no `help=`
+    set, and that has an entry in COLUMN_HELP, rebuild the config with the help
+    text attached. Columns not in COLUMN_HELP, or that already have help, are
+    left untouched. This gives column headers a hover tooltip everywhere the
+    config is passed through here, without editing each table call.
+
+    Streamlit column_config objects don't expose their kwargs cleanly, so we
+    can't mutate them in place — instead we only ADD help where a config entry
+    is a plain string label or is missing, and otherwise leave the existing
+    object (which may already carry formatting) as-is. To actually attach help
+    to existing NumberColumn/TextColumn objects we rebuild from COLUMN_HELP when
+    the caller passes the column name mapped to a simple type. Safe no-op if the
+    structure isn't recognized.
+    """
+    if not isinstance(config, dict):
+        config = {}
+    out = dict(config)
+    for _col, _help in COLUMN_HELP.items():
+        if _col not in out:
+            continue
+        _existing = out[_col]
+        # If it's a plain string (just a label), upgrade to a TextColumn w/ help.
+        if isinstance(_existing, str):
+            out[_col] = st.column_config.Column(_existing, help=_help)
+    return out
+
+
+def _config_for(cols, extra: dict | None = None) -> dict:
+    """v44.80: build a column_config for a list of columns, giving each a hover
+    help tooltip from COLUMN_HELP. `extra` overrides/augments per-column configs
+    (e.g. number formats). Any column with COLUMN_HELP text and no explicit
+    config gets a Column(help=...) so its header is hoverable.
+    """
+    cfg = {}
+    for _c in cols:
+        if _c in COLUMN_HELP:
+            cfg[_c] = st.column_config.Column(help=COLUMN_HELP[_c])
+    if extra:
+        # extra entries win (they may add format/width); but preserve help if
+        # the extra entry didn't set one and we have COLUMN_HELP for it.
+        for _c, _v in extra.items():
+            cfg[_c] = _v
+    return cfg
 
 
 
@@ -6388,7 +6503,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.79 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.81 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -9236,6 +9351,11 @@ if combined_picks is not None and not combined_picks.empty:
                         "NUC Detail", width="medium",
                     ),
                 }
+                # v44.80: add hover help to any profile-table column that has
+                # COLUMN_HELP text but wasn't given a help= above.
+                for _hc, _ht in COLUMN_HELP.items():
+                    if _hc not in _profile_config:
+                        _profile_config[_hc] = st.column_config.Column(help=_ht)
                 if "must_have_met" in _cp.columns and "nuclear_met" in _cp.columns:
                     st.subheader("🎯 Researcher's Profile Summary")
                     st.caption(
@@ -11193,7 +11313,8 @@ if combined_picks is not None and not combined_picks.empty:
                                 hide_index=True, use_container_width=True,
                                 column_config={
                                     _col: st.column_config.NumberColumn(
-                                        _kind[:-1] + " Score", format="%.1f", width="small"),
+                                        _kind[:-1] + " Score", format="%.1f", width="small",
+                                        help=COLUMN_HELP.get(_col)),
                                     "player_name": st.column_config.TextColumn("Player"),
                                     "hr_game_pct": st.column_config.NumberColumn(
                                         "HR%", format="%.1f", width="small"),
@@ -11205,6 +11326,55 @@ if combined_picks is not None and not combined_picks.empty:
                                         "EV", format="%.1f", width="small"),
                                 },
                             )
+        except Exception:
+            pass
+
+        # v44.81 (user: "I only see regular smash, not strong or elite"). The
+        # per-team Smash Spots table (further down) reads from each team's frame
+        # capped at 2/team, so ELITE/STRONG scattered across teams never showed
+        # together — you'd see one regular SMASH in a team block and miss the
+        # rest. This SLATE-WIDE section shows every tier ranked together, so the
+        # ELITE/STRONG counts that Pipeline Health reports actually appear.
+        try:
+            if "smash_spot" in q.columns and (q["smash_spot"].fillna("") != "").any():
+                _sw = q[q["smash_spot"].fillna("") != ""].copy()
+                _tier_rank = {"🔥🔥🔥 ELITE SMASH": 3, "🔥🔥 STRONG SMASH": 2, "🔥 SMASH": 1}
+                _sw["_tier"] = _sw["smash_spot"].map(_tier_rank).fillna(0)
+                _sw = _sw.sort_values(["_tier", "hr_game_pct"],
+                                      ascending=[False, False])
+                _n_e = int((_sw["_tier"] == 3).sum())
+                _n_s = int((_sw["_tier"] == 2).sum())
+                _n_m = int((_sw["_tier"] == 1).sum())
+                with st.expander(
+                    f"🔥 Smash Spots (slate-wide) — {_n_e} ELITE · {_n_s} STRONG · {_n_m} SMASH",
+                    expanded=(_n_e > 0 or _n_s > 0)
+                ):
+                    st.caption(
+                        "ALL triple-threat smash spots across the whole slate, ranked "
+                        "ELITE → STRONG → SMASH, then by HR%. Unlike the per-team tables "
+                        "below (capped at 2/team), this shows every tier together so the "
+                        "best plays surface. ELITE = EXPLOIT+ pitcher + favorable env "
+                        "(≥1.05) + HR%≥19; STRONG = EXPLOIT/+ + favorable env + HR%≥15; "
+                        "SMASH = EXPLOIT/+ + HR%≥15."
+                    )
+                    _sw_cols = [c for c in [
+                        "smash_spot", "player_name", "team", "game", "opp_pitcher",
+                        "hr_game_pct", "pick_score", "grade", "barrel_pct", "env_boost",
+                    ] if c in _sw.columns]
+                    st.dataframe(
+                        _sw[_sw_cols].reset_index(drop=True),
+                        hide_index=True, use_container_width=True,
+                        column_config={
+                            "smash_spot": st.column_config.TextColumn("Tier", width="medium"),
+                            "player_name": st.column_config.TextColumn("Hitter"),
+                            "team": st.column_config.TextColumn("Tm", width="small"),
+                            "hr_game_pct": st.column_config.NumberColumn("HR%", format="%.1f%%"),
+                            "pick_score": st.column_config.NumberColumn("Pick", format="%.1f", width="small"),
+                            "barrel_pct": st.column_config.NumberColumn("Brl%", format="%.1f%%"),
+                            "env_boost": st.column_config.NumberColumn("Env×", format="%.2f", width="small",
+                                                                       help=COLUMN_HELP.get("env_boost")),
+                        },
+                    )
         except Exception:
             pass
         #
@@ -15703,6 +15873,21 @@ def build_col_config():
     }
 
 
+def build_col_config_with_help(extra_cols=None):
+    """v44.80: build_col_config PLUS auto-injected hover help for any column
+    that has COLUMN_HELP text but no config entry yet. So a displayed column
+    like moonshot_score gets a header tooltip even if build_col_config didn't
+    explicitly define it. Pass extra_cols (the actual columns being shown) to
+    guarantee they're covered.
+    """
+    cfg = build_col_config()
+    _cols = set(extra_cols) if extra_cols else set(COLUMN_HELP.keys())
+    for _c in _cols:
+        if _c not in cfg and _c in COLUMN_HELP:
+            cfg[_c] = st.column_config.Column(help=COLUMN_HELP[_c])
+    return cfg
+
+
 def _style_matchup_df(df: pd.DataFrame):
     """
     Returns a Styled DataFrame with color-coded columns - Kasper-style.
@@ -15990,7 +16175,7 @@ def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
         st.dataframe(
             _style_matchup_df(qualified[cols_to_show]),
             hide_index=True, use_container_width=True,
-            column_config=build_col_config(),
+            column_config=build_col_config_with_help(cols_to_show),
         )
 
     if not insufficient.empty:
@@ -15998,7 +16183,7 @@ def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
             st.dataframe(
                 _style_matchup_df(insufficient[cols_to_show]),
                 hide_index=True, use_container_width=True,
-                column_config=build_col_config(),
+                column_config=build_col_config_with_help(cols_to_show),
             )
 
 
