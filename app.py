@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.96-sticky-owner-mode"
+APP_VERSION = "2026.06.10-v45.00-schema-doubleheader-smash-docs"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -98,6 +98,35 @@ except ImportError:
     def _stats_day_key() -> str:
         from datetime import date
         return date.today().isoformat()
+
+# v45.00: column schema registry (drift detection). Fail-open import so a
+# missing module never breaks the app.
+try:
+    from schema import assert_schema as _assert_schema, find_column as _find_column
+except Exception:
+    def _assert_schema(*a, **k): return []
+    def _find_column(df, name):
+        return name if (df is not None and name in getattr(df, "columns", [])) else None
+
+
+def _today_et():
+    """v44.97: the current calendar date in US/Eastern.
+
+    Streamlit Cloud's server clock is UTC, so a naive datetime.now().date()
+    rolls over to 'tomorrow' at 8 PM ET (00:00 UTC) — which was silently
+    breaking the auto-snapshot gate (no evening snapshots = starved learning
+    loop) and the started-games filter. All 'is this today?' comparisons
+    against the ET-derived selected_date must use THIS, not datetime.now().
+    """
+    try:
+        import pytz
+        return datetime.now(pytz.timezone("US/Eastern")).date()
+    except Exception:
+        # DST-aware-ish fallback: EDT (-4) Mar–Nov, EST (-5) otherwise.
+        _u = datetime.now(timezone.utc)
+        _off = 4 if 3 <= _u.month <= 11 else 5
+        return (_u.replace(tzinfo=None) - timedelta(hours=_off)).date()
+
 
 try:
     from data_fetcher import get_lineup
@@ -253,16 +282,23 @@ try:
     # pitcher data against the hitter's overall per-pitch performance.
     # Not as theoretically clean as fully hand-aware on both sides, but
     # it's the version that actually works.
-    _hitter_arsenal_cache = {"df": None}
+    _hitter_arsenal_cache = {"day": None, "df": None}
     def _get_hitter_arsenal():
-        """Single combined hitter arsenal (no hand split). v43.29 fix."""
-        if _hitter_arsenal_cache["df"] is None or _hitter_arsenal_cache["df"].empty:
+        """Single combined hitter arsenal (no hand split). v43.29 fix.
+        v44.97 (review): keyed on stats-day so a warm container that survives
+        multiple days doesn't serve stale arsenal (which drifts pitch-match).
+        """
+        _day = _stats_day_key()
+        _stale = (_hitter_arsenal_cache.get("day") != _day)
+        if (_stale or _hitter_arsenal_cache["df"] is None
+                or _hitter_arsenal_cache["df"].empty):
             try:
                 fetched = get_hitter_pitch_arsenal()  # no kwarg
             except Exception:
                 fetched = pd.DataFrame()
             if fetched is not None and not fetched.empty:
                 _hitter_arsenal_cache["df"] = fetched
+                _hitter_arsenal_cache["day"] = _day
                 return fetched
             return pd.DataFrame()
         return _hitter_arsenal_cache["df"]
@@ -2117,11 +2153,19 @@ with st.sidebar:
             st.caption(f"Snapshots saved: **{len(existing)}** (most recent: {existing[-1]})")
             # Check coverage in the last 14 days
             from datetime import datetime, timedelta
-            today = datetime.now().date()
+            today = _today_et()  # v44.97: ET-aware (was naive UTC)
             expected_days = set()
             for i in range(14):
                 expected_days.add(str(today - timedelta(days=i)))
-            covered = set(existing).intersection(expected_days)
+            covered = set()
+            # v44.99 (review #2): snapshot keys are hourly ('YYYY-MM-DDThh'),
+            # so an exact set-intersection with plain 'YYYY-MM-DD' day strings
+            # always matched 0 → coverage falsely read 0/14. Prefix-match each
+            # expected day against the (date-normalized) keys instead.
+            _existing_days = {str(k).split("T")[0] for k in existing}
+            for _day in expected_days:
+                if _day in _existing_days:
+                    covered.add(_day)
             coverage_pct = len(covered) / 14 * 100
             if coverage_pct >= 80:
                 st.caption(f"✅ 14-day coverage: {len(covered)}/14 days ({coverage_pct:.0f}%)")
@@ -2131,7 +2175,9 @@ with st.sidebar:
                 st.caption(f"⚠️ 14-day coverage: {len(covered)}/14 days — load app daily to build calibration data.")
             # NEW: Show staleness of most recent snapshot
             try:
-                latest_date = datetime.strptime(existing[-1], "%Y-%m-%d").date()
+                latest_date = datetime.strptime(
+                    str(existing[-1]).split("T")[0], "%Y-%m-%d"
+                ).date()  # v44.99: normalize hourly key before parsing
                 days_old = (today - latest_date).days
                 # v44.88: All-Star break awareness. No regular games ~Jul 14-16,
                 # 2026, so a multi-day snapshot gap during/right after the break
@@ -2385,10 +2431,11 @@ with st.sidebar:
              "- 💢 — Hitter into unfavorable same-side platoon."),
 
             ("🔥 Smash Spot",
-             "Multi-factor convergence flag.\n"
-             "- 🔥🔥🔥 **ELITE** — EXPLOIT+ pitcher + favorable env (≥1.05) + HR%≥19%\n"
-             "- 🔥🔥 **STRONG** — EXPLOIT/EXPLOIT+ + favorable env (≥1.05) + HR%≥15%\n"
-             "- 🔥 **SOLID** — EXPLOIT pitcher + favorable env + HR%≥12%"),
+             "Multi-factor convergence flag (HR Score + pitcher + env).\n"
+             "- 🔥🔥🔥 **ELITE** — HR Score ≥85 + EXPLOIT/EXPLOIT+ pitcher + env ≥1.00\n"
+             "- 🔥🔥 **STRONG** — HR Score ≥75 + EXPLOIT/EXPLOIT+ + env ≥0.92\n"
+             "- 🔥 **SMASH** — HR Score ≥65 + EXPLOIT/EXPLOIT+ + env ≥0.92\n"
+             "(ELITE/TOUGH pitcher blocks all tiers.)"),
 
             ("pick_score",
              "Composite ranking (weighted blend of all signals, 0-99)."),
@@ -2557,7 +2604,7 @@ if slate.empty:
             try:
                 from backtest import (
                     list_snapshots, load_snapshot,
-                    fetch_hitter_outcomes, fetch_pitcher_outcomes,
+                    fetch_hitter_outcomes,
                     evaluate_hitter_projections,
                 )
                 _od_snaps = list_snapshots()
@@ -2686,7 +2733,7 @@ use_bat_tracking = st.sidebar.checkbox(
         "the status caption goes ❌ and the features above gracefully turn off."
     ),
 )
-if hide_started and selected_date == datetime.now().date():
+if hide_started and selected_date == _today_et():  # v44.97: ET-aware
     try:
         # v43.43 (reviewer-validated bias fix): the snapshot payload records
         # which games were dropped via dropped_gamepks / n_filtered (set
@@ -3412,25 +3459,36 @@ try:
                     "history**, so confirm carefully — but on a corrupt "
                     "gist, that history is already unreachable."
                 )
-                _confirm = st.checkbox(
-                    "I understand resetting wipes all prior snapshot history "
-                    "(it's already unreachable due to corruption)",
-                    key="_gist_reset_inline_confirm",
-                )
-                if _confirm and st.button(
-                    "🆘 Reset gist now (start fresh)",
-                    key="_gist_reset_inline_button",
-                    type="primary",
-                ):
-                    _ok, _msg = emergency_reset_gist()
-                    if _ok:
-                        st.success(
-                            f"✅ {_msg}\n\nReload the page to start "
-                            "fresh. Tonight's snapshot will save cleanly."
-                        )
-                        st.balloons()
-                    else:
-                        st.error(f"❌ Reset failed: {_msg}")
+                # v44.97 (review #5): only the OWNER may trigger the wipe.
+                # The warning above is public (so a visitor knows it's broken),
+                # but the reset button was previously ungated — any visitor
+                # could wipe the gist. Gate the confirm + button on owner_mode.
+                if not owner_mode:
+                    st.caption(
+                        "🔒 Reset is owner-only. If you're the owner, log in "
+                        "(add ?owner=… to the URL or use the owner login) to "
+                        "enable the reset button."
+                    )
+                else:
+                    _confirm = st.checkbox(
+                        "I understand resetting wipes all prior snapshot history "
+                        "(it's already unreachable due to corruption)",
+                        key="_gist_reset_inline_confirm",
+                    )
+                    if _confirm and st.button(
+                        "🆘 Reset gist now (start fresh)",
+                        key="_gist_reset_inline_button",
+                        type="primary",
+                    ):
+                        _ok, _msg = emergency_reset_gist()
+                        if _ok:
+                            st.success(
+                                f"✅ {_msg}\n\nReload the page to start "
+                                "fresh. Tonight's snapshot will save cleanly."
+                            )
+                            st.balloons()
+                        else:
+                            st.error(f"❌ Reset failed: {_msg}")
 except Exception:
     pass
 
@@ -3550,9 +3608,9 @@ if not st.session_state["_auto_eval_done"]:
         try:
             import pytz
             _et_now = _dt.now(pytz.timezone("US/Eastern"))
-            _today_et = _et_now.date()
+            _today_et_date = _et_now.date()
         except Exception:
-            _today_et = (_dt.utcnow() - _td(hours=4)).date()
+            _today_et_date = (_dt.utcnow() - _td(hours=4)).date()
 
         _all_snaps = sorted(list_snapshots())
 
@@ -3588,7 +3646,7 @@ if not st.session_state["_auto_eval_done"]:
                 return None
         _eligible = [
             s for s in _all_snaps
-            if (_d := _parse_snap_date(s)) is not None and _d < _today_et
+            if (_d := _parse_snap_date(s)) is not None and _d < _today_et_date
         ]
 
         if not _eligible:
@@ -3596,7 +3654,7 @@ if not st.session_state["_auto_eval_done"]:
             st.session_state["_auto_eval_error"] = (
                 "no_past_snapshots",
                 f"Found {len(_all_snaps)} snapshot(s) total but none before today "
-                f"({_today_et}).\n\n"
+                f"({_today_et_date}).\n\n"
                 f"Most recent snapshots: {_snap_list}\n"
                 f"Gist storage: {_gist_status}\n\n"
                 f"Snapshots from today can't be evaluated until games finish. "
@@ -4338,7 +4396,7 @@ if show_pattern_analysis:
             # (same multi-tier path as auto_run_pattern_discovery) so counts
             # are consistent between the header banner and the daily runner.
             _all_keys = [k for k in list_snapshots() if not str(k).startswith("_")]
-            _today = date.today()
+            _today = _today_et()  # v44.98: ET-aware (was UTC → attached partial outcomes to in-progress slate after 8pm ET)
             _with_outcomes = {}
             _snaps_by_date = {}
             for k in _all_keys:
@@ -5791,14 +5849,15 @@ if show_legend:
             "multiple advantages stacking together. Look for these FIRST when building your slate:\n\n"
             "| Tier | Conditions Required |\n"
             "|---|---|\n"
-            "| 🔥🔥🔥 **ELITE SMASH** | EXPLOIT+ pitcher + favorable env (≥1.05) + HR Game% ≥19% |\n"
-            "| 🔥🔥 **STRONG SMASH** | EXPLOIT/EXPLOIT+ pitcher + favorable env (≥1.05) + HR Game% ≥15% |\n"
-            "| 🔥 **SMASH** | EXPLOIT/EXPLOIT+ pitcher + HR Game% ≥15% (env not favorable) |\n\n"
+            "| 🔥🔥🔥 **ELITE SMASH** | HR Score ≥85 + EXPLOIT/EXPLOIT+ pitcher + favorable env (≥1.00) |\n"
+            "| 🔥🔥 **STRONG SMASH** | HR Score ≥75 + EXPLOIT/EXPLOIT+ pitcher + neutral+ env (≥0.92) |\n"
+            "| 🔥 **SMASH** | HR Score ≥65 + EXPLOIT/EXPLOIT+ pitcher + neutral+ env (≥0.92) |\n\n"
             "Where:\n"
-            "- **Favorable env** = hand-aware park × weather × pull-wind ≥ 1.05 "
-            "(single gate — earlier doc text referenced a separate park check, "
-            "but the code uses the combined env multiplier only)\n"
-            "- **Pitcher grade** must NOT be TBD (we need real pitcher stats)\n\n"
+            "- **HR Score** is the primary matchup-aware composite (0–99, slate-rescaled)\n"
+            "- **env** = hand-aware park × weather × pull-wind multiplier "
+            "(≥1.00 = actively helps, ≥0.92 = non-hostile)\n"
+            "- Any hitter facing an **ELITE/TOUGH** pitcher is blocked from all "
+            "smash tiers regardless of score (no smash spot against an ace)\n\n"
             "Why this matters: when a hitter faces a bad pitcher (EXPLOIT) in a hitter-friendly "
             "ballpark with wind blowing out and good handedness platoon — that's where the model "
             "becomes most confident. Each factor alone is moderate; together they compound.\n\n"
@@ -6798,7 +6857,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.96 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.00 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -8979,6 +9038,30 @@ two_leg_parlay_export = None
 three_leg_parlay_export = None
 sleeper_parlay_export = None
 rr_export = None
+
+# v45.00 (review #5): doubleheader disambiguation. Two games between the same
+# teams share the label "AWY @ HOM", so any back-map keyed by player_id or
+# (player_id, game) collapses both into one — game 2 silently inherits game 1's
+# grade/audit/smash. Detect matchups that span multiple gamePks and assign a
+# game-number suffix (" (G1)", " (G2)") so labels — and thus (player_id, game)
+# keys — are unique per game.
+_dh_suffix_by_gpk = {}
+try:
+    _matchup_to_gpks = {}
+    for _gpk in game_context_map.keys():
+        _gr = slate[slate["gamePk"] == _gpk]
+        if _gr.empty:
+            continue
+        _gr0 = _gr.iloc[0]
+        _mk = f"{_gr0['away_team_abbr']} @ {_gr0['home_team_abbr']}"
+        _matchup_to_gpks.setdefault(_mk, []).append(_gpk)
+    for _mk, _gpks in _matchup_to_gpks.items():
+        if len(_gpks) > 1:  # doubleheader (or more)
+            for _n, _gpk in enumerate(sorted(_gpks), start=1):
+                _dh_suffix_by_gpk[_gpk] = f" (G{_n})"
+except Exception:
+    _dh_suffix_by_gpk = {}
+
 for gpk, ctx in game_context_map.items():
     game_rows = slate[slate["gamePk"] == gpk]
     if game_rows.empty:
@@ -9007,7 +9090,8 @@ for gpk, ctx in game_context_map.items():
             continue
         x = m.copy()
         x["is_bench"] = side.endswith("bench")  # v43.78 auditor fix
-        x["game"] = f"{g_row['away_team_abbr']} @ {g_row['home_team_abbr']}"
+        x["game"] = (f"{g_row['away_team_abbr']} @ {g_row['home_team_abbr']}"
+                     + _dh_suffix_by_gpk.get(gpk, ""))  # v45.00: DH-unique
         # Bench frames are still TEAM-aligned with their side prefix
         team_side = "away" if side.startswith("away") else "home"
         # v43.93 (user-flagged skew): carry per-row lineup confirmation so
@@ -9166,21 +9250,38 @@ if all_hitters_for_picks:
             )
         combined_picks["grade"] = combined_picks.apply(_row_grade, axis=1)
 
-        # Back-map: dict of player_id → (composite, score, signal, grade)
-        _grade_map = {
-            int(pid): (comp, score, sig, grd)
-            for pid, comp, score, sig, grd in zip(
-                combined_picks["player_id"],
-                combined_picks["grade_composite"],
-                combined_picks["hr_score"],
-                combined_picks["hr_score_signal"],
-                combined_picks["grade"],
-            )
-            if pid is not None and not pd.isna(pid)
-        }
+        # Back-map: dict of (player_id, game) → (composite, score, signal, grade).
+        # v45.00 (review #5): compound key so doubleheaders don't collapse. Also
+        # keep a player_id-only fallback map for rows lacking a game label.
+        _grade_map = {}
+        _grade_map_pid_only = {}
+        for pid, gm, comp, score, sig, grd in zip(
+            combined_picks["player_id"],
+            combined_picks["game"] if "game" in combined_picks.columns
+                else [None] * len(combined_picks),
+            combined_picks["grade_composite"],
+            combined_picks["hr_score"],
+            combined_picks["hr_score_signal"],
+            combined_picks["grade"],
+        ):
+            if pid is None or pd.isna(pid):
+                continue
+            _val = (comp, score, sig, grd)
+            _grade_map[(int(pid), str(gm))] = _val
+            _grade_map_pid_only[int(pid)] = _val  # last-wins fallback
 
         # Update every matchup_df's grade columns
         for _gpk, _ctx in game_context_map.items():
+            # game label for THIS gpk (DH-suffixed) to build the compound key
+            _gr_lbl = None
+            try:
+                _grl = slate[slate["gamePk"] == _gpk]
+                if not _grl.empty:
+                    _grl0 = _grl.iloc[0]
+                    _gr_lbl = (f"{_grl0['away_team_abbr']} @ {_grl0['home_team_abbr']}"
+                               + _dh_suffix_by_gpk.get(_gpk, ""))
+            except Exception:
+                _gr_lbl = None
             for _side_key in ("away_matchup", "home_matchup",
                                "away_bench_matchup", "home_bench_matchup"):
                 _mdf = _ctx.get(_side_key)
@@ -9197,7 +9298,10 @@ if all_hitters_for_picks:
                         new_scores.append(None)
                         new_sigs.append("⚪")
                         continue
-                    info = _grade_map.get(int(_pid))
+                    # v45.00: try compound (pid, game) key first, then pid-only
+                    info = _grade_map.get((int(_pid), str(_gr_lbl)))
+                    if info is None:
+                        info = _grade_map_pid_only.get(int(_pid))
                     if info:
                         new_composites.append(info[0])
                         new_scores.append(info[1])
@@ -9995,21 +10099,22 @@ if combined_picks is not None and not combined_picks.empty:
                 if "opp_pitcher_grade" in combined_picks.columns:
                     _has_exploitplus = bool((combined_picks["opp_pitcher_grade"] == "EXPLOIT+").any())
                 if "env_boost" in combined_picks.columns:
-                    _has_fav_env = bool((pd.to_numeric(combined_picks["env_boost"], errors="coerce") >= 1.05).any())
+                    _has_fav_env = bool((pd.to_numeric(combined_picks["env_boost"], errors="coerce") >= 1.00).any())
                 _why = []
                 if _n_elite == 0:
                     if not _has_exploitplus:
-                        _why.append("no pitcher graded EXPLOIT+ tonight (ELITE requires it)")
+                        _why.append("no pitcher graded EXPLOIT/EXPLOIT+ tonight (all tiers require it)")
                     elif not _has_fav_env:
-                        _why.append("no park/weather ≥1.05 favorable env tonight (ELITE/STRONG need it)")
+                        _why.append("no hitter had favorable env ≥1.00 (ELITE needs it)")
                     else:
-                        _why.append("EXPLOIT+ pitchers exist but no hitter cleared HR%≥19% + favorable env")
+                        _why.append("EXPLOIT pitchers exist but no hitter cleared HR Score ≥85 + favorable env")
                 _why_str = ("  Why higher tiers are sparse: " + "; ".join(_why)) if _why else ""
                 stash_diagnostic(
                     "pipeline_health",
                     f"🔥 Smash Spots: {_n_elite} ELITE · {_n_strong} STRONG · {_n_smash} SMASH."
-                    f"{_why_str}  This gates on pitcher grade + env + HR%, so sparse "
-                    f"higher tiers on a neutral-park/tough-pitcher night is correct, not a bug.",
+                    f"{_why_str}  This gates on HR Score (≥85/75/65) + pitcher grade "
+                    f"(EXPLOIT/EXPLOIT+) + env, so sparse higher tiers on a "
+                    f"neutral-park/tough-pitcher night is correct, not a bug.",
                     level="caption",
                 )
             except Exception:
@@ -10411,6 +10516,23 @@ if combined_picks is not None and not combined_picks.empty:
     else:
         q = combined_picks.copy()
 
+    # v44.99 (review #1): exclude bench players from the pick pool. They carry
+    # season PA above threshold and a near-full pick_score (bench adj is only
+    # -2/-3 pts on a ~100 scale), so without this a non-starter could land in
+    # the Top 10, parlays, round-robin, and the published post. Already excluded
+    # from Expected HRs / Researcher / adaptive (v43.78); the pick pool was the
+    # one path that never got the fix.
+    if "is_bench" in q.columns and not q.empty:
+        _pre_bench = len(q)
+        q = q[~q["is_bench"].fillna(False).astype(bool)].copy()
+        _n_bench_dropped = _pre_bench - len(q)
+        if _n_bench_dropped > 0:
+            stash_diagnostic(
+                "pipeline_health",
+                f"Pick pool: excluded {_n_bench_dropped} bench player(s) from "
+                f"Top 10 eligibility (v44.99 — starters only in published picks).",
+            )
+
     if not q.empty:
         def _pct(s):
             return s.rank(pct=True) * 100 if s.notna().any() else pd.Series([50]*len(s), index=s.index)
@@ -10699,7 +10821,16 @@ if combined_picks is not None and not combined_picks.empty:
             "ps_penalty_il", "ps_bvp",
         ) if c in q.columns]
         if "player_id" in q.columns:
-            pick_audit = q[_ps_cols].drop_duplicates(subset="player_id", keep="first").copy()
+            # v45.00 (review #5): include 'game' in the dedup key so a hitter's
+            # two doubleheader rows keep distinct component breakdowns instead of
+            # game 2 inheriting game 1's. The downstream merge keys on both.
+            _audit_cols = list(_ps_cols)
+            if "game" in q.columns and "game" not in _audit_cols:
+                _audit_cols = _audit_cols + ["game"]
+            _dedup_subset = (["player_id", "game"]
+                             if "game" in _audit_cols else ["player_id"])
+            pick_audit = q[_audit_cols].drop_duplicates(
+                subset=_dedup_subset, keep="first").copy()
 
         # v43.89 (pyflakes F821 — auditor-style self-review): Section H of
         # the Pattern Analysis expander referenced `combined_picks` directly,
@@ -12312,7 +12443,7 @@ if combined_picks is not None and not combined_picks.empty:
                     "_p2_name": rows[1]['player_name'],
                 })
             # v43.97: guard the empty case (small slates → no combos).
-            _2LEG_COLS = ["Leg 1", "Leg 2", "Avg HR%", "Parlay HR%",
+            _2LEG_COLS = ["Leg 1", "Leg 2", "L1 HR%", "L2 HR%", "Parlay HR%",
                           "Approx Odds", "_p1_name", "_p2_name"]
             two_leg_all = (
                 pd.DataFrame(two_leg_parlays).sort_values(
@@ -12724,7 +12855,7 @@ if combined_picks is not None and not combined_picks.empty:
                             display_cols = [c for c in [
                                 "player_name", "team", "game", "opp_pitcher",
                                 "bats", "hr_game_pct", "grade", "smash_spot",
-                                "barrel_pct", "iso", "matchup_opp", "env_mult",
+                                "barrel_pct", "iso", "matchup_opp", "env_boost",
                             ] if c in my_picks_df.columns]
                             st.dataframe(
                                 my_picks_df[display_cols],
@@ -12735,7 +12866,7 @@ if combined_picks is not None and not combined_picks.empty:
                                     "barrel_pct": st.column_config.NumberColumn(
                                         "Brl%", format="%.1f%%"),
                                     "iso": st.column_config.NumberColumn("ISO", format="%.3f"),
-                                    "env_mult": st.column_config.NumberColumn(
+                                    "env_boost": st.column_config.NumberColumn(
                                         "Env×", format="%.3f"),
                                 },
                             )
@@ -12935,6 +13066,23 @@ for gpk, ctx in game_context_map.items():
 
 if all_hitters:
     combined_all = pd.concat(all_hitters, ignore_index=True)
+
+    # v45.00: schema drift detection. If a required column is missing or present
+    # only under a legacy alias (env_mult vs env_boost, barrel_allowed, etc.),
+    # surface it as a diagnostic rather than letting the 'if col in columns'
+    # guards silently skip it. opp_pitcher_grade is added later (post-concat),
+    # so it's excluded from this early check.
+    try:
+        _schema_problems = _assert_schema(
+            combined_all,
+            required=["player_id", "player_name", "team", "is_bench",
+                      "hr_game_pct", "hr_score", "env_boost", "grade"],
+            frame_name="combined_all",
+        )
+        for _sp in _schema_problems:
+            stash_diagnostic("pipeline_health", f"⚠️ Schema: {_sp}", level="warning")
+    except Exception as _sce:
+        log_swallowed_error("schema_assert", _sce, surface=False)
 
     # v44.11: Dinger Score v2 column (power base × per-slate context) — a
     # first-class column so it appears per-game and gets snapshotted/graded.
@@ -13482,7 +13630,15 @@ if all_hitters:
             pick_audit["player_id"] = pd.to_numeric(
                 pick_audit["player_id"], errors="coerce"
             ).astype("Int64")
-            combined_all = combined_all.merge(pick_audit, on="player_id", how="left")
+            # v45.00 (review #5): merge on (player_id, game) when both sides have
+            # 'game', so a doubleheader hitter's two rows get their own audit
+            # breakdown rather than both inheriting one. 'game' exists on both
+            # frames, so it aligns rows (no _x/_y duplication).
+            if "game" in pick_audit.columns and "game" in combined_all.columns:
+                combined_all = combined_all.merge(
+                    pick_audit, on=["player_id", "game"], how="left")
+            else:
+                combined_all = combined_all.merge(pick_audit, on="player_id", how="left")
         except Exception:
             # If merge fails, don't break the export — ps_* columns just won't appear
             pass
@@ -14009,7 +14165,7 @@ if all_hitters:
     # Detect and warn so the user knows to uncheck the filter if they're
     # actively building backtest data.
     n_dropped = st.session_state.get("_filter_dropped_games", 0)
-    if n_dropped > 0 and hide_started and selected_date == datetime.now().date():
+    if n_dropped > 0 and hide_started and selected_date == _today_et():  # v44.97: ET-aware
         st.warning(
             f"⚠️ **Snapshot bias warning:** {n_dropped} game(s) already started "
             f"and are EXCLUDED from any snapshot saved right now. "
@@ -14031,7 +14187,7 @@ if all_hitters:
         # late-game lineups (7pm games need data from ~5-6pm).
         current_hour_key = _snapshot_key_for_now(selected_date)
         if (current_hour_key not in existing_snaps
-                and selected_date == datetime.now().date()
+                and selected_date == _today_et()  # v44.97: ET-aware (was UTC → no evening snapshots)
                 and combined_all is not None and len(combined_all) >= 100):
             # v43.8: read calibration constants from single source of truth.
             # The save can no longer drift from the scoring formula because
@@ -14534,7 +14690,7 @@ if all_hitters:
             elite_cols = [c for c in [
                 "grade", "player_name", "team", "game", "opp_pitcher",
                 "opp_pitcher_grade", "hr_game_pct", "smash_spot",
-                "barrel_pct", "iso", "env_mult",
+                "barrel_pct", "iso", "env_boost",
             ] if c in elite_sorted.columns]
             st.dataframe(
                 elite_sorted[elite_cols], hide_index=True, use_container_width=True,
@@ -14549,7 +14705,7 @@ if all_hitters:
                     "smash_spot": st.column_config.TextColumn("Smash", width="small"),
                     "barrel_pct": st.column_config.NumberColumn("Brl%", format="%.1f%%"),
                     "iso": st.column_config.NumberColumn("ISO", format="%.3f"),
-                    "env_mult": st.column_config.NumberColumn("Env×", format="%.2f"),
+                    "env_boost": st.column_config.NumberColumn("Env×", format="%.2f"),
                 },
             )
 
@@ -14578,8 +14734,11 @@ if all_hitters:
                 | (perfect_storm.get("opp_pitcher_barrel_allowed", pd.Series([0]*len(perfect_storm))).fillna(0) >= 7.5)
             )
         )
-        if "env_mult" in perfect_storm.columns:
-            ps_mask = ps_mask & (perfect_storm["env_mult"].fillna(1.0) >= 1.00)
+        # v44.99 (review #3): the frame carries 'env_boost', not 'env_mult'.
+        # This gate referenced env_mult → column absent → env filter silently
+        # never applied despite the caption promising favorable env.
+        if "env_boost" in perfect_storm.columns:
+            ps_mask = ps_mask & (perfect_storm["env_boost"].fillna(1.0) >= 1.00)
         perfect_storm = perfect_storm[ps_mask].copy()
         # Cap to 1 per team to spread plays
         if not perfect_storm.empty and "team" in perfect_storm.columns:
@@ -14600,7 +14759,7 @@ if all_hitters:
             ps_cols = [c for c in [
                 "player_name", "team", "game", "grade", "hr_game_pct",
                 "opp_pitcher", "opp_pitcher_grade", "opp_pitcher_hr9",
-                "opp_pitcher_barrel_allowed", "env_mult", "barrel_pct",
+                "opp_pitcher_barrel_allowed", "env_boost", "barrel_pct",
             ] if c in perfect_storm.columns]
             st.dataframe(
                 perfect_storm[ps_cols], hide_index=True, use_container_width=True,
@@ -14623,7 +14782,7 @@ if all_hitters:
                         "P Brl%", format="%.1f%%",
                         help="Pitcher's barrel% allowed. ≥7.5% = above-average hard contact.",
                     ),
-                    "env_mult": st.column_config.NumberColumn(
+                    "env_boost": st.column_config.NumberColumn(
                         "Env×", format="%.2f",
                         help="Park × weather × wind multiplier.",
                     ),
@@ -14813,7 +14972,7 @@ if all_hitters:
         )
         smash_cols = [c for c in [
             "smash_spot", "player_name", "team", "game", "opp_pitcher",
-            "hr_game_pct", "grade", "barrel_pct", "env_mult", "matchup_opp",
+            "hr_game_pct", "grade", "barrel_pct", "env_boost", "matchup_opp",
         ] if c in smash_df.columns]
         st.dataframe(
             smash_df[smash_cols], hide_index=True, use_container_width=True,
@@ -14826,7 +14985,7 @@ if all_hitters:
                 "hr_game_pct": st.column_config.NumberColumn("HR%", format="%.1f%%"),
                 "grade": st.column_config.TextColumn("Grd", width="small"),
                 "barrel_pct": st.column_config.NumberColumn("Brl%", format="%.1f%%"),
-                "env_mult": st.column_config.NumberColumn("Env×", format="%.2f"),
+                "env_boost": st.column_config.NumberColumn("Env×", format="%.2f"),
                 "matchup_opp": st.column_config.NumberColumn("Opp", format="%.1f"),
             },
         )
@@ -14925,7 +15084,7 @@ try:
         st.subheader("🔥 Elite Convergence")
         st.caption(
             f"The rare hitters where EVERY power model agrees — HR Score ≥{_EC_HR:.0f}, "
-            f"HR grade A- or better, Dinger ≥{_EC_DINGER:.0f}, Combo ≥{_EC_COMBO:.0f}, "
+            f"HR grade A or better, Dinger ≥{_EC_DINGER:.0f}, Combo ≥{_EC_COMBO:.0f}, "
             f"Barrel Match ≥{_EC_BRL:.0f}, and Two-Way ≥{_EC_TWO:.0f}. When all six "
             f"converge it's the highest-conviction HR signal on the slate. "
             f"Thresholds are tuned conservatively and adjust from results."
@@ -15353,6 +15512,7 @@ try:
                         b.text for b in _msg.content if getattr(b, "type", "") == "text"
                     )
                 except Exception as _le:
+                    log_swallowed_error("ask_bot_llm", _le, surface=False)
                     _ans = (
                         "I couldn't reach the AI service for that question, but I "
                         "can answer things like *top 5 dinger scores*, *how is "
@@ -15397,6 +15557,14 @@ try:
         _display_to_pid = dict(zip(_hh_pool["__display"], _hh_pool["player_id"]))
         _hh_options = sorted(_hh_pool["__display"].tolist())
 
+        # v44.98 (review bug #3): apply any pending selection change BEFORE the
+        # multiselect is created. Writing to a widget's session_state key AFTER
+        # the widget exists raises StreamlitAPIException (was surfaced as
+        # "Comparison tool error"). The ✕/Clear buttons below set _pending +
+        # rerun; we consume it here, before instantiation.
+        if "_h2h_pending" in st.session_state:
+            st.session_state["_h2h_compare_selector"] = st.session_state.pop("_h2h_pending")
+
         _hh_selected = st.multiselect(
             "Pick hitters (2-4):",
             options=_hh_options,
@@ -15414,14 +15582,15 @@ try:
                 with _rm_cols[_i]:
                     if st.button(f"✕ {_sel[:14]}", key=f"_h2h_rm_{_i}",
                                  help=f"Remove {_sel} from the comparison"):
-                        st.session_state["_h2h_compare_selector"] = [
+                        # set pending (applied before widget on next run), rerun
+                        st.session_state["_h2h_pending"] = [
                             x for x in _hh_selected if x != _sel
                         ]
                         st.rerun()
             with _rm_cols[-1]:
                 if st.button("Clear all", key="_h2h_clear",
                              help="Remove everyone and start over"):
-                    st.session_state["_h2h_compare_selector"] = []
+                    st.session_state["_h2h_pending"] = []
                     st.rerun()
 
         if len(_hh_selected) >= 2:
@@ -15686,16 +15855,20 @@ def _render_wind_diagram(wind_mph, wind_dir_deg, cf_bearing, venue_name=None):
         impact = "across field"
         impact_short = "crosswind"
 
-    # Specifically helpful for LHB / RHB
+    # Specifically helpful for LHB / RHB.
+    # v44.97 (review): positive angle_rel_cf = clockwise from CF = toward RF
+    # (matches SVG rot, positive=clockwise=RF/1B side). RF is the LHB pull side;
+    # LF is the RHB pull side. The labels were previously swapped, contradicting
+    # the arrow. Corrected below.
     pull_side = ""
-    if 30 <= angle_rel_cf <= 75:        # blowing to LF (RHB pull side)
-        pull_side = " → boosts RHB pull (LF)"
-    elif -75 <= angle_rel_cf <= -30:    # blowing to RF (LHB pull side)
+    if 30 <= angle_rel_cf <= 75:        # blowing toward RF (LHB pull side)
         pull_side = " → boosts LHB pull (RF)"
+    elif -75 <= angle_rel_cf <= -30:    # blowing toward LF (RHB pull side)
+        pull_side = " → boosts RHB pull (LF)"
     elif 105 <= abs_angle <= 150 and angle_rel_cf < 0:
-        pull_side = " ← from RF (hurts LHB pull)"
-    elif 105 <= abs_angle <= 150 and angle_rel_cf > 0:
         pull_side = " ← from LF (hurts RHB pull)"
+    elif 105 <= abs_angle <= 150 and angle_rel_cf > 0:
+        pull_side = " ← from RF (hurts LHB pull)"
 
     # SVG: 200x200, home plate at bottom center, CF arrow pointing up
     # The arrow inside the field shows wind direction relative to the
@@ -16272,47 +16445,19 @@ def build_col_config():
         # format specifier fixes the DISPLAY cleanly across every table
         # without touching the underlying values (which stay full-precision
         # for correct math). One-decimal for percents, three for rate stats.
-        "barrel_pct":      st.column_config.NumberColumn("Barrel%", format="%.1f%%", width="small", help="Share of batted balls hit at the ideal EV+launch-angle combo for extra bases. The most stable HR predictor in the model."),
         "pulled_brl_pct":  st.column_config.NumberColumn("Pull Brl%", format="%.1f", width="small", help="Barrels pulled in the air — the exact launch pattern that produces home runs. HR-specific power signal."),
         "blast_pct":       st.column_config.NumberColumn("Blast%", format="%.1f", width="small", help="Share of competitive swings that are 'blasts' — Statcast's fast-swing + squared-up combos that do the most damage. High = elite bat speed meeting the ball flush."),
-        "hard_hit":        st.column_config.NumberColumn("Hard Hit%", format="%.1f%%", width="small", help="Share of batted balls hit 95+ mph exit velocity. Raw contact quality."),
         "pull_air_pct":    st.column_config.NumberColumn("Pull Air%", format="%.1f", width="small", help="Share of batted balls pulled in the air. The launch/direction combo most associated with HRs."),
         "pull_pct":        st.column_config.NumberColumn("Pull%", format="%.1f", width="small", help="Share of batted balls pulled (any trajectory)."),
-        "fb_pct":          st.column_config.NumberColumn("FB%", format="%.1f%%", width="small", help="Fly-ball rate. HRs come from fly balls, so higher helps power output."),
         "gb_pct":          st.column_config.NumberColumn("GB%", format="%.1f", width="small", help="Ground-ball rate. High GB% suppresses HR upside."),
         "ld_pct":          st.column_config.NumberColumn("LD%", format="%.1f", width="small", help="Line-drive rate. Best for hits/total bases, less for HRs."),
-        "k_pct":           st.column_config.NumberColumn("K%", format="%.1f%%", width="small", help="Strikeout rate. Higher = more empty at-bats."),
-        "bb_pct":          st.column_config.NumberColumn("BB%", format="%.1f%%", width="small", help="Walk rate. Plate discipline signal."),
-        "whiff_pct":       st.column_config.NumberColumn("Whiff%", format="%.1f%%", width="small", help="Swing-and-miss rate on swings."),
-        "avg_ev":          st.column_config.NumberColumn("Avg EV", format="%.1f", width="small", help="Average exit velocity (mph) across all batted balls. Core input to the Laser (105+ mph) target."),
         "avg_hr_ev":       st.column_config.NumberColumn("HR EV", format="%.1f", width="small", help="Average exit velocity (mph) on home runs specifically — how hard this hitter's HRs are struck. Feeds the Laser target alongside overall avg EV."),
         "power_composite": st.column_config.NumberColumn("💥+ Combo", format="%.0f", width="small", help="Composite of HR Score (55%) + Dinger Score (45%) — blends the full matchup-aware model with curated raw power. Highest when both systems agree a hitter is a strong HR play. Runs parallel to the shipped ranking."),
         "barrel_matchup_score": st.column_config.NumberColumn("🎯 Brl Match", format="%.0f", width="small", help="NEW (v44.34): leads with pulled-barrel% — the most RELIABLE HR predictor in our data (Section G reliability 2.69) — plus barrels/hard-hit/EV, then amplifies by tonight's pitcher HR-vulnerability (arsenal HR-tilt + barrels allowed). The thesis: the most reliable power signal aimed at the most vulnerable arm. Graded parallel to the others."),
         "data_completeness": st.column_config.TextColumn("📊 Data", width="small", help="Data completeness for this hitter's core power inputs (barrel%, pull-barrel%, EV, hard-hit%, ISO) + the handedness split vs tonight's pitcher. ✅ full = all present. ⚠️ partial = some missing (score uses fallbacks). 🚨 thin = mostly missing — treat the rank with caution, it may be inflated/deflated by missing data."),
         "two_way_matchup_score": st.column_config.NumberColumn("⚖️ Two-Way", format="%.0f", width="small", help="NEW (v44.43): scores the matchup from BOTH sides + arsenal, handedness-aware. Three parts: the hitter's power (50%), how much THIS pitcher allows to hitters of that hand (30%: vs-hand HR/PA + SLG, plus barrel%/xwOBA/FB% allowed), and how the batter fares vs THIS pitcher's pitch mix (20%: pitch HR-tilt, arsenal match, best-pitch xwOBA). A masher facing a pitcher who suppresses that side AND has a tough arsenal gets marked down. Switch hitters resolve to their platoon-advantage side."),
-        "max_hit_speed":   st.column_config.NumberColumn("Max EV", format="%.1f", width="small", help="Hardest-hit ball (mph). Ceiling of raw power."),
-        "avg_hr_distance": st.column_config.NumberColumn("HR Dist", format="%.0f", width="small", help="Average home-run distance (ft) when available from Savant. Feeds the Moonshot (400+ ft) target."),
-        "la":              st.column_config.NumberColumn("LA", format="%.1f", width="small", help="Average launch angle (degrees). ~25-35° is the HR sweet spot."),
-        "iso":             st.column_config.NumberColumn("ISO", format="%.3f", width="small", help="Isolated Power = SLG − AVG. Raw extra-base power, stripping out singles."),
         "xslg":            st.column_config.NumberColumn("xSLG", format="%.3f", width="small", help="Expected slugging from quality of contact (Statcast)."),
-        "slg":             st.column_config.NumberColumn("SLG", format="%.3f", width="small", help="Slugging percentage (total bases per at-bat)."),
-        "obp":             st.column_config.NumberColumn("OBP", format="%.3f", width="small", help="On-base percentage."),
-        "ops":             st.column_config.NumberColumn("OPS", format="%.3f", width="small", help="On-base plus slugging."),
-        "xwoba":           st.column_config.NumberColumn("xwOBA", format="%.3f", width="small", help="Expected weighted on-base average from quality of contact — a single all-around offensive quality number."),
-        "xwobacon":        st.column_config.NumberColumn("xwOBAcon", format="%.3f", width="small", help="xwOBA on contact only (excludes walks/strikeouts) — pure quality-of-contact."),
-        "best_pitch_xwoba": st.column_config.NumberColumn("Best Pitch xwOBA", format="%.3f", width="small", help="Hitter's xwOBA vs the pitch type they hit best."),
-        "sprint_speed":    st.column_config.NumberColumn("Sprint", format="%.1f", width="small", help="Sprint speed (ft/sec). Speed adds to hit/total-base upside via infield hits and extra bases."),
-        "pitch_match_score": st.column_config.NumberColumn("Pitch Match", format="%.0f", width="small", help="How well this hitter matches up against the pitcher's arsenal (0-100)."),
-        "pitch_hr_score":  st.column_config.NumberColumn("Pitch HR", format="%.0f", width="small", help="HR-tilt of the arsenal matchup — does this pitcher's mix give up HRs to this hitter's profile?"),
-        "expected_total_bases": st.column_config.NumberColumn("xTB", format="%.2f", width="small", help="Expected total bases tonight (excludes walks). Higher = better 2+ bases play."),
-        "recent_hr_weighted_rate": st.column_config.NumberColumn("L15 wHR%", format="%.2f", width="small", help="Recency-weighted HR rate over the last ~15 games — recent form, recent games weighted heavier."),
         "env_boost":       st.column_config.NumberColumn("Env", format="%.2f", width="small", help="Park + weather HR multiplier. >1.0 favors hitters (warm, thin air, wind out), <1.0 favors pitchers."),
-        "pa":              st.column_config.NumberColumn("PA", format="%d", width="small", help="Plate appearances this season — sample-size context."),
-        "recent_hr":       st.column_config.NumberColumn("Rec HR", format="%d", width="small", help="Home runs in the recent window."),
-        "home_run":        st.column_config.NumberColumn("HR", format="%d", width="small", help="Season home run total."),
-        "test_score":      st.column_config.NumberColumn("Test", format="%.0f", width="small", help="Experimental composite (not shipped in rankings)."),
-        "sleeper_score":   st.column_config.NumberColumn("Sleeper", format="%.0f", width="small", help="Low-owned / under-the-radar HR upside score."),
-        "hit_pa_pct":      st.column_config.NumberColumn("Hit/PA%", format="%.1f%%", width="small", help="Per-plate-appearance hit rate."),
     }
 
 
@@ -17086,11 +17231,20 @@ if _valid_games:
         if gtime:
             try:
                 from datetime import datetime as _dt
-                # gameTime is ISO format from MLB Stats API
-                dt = _dt.fromisoformat(gtime.replace("Z", "+00:00"))
+                # v44.98 (review): gameTime may be an ISO string OR a pandas
+                # Timestamp/datetime. Calling .replace('Z',...) on a Timestamp
+                # raises (wrong signature) → time never rendered. Handle both.
+                if isinstance(gtime, str):
+                    dt = _dt.fromisoformat(gtime.replace("Z", "+00:00"))
+                else:
+                    # Timestamp / datetime — use directly (to_pydatetime if pandas)
+                    dt = gtime.to_pydatetime() if hasattr(gtime, "to_pydatetime") else gtime
                 # Convert to ET for display
                 try:
                     import pytz
+                    # ensure tz-aware before converting
+                    if dt.tzinfo is None:
+                        dt = pytz.utc.localize(dt)
                     et = dt.astimezone(pytz.timezone("US/Eastern"))
                     time_str = f" {et.strftime('%-I:%M%p').lower().replace(':00', '')}"
                 except Exception:
