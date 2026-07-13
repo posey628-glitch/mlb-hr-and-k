@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.94-durable-copy-keys-survive-reruns"
+APP_VERSION = "2026.06.10-v44.95-offday-tools-empty-slate"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -2525,6 +2525,97 @@ with st.spinner("Loading slate and stats..."):
 
 if slate.empty:
     st.warning(f"No MLB games found on {selected_date}. Try another date.")
+    # v44.95 (user: I can't pattern-analyze or backtest on a gameless day even
+    # though those use PAST data). The picks need a slate, but the analysis
+    # tools read accumulated snapshot history — so render them here (owner-only)
+    # before stopping, instead of killing the whole page on an empty date.
+    if owner_mode:
+        st.divider()
+        st.markdown("### 📊 Off-day tools — analyze past data (no games today)")
+        st.caption(
+            "There are no games on this date, so there are no picks to show — but "
+            "Backtest and Pattern Analysis work off accumulated snapshot history, "
+            "so you can still review how past predictions performed and what "
+            "patterns the data shows. Handy during the All-Star break or off-days."
+        )
+
+        # --- Backtest (history-based, self-contained) ---
+        with st.expander("📈 Backtest — projection accuracy vs past outcomes", expanded=True):
+            try:
+                from backtest import (
+                    list_snapshots, load_snapshot,
+                    fetch_hitter_outcomes, fetch_pitcher_outcomes,
+                    evaluate_hitter_projections,
+                )
+                _od_snaps = list_snapshots()
+                if not _od_snaps:
+                    st.info("No snapshots saved yet — nothing to backtest.")
+                else:
+                    _od_choice = st.selectbox(
+                        "Evaluate snapshot from:", options=_od_snaps,
+                        index=len(_od_snaps) - 1, key="_offday_snap_choice",
+                    )
+                    if st.button("🔍 Evaluate this snapshot", key="_offday_eval_btn"):
+                        with st.spinner("Fetching actual outcomes..."):
+                            _od_snapshot = load_snapshot(_od_choice)
+                            _od_actuals = fetch_hitter_outcomes(_od_choice) if _od_snapshot else {}
+                            _od_m = (evaluate_hitter_projections(_od_snapshot, _od_actuals)
+                                     if _od_snapshot else {})
+                        if _od_m and not _od_m.get("error"):
+                            c1, c2, c3, c4 = st.columns(4)
+                            c1.metric("Hitters tracked", _od_m.get("hitters_who_played", 0))
+                            c2.metric("Total HRs", _od_m.get("total_actual_hrs", 0))
+                            c3.metric("Slate HR rate", f"{_od_m.get('actual_hr_rate_pct', 0)}%")
+                            c4.metric("Top-10 hit rate", f"{_od_m.get('top10_hr_hit_rate', 0)}%")
+                            _od_lines = [
+                                f"📈 BACKTEST — {_od_choice}",
+                                f"Hitters tracked: {_od_m.get('hitters_who_played', 0)} · "
+                                f"Total HRs: {_od_m.get('total_actual_hrs', 0)} · "
+                                f"Slate HR rate: {_od_m.get('actual_hr_rate_pct', 0)}% · "
+                                f"Top-10 hit rate: {_od_m.get('top10_hr_hit_rate', 0)}%",
+                            ]
+                            _od_br = _od_m.get("brier_score")
+                            if _od_br is not None:
+                                _od_lines.append(f"Brier: {_od_br:.4f}")
+                            st.session_state["_backtest_copy_text"] = "\n".join(_od_lines)
+                            st.session_state["_backtest_copy_label"] = _od_choice
+                        else:
+                            st.warning("No matched outcomes for that snapshot yet.")
+                    # durable copy toggle (survives reruns)
+                    _od_copy = st.session_state.get("_backtest_copy_text")
+                    if _od_copy:
+                        if st.checkbox("📋 Show copyable backtest text",
+                                       key="_offday_bt_copy"):
+                            st.code(_od_copy, language=None)
+            except Exception as _od_e:
+                st.error(f"Off-day backtest error: {type(_od_e).__name__}: {_od_e}")
+
+        # --- Pattern discovery (history-based) ---
+        with st.expander("🔬 Pattern Analysis — run on accumulated history", expanded=True):
+            st.caption(
+                "Runs the correlation/pattern discovery over all banked "
+                "snapshot+outcome pairings and refreshes the learning history."
+            )
+            if st.button("🔬 Run pattern discovery now", key="_offday_pattern_btn"):
+                try:
+                    from backtest import auto_run_pattern_discovery
+                    with st.spinner("Analyzing accumulated snapshots..."):
+                        _od_pd = auto_run_pattern_discovery()
+                    st.success(_od_pd.get("note", "Pattern discovery complete."))
+                    st.session_state["_offday_pattern_note"] = _od_pd.get("note", "")
+                except Exception as _od_pe:
+                    st.error(f"Pattern discovery error: {type(_od_pe).__name__}: {_od_pe}")
+            _od_pn = st.session_state.get("_offday_pattern_note")
+            if _od_pn:
+                if st.checkbox("📋 Show copyable pattern-discovery note",
+                               key="_offday_pd_copy"):
+                    st.code(_od_pn, language=None)
+            st.info(
+                "The full Pattern Analysis tables (feature importance, cohorts, "
+                "Proposed Weights) render on a normal game-day. This off-day view "
+                "runs the discovery + refreshes history; open the app on a game-day "
+                "for the complete breakdown."
+            )
     st.stop()
 
 # ============================================================================
@@ -6694,7 +6785,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.94 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.95 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
