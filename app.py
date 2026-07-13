@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.95-offday-tools-empty-slate"
+APP_VERSION = "2026.06.10-v44.96-sticky-owner-mode"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -1958,6 +1958,13 @@ with st.sidebar:
         pass
 
     owner_mode = False
+    # v44.96: owner_mode is sticky for the session. Previously it was recomputed
+    # from scratch each run (URL param OR password field), so a password login
+    # didn't survive reruns and any run where ?owner= was momentarily missing
+    # flipped it False — hiding ALL owner tools (off-day panel, copy buttons,
+    # diagnostics) intermittently. Once verified, remember it.
+    if st.session_state.get("_owner_verified"):
+        owner_mode = True
     if OWNER_KEY:
         # Method 1: URL param ?owner=...  (silent, instant via bookmark)
         try:
@@ -1967,6 +1974,7 @@ with st.sidebar:
                 url_key = url_key[0] if url_key else ""
             if url_key and url_key == OWNER_KEY:
                 owner_mode = True
+                st.session_state["_owner_verified"] = True  # v44.96: sticky
         except Exception:
             pass
         # Method 2: Password entry (collapsed expander — public users won't notice)
@@ -1978,11 +1986,16 @@ with st.sidebar:
                 )
                 if pwd and pwd == OWNER_KEY:
                     owner_mode = True
+                    st.session_state["_owner_verified"] = True  # v44.96: sticky
                     st.success("✓ Owner mode active")
                 elif pwd:
                     st.error("Invalid key.")
     if owner_mode:
         st.caption("👑 **Owner mode active** — extra tools enabled below.")
+        # v44.96: allow clearing sticky owner mode (e.g. shared browser).
+        if st.button("Log out of owner mode", key="_owner_logout"):
+            st.session_state["_owner_verified"] = False
+            st.rerun()
 
     st.subheader("Data sources")
     use_recent_form = st.checkbox("Recent form (L15)", value=True)
@@ -6785,7 +6798,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.95 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.96 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
