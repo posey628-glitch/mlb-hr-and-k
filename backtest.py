@@ -15,6 +15,21 @@ import json
 import pandas as pd
 import requests
 
+
+def _today_et():
+    """v44.98: ET-aware today. Server clock is UTC on Streamlit Cloud; after
+    8 PM ET (00:00 UTC) a naive date.today() rolls to tomorrow, making today's
+    in-progress slate look like a finished past day → partial outcomes attached.
+    """
+    try:
+        import pytz
+        return datetime.now(pytz.timezone("US/Eastern")).date()
+    except Exception:
+        _u = datetime.now(timezone.utc)
+        _off = 4 if 3 <= _u.month <= 11 else 5
+        return (_u.replace(tzinfo=None) - timedelta(hours=_off)).date()
+
+
 try:
     import streamlit as st
     _HAVE_ST = True
@@ -1155,7 +1170,7 @@ def auto_attach_outcomes_to_past_snapshots(max_dates: int = 14) -> dict:
         if not snaps:
             return result
 
-        today = date.today()
+        today = _today_et()  # v44.98: ET-aware
         # Group snapshots by date
         snaps_by_date = {}
         for k, v in snaps.items():
@@ -1307,7 +1322,7 @@ def auto_run_pattern_discovery() -> dict:
                 )
             return result
 
-        today = date.today()
+        today = _today_et()  # v44.98: ET-aware
         # Load each snapshot payload (multi-tier via load_snapshot)
         # and separate has-outcomes vs needs-fetch (past dates)
         with_stored_outcomes = {}
