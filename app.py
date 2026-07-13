@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.00-schema-doubleheader-smash-docs"
+APP_VERSION = "2026.06.10-v45.02-merged-reqs-more-fragments"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -107,6 +107,21 @@ except Exception:
     def _assert_schema(*a, **k): return []
     def _find_column(df, name):
         return name if (df is not None and name in getattr(df, "columns", [])) else None
+
+
+# v45.01: safe fragment decorator. st.fragment (Streamlit >=1.37) reruns only
+# the decorated section on its own widget interactions, instead of the whole
+# script — which means copy toggles / Ask bot / H2H no longer trigger a full
+# pipeline recompute. Feature-detected: on older Streamlit it's a no-op
+# passthrough, so the section still works (just without the isolation speedup).
+def _fragment(func):
+    _frag = getattr(st, "fragment", None) or getattr(st, "experimental_fragment", None)
+    if _frag is not None:
+        try:
+            return _frag(func)
+        except Exception:
+            return func
+    return func
 
 
 def _today_et():
@@ -6857,7 +6872,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.00 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.02 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -18187,15 +18202,18 @@ if owner_mode:
             _slate_audit,
             "No slate-audit data yet — run a slate to populate."
         )
-        # v44.94: durable copy (survives checkbox reruns — see Pipeline Health).
-        _slate_copy_text = st.session_state.get("_durable_slate_copy")
-        if _slate_copy_text or _slate_audit:
-            if st.checkbox("📋 Show copyable Slate Audit text",
-                           key="_copy_slate_audit_toggle"):
-                if not _slate_copy_text:
-                    _slate_copy_text = _build_diag_copy_text(
-                        _slate_audit, "📊 Slate Audit")
-                st.code(_slate_copy_text, language=None)
+        # v45.02: fragment-isolate (same as Pipeline Health copy) so toggling
+        # this doesn't trigger a full pipeline recompute.
+        @_fragment
+        def _slate_copy_fragment(_sa_list):
+            _sct = st.session_state.get("_durable_slate_copy")
+            if _sct or _sa_list:
+                if st.checkbox("📋 Show copyable Slate Audit text",
+                               key="_copy_slate_audit_toggle"):
+                    if not _sct:
+                        _sct = _build_diag_copy_text(_sa_list, "📊 Slate Audit")
+                    st.code(_sct, language=None)
+        _slate_copy_fragment(_slate_audit)
 
 
 # ----- 🔧 Pipeline Health (owner-only: internal data-quality diagnostics) -----
@@ -18222,17 +18240,20 @@ if owner_mode:
 
         # v44.94 (user: copy still didn't show). Read the DURABLE copy text
         # (persisted whenever diagnostics were last computed) so a checkbox
-        # rerun — which wipes the transient _diagnostics bucket — doesn't leave
-        # this empty. Show the toggle if either the live list OR the durable
-        # snapshot has content.
-        _pipe_copy_text = st.session_state.get("_durable_pipe_copy")
-        if _pipe_copy_text or _pipe_health:
-            if st.checkbox("📋 Show copyable Pipeline Health text",
-                           key="_copy_pipe_health_toggle"):
-                if not _pipe_copy_text:
-                    _pipe_copy_text = _build_diag_copy_text(
-                        _pipe_health, "🔧 Pipeline Health")
-                st.code(_pipe_copy_text, language=None)
+        # v45.01: wrap in a fragment so toggling the copy checkbox only reruns
+        # THIS section, not the whole pipeline (was a full ~500-hitter recompute
+        # just to show/hide a text block). Self-contained: reads durable
+        # session_state + the passed-in list.
+        @_fragment
+        def _pipe_copy_fragment(_ph_list):
+            _pct = st.session_state.get("_durable_pipe_copy")
+            if _pct or _ph_list:
+                if st.checkbox("📋 Show copyable Pipeline Health text",
+                               key="_copy_pipe_health_toggle"):
+                    if not _pct:
+                        _pct = _build_diag_copy_text(_ph_list, "🔧 Pipeline Health")
+                    st.code(_pct, language=None)
+        _pipe_copy_fragment(_pipe_health)
 
 
 # ----- 🎛️ Custom Grade Builder (moved from mid-script) -----
