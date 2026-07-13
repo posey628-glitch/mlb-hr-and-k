@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.93-copy-toggles-not-nested-expanders"
+APP_VERSION = "2026.06.10-v44.94-durable-copy-keys-survive-reruns"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -4124,6 +4124,29 @@ if show_backtest:
                                 quality = "Needs tuning"
                             st.markdown(f"**Mean Brier score**: {brier_m:.4f} — {quality}")
 
+                        # v44.94: build + persist a copy-text of the rolling
+                        # aggregate so a durable toggle survives reruns.
+                        _ragg_lines = [
+                            f"📊 ROLLING AGGREGATE — {window_choice}",
+                            f"Snapshots: {agg.get('n_snapshots', 0)}",
+                            f"Top 10 HR rate: {agg.get('top10_hr_rate_pct', 0)}% "
+                            f"({agg.get('top10_hrs_hit', 0)}/{agg.get('top10_picks_total', 0)})",
+                            f"Slate baseline: {agg.get('slate_baseline_hr_rate_pct', 0)}%",
+                            f"Edge vs slate (legacy hr_game_pct): {agg.get('edge_vs_slate_pp', 0):+.1f}pp",
+                        ]
+                        if _ps_edge is not None and _ps_days > 0:
+                            _ragg_lines.append(
+                                f"pick_score top-10 hit rate: {_ps_hit}% · "
+                                f"edge {_ps_edge:+.1f}pp ({_ps_days} days)"
+                            )
+                        _ragg_lines.append(
+                            f"Days with ≥1 Top10 HR: {agg.get('days_with_any_top10_hit', 0)}"
+                            f"/{agg.get('days_total', 0)} ({agg.get('any_hit_rate_pct', 0)}%)"
+                        )
+                        if agg.get("brier_mean") is not None:
+                            _ragg_lines.append(f"Mean Brier: {agg['brier_mean']:.4f}")
+                        st.session_state["_rolling_agg_copy_text"] = "\n".join(_ragg_lines)
+
                         # Per-day table
                         per_day = agg.get("per_day_summary", [])
                         if per_day:
@@ -4146,6 +4169,15 @@ if show_backtest:
                                     ),
                                 },
                             )
+
+                # v44.94: durable rolling-aggregate copy toggle (outside the
+                # compute button, reads persisted session_state so it survives
+                # reruns — user: no copy showed after computing rolling agg).
+                _ragg_copy = st.session_state.get("_rolling_agg_copy_text")
+                if _ragg_copy:
+                    if st.checkbox("📋 Show copyable rolling-aggregate text",
+                                   key="_copy_rolling_agg_toggle"):
+                        st.code(_ragg_copy, language=None)
         except Exception as e:
             st.error(f"Backtest panel error: {e}")
 
@@ -6662,7 +6694,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.93 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.94 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -17837,6 +17869,30 @@ st.caption(
 
 _diag = st.session_state.get("_diagnostics", {})
 
+# v44.94: the _diagnostics bucket is wiped at the top of every rerun (see the
+# reset near line 413) and only refilled during a full slate compute. A copy
+# checkbox click triggers a rerun that clears it but may NOT refill it (compute
+# is cached/skipped), leaving the copy sections empty — which is why the copy
+# text never appeared. Fix: whenever the bucket currently HAS data, snapshot a
+# copy-ready text version into a DURABLE session_state key that is not cleared
+# each run. The copy toggles below read these durable keys, so the text
+# survives checkbox reruns.
+def _build_diag_copy_text(items, header):
+    _lines = [header]
+    for _d in (items or []):
+        _lvl = _d.get("level", "caption")
+        _m = _d.get("message", "")
+        _prefix = "⚠️ " if _lvl == "warning" else ("🚨 " if _lvl == "error" else "")
+        _lines.append(f"· {_prefix}{_m}")
+    return "\n".join(_lines)
+
+if _diag.get("pipeline_health"):
+    st.session_state["_durable_pipe_copy"] = _build_diag_copy_text(
+        _diag.get("pipeline_health", []), "🔧 Pipeline Health")
+if _diag.get("slate_audit"):
+    st.session_state["_durable_slate_copy"] = _build_diag_copy_text(
+        _diag.get("slate_audit", []), "📊 Slate Audit")
+
 
 def _render_diag_list(items, empty_msg):
     """Render a list of stashed diagnostic dicts with proper level handling."""
@@ -17873,18 +17929,15 @@ if owner_mode:
             _slate_audit,
             "No slate-audit data yet — run a slate to populate."
         )
-        # v44.93 (user: copy button never showed — nested expander bug). Use a
-        # checkbox toggle + direct st.code instead of an inner expander.
-        if _slate_audit:
+        # v44.94: durable copy (survives checkbox reruns — see Pipeline Health).
+        _slate_copy_text = st.session_state.get("_durable_slate_copy")
+        if _slate_copy_text or _slate_audit:
             if st.checkbox("📋 Show copyable Slate Audit text",
                            key="_copy_slate_audit_toggle"):
-                _sa_lines = [_slate_label]
-                for _d in _slate_audit:
-                    _lvl = _d.get("level", "caption")
-                    _m = _d.get("message", "")
-                    _prefix = "⚠️ " if _lvl == "warning" else ("🚨 " if _lvl == "error" else "")
-                    _sa_lines.append(f"· {_prefix}{_m}")
-                st.code("\n".join(_sa_lines), language=None)
+                if not _slate_copy_text:
+                    _slate_copy_text = _build_diag_copy_text(
+                        _slate_audit, "📊 Slate Audit")
+                st.code(_slate_copy_text, language=None)
 
 
 # ----- 🔧 Pipeline Health (owner-only: internal data-quality diagnostics) -----
@@ -17909,26 +17962,19 @@ if owner_mode:
             "No pipeline-health data yet — run a slate to populate."
         )
 
-        # v44.93 (user: copy button never showed). It was a nested expander —
-        # Streamlit silently fails to render an expander inside an expander.
-        # Use a checkbox toggle + direct st.code (st.code has its own copy icon).
-        if _pipe_health:
+        # v44.94 (user: copy still didn't show). Read the DURABLE copy text
+        # (persisted whenever diagnostics were last computed) so a checkbox
+        # rerun — which wipes the transient _diagnostics bucket — doesn't leave
+        # this empty. Show the toggle if either the live list OR the durable
+        # snapshot has content.
+        _pipe_copy_text = st.session_state.get("_durable_pipe_copy")
+        if _pipe_copy_text or _pipe_health:
             if st.checkbox("📋 Show copyable Pipeline Health text",
                            key="_copy_pipe_health_toggle"):
-                _pipe_lines = [
-                    f"🔧 Pipeline Health {_pipe_icon} ({_pipe_count} item"
-                    + ("s" if _pipe_count != 1 else "") + ")"
-                ]
-                for _d in _pipe_health:
-                    _lvl = _d.get("level", "caption")
-                    _m = _d.get("message", "")
-                    _prefix = ""
-                    if _lvl == "warning":
-                        _prefix = "⚠️ "
-                    elif _lvl == "error":
-                        _prefix = "🚨 "
-                    _pipe_lines.append(f"· {_prefix}{_m}")
-                st.code("\n".join(_pipe_lines), language=None)
+                if not _pipe_copy_text:
+                    _pipe_copy_text = _build_diag_copy_text(
+                        _pipe_health, "🔧 Pipeline Health")
+                st.code(_pipe_copy_text, language=None)
 
 
 # ----- 🎛️ Custom Grade Builder (moved from mid-script) -----
