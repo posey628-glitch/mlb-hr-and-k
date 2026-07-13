@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v44.92-backtest-copy-persist"
+APP_VERSION = "2026.06.10-v44.93-copy-toggles-not-nested-expanders"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -3987,15 +3987,15 @@ if show_backtest:
                                 st.session_state["_backtest_copy_text"] = "\n".join(_bt_lines)
                                 st.session_state["_backtest_copy_label"] = snap_choice
 
-                # v44.92: persistent copy button — renders whenever a backtest
-                # has been evaluated this session, OUTSIDE the st.button block so
-                # it survives reruns (the inline one vanished immediately).
+                # v44.93: persistent copy — checkbox toggle + direct st.code
+                # (NOT a nested expander; Streamlit won't render those). Renders
+                # whenever a backtest has been evaluated this session.
                 _bt_copy = st.session_state.get("_backtest_copy_text")
                 if _bt_copy:
-                    with st.expander(
-                        f"📋 Copy backtest results as text "
+                    if st.checkbox(
+                        f"📋 Show copyable backtest text "
                         f"({st.session_state.get('_backtest_copy_label','last run')})",
-                        expanded=False,
+                        key="_copy_backtest_toggle",
                     ):
                         st.code(_bt_copy, language=None)
 
@@ -6662,7 +6662,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v44.92 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v44.93 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -17873,10 +17873,11 @@ if owner_mode:
             _slate_audit,
             "No slate-audit data yet — run a slate to populate."
         )
-        # v44.91: copyable text version (user: the rendered version won't copy
-        # cleanly). st.code gives a one-tap copy icon.
+        # v44.93 (user: copy button never showed — nested expander bug). Use a
+        # checkbox toggle + direct st.code instead of an inner expander.
         if _slate_audit:
-            with st.expander("📋 Copy Slate Audit as text", expanded=False):
+            if st.checkbox("📋 Show copyable Slate Audit text",
+                           key="_copy_slate_audit_toggle"):
                 _sa_lines = [_slate_label]
                 for _d in _slate_audit:
                     _lvl = _d.get("level", "caption")
@@ -17908,11 +17909,12 @@ if owner_mode:
             "No pipeline-health data yet — run a slate to populate."
         )
 
-        # v44.72 (user request): copy-text button for the whole Pipeline Health
-        # report, so it's one tap to paste elsewhere (matches the results
-        # copy-text pattern). st.code() renders a built-in copy button.
+        # v44.93 (user: copy button never showed). It was a nested expander —
+        # Streamlit silently fails to render an expander inside an expander.
+        # Use a checkbox toggle + direct st.code (st.code has its own copy icon).
         if _pipe_health:
-            with st.expander("📋 Copy Pipeline Health as text", expanded=False):
+            if st.checkbox("📋 Show copyable Pipeline Health text",
+                           key="_copy_pipe_health_toggle"):
                 _pipe_lines = [
                     f"🔧 Pipeline Health {_pipe_icon} ({_pipe_count} item"
                     + ("s" if _pipe_count != 1 else "") + ")"
