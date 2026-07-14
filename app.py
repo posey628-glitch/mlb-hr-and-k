@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.13-caption-drift-fixes"
+APP_VERSION = "2026.06.10-v45.14-full-review-sweep"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -206,15 +206,20 @@ def merge_on_player_id(base, other, cols=None, how="left", overwrite=False):
         return base
 
 
-def smash_tier(hr_score, pitcher_grade, env_boost):
+def smash_tier(hr_score, pitcher_grade, env_boost, lineup_confirmed=True):
     """Return the smash-tier label for one hitter, or "" for none.
 
     THE canonical smash logic. hr_score = 0-99 composite; pitcher_grade =
-    opposing pitcher grade string; env_boost = park×weather×wind multiplier.
+    opposing pitcher grade string; env_boost = park×weather×wind multiplier;
+    lineup_confirmed = the hitter is in the confirmed starting lineup
+    (v45.14: restored — the override had dropped this documented gate; an
+    unconfirmed hitter can't be a smash spot no matter the score).
     Rules: never smash vs an ELITE/TOUGH pitcher; otherwise tier by HR Score +
     a favorable/neutral env gate. Referenced by both the scoring override and
     the caption text so they can never drift.
     """
+    if not lineup_confirmed:
+        return ""
     _pg = str(pitcher_grade or "").upper()
     # Hostile pitcher (ace) blocks all tiers.
     if "ELITE" in _pg or "TOUGH" in _pg:
@@ -635,8 +640,8 @@ for _flag in ("_matchup_trace_done",):
 # matters." So users learn the stat AND know whether high or low is good.
 #
 # To apply: pass `help=COLUMN_HELP[col]` to st.column_config.NumberColumn()
-# or use _enrich_config(config_dict) below to inject help into an existing
-# config dict.
+# (v45.14: the unused _enrich_config/_config_for helpers were removed —
+# build_col_config_with_help is the live path for injecting hover help.)
 # ============================================================================
 COLUMN_HELP = {
     # === Core HR-relevant hitter metrics ===
@@ -796,57 +801,6 @@ COLUMN_HELP = {
                          "🚨 thin. Shows whether the core scoring inputs and handedness "
                          "splits are real vs missing/imputed. Hover the 📊 note for details.",
 }
-
-
-def _enrich_config(config: dict | None) -> dict:
-    """v44.80: inject hover help (from COLUMN_HELP) into a column_config dict.
-
-    For every column that already has a st.column_config entry but no `help=`
-    set, and that has an entry in COLUMN_HELP, rebuild the config with the help
-    text attached. Columns not in COLUMN_HELP, or that already have help, are
-    left untouched. This gives column headers a hover tooltip everywhere the
-    config is passed through here, without editing each table call.
-
-    Streamlit column_config objects don't expose their kwargs cleanly, so we
-    can't mutate them in place — instead we only ADD help where a config entry
-    is a plain string label or is missing, and otherwise leave the existing
-    object (which may already carry formatting) as-is. To actually attach help
-    to existing NumberColumn/TextColumn objects we rebuild from COLUMN_HELP when
-    the caller passes the column name mapped to a simple type. Safe no-op if the
-    structure isn't recognized.
-    """
-    if not isinstance(config, dict):
-        config = {}
-    out = dict(config)
-    for _col, _help in COLUMN_HELP.items():
-        if _col not in out:
-            continue
-        _existing = out[_col]
-        # If it's a plain string (just a label), upgrade to a TextColumn w/ help.
-        if isinstance(_existing, str):
-            out[_col] = st.column_config.Column(_existing, help=_help)
-    return out
-
-
-def _config_for(cols, extra: dict | None = None) -> dict:
-    """v44.80: build a column_config for a list of columns, giving each a hover
-    help tooltip from COLUMN_HELP. `extra` overrides/augments per-column configs
-    (e.g. number formats). Any column with COLUMN_HELP text and no explicit
-    config gets a Column(help=...) so its header is hoverable.
-    """
-    cfg = {}
-    for _c in cols:
-        if _c in COLUMN_HELP:
-            cfg[_c] = st.column_config.Column(help=COLUMN_HELP[_c])
-    if extra:
-        # extra entries win (they may add format/width); but preserve help if
-        # the extra entry didn't set one and we have COLUMN_HELP for it.
-        for _c, _v in extra.items():
-            cfg[_c] = _v
-    return cfg
-
-
-
 
 
 # ============================================================================
@@ -1249,8 +1203,11 @@ st.session_state["_app_version"] = APP_VERSION
 
 
 def safe_int(val) -> Optional[int]:
-    if val is None or pd.isna(val):
-        return None
+    try:
+        if val is None or pd.isna(val):
+            return None
+    except (ValueError, TypeError):
+        return None  # v45.14: array-like → pd.isna truthiness raises
     try:
         return int(val)
     except (ValueError, TypeError):
@@ -1625,8 +1582,11 @@ def tag_power_targets(df: "pd.DataFrame") -> "pd.DataFrame":
 
 
 def safe_float(val) -> Optional[float]:
-    if val is None or pd.isna(val):
-        return None
+    try:
+        if val is None or pd.isna(val):
+            return None
+    except (ValueError, TypeError):
+        return None  # v45.14: array-like → pd.isna truthiness raises
     try:
         return float(val)
     except (ValueError, TypeError):
@@ -2118,7 +2078,8 @@ with st.sidebar:
             import pytz
             _et = datetime.now(pytz.timezone("US/Eastern"))
         except Exception:
-            _et = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=4)  # ET fallback
+            _et = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
+                hours=_et_utc_offset_hours(datetime.now(timezone.utc)))  # v45.14: accurate DST
         # Only 12 AM–5 AM ET holds on last night's slate (games finishing up).
         if _et.hour < 5:
             return (_et - timedelta(days=1)).date()
@@ -2222,14 +2183,9 @@ with st.sidebar:
     st.subheader("Data sources")
     use_recent_form = st.checkbox("Recent form (L15)", value=True)
     use_pitch_match = st.checkbox("Pitch match score", value=HAVE_PITCH_MATCH)
-    # v43.54 (reviewer cleanup L2): clarify what this flag actually controls.
-    # The OLD checkbox toggled get_career_bvp_aggregate (lifetime BvP) which
-    # was never actually called downstream — that's dead. But get_bvp_for_matchup
-    # (per-pitcher BvP that DOES feed ps_bvp in pick_score) runs unconditionally
-    # from the matchup loop. It's gated only by the fast_load_mode toggle below.
-    # So setting use_bvp = False here is a no-op; kept for compatibility with
-    # any conditional branches that may still reference it.
-    use_bvp = False
+    # v45.14 (review P2 #11): removed the dead use_bvp flag — it was written and
+    # never read anywhere (grep-verified). Per-pitcher BvP (ps_bvp) runs
+    # unconditionally from the matchup loop, gated only by fast_load_mode.
     use_weather = st.checkbox("Weather + park factors", value=True)
     # Catcher framing remains disabled — was fetched but never wired into
     # k_total_projection. Reintroducing it cleanly would require pulling the
@@ -2995,6 +2951,13 @@ if slate.empty:
 # Statcast pulls — wrap with try/except so transient timeouts don't crash app
 try:
     hitter_stats = get_hitter_stats(stats_day=_stats_day_key()) if not slate.empty else pd.DataFrame()
+    # v45.14 (review P1 #3): normalize player_id dtype ONCE at the source.
+    # Several downstream merges (zone tiers, hand statcast, bat tracking,
+    # sprint) use raw .merge — if the fetcher ever returns object/float ids,
+    # those joins would silently yield all-NaN. Int64 here kills that class.
+    if hitter_stats is not None and not hitter_stats.empty and "player_id" in hitter_stats.columns:
+        hitter_stats["player_id"] = pd.to_numeric(
+            hitter_stats["player_id"], errors="coerce").astype("Int64")
 
     # v44.31: pinpoint diagnostic to isolate WHERE distance data is lost.
     # The fetch trace shows dist_merged=251 inside get_hitter_stats, but
@@ -3044,6 +3007,10 @@ except (ConnectionError, requests.exceptions.RequestException) as _e:
 
 try:
     pitcher_stats = get_pitcher_stats(stats_day=_stats_day_key()) if not slate.empty else pd.DataFrame()
+    # v45.14 (review P1 #3): same source-level Int64 normalization as hitters.
+    if pitcher_stats is not None and not pitcher_stats.empty and "player_id" in pitcher_stats.columns:
+        pitcher_stats["player_id"] = pd.to_numeric(
+            pitcher_stats["player_id"], errors="coerce").astype("Int64")
 except (ConnectionError, requests.exceptions.RequestException) as _e:
     st.error(
         f"⚠️ **Baseball Savant (pitcher data) is currently unreachable.**\n\n"
@@ -3265,17 +3232,22 @@ except Exception:
 # Use MLB Stats API statSplits which IS documented and works on Streamlit Cloud.
 # We only fetch splits for pitchers in TODAY'S slate (typically 26-30 pitchers)
 # instead of every pitcher in the league.
+# v45.14 (review P1 #9): slate_pitcher_ids is pure slate parsing — hoisted OUT
+# of the splits try-block so a splits-import failure no longer silently kills
+# the day/night + IL block that also needs these ids (the old coupling was
+# papered over by an `except NameError` downstream).
+slate_pitcher_ids = []
+for col in ["away_pitcher_id", "home_pitcher_id"]:
+    if col in slate.columns:
+        for pid in slate[col].dropna().unique():
+            try:
+                slate_pitcher_ids.append(int(pid))
+            except (TypeError, ValueError):
+                continue
+slate_pitcher_ids = tuple(set(slate_pitcher_ids))
+
 try:
     from data_fetcher import get_pitcher_handedness_splits
-    slate_pitcher_ids = []
-    for col in ["away_pitcher_id", "home_pitcher_id"]:
-        if col in slate.columns:
-            for pid in slate[col].dropna().unique():
-                try:
-                    slate_pitcher_ids.append(int(pid))
-                except (TypeError, ValueError):
-                    continue
-    slate_pitcher_ids = tuple(set(slate_pitcher_ids))
     pitcher_splits = get_pitcher_handedness_splits(pitcher_ids=slate_pitcher_ids) if slate_pitcher_ids else pd.DataFrame()
     if (pitcher_splits is not None and not pitcher_splits.empty
             and "player_id" in pitcher_stats.columns):
@@ -3899,8 +3871,6 @@ if _eval_metrics and _eval_date:
     _slate_rate = _eval_metrics.get("actual_hr_rate_pct", 0)
     _edge = _hit_rate - _slate_rate
     _actual_hrs = _eval_metrics.get("total_actual_hrs", 0)
-    _top10_hits = int(round(_hit_rate / 10)) if _hit_rate else 0  # approx — actual count not in metrics dict directly
-    # Better: pull actual count from preds list
     _top10_hits = sum(1 for p in _preds if p.get("homered"))
     edge_color = "🟢" if _edge >= 5 else "🟡" if _edge >= 0 else "🔴"
     with st.expander(
@@ -5269,12 +5239,17 @@ if show_pattern_analysis:
                                             _adaptive_slate = pd.DataFrame(_latest_hitters)
                                 except Exception:
                                     _adaptive_slate = None
-                                # Fallback to combined_all if the current
-                                # slate is already built and in scope
-                                if (_adaptive_slate is None or _adaptive_slate.empty) and \
-                                   "combined_all" in dir() and combined_all is not None \
-                                   and not combined_all.empty:
-                                    _adaptive_slate = combined_all
+                                # v45.14 (review P1 #5 / P2 C2): the old fallback
+                                # checked combined_all, which is assigned ~8000
+                                # lines AFTER this renders — provably always None
+                                # here. Meanwhile the picks section stores a
+                                # curated frame in _slate_for_adaptive for exactly
+                                # this purpose (written last run; available on any
+                                # rerun). Wire it up.
+                                if _adaptive_slate is None or _adaptive_slate.empty:
+                                    _sfa = st.session_state.get("_slate_for_adaptive")
+                                    if _sfa is not None and not getattr(_sfa, "empty", True):
+                                        _adaptive_slate = _sfa
                                 if _adaptive_slate is not None and not _adaptive_slate.empty:
                                     _starters_only = _adaptive_slate
                                     if "is_bench" in _adaptive_slate.columns:
@@ -6185,30 +6160,18 @@ if not p_slate.empty and "pitcher_id" in p_slate.columns:
     except Exception:
         p_slate["primary_position"] = ""
 
-# HARD OVERRIDE: probable starters cannot be on IL.
-# MLB doesn't list IL'd pitchers as probable starters. If our transactions
-# parser thinks Webb is on IL but he's the probable starter today, the slate
-# is the authority — override unconditionally.
-# NUCLEAR v6 FIX: previous version only cleared on_il. But days_since_return
-# and il_count_this_season are SEPARATE fields the warn flag + role check
-# also read. Even with on_il=False, if days_since_return=3, you'd see
-# "🏥 FRESH IL (3d)" — and if il_count>0, role check thinks pitcher is
-# "returning from IL". Clear EVERYTHING for these pitchers.
-# v45.12 NOTE (review P2 #2): a reviewer flagged that this disables FRESH IL for
-# ALL starters. That's the intended trade-off given the transactions parser
-# produced FALSE fresh-IL flags on probable starters (real user-reported bug).
-# If the parser becomes reliable, revisit: preserve days_since_return so a
-# genuinely-just-returned starter can show FRESH IL. Left as-is for now because
-# reintroducing false positives is worse than a missing flag. Roles recompute
-# once below.
+# HARD OVERRIDE: probable starters cannot be ACTIVELY on IL.
+# MLB doesn't list IL'd pitchers as probable starters — clear on_il.
+# v45.14 (review P2 #2, user-approved): PRESERVE days_since_return and
+# il_count_this_season so a starter who genuinely just returned shows
+# 🏥 FRESH IL (Nd) and gets the expected_ip cap the legend documents.
+# HISTORY: the old "NUCLEAR v6" wiped all three because the transactions
+# parser once produced false fresh-IL flags on starters. If false positives
+# reappear, revert to wiping days_since_return/il_count and re-note here.
 if not p_slate.empty:
-    for il_col in ("on_il", "days_since_return", "il_count_this_season"):
-        if il_col in p_slate.columns:
-            if il_col == "on_il":
-                p_slate[il_col] = False
-            else:
-                p_slate[il_col] = pd.NA
-    # Also re-run role classification with the cleaned data
+    if "on_il" in p_slate.columns:
+        p_slate["on_il"] = False
+    # Re-run role classification with the corrected on_il
     try:
         from models import recompute_pitcher_roles
         p_slate = recompute_pitcher_roles(p_slate, slate_date=selected_date)
@@ -6269,10 +6232,15 @@ if not p_slate.empty:
         axis=1,
     )
     # Add letter-style matchup grade (EXPLOITABLE/MIXED/TOUGH/ELITE)
+    # v45.14 (review P2 #6): pitchers get their OWN documented threshold (80 PA
+    # faced, per the pitcher_grade docstring + legend) — NOT the hitter's
+    # season-scaled INSUFFICIENT_PA_THRESHOLD (40-280), which by August pushed
+    # low-workload pitchers into the ERA/HR9 fallback far more than intended.
+    PITCHER_PA_FACED_THRESHOLD = 80
     p_slate["grade"] = p_slate.apply(
         lambda r: pitcher_grade(
             r.get("test_score"), r.get("hr_suppress"), r.get("pa"),
-            INSUFFICIENT_PA_THRESHOLD,
+            PITCHER_PA_FACED_THRESHOLD,
             era=r.get("era"), hr9=r.get("hr9"), ip=r.get("ip"),
         ),
         axis=1,
@@ -7042,7 +7010,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.13 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.14 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -7682,7 +7650,7 @@ for _, game in slate.iterrows():
         # v43.66 (researcher framework): compute near_hr_est = max(0,
         # barrel_count - home_run), the closest approximation we have for
         # the researcher's "Near HR" metric (barrels that didn't leave the
-        # yard). Then run Must-Have (10-point) and Nuclear (14-point)
+        # yard). Then run Must-Have (9-criteria) and Nuclear (12-criteria)
         # checklists alongside the 4-point. All three remain display-only;
         # no scoring change.
         def _compute_near_hr(df):
@@ -10037,7 +10005,7 @@ if combined_picks is not None and not combined_picks.empty:
                     ):
                         if n_nuc == 0:
                             st.info(
-                                "No starters reached NEAR (≥10/14 with ≤4 missed) "
+                                "No starters reached NEAR (≥8/12 with ≤4 missed) "
                                 "tonight. Nuclear is designed to surface only "
                                 "3-8 plays per slate at most, often zero. "
                                 "Check Top-10-by-Nuclear below for the strongest "
@@ -10110,7 +10078,7 @@ if combined_picks is not None and not combined_picks.empty:
                         with col_b:
                             st.caption("**Nuclear count distribution**")
                             _nuc_lines = "\n".join(
-                                f"- **{k}/14** met: {v} hitter"
+                                f"- **{k}/12** met: {v} hitter"
                                 f"{'s' if v != 1 else ''}"
                                 for k, v in _nuc_dist.head(10).items()
                             )
@@ -10221,34 +10189,35 @@ if combined_picks is not None and not combined_picks.empty:
     # ========================================================================
     try:
         if "hr_score" in combined_picks.columns:
+            # v45.14 (P2 #12): key by (pid, game) so doubleheader rows keep
+            # their own tier (pid-only collapsed both games to the last one).
             new_smash_per_pid = {}
             for _, _row in combined_picks.iterrows():
                 _sc = _row.get("hr_score")
                 _pid = _row.get("player_id")
                 if _pid is None or pd.isna(_pid):
                     continue
+                _key = (int(_pid), str(_row.get("game")))
                 if _sc is None or pd.isna(_sc):
-                    new_smash_per_pid[int(_pid)] = ""
+                    new_smash_per_pid[_key] = ""
                     continue
-
-                # Pitcher quality gate — favor EXPLOIT(+) pitchers (vulnerable),
-                # block ELITE/TOUGH pitchers (no smash spot against an ace).
-                _pg = _row.get("opp_pitcher_grade") or ""
-                _pg_upper = str(_pg).upper()
-                pitcher_favorable = _pg_upper in ("EXPLOIT", "EXPLOIT+")
-                pitcher_hostile = _pg_upper in ("ELITE", "ELITE+", "TOUGH")
-
-                # v45.08 (review): use the canonical smash_tier() — one source
-                # of truth for all thresholds (was duplicated with drifting env
-                # bars across the file).
-                new_smash_per_pid[int(_pid)] = smash_tier(
-                    _sc, _row.get("opp_pitcher_grade"), _row.get("env_boost")
+                # v45.14 (P2 #3): restore the lineup-confirmation gate the
+                # override had dropped. (Also removed the dead
+                # pitcher_favorable/pitcher_hostile locals — smash_tier
+                # computes pitcher favorability internally.)
+                _lc = _row.get("lineup_confirmed")
+                _lineup_ok = bool(_lc) if _lc is not None and not pd.isna(_lc) else False
+                new_smash_per_pid[_key] = smash_tier(
+                    _sc, _row.get("opp_pitcher_grade"), _row.get("env_boost"),
+                    lineup_confirmed=_lineup_ok,
                 )
 
-            # Write back to combined_picks
-            combined_picks["smash_spot"] = combined_picks["player_id"].apply(
-                lambda p: new_smash_per_pid.get(int(p), "")
-                if p is not None and not pd.isna(p) else ""
+            # Write back to combined_picks — (pid, game) keyed
+            combined_picks["smash_spot"] = combined_picks.apply(
+                lambda r: new_smash_per_pid.get(
+                    (int(r["player_id"]), str(r.get("game"))), "")
+                if r.get("player_id") is not None and not pd.isna(r.get("player_id")) else "",
+                axis=1,
             )
 
             # v44.66 (user: "only 1 strong, 0 elite — is that right or broken?").
@@ -10294,6 +10263,17 @@ if combined_picks is not None and not combined_picks.empty:
             except Exception:
                 _all_frames = None
             for _gpk, _ctx in game_context_map.items():
+                # v45.14 (P2 #12): compute this gpk's DH-suffixed game label so
+                # the (pid, game) smash lookup matches combined_picks' keys.
+                _sm_lbl = None
+                try:
+                    _sgr = slate[slate["gamePk"] == _gpk]
+                    if not _sgr.empty:
+                        _sg0 = _sgr.iloc[0]
+                        _sm_lbl = (f"{_sg0['away_team_abbr']} @ {_sg0['home_team_abbr']}"
+                                   + _dh_suffix_by_gpk.get(_gpk, ""))
+                except Exception:
+                    _sm_lbl = None
                 if _all_frames is not None:
                     _frame_iter = _all_frames(_ctx)
                 else:
@@ -10312,7 +10292,13 @@ if combined_picks is not None and not combined_picks.empty:
                         if _pid is None or pd.isna(_pid):
                             new_smash.append("")
                             continue
-                        new_smash.append(new_smash_per_pid.get(int(_pid), ""))
+                        # (pid, game) first; pid-only fallback for any row whose
+                        # label didn't resolve (keeps single games working).
+                        _v = new_smash_per_pid.get((int(_pid), str(_sm_lbl)))
+                        if _v is None:
+                            _v = next((val for (p, _g), val in new_smash_per_pid.items()
+                                       if p == int(_pid)), "")
+                        new_smash.append(_v)
                     _mdf["smash_spot"] = new_smash
 
             # Diagnostic: how many smash flags fired total
@@ -11406,7 +11392,7 @@ if combined_picks is not None and not combined_picks.empty:
                         "Whether this hitter's core power inputs went through: "
                         "barrel%, pull-barrel%, exit velo, hard-hit%, ISO, plus "
                         "the handedness split vs tonight's pitcher.\n\n"
-                        "✅ full = all key inputs present\n"
+                        "✅ full = core inputs present (at most one missing)\n"
                         "⚠️ partial = some missing; score is using fallbacks\n"
                         "🚨 thin = mostly missing — the rank may be inflated or "
                         "deflated by missing data, so treat it with caution.\n\n"
@@ -12259,36 +12245,35 @@ if combined_picks is not None and not combined_picks.empty:
                         # matchup frames, which ARE populated by now (the games
                         # loop ran before this UI renders). (The old combined_all
                         # branch was dead; removed to avoid misleading editors.)
-                        if True:
-                            # Read from game_context_map (populated during the
-                            # games loop, which has already run).
-                            seen = set()
-                            scored_smashers = []
-                            for _gpk, _ctx in game_context_map.items():
-                                for _side in ("away_matchup", "home_matchup"):
-                                    _m = _ctx.get(_side)
-                                    if _m is None or _m.empty:
-                                        continue
-                                    if "smash_spot" not in _m.columns:
-                                        continue
-                                    _smash_rows = _m[
-                                        _m["smash_spot"].fillna("").str.contains(
-                                            "SMASH", na=False
+                        # Read from game_context_map (populated during the
+                        # games loop, which has already run).
+                        seen = set()
+                        scored_smashers = []
+                        for _gpk, _ctx in game_context_map.items():
+                            for _side in ("away_matchup", "home_matchup"):
+                                _m = _ctx.get(_side)
+                                if _m is None or _m.empty:
+                                    continue
+                                if "smash_spot" not in _m.columns:
+                                    continue
+                                _smash_rows = _m[
+                                    _m["smash_spot"].fillna("").str.contains(
+                                        "SMASH", na=False
+                                    )
+                                ]
+                                for _, _r in _smash_rows.iterrows():
+                                    _nm = _r.get("player_name")
+                                    if _nm and _nm not in seen:
+                                        seen.add(_nm)
+                                        # Score by smash tier so ELITE
+                                        # shows first
+                                        _label = str(_r.get("smash_spot") or "")
+                                        _tier = 3 if "ELITE" in _label else (
+                                            2 if "STRONG" in _label else 1
                                         )
-                                    ]
-                                    for _, _r in _smash_rows.iterrows():
-                                        _nm = _r.get("player_name")
-                                        if _nm and _nm not in seen:
-                                            seen.add(_nm)
-                                            # Score by smash tier so ELITE
-                                            # shows first
-                                            _label = str(_r.get("smash_spot") or "")
-                                            _tier = 3 if "ELITE" in _label else (
-                                                2 if "STRONG" in _label else 1
-                                            )
-                                            scored_smashers.append((_tier, _nm))
-                            scored_smashers.sort(key=lambda x: -x[0])
-                            smash_names = [nm for _, nm in scored_smashers[:6]]
+                                        scored_smashers.append((_tier, _nm))
+                        scored_smashers.sort(key=lambda x: -x[0])
+                        smash_names = [nm for _, nm in scored_smashers[:6]]
                     except Exception:
                         pass
                     smash_line = ""
@@ -12349,10 +12334,14 @@ if combined_picks is not None and not combined_picks.empty:
                         hit_rate = yest_metrics.get("top10_hr_hit_rate", 0)
                         slate_rate = yest_metrics.get("actual_hr_rate_pct", 0)
                         edge = hit_rate - slate_rate
-                        top10_hits = yest_metrics.get("top10_hrs_hit", 0)
                         actual_hrs = yest_metrics.get("total_actual_hrs", 0)
                         # Pull the names of picks that homered
                         preds = yest_metrics.get("top10_hr_predictions", []) or []
+                        # v45.14 (review P2 #8): 'top10_hrs_hit' is only set by the
+                        # ROLLING aggregate, not the per-day eval dict — this read
+                        # was always 0 ("0/10 hit a HR" even on good nights).
+                        # Count from the predictions list instead.
+                        top10_hits = sum(1 for p in preds if p.get("homered"))
                         winners = [p.get("name") for p in preds if p.get("homered")]
                         winners_str = ""
                         if winners:
@@ -13524,8 +13513,14 @@ if all_hitters:
                             continue
                         _fk = pd.to_numeric(_frame["player_id"], errors="coerce")
                         for _c, _m in _score_maps.items():
-                            # don't clobber a column the matchup frame already has
-                            if _c not in _frame.columns or _frame[_c].isna().all():
+                            # v45.14 (P3 #4): sleeper_score OVERWRITES — the
+                            # frames carry find_sleepers' per-lineup percentile,
+                            # but the glossary documents the slate-wide
+                            # definition computed on combined_all. One name,
+                            # one meaning, everywhere.
+                            if _c == "sleeper_score":
+                                _frame[_c] = _fk.map(_m)
+                            elif _c not in _frame.columns or _frame[_c].isna().all():
                                 _frame[_c] = _fk.map(_m)
                         _gctx[_side] = _frame
         except Exception as _bmap_e:
@@ -15261,18 +15256,34 @@ try:
             return pd.to_numeric(_ec.get(col), errors="coerce")
 
         _mask = pd.Series(True, index=_ec.index)
-        _mask &= _num("hr_score") >= _EC_HR
+        # v45.14 (review P3 #5): guard ALL gates on column presence + having
+        # real values. hr_score/dinger_score were unconditional — if
+        # compute_dinger_score threw (all-NaN column), the mask went all-False
+        # and the section quietly showed the "no hitters clear all six" empty
+        # message, masking a pipeline failure as strict filtering.
+        _ec_skipped_gates = []
+        def _gate(col, thr):
+            _s = _num(col)
+            if col in _ec.columns and _s.notna().any():
+                return _s >= thr
+            _ec_skipped_gates.append(col)
+            return pd.Series(True, index=_ec.index)  # gate unavailable → skip
+        _mask &= _gate("hr_score", _EC_HR)
         if "grade" in _ec.columns:
             _mask &= _ec["grade"].astype(str).str.strip().isin(_EC_GRADES)
-        _mask &= _num("dinger_score") >= _EC_DINGER
-        if "power_composite" in _ec.columns:
-            _mask &= _num("power_composite") >= _EC_COMBO
-        if "barrel_matchup_score" in _ec.columns:
-            _mask &= _num("barrel_matchup_score") >= _EC_BRL
-        if "two_way_matchup_score" in _ec.columns:
-            _mask &= _num("two_way_matchup_score") >= _EC_TWO
+        _mask &= _gate("dinger_score", _EC_DINGER)
+        _mask &= _gate("power_composite", _EC_COMBO)
+        _mask &= _gate("barrel_matchup_score", _EC_BRL)
+        _mask &= _gate("two_way_matchup_score", _EC_TWO)
 
         _elite = _ec[_mask.fillna(False)].copy()
+        if _ec_skipped_gates:
+            st.caption(
+                f"⚠️ Elite Convergence: {len(_ec_skipped_gates)} metric(s) "
+                f"unavailable this run ({', '.join(_ec_skipped_gates)}) — those "
+                f"gates were skipped, not passed. If this persists, a compute "
+                f"upstream is failing."
+            )
 
         st.markdown("<div id='sec-elite'></div>", unsafe_allow_html=True)
         st.subheader("🔥 Elite Convergence")
@@ -15484,7 +15495,12 @@ def _ask_bot_fragment():
                 if "game" in _pool.columns:
                     for _g in _pool["game"].dropna().astype(str).unique():
                         _parts = [p.strip().lower() for p in _g.replace("@", " ").split()]
-                        if any(p and p in _ql for p in _parts):
+                        # v45.14 (review P3 #14): word-boundary match — short
+                        # abbrevs ('min','was') substring-matched innocent words
+                        # ('minimum','wasn't') and hijacked unrelated questions.
+                        import re as _re_team
+                        if any(p and _re_team.search(r'\b' + _re_team.escape(p) + r'\b', _ql)
+                               for p in _parts):
                             _match = _pool[_pool["game"] == _g]
                             _mlabel = _g
                             break
@@ -15646,8 +15662,8 @@ def _ask_bot_fragment():
                                     _extra.append(f"{float(_r['hr_game_pct']):.1f}% HR")
                                 if _target_col != "dinger_score" and pd.notna(_r.get("dinger_score")):
                                     _extra.append(f"💥{float(_r['dinger_score']):.0f}")
-                                if pd.notna(_r.get("matchup")):
-                                    _extra.append(str(_r.get("matchup")))
+                                if pd.notna(_r.get("game")):
+                                    _extra.append(str(_r.get("game")))  # v45.14: was 'matchup' (a number)
                                 _lines.append(
                                     f"{_i}. **{_r.get('player_name','?')}** "
                                     f"({_r.get('team','')}) — {_nice} {_vs}"
@@ -15706,10 +15722,10 @@ def _ask_bot_fragment():
                             model="claude-sonnet-4-6",
                             max_tokens=600,
                             messages=[{"role": "user", "content": (
-                                f"You are a helpful assistant inside an MLB home-run "
-                                f"props app. Answer ONLY from this slate data (CSV). "
-                                f"Be concise. If the answer isn't in the data, say so.\\n\\n"
-                                f"SLATE DATA:\\n{_ctx}\\n\\nQUESTION: {_ask_q}"
+                                "You are a helpful assistant inside an MLB home-run "
+                                "props app. Answer ONLY from this slate data (CSV). "
+                                "Be concise. If the answer isn't in the data, say so.\n\n"
+                                f"SLATE DATA:\n{_ctx}\n\nQUESTION: {_ask_q}"
                             )}],
                         )
                         _ans = "".join(
@@ -16636,9 +16652,9 @@ def build_col_config():
         ),
         "split_confidence": st.column_config.TextColumn(
             "Split Conf", width="small",
-            help="Confidence in the handedness split PA sample. "
-                 "⭐⭐⭐ = high (100+ PA), ⭐⭐ = medium, ⭐ = low. "
-                 "Fewer stars = split less reliable.",
+            help="Handedness-split sample size vs today's pitcher hand. "
+                 "⚠️ thin split = very few PA vs this hand, 📊 small split = "
+                 "modest sample, blank = adequate. Season-aware thresholds.",
         ),
         "slate_leader_flag": st.column_config.TextColumn(
             "Slate Lead", width="small",
@@ -16810,6 +16826,14 @@ def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
                 # Blank smash_spot on the lower-ranked smash rows
                 _drop_idx = _ordered.iloc[2:].index
                 matchup_df.loc[_drop_idx, "smash_spot"] = ""
+                # v45.14 (review P3 #12): tell the user this table caps the
+                # display — the slate-wide All Smash Spots list is uncapped,
+                # so a hitter can be flagged there but blank here by design.
+                st.caption(
+                    f"🔥 Showing top 2 smash flags for this lineup "
+                    f"({int(_smash_mask.sum())} qualified — full list in "
+                    f"All Smash Spots)."
+                )
         except Exception:
             pass
 
