@@ -1454,8 +1454,18 @@ def get_slate(game_date: Optional[str] = None) -> pd.DataFrame:
         )
 
     rows = []
+    # v45.14 (user-flagged: ASG appeared as a slate on Jul 14): exclude
+    # exhibition-type games — A = All-Star, E = exhibition, S = spring training.
+    # NOT a filter TO "R" only: postseason gameTypes (F/D/L/W) must still flow
+    # in October. Keeping the ASG out here means it never gets scored,
+    # auto-snapshotted, or banked into pattern history (outcome grading was
+    # already protected by the v44.87 gameType=R filter in backtest.py).
+    _EXCLUDED_GAME_TYPES = {"A", "E", "S"}
     for d in data.get("dates", []):
         for g in d.get("games", []):
+            _gt = str(g.get("gameType") or "").upper()
+            if _gt in _EXCLUDED_GAME_TYPES:
+                continue
             away = g["teams"]["away"]
             home = g["teams"]["home"]
             rows.append({
