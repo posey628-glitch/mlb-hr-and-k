@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.14-full-review-sweep"
+APP_VERSION = "2026.06.10-v45.15-module-audit"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -109,6 +109,18 @@ def _calibration_snapshot() -> dict:
         "ps_weights": dict(PICK_SCORE_WEIGHTS),
         "ctx_mult_cap": list(CTX_MULT_CAP),
         "split_prior_pa": SPLIT_PRIOR_PA,
+        # v45.15 (audit): record the dinger weights + smash thresholds too.
+        # When DINGER_BASE_WEIGHTS gets its first evidence-driven reweight (the
+        # 15-slate milestone), snapshots must say which weights produced them —
+        # otherwise pre/post-reweight slates are indistinguishable when grading.
+        "dinger_weights": dict(DINGER_BASE_WEIGHTS),
+        "smash_thresholds": {
+            "elite_score": SMASH_ELITE_SCORE,
+            "strong_score": SMASH_STRONG_SCORE,
+            "base_score": SMASH_BASE_SCORE,
+            "env_favorable": SMASH_ENV_FAVORABLE,
+            "env_neutral": SMASH_ENV_NEUTRAL,
+        },
     }
 
 
@@ -1340,8 +1352,9 @@ DINGER_CONTEXT = {
     "env": 0.15,       # park + weather (env_boost)
     "matchup": 0.15,   # vs tonight's pitcher (matchup_opp)
 }
-# For the builder preset (season-power view only), expose the base.
-DINGER_SCORE_WEIGHTS = dict(DINGER_BASE_WEIGHTS)
+# (v45.15: removed the dead DINGER_SCORE_WEIGHTS alias — written, never read.
+#  DINGER_BASE_WEIGHTS is the single live name; it's now also recorded in
+#  _calibration_snapshot so the reweight milestone is auditable.)
 
 
 def _dinger_base_percentile(df: "pd.DataFrame") -> "pd.Series":
@@ -7010,7 +7023,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.14 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.15 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
