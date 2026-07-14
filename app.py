@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.02-merged-reqs-more-fragments"
+APP_VERSION = "2026.06.10-v45.13-caption-drift-fixes"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -69,6 +69,34 @@ PICK_SCORE_WEIGHTS = {
 LEAGUE_HR_PER_PA = 0.030       # Matches props.LEAGUE_HR_PER_PA
 CTX_MULT_CAP = [0.65, 1.35]    # Matches props.hr_prob_per_pa
 SPLIT_PRIOR_PA = 150           # Bayesian shrinkage anchor for handedness splits
+
+
+# v45.13 (review P2 #4): human-readable labels for the pick_score components,
+# so help text renders FROM the weights and can't go stale. Any weight change
+# updates every caption automatically.
+_PICK_SCORE_LABELS = {
+    "ps_hr_game": "HR Game%",
+    "ps_matchup_opp": "matchup",
+    "ps_power": "power",
+    "ps_pitch_hr": "pitch matchup",
+    "ps_form": "recent form",
+    "ps_discipline": "plate discipline",
+    "ps_lift": "lift/leverage",
+    "ps_sleeper": "sleeper",
+    "ps_env": "environment",
+}
+
+
+def pick_score_weight_text(top_n=None):
+    """Return a '· HR Game% (16%), power (18%), ...' string built from the live
+    PICK_SCORE_WEIGHTS, sorted high→low. top_n limits to the biggest N. Used by
+    every pick_score help/caption so they never drift from the constant."""
+    items = sorted(PICK_SCORE_WEIGHTS.items(), key=lambda kv: kv[1], reverse=True)
+    if top_n:
+        items = items[:top_n]
+    return ", ".join(
+        f"{_PICK_SCORE_LABELS.get(k, k)} ({v*100:.0f}%)" for k, v in items
+    )
 
 
 def _calibration_snapshot() -> dict:
@@ -124,6 +152,115 @@ def _fragment(func):
     return func
 
 
+# v45.08 (review): SINGLE SOURCE OF TRUTH for smash-tier thresholds. The
+# reviewer found this logic re-expressed in ~4 places with 3 different env bars
+# (1.05 / 1.00 / 0.92), and the tooltip contradicting the caption. All smash
+# computation + all captions now reference these constants and this function.
+SMASH_ELITE_SCORE = 85      # HR Score ≥ this for ELITE tier
+SMASH_STRONG_SCORE = 75     # HR Score ≥ this for STRONG
+SMASH_BASE_SCORE = 65       # HR Score ≥ this for base SMASH
+SMASH_ENV_FAVORABLE = 1.00  # env_boost ≥ this = actively helps (ELITE gate)
+SMASH_ENV_NEUTRAL = 0.92    # env_boost ≥ this = non-hostile (STRONG/SMASH gate)
+
+
+def merge_on_player_id(base, other, cols=None, how="left", overwrite=False):
+    """v45.11 (review): canonical player_id merge. Normalizes BOTH frames'
+    player_id to Int64 (a silent-merge-failure source when dtypes differ —
+    e.g. int64 vs object), optionally restricts to `cols`, drops columns that
+    would collide with base (unless overwrite=True), then merges.
+
+    Returns the merged frame (or base unchanged if the merge can't run). Never
+    raises — a failed merge returns base so the pipeline degrades gracefully.
+    """
+    try:
+        if (base is None or other is None
+                or getattr(other, "empty", True)
+                or "player_id" not in base.columns
+                or "player_id" not in other.columns):
+            return base
+        base = base.copy()
+        other = other.copy()
+        base["player_id"] = pd.to_numeric(
+            base["player_id"], errors="coerce").astype("Int64")
+        other["player_id"] = pd.to_numeric(
+            other["player_id"], errors="coerce").astype("Int64")
+        # Which columns to bring over
+        candidate = [c for c in (cols or other.columns) if c != "player_id"]
+        candidate = [c for c in candidate if c in other.columns]
+        if not overwrite:
+            existing = set(base.columns)
+            candidate = [c for c in candidate if c not in existing]
+        else:
+            # v45.13 (review): overwrite → drop base's colliding columns FIRST,
+            # so the merge replaces them cleanly instead of producing _x/_y
+            # suffixes (which would make the original column name vanish).
+            _clash = [c for c in candidate if c in base.columns]
+            if _clash:
+                base = base.drop(columns=_clash)
+        if not candidate:
+            return base
+        return base.merge(
+            other[["player_id"] + candidate], on="player_id", how=how,
+        )
+    except Exception:
+        return base
+
+
+def smash_tier(hr_score, pitcher_grade, env_boost):
+    """Return the smash-tier label for one hitter, or "" for none.
+
+    THE canonical smash logic. hr_score = 0-99 composite; pitcher_grade =
+    opposing pitcher grade string; env_boost = park×weather×wind multiplier.
+    Rules: never smash vs an ELITE/TOUGH pitcher; otherwise tier by HR Score +
+    a favorable/neutral env gate. Referenced by both the scoring override and
+    the caption text so they can never drift.
+    """
+    _pg = str(pitcher_grade or "").upper()
+    # Hostile pitcher (ace) blocks all tiers.
+    if "ELITE" in _pg or "TOUGH" in _pg:
+        return ""
+    _favorable_pitcher = ("EXPLOIT" in _pg)  # EXPLOIT or EXPLOIT+
+    if not _favorable_pitcher:
+        return ""
+    try:
+        _sc = float(hr_score) if hr_score is not None and not pd.isna(hr_score) else 0.0
+    except (TypeError, ValueError):
+        _sc = 0.0
+    try:
+        _env = float(env_boost) if env_boost is not None and not pd.isna(env_boost) else 0.0
+    except (TypeError, ValueError):
+        _env = 0.0
+    _env_favorable = _env >= SMASH_ENV_FAVORABLE
+    _env_neutral = _env >= SMASH_ENV_NEUTRAL
+    if _sc >= SMASH_ELITE_SCORE and _env_favorable:
+        return "🔥🔥🔥 ELITE SMASH"
+    if _sc >= SMASH_STRONG_SCORE and _env_neutral:
+        return "🔥🔥 STRONG SMASH"
+    if _sc >= SMASH_BASE_SCORE and _env_neutral:
+        return "🔥 SMASH"
+    return ""
+
+
+def _et_utc_offset_hours(dt_utc):
+    """v45.08 (review): accurate ET offset (hours to subtract from UTC) using the
+    real US DST rule — 2nd Sunday of March to 1st Sunday of November. The old
+    fallback used 'month 3-11' which was off by an hour in early March / early
+    Nov. Only a fallback; pytz is used when available.
+    """
+    import calendar
+    y = dt_utc.year
+    # 2nd Sunday of March
+    march_sundays = [d for d in range(1, 15)
+                     if calendar.weekday(y, 3, d) == calendar.SUNDAY]
+    dst_start = datetime(y, 3, march_sundays[1], 7)  # 2 AM ET ≈ 07:00 UTC
+    # 1st Sunday of November
+    nov_sundays = [d for d in range(1, 8)
+                   if calendar.weekday(y, 11, d) == calendar.SUNDAY]
+    dst_end = datetime(y, 11, nov_sundays[0], 6)  # 2 AM ET ≈ 06:00 UTC
+    _naive = dt_utc.replace(tzinfo=None)
+    return 4 if dst_start <= _naive < dst_end else 5
+
+
 def _today_et():
     """v44.97: the current calendar date in US/Eastern.
 
@@ -137,9 +274,9 @@ def _today_et():
         import pytz
         return datetime.now(pytz.timezone("US/Eastern")).date()
     except Exception:
-        # DST-aware-ish fallback: EDT (-4) Mar–Nov, EST (-5) otherwise.
+        # Accurate DST-aware fallback (v45.08).
         _u = datetime.now(timezone.utc)
-        _off = 4 if 3 <= _u.month <= 11 else 5
+        _off = _et_utc_offset_hours(_u)
         return (_u.replace(tzinfo=None) - timedelta(hours=_off)).date()
 
 
@@ -215,6 +352,23 @@ from models import build_matchup_table, build_pitcher_slate
 from sleepers import hr_probability, find_sleepers
 # Props - core functions are required, verdict_color is optional
 from props import hr_prob_per_pa, k_total_projection
+
+# v45.09 (review): detect hr_prob_per_pa's parameter names ONCE, so we call it
+# with the correct kwargs directly instead of a TypeError ladder. The ladder's
+# fallback passed weather_hr_factor=wx_mult (wind INCLUDED) while the primary
+# path passes weather_mult=wx_mult_nowind (wind excluded — it's applied
+# separately via pull_mult in the park factor). Guessing wrong double-counts
+# wind. This inspects the real signature so the wind term is never doubled.
+try:
+    import inspect as _inspect
+    _HRPPA_PARAMS = set(_inspect.signature(hr_prob_per_pa).parameters.keys())
+except Exception:
+    _HRPPA_PARAMS = set()
+# Which weather kwarg does this build accept, and does it take ttop_mult?
+_HRPPA_HAS_WEATHER_MULT = "weather_mult" in _HRPPA_PARAMS
+_HRPPA_HAS_WEATHER_HR_FACTOR = "weather_hr_factor" in _HRPPA_PARAMS
+_HRPPA_HAS_TTOP = "ttop_mult" in _HRPPA_PARAMS
+_HRPPA_HAS_PARK_FACTOR = "park_factor" in _HRPPA_PARAMS
 # v43.64 (reviewer fix #7): hoist hit/total-bases functions to module
 # scope. Previously imported INSIDE the per-hitter loop (~5749), running
 # once per row of every game. Python caches but the import-in-loop pattern
@@ -413,7 +567,12 @@ try:
         Returns None on any mismatch — vegas is a soft dependency."""
         try:
             from datetime import date
-            totals = get_vegas_totals(date.today().isoformat())
+            # v45.08 (review): prefer an explicit slate_date if the caller passes
+            # one; else ET-today (not UTC date.today()). This is slate-scoped —
+            # reviewing a past date should use THAT date's totals, not today's.
+            _slate_d = kwargs.get("slate_date")
+            _vegas_date = str(_slate_d) if _slate_d else _today_et().isoformat()
+            totals = get_vegas_totals(_vegas_date)
             if totals is None or (hasattr(totals, "empty") and totals.empty):
                 return None
             # Try (away_team, home_team) form first
@@ -535,9 +694,9 @@ COLUMN_HELP = {
     "pick_score": "Overall composite. ⬆️ HIGHER = stronger pick. Blends "
                   "HR Game%, matchup, power, form, sleeper, lift, environment. "
                   "Includes bonuses for confirmed lineups and platoon edges.",
-    "convergence_score": "How many systems agree this is a top play (0-5). "
-                         "5/5 = HR%, matchup, power, form, AND sleeper all rank "
-                         "this hitter top tier. ⬆️ HIGHER = stronger consensus.",
+    "convergence_score": "How many of the 7 core scoring lenses agree this is a "
+                         "top play. More agreement = broader multi-method "
+                         "consensus. ⬆️ HIGHER = stronger consensus.",
     "test_score": "70% matchup + 30% form, PA-weighted. ⬆️ HIGHER = better.",
     # === Pitcher metrics ===
     "hr9": "Pitcher's HRs allowed per 9 innings. ⬆️ HIGHER = WORSE for pitcher "
@@ -623,9 +782,10 @@ COLUMN_HELP = {
     "nuclear_grade": "Nuclear tier: ☢️ NUCLEAR (all 12) / 💥 STRONG (≤2 missed) / "
                      "🎯 NEAR (≤4 missed). Blank = didn't reach NEAR. The rarest, "
                      "highest-conviction power profiles.",
-    "convergence_count": "How many INDEPENDENT scoring methods (up to 10) rank this "
-                         "hitter top-15 tonight. ⬆️ HIGHER = broader multi-method "
-                         "agreement. See the 🎯 Consensus Board.",
+    "convergence_count": "How many INDEPENDENT scoring methods (7 core lenses: "
+                         "HR%, power, lift, matchup, pitch-exploit, must-have, "
+                         "nuclear) rank this hitter top-15 tonight. ⬆️ HIGHER = "
+                         "broader multi-method agreement. See the 🎯 Consensus Board.",
     "convergence_label": "Consensus tier: 🎯🎯🎯 (≥70% of methods agree) / 🎯🎯 (≥50%) / "
                          "🎯 (≥40%). More 🎯 = stronger multi-method consensus.",
     "expected_total_bases": "Projected total bases this game (singles=1 … HR=4). "
@@ -1303,8 +1463,14 @@ def _apply_dinger_tiebreak(df: "pd.DataFrame", score: "pd.Series") -> None:
     meaningfully (by who's stronger in the most HR-predictive stat). The
     displayed dinger_score stays the clean rounded value; this is sort-only.
     Priority order = Section G's most reliable predictors, decaying so the
-    first (pulled_brl_pct) dominates ties. Total nudge < 0.099 → never
-    changes the rounded display."""
+    first (pulled_brl_pct) dominates ties.
+
+    SAFETY (v45.09 correction): this is safe NOT because the nudge is small
+    enough to never flip a rounded value — the max nudge (~0.0969) CAN cross a
+    round(1) boundary. It's safe because the nudge lands ONLY in the separate
+    dinger_score_precise column (used for sorting); the DISPLAYED dinger_score
+    is the un-nudged rounded value. Do NOT fold precise back into the display —
+    the magnitude bound does not protect it, the column separation does."""
     try:
         _tb = pd.Series(0.0, index=df.index)
         for _i, _c in enumerate(["pulled_brl_pct", "barrel_pct", "avg_ev",
@@ -1521,7 +1687,7 @@ def hr_verdict(hr_game_pct, sample_size=None, pa_threshold=80):
 
 
 def hr_signal_emoji(hr_game_pct, sample_size=None, pa_threshold=80,
-                     same_side_platoon=False):
+                     same_side_platoon=False, env_mult=None):
     """Single emoji for the Signal column - hitters.
 
     v43.4 FIX (reviewer-validated): Signal is now DERIVED FROM GRADE so they
@@ -1533,10 +1699,15 @@ def hr_signal_emoji(hr_game_pct, sample_size=None, pa_threshold=80,
 
     Now: A+/A → 🟢, B+/B → 🟡, C+/C → 🟠, D/F → 🔴. Inherits the platoon cap
     and PA gate automatically. Colors will always match the letter.
+
+    v45.12 (review P1 #1): also forwards env_mult, so an env-capped grade
+    (env<0.85, e.g. A→B+) yields the matching capped signal — otherwise the
+    signal recomputed an UNcapped grade and drifted from the displayed letter.
     """
     grade = hr_grade(hr_game_pct, sample_size=sample_size,
                      pa_threshold=pa_threshold,
-                     same_side_platoon=same_side_platoon)
+                     same_side_platoon=same_side_platoon,
+                     env_mult=env_mult)
     if grade in ("A+", "A"):
         return "🟢"
     if grade in ("B+", "B"):
@@ -2275,9 +2446,11 @@ with st.sidebar:
              "- 🎯🎯 — in ≥50% of methods. Strong consensus.\n"
              "- 🎯 — in ≥40% of methods. Moderate consensus.\n"
              "- (empty) — below 40%; a single-axis play, not a consensus one.\n\n"
-             "**Methods counted (up to 10):** hr_game_pct, power_score, lift_score, "
-             "matchup_opp, pitch_hr_score, dinger_score, barrel_matchup_score, "
-             "two_way_matchup_score, must_have_met, nuclear_met. "
+             "**Methods counted (7 core lenses):** hr_game_pct, power_score, "
+             "lift_score, matchup_opp, pitch_hr_score, must_have_met, "
+             "nuclear_met. (The custom metrics — dinger, barrel-matchup, "
+             "two-way — are computed later in the pipeline and feed the "
+             "Consensus Board's combined view rather than this per-pick count.) "
              "See the 🎯 Consensus Board near the Top 10 for the ranked list."),
             ("💤 Sleeper Score",
              "This is a VALUE / under-the-radar metric, NOT a raw power signal — an "
@@ -2907,10 +3080,19 @@ if not pitcher_zone_tiers.empty and "player_id" in pitcher_stats.columns:
     pitcher_stats = pitcher_stats.merge(
         pitcher_zone_tiers, on="player_id", how="left", suffixes=("", "_zt"),
     )
+    # v45.10 (review): drop orphaned _zt collision columns (keep the original).
+    _zt_dupes = [c for c in pitcher_stats.columns
+                 if c.endswith("_zt") and c[:-3] in pitcher_stats.columns]
+    if _zt_dupes:
+        pitcher_stats = pitcher_stats.drop(columns=_zt_dupes)
 if not hitter_zone_tiers.empty and "player_id" in hitter_stats.columns:
     hitter_stats = hitter_stats.merge(
         hitter_zone_tiers, on="player_id", how="left", suffixes=("", "_zt"),
     )
+    _zt_dupes = [c for c in hitter_stats.columns
+                 if c.endswith("_zt") and c[:-3] in hitter_stats.columns]
+    if _zt_dupes:
+        hitter_stats = hitter_stats.drop(columns=_zt_dupes)
 
 # ----------------------------------------------------------------------------
 # v43.5: SAVANT HANDEDNESS STATCAST (experimental)
@@ -2961,6 +3143,11 @@ if not hitter_hand_statcast.empty and "player_id" in hitter_stats.columns:
         hitter_hand_statcast, on="player_id", how="left",
         suffixes=("", "_hs"),
     )
+    # v45.10 (review): drop orphaned _hs collision columns (keep the original).
+    _hs_dupes = [c for c in hitter_stats.columns
+                 if c.endswith("_hs") and c[:-3] in hitter_stats.columns]
+    if _hs_dupes:
+        hitter_stats = hitter_stats.drop(columns=_hs_dupes)
 
 # v43.17 (user-requested): Bat tracking / Blast % — OPT-IN.
 # Fetches Statcast bat tracking only if the sidebar toggle is enabled.
@@ -3092,19 +3279,8 @@ try:
     pitcher_splits = get_pitcher_handedness_splits(pitcher_ids=slate_pitcher_ids) if slate_pitcher_ids else pd.DataFrame()
     if (pitcher_splits is not None and not pitcher_splits.empty
             and "player_id" in pitcher_stats.columns):
-        pitcher_stats["player_id"] = pd.to_numeric(
-            pitcher_stats["player_id"], errors="coerce").astype("Int64")
-        pitcher_splits["player_id"] = pd.to_numeric(
-            pitcher_splits["player_id"], errors="coerce").astype("Int64")
-        # Drop any conflicting columns then merge
-        merge_cols = [c for c in pitcher_splits.columns if c != "player_id"]
-        existing = set(pitcher_stats.columns)
-        merge_cols = [c for c in merge_cols if c not in existing]
-        if merge_cols:
-            pitcher_stats = pitcher_stats.merge(
-                pitcher_splits[["player_id"] + merge_cols],
-                on="player_id", how="left"
-            )
+        # v45.11: canonical player_id merge (Int64-normalize + drop collisions).
+        pitcher_stats = merge_on_player_id(pitcher_stats, pitcher_splits)
 except Exception:
     # Don't block app if MLB Stats API splits fetch fails
     pass
@@ -3135,18 +3311,8 @@ try:
             hitter_splits = get_hitter_handedness_splits(hitter_ids=hitter_ids_tuple)
         if (hitter_splits is not None and not hitter_splits.empty
                 and "player_id" in hitter_stats.columns):
-            hitter_stats["player_id"] = pd.to_numeric(
-                hitter_stats["player_id"], errors="coerce").astype("Int64")
-            hitter_splits["player_id"] = pd.to_numeric(
-                hitter_splits["player_id"], errors="coerce").astype("Int64")
-            merge_cols = [c for c in hitter_splits.columns if c != "player_id"]
-            existing = set(hitter_stats.columns)
-            merge_cols = [c for c in merge_cols if c not in existing]
-            if merge_cols:
-                hitter_stats = hitter_stats.merge(
-                    hitter_splits[["player_id"] + merge_cols],
-                    on="player_id", how="left",
-                )
+            # v45.11: canonical player_id merge.
+            hitter_stats = merge_on_player_id(hitter_stats, hitter_splits)
             # Diagnostic: track how many hitters got splits
             n_with_lhp_splits = hitter_stats.get("vs_lhp_pa", pd.Series(dtype=float)).notna().sum()
             n_with_rhp_splits = hitter_stats.get("vs_rhp_pa", pd.Series(dtype=float)).notna().sum()
@@ -3166,18 +3332,8 @@ try:
     hr_profile = get_hitter_hr_profile()
     if (hr_profile is not None and not hr_profile.empty
             and "player_id" in hitter_stats.columns):
-        hitter_stats["player_id"] = pd.to_numeric(
-            hitter_stats["player_id"], errors="coerce").astype("Int64")
-        hr_profile["player_id"] = pd.to_numeric(
-            hr_profile["player_id"], errors="coerce").astype("Int64")
-        merge_cols = [c for c in hr_profile.columns if c != "player_id"]
-        existing = set(hitter_stats.columns)
-        merge_cols = [c for c in merge_cols if c not in existing]
-        if merge_cols:
-            hitter_stats = hitter_stats.merge(
-                hr_profile[["player_id"] + merge_cols],
-                on="player_id", how="left",
-            )
+        # v45.11: canonical player_id merge.
+        hitter_stats = merge_on_player_id(hitter_stats, hr_profile)
 except Exception as _e:
     st.session_state["_hr_profile_err"] = str(_e)[:200]
 
@@ -3189,29 +3345,13 @@ try:
     if slate_pitcher_ids:
         pitcher_dn = get_pitcher_day_night_splits(pitcher_ids=slate_pitcher_ids)
         if pitcher_dn is not None and not pitcher_dn.empty and "player_id" in pitcher_stats.columns:
-            pitcher_dn["player_id"] = pd.to_numeric(
-                pitcher_dn["player_id"], errors="coerce").astype("Int64")
-            merge_cols = [c for c in pitcher_dn.columns if c != "player_id"]
-            existing = set(pitcher_stats.columns)
-            merge_cols = [c for c in merge_cols if c not in existing]
-            if merge_cols:
-                pitcher_stats = pitcher_stats.merge(
-                    pitcher_dn[["player_id"] + merge_cols],
-                    on="player_id", how="left"
-                )
+            # v45.11: canonical player_id merge.
+            pitcher_stats = merge_on_player_id(pitcher_stats, pitcher_dn)
         # IL status
         pitcher_il = get_pitchers_il_status(slate_pitcher_ids)
         if pitcher_il is not None and not pitcher_il.empty and "player_id" in pitcher_stats.columns:
-            pitcher_il["player_id"] = pd.to_numeric(
-                pitcher_il["player_id"], errors="coerce").astype("Int64")
-            merge_cols = [c for c in pitcher_il.columns if c != "player_id"]
-            existing = set(pitcher_stats.columns)
-            merge_cols = [c for c in merge_cols if c not in existing]
-            if merge_cols:
-                pitcher_stats = pitcher_stats.merge(
-                    pitcher_il[["player_id"] + merge_cols],
-                    on="player_id", how="left"
-                )
+            # v45.11: canonical player_id merge.
+            pitcher_stats = merge_on_player_id(pitcher_stats, pitcher_il)
 except NameError as _e:
     # slate_pitcher_ids not defined - handedness fetch failed earlier
     _pitcher_dn_il_err = f"NameError: {_e}"
@@ -3239,7 +3379,11 @@ if not hitter_trad.empty and "player_id" in hitter_stats.columns:
         hitter_trad.drop(columns=drop, errors="ignore"),
         on="player_id", how="left", suffixes=("", "_trad"),
     )
-    # Coalesce: keep Savant value, fall back to trad if Savant is NaN
+    # Coalesce: keep Savant value, fall back to trad if Savant is NaN.
+    # NOTE (v45.08): this is the OPPOSITE precedence from the pitcher block below
+    # (which prefers trad) — INTENTIONAL, not a copy-paste error. For hitters,
+    # Savant computes these rate/count stats well; for pitchers, official
+    # ERA/WHIP/IP from MLB Stats API are ground truth over Savant estimates.
     for col in ["obp", "slg", "ops", "avg", "home_run", "rbi", "runs", "sb"]:
         trad_col = f"{col}_trad"
         if trad_col in hitter_stats.columns:
@@ -3625,7 +3769,10 @@ if not st.session_state["_auto_eval_done"]:
             _et_now = _dt.now(pytz.timezone("US/Eastern"))
             _today_et_date = _et_now.date()
         except Exception:
-            _today_et_date = (_dt.utcnow() - _td(hours=4)).date()
+            # v45.08: accurate DST-aware offset (2nd Sun Mar - 1st Sun Nov).
+            _u = _dt.now(timezone.utc)
+            _off = _et_utc_offset_hours(_u)
+            _today_et_date = (_u.replace(tzinfo=None) - _td(hours=_off)).date()
 
         _all_snaps = sorted(list_snapshots())
 
@@ -4964,19 +5111,40 @@ if show_pattern_analysis:
                                     "need ≥3 days per feature to compute importance."
                                 )
                             else:
+                                _days_to_go = max(0, 15 - n_days_history)
                                 reliability_note = (
                                     "🟢 **Trustworthy signal** — "
                                     if n_days_history >= 15
-                                    else f"🟡 **Building signal** ({n_days_history}/15+ days) — "
+                                    else f"🟡 **Building signal** ({n_days_history}/15 slates) — "
                                     if n_days_history >= 7
-                                    else f"🔴 **Too early to trust** ({n_days_history}/7+ days) — "
+                                    else f"🔴 **Too early to trust** ({n_days_history}/7 slates) — "
                                 )
+                                if n_days_history >= 15:
+                                    _readiness_tail = (
+                                        "Rankings are stable — Proposed Weights below are "
+                                        "**actionable**. This is the reweight signal you've "
+                                        "been accumulating toward."
+                                    )
+                                else:
+                                    _readiness_tail = (
+                                        f"Rankings will stabilize as more slates accumulate. "
+                                        f"**{_days_to_go} more slate"
+                                        + ("s" if _days_to_go != 1 else "")
+                                        + f"** until Proposed Weights become trustworthy "
+                                        f"(15-slate threshold). Don't reweight until then — "
+                                        f"current values are directional only."
+                                    )
                                 st.markdown(
                                     reliability_note
-                                    + f"analyzing {n_days_history} day(s) of accumulated outcomes. "
-                                    + ("Rankings are stable." if n_days_history >= 15
-                                       else "Rankings will stabilize as more slates accumulate.")
+                                    + f"analyzing {n_days_history} slate(s) of accumulated outcomes. "
+                                    + _readiness_tail
                                 )
+                                # v45.07: progress bar to the 15-slate milestone
+                                if n_days_history < 15:
+                                    st.progress(
+                                        min(1.0, n_days_history / 15),
+                                        text=f"Weight-validation progress: {n_days_history}/15 slates",
+                                    )
                                 disp = importance_df.head(15).copy()
                                 disp["trend_display"] = disp["trend"].apply(
                                     lambda t: (
@@ -5821,14 +5989,9 @@ if show_legend:
         st.markdown("---")
         st.markdown("### 🎯 Top Picks Formula (how the daily Top 10 is ranked)")
         st.markdown(
-            "**Pick Score** = 0-100 weighted blend of:\n\n"
-            "- **HR Game%** (25%) — today's HR probability (most important)\n"
-            "- **Matchup vs Opponent** (15%) — pitcher quality × park\n"
-            "- **Power Score** (15%) — underlying season power skills\n"
-            "- **Pitch HR Match** (10%) — barrel rate vs this pitcher's specific arsenal\n"
-            "- **HR Form** (12%) — recent ISO trend\n"
-            "- **Sleeper Lift** (8%) — today vs season pace\n"
-            "- **Env Boost** (15%) — park × weather × pull-wind\n\n"
+            "**Pick Score** = 0-100 weighted blend of these components "
+            "(weights shown, high→low):\n\n"
+            f"- {pick_score_weight_text()}\n\n"
             "**Lineup bonuses:** +3 if confirmed lineup, -2 if roster-fill (lineup unknown)\n\n"
             "Diversity rule: max 2 hitters per game (3 if slate is small)."
         )
@@ -6031,6 +6194,13 @@ if not p_slate.empty and "pitcher_id" in p_slate.columns:
 # also read. Even with on_il=False, if days_since_return=3, you'd see
 # "🏥 FRESH IL (3d)" — and if il_count>0, role check thinks pitcher is
 # "returning from IL". Clear EVERYTHING for these pitchers.
+# v45.12 NOTE (review P2 #2): a reviewer flagged that this disables FRESH IL for
+# ALL starters. That's the intended trade-off given the transactions parser
+# produced FALSE fresh-IL flags on probable starters (real user-reported bug).
+# If the parser becomes reliable, revisit: preserve days_since_return so a
+# genuinely-just-returned starter can show FRESH IL. Left as-is for now because
+# reintroducing false positives is worse than a missing flag. Roles recompute
+# once below.
 if not p_slate.empty:
     for il_col in ("on_il", "days_since_return", "il_count_this_season"):
         if il_col in p_slate.columns:
@@ -6872,7 +7042,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.02 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.13 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -8040,36 +8210,38 @@ for _, game in slate.iterrows():
                 # only for the DISPLAY flag. This is fine (no double-count
                 # risk, no silent bug) but worth knowing: the day/night
                 # shrinkage only fires on confirmed-lineup slates.
-                p_pa = hr_prob_per_pa(
-                    row_dict, _opp_p_row_local,
-                    park_factor=hitter_park_mult, weather_mult=wx_mult_nowind,
-                    pitch_match_score=row_dict.get("pitch_match_score"),
-                    bullpen_hr9=opp_bullpen_hr9,
-                    # v43.3: TTop kept (real HR effect). ump/catcher reverted.
-                    ttop_mult=opp_ttop,
-                )
+                # v45.09 (review): build kwargs from the detected signature so
+                # the weather term is ALWAYS wx_mult_nowind (wind excluded —
+                # applied separately via pull_mult). No TypeError ladder, no
+                # wind double-count from a fallback that used wx_mult.
+                _hrppa_kwargs = {}
+                if _HRPPA_HAS_PARK_FACTOR:
+                    _hrppa_kwargs["park_factor"] = hitter_park_mult
+                elif "park_hr_factor" in _HRPPA_PARAMS:
+                    _hrppa_kwargs["park_hr_factor"] = hitter_park_mult
+                if _HRPPA_HAS_WEATHER_MULT:
+                    _hrppa_kwargs["weather_mult"] = wx_mult_nowind
+                elif _HRPPA_HAS_WEATHER_HR_FACTOR:
+                    _hrppa_kwargs["weather_hr_factor"] = wx_mult_nowind  # NOT wx_mult
+                if "pitch_match_score" in _HRPPA_PARAMS:
+                    _hrppa_kwargs["pitch_match_score"] = row_dict.get("pitch_match_score")
+                if "bullpen_hr9" in _HRPPA_PARAMS:
+                    _hrppa_kwargs["bullpen_hr9"] = opp_bullpen_hr9
+                if _HRPPA_HAS_TTOP:
+                    _hrppa_kwargs["ttop_mult"] = opp_ttop
+                try:
+                    p_pa = hr_prob_per_pa(row_dict, _opp_p_row_local, **_hrppa_kwargs)
+                except Exception:
+                    try:
+                        p_pa = hr_prob_per_pa(row_dict, _opp_p_row_local)
+                    except Exception:
+                        p_pa = None
                 # p_pa is already soft-squashed inside hr_prob_per_pa; no
                 # external adjustment needed now that pitch_hr_mult is gone.
-            except TypeError:
-                # Older props.py without ttop_mult param — fall back gracefully
-                try:
-                    p_pa = hr_prob_per_pa(
-                        row_dict, _opp_p_row_local,
-                        park_factor=hitter_park_mult, weather_mult=wx_mult_nowind,
-                        pitch_match_score=row_dict.get("pitch_match_score"),
-                        bullpen_hr9=opp_bullpen_hr9,
-                    )
-                except TypeError:
-                    try:
-                        p_pa = hr_prob_per_pa(
-                            row_dict, _opp_p_row_local,
-                            park_hr_factor=hitter_park_mult, weather_hr_factor=wx_mult,
-                        )
-                    except TypeError:
-                        try:
-                            p_pa = hr_prob_per_pa(row_dict, _opp_p_row_local)
-                        except Exception:
-                            p_pa = None
+            except Exception:
+                # v45.09: any other failure in the p_pa block → None (was the
+                # tail of the old TypeError ladder).
+                p_pa = None
             # Lineup-spot-aware expected PA per game
             # ONLY use lineup-position scaling when:
             #   - This player is in a REAL posted lineup (not roster-fill)
@@ -8246,21 +8418,20 @@ for _, game in slate.iterrows():
                 and _h_bats != "S"
                 and _h_bats == _p_throws_now
             )
-            signals.append(hr_signal_emoji(
-                game_pct_val, sample, INSUFFICIENT_PA_THRESHOLD,
-                same_side_platoon=_same_side,
-            ))
-            # v43.21: env hostility tier-cap. Compute the relevant env
-            # multiplier for THIS hitter (hand-park × pull-wind × weather)
-            # and pass to hr_grade. If env_mult < 0.85 (clear suppression),
-            # the grade caps one tier down — display matches the matchup
-            # difficulty even when the season power-line keeps HR% elevated.
+            # v43.21 / v45.12: compute the hitter's env multiplier FIRST so
+            # both the signal and the grade see the same env tier-cap (env<0.85
+            # caps one tier). Passing it to grade-only made signal drift.
             try:
                 _env_for_grade = (
                     float(hand_park) * float(pull_mult) * float(wx_mult_nowind)
                 )
             except (TypeError, ValueError):
                 _env_for_grade = None
+            signals.append(hr_signal_emoji(
+                game_pct_val, sample, INSUFFICIENT_PA_THRESHOLD,
+                same_side_platoon=_same_side,
+                env_mult=_env_for_grade,
+            ))
             grades.append(hr_grade(
                 game_pct_val, sample, INSUFFICIENT_PA_THRESHOLD,
                 same_side_platoon=_same_side,
@@ -10067,32 +10238,12 @@ if combined_picks is not None and not combined_picks.empty:
                 pitcher_favorable = _pg_upper in ("EXPLOIT", "EXPLOIT+")
                 pitcher_hostile = _pg_upper in ("ELITE", "ELITE+", "TOUGH")
 
-                # Env gate — env_boost ≥ 1.0 means park×weather actively helps;
-                # < 0.92 actively hurts. Allow anything in between for the
-                # lower smash tier; require ≥ 1.0 for ELITE/STRONG.
-                _env = _row.get("env_boost")
-                env_favorable = False
-                env_neutral = True  # default to neutral if no data
-                try:
-                    if _env is not None and not pd.isna(_env):
-                        _env_f = float(_env)
-                        env_favorable = _env_f >= 1.00
-                        env_neutral = _env_f >= 0.92
-                except (TypeError, ValueError):
-                    pass
-
-                # Tiered smash assignment
-                if pitcher_hostile:
-                    # Never smash against an ace, regardless of HR Score
-                    new_smash_per_pid[int(_pid)] = ""
-                elif _sc >= 85 and pitcher_favorable and env_favorable:
-                    new_smash_per_pid[int(_pid)] = "🔥🔥🔥 ELITE SMASH"
-                elif _sc >= 75 and pitcher_favorable and env_neutral:
-                    new_smash_per_pid[int(_pid)] = "🔥🔥 STRONG SMASH"
-                elif _sc >= 65 and pitcher_favorable and env_neutral:
-                    new_smash_per_pid[int(_pid)] = "🔥 SMASH"
-                else:
-                    new_smash_per_pid[int(_pid)] = ""
+                # v45.08 (review): use the canonical smash_tier() — one source
+                # of truth for all thresholds (was duplicated with drifting env
+                # bars across the file).
+                new_smash_per_pid[int(_pid)] = smash_tier(
+                    _sc, _row.get("opp_pitcher_grade"), _row.get("env_boost")
+                )
 
             # Write back to combined_picks
             combined_picks["smash_spot"] = combined_picks["player_id"].apply(
@@ -11339,10 +11490,9 @@ if combined_picks is not None and not combined_picks.empty:
                     "Pick Score",
                     format="%.1f",
                     help=(
-                        "0-100 composite. Blends: HR Game% (25%), matchup quality (15%), "
-                        "power score (15%), pitch-HR match (10%), recent form (12%), "
-                        "sleeper lift (8%), env boost (15%). Plus +3 for confirmed "
-                        "lineup, -2 for roster-fill."
+                        "0-100 composite. Blends (high→low): "
+                        + pick_score_weight_text()
+                        + ". Plus +3 for confirmed lineup, -2 for roster-fill."
                     ),
                 ),
                 "hr_game_pct": st.column_config.NumberColumn(
@@ -11412,9 +11562,8 @@ if combined_picks is not None and not combined_picks.empty:
                 "• Severe platoon vulnerability (matching hand): **+4** (notable: +2)  \n"
                 "• Opposing pitcher 🔥 recent HR streak: **+3** (⚠️ +1.5)  \n"
                 "• BvP career punisher (≥20 PA, real edge): **±5**  \n"
-                "• Park history residual (≥40 PA at this venue): **±3** (v43.26)  \n"
                 "• IL flag penalty: **−15**  \n"
-                "Max possible stack ≈ **+18** above base, so pick_score "
+                "Max possible stack ≈ **+15** above base, so pick_score "
                 "of 100-115+ means an elite-base hitter with stacked bonuses "
                 "(NOT a math error). The breakdown below shows exactly where "
                 "the points came from."
@@ -11514,14 +11663,17 @@ if combined_picks is not None and not combined_picks.empty:
                             f"Pitcher vs {bats}HB: {int(p_pa)} PA{hr_part}{rate_str}"
                         )
 
-                # Compute component contributions (raw value × weight = points)
-                # then rank by absolute contribution
+                # v45.12 (review): the ps_* columns are ALREADY weight-scaled
+                # (stored as pct_rank × w/total = the contribution). Do NOT
+                # multiply by w again — that double-applied the weight (w²) and
+                # made the displayed drivers + dominance % wrong. The stored
+                # value IS the point contribution.
                 contribs = []
                 for col, w in _ps_weights.items():
                     val = pick_row.get(col)
                     if val is None or pd.isna(val):
                         continue
-                    pts = float(val) * w
+                    pts = float(val)  # already the weighted contribution
                     contribs.append((col, float(val), pts))
                 contribs.sort(key=lambda x: abs(x[2]), reverse=True)
                 top_contribs = contribs[:3]
@@ -12101,20 +12253,15 @@ if combined_picks is not None and not combined_picks.empty:
                     # (the games loop ran before this UI renders).
                     smash_names = []
                     try:
-                        if combined_all is not None and "smash_spot" in combined_all.columns:
-                            # Best case — combined_all already built (rare at
-                            # this point but possible on re-render)
-                            smashers = combined_all[
-                                combined_all["smash_spot"].fillna("").str.contains(
-                                    "SMASH", na=False
-                                )
-                            ]
-                            smash_names = smashers["player_name"].head(6).tolist()
-                        else:
-                            # Fall back to game_context_map. matchup_df frames
-                            # are populated during the games loop (which has
-                            # already run), so smash_spot is computed and
-                            # available here.
+                        # v45.08 (review): combined_all is built ~1000 lines
+                        # below this render, so it's always None here — read
+                        # smash_spot directly from game_context_map's per-game
+                        # matchup frames, which ARE populated by now (the games
+                        # loop ran before this UI renders). (The old combined_all
+                        # branch was dead; removed to avoid misleading editors.)
+                        if True:
+                            # Read from game_context_map (populated during the
+                            # games loop, which has already run).
                             seen = set()
                             scored_smashers = []
                             for _gpk, _ctx in game_context_map.items():
@@ -13047,7 +13194,10 @@ for gpk, ctx in game_context_map.items():
         if m is None or m.empty:
             continue
         x = m.copy()
-        x["game"] = f"{g_row['away_team_abbr']} @ {g_row['home_team_abbr']}"
+        # v45.12 (review): match combined_picks' DH-suffixed game label so the
+        # pick_audit merge on ['player_id','game'] aligns on doubleheader days.
+        x["game"] = (f"{g_row['away_team_abbr']} @ {g_row['home_team_abbr']}"
+                     + _dh_suffix_by_gpk.get(gpk, ""))
         x["team"] = g_row[f"{side}_team_abbr"]
         opp_side = "home" if side == "away" else "away"
         x["opp_pitcher"] = g_row.get(f"{opp_side}_pitcher", "TBD") or "TBD"
@@ -13072,7 +13222,8 @@ for gpk, ctx in game_context_map.items():
         bench = ctx.get(f"{side}_bench_matchup")
         if bench is not None and not bench.empty:
             xb = bench.copy()
-            xb["game"] = f"{g_row['away_team_abbr']} @ {g_row['home_team_abbr']}"
+            xb["game"] = (f"{g_row['away_team_abbr']} @ {g_row['home_team_abbr']}"
+                          + _dh_suffix_by_gpk.get(gpk, ""))  # v45.12: DH-match
             xb["team"] = g_row[f"{side}_team_abbr"]
             xb["opp_pitcher"] = g_row.get(f"{opp_side}_pitcher", "TBD") or "TBD"
             xb["env_boost"] = round(float(ctx.get("hr_mult", 1.0) or 1.0), 4)
@@ -13346,35 +13497,42 @@ if all_hitters:
     # every ctx frame. Only maps columns that (a) exist on combined_all and
     # (b) aren't already on the target frame, so we never clobber a value the
     # matchup frame computed itself.
-    try:
-        _backmap_candidates = [
-            "dinger_score", "dinger_score_precise", "power_composite",
-            "barrel_matchup_score", "two_way_matchup_score", "is_moonshot_target", "is_laser_target",
-            "opp_pitcher_grade", "opp_pitcher_barrel_allowed", "opp_recent_hr",
-            "opp_platoon_hr", "xhr_neutral", "hr_conv_ratio", "hr_luck_gap",
-            "slate_leader_flag", "sleeper_score", "recently_moved", "il_flag",
-            "data_completeness",
-        ]
-        _score_cols = [c for c in _backmap_candidates
-                       if c in combined_all.columns and "player_id" in combined_all.columns]
-        if _score_cols:
-            _ca_key = pd.to_numeric(combined_all["player_id"], errors="coerce")
-            _score_maps = {c: dict(zip(_ca_key, combined_all[c])) for c in _score_cols}
-            for _gpk, _gctx in game_context_map.items():
-                for _side in ("away_matchup", "home_matchup",
-                              "away_bench_matchup", "home_bench_matchup"):
-                    _frame = _gctx.get(_side)
-                    if _frame is None or _frame.empty or "player_id" not in _frame.columns:
-                        continue
-                    _fk = pd.to_numeric(_frame["player_id"], errors="coerce")
-                    for _c, _m in _score_maps.items():
-                        # don't clobber a column the matchup frame already has
-                        # its own values for (e.g. sleeper_score set on-frame)
-                        if _c not in _frame.columns or _frame[_c].isna().all():
-                            _frame[_c] = _fk.map(_m)
-                    _gctx[_side] = _frame
-    except Exception as _bmap_e:
-        log_swallowed_error("score_backmap_to_matchup", _bmap_e, surface=False)
+    def _run_score_backmap():
+        # v45.12 (review): factored so it can run AFTER all combined_all
+        # enrichment (il_flag, data_completeness, opp maps, sleeper_score are
+        # assigned well below the original single call site — they were being
+        # silently skipped by the 'if c in combined_all.columns' filter).
+        try:
+            _backmap_candidates = [
+                "dinger_score", "dinger_score_precise", "power_composite",
+                "barrel_matchup_score", "two_way_matchup_score", "is_moonshot_target", "is_laser_target",
+                "opp_pitcher_grade", "opp_pitcher_barrel_allowed", "opp_recent_hr",
+                "opp_platoon_hr", "xhr_neutral", "hr_conv_ratio", "hr_luck_gap",
+                "slate_leader_flag", "sleeper_score", "recently_moved", "il_flag",
+                "data_completeness",
+            ]
+            _score_cols = [c for c in _backmap_candidates
+                           if c in combined_all.columns and "player_id" in combined_all.columns]
+            if _score_cols:
+                _ca_key = pd.to_numeric(combined_all["player_id"], errors="coerce")
+                _score_maps = {c: dict(zip(_ca_key, combined_all[c])) for c in _score_cols}
+                for _gpk, _gctx in game_context_map.items():
+                    for _side in ("away_matchup", "home_matchup",
+                                  "away_bench_matchup", "home_bench_matchup"):
+                        _frame = _gctx.get(_side)
+                        if _frame is None or _frame.empty or "player_id" not in _frame.columns:
+                            continue
+                        _fk = pd.to_numeric(_frame["player_id"], errors="coerce")
+                        for _c, _m in _score_maps.items():
+                            # don't clobber a column the matchup frame already has
+                            if _c not in _frame.columns or _frame[_c].isna().all():
+                                _frame[_c] = _fk.map(_m)
+                        _gctx[_side] = _frame
+        except Exception as _bmap_e:
+            log_swallowed_error("score_backmap_to_matchup", _bmap_e, surface=False)
+
+    # First pass: catches columns already present now (dinger, power, etc).
+    _run_score_backmap()
 
     # v44.18: tag per-game Moonshot/Laser targets HERE (upstream of the
     # snapshot at ~line 11900) so the picks get snapshotted and the learning
@@ -13447,8 +13605,9 @@ if all_hitters:
         _total_core = len(_core_inputs)
         _present = _total_core - _missing_count
         def _completeness_label(present, total, split_ok):
-            if present >= total and split_ok:
-                return "✅ full"
+            # v45.09 (review): 'full' if at most ONE core stat is missing (>=
+            # total-1) and the platoon split is present. (The old separate
+            # '>= total' branch was redundant — total-1 already covers it.)
             if present >= total - 1 and split_ok:
                 return "✅ full"
             if present >= max(2, total - 2):
@@ -14017,6 +14176,12 @@ if all_hitters:
             )
         except Exception:
             pass
+    # v45.12 (review P3 #2): second backmap pass — now that il_flag,
+    # data_completeness, opp_pitcher_grade, opp maps, sleeper_score, and
+    # recently_moved have all been assigned to combined_all, push them onto the
+    # matchup frames too (the first pass ran before these existed).
+    _run_score_backmap()
+
     # Drop hr_prob (it's a duplicate of hr_score, just confusingly named).
     # Both are 0-100 composite scores — keeping both confused users who
     # thought hr_prob was a 0-1 probability.
@@ -14201,9 +14366,17 @@ if all_hitters:
         # Captures early-game lineups (1pm games need data from ~11am) AND
         # late-game lineups (7pm games need data from ~5-6pm).
         current_hour_key = _snapshot_key_for_now(selected_date)
+        # v45.05 (review): scale the minimum-hitters floor by game count instead
+        # of a flat 100. A flat floor meant small slates (2-4 games, ~52-104
+        # hitters) rarely/never auto-snapshotted — systematically biasing the
+        # learning loop toward big slates. Expect ~20 hitters/game as a sanity
+        # floor (still catches a broken/partial fetch, which returns far fewer),
+        # with a minimum of 30 so a 1-game slate can still save.
+        _n_slate_games = len(game_context_map) if "game_context_map" in dir() and game_context_map else 0
+        _min_hitters_floor = max(30, _n_slate_games * 20)
         if (current_hour_key not in existing_snaps
                 and selected_date == _today_et()  # v44.97: ET-aware (was UTC → no evening snapshots)
-                and combined_all is not None and len(combined_all) >= 100):
+                and combined_all is not None and len(combined_all) >= _min_hitters_floor):
             # v43.8: read calibration constants from single source of truth.
             # The save can no longer drift from the scoring formula because
             # both read the same module-level PICK_SCORE_WEIGHTS dict.
@@ -14385,13 +14558,18 @@ if all_hitters:
                     # v43.50: bp_* (park history) columns removed — feature
                     # was non-functional (MLB Stats API rejected byVenue).
                 )
-                if combined_all is not None and not combined_all.empty:
-                    combined_all = _int_cast(combined_all, _INTEGER_COUNT_COLS)
+                # v45.08 (review): use a LOCAL copy for the export — never
+                # rebind the module-level combined_all (every table rendered
+                # after the export was inheriting this Int64-cast frame as a
+                # side effect of building a download).
+                _export_all = combined_all
+                if _export_all is not None and not _export_all.empty:
+                    _export_all = _int_cast(_export_all, _INTEGER_COUNT_COLS)
 
                 with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
                     sheets_written = 0
-                    if combined_all is not None and not combined_all.empty:
-                        combined_all.to_excel(writer, sheet_name="Hitters", index=False)
+                    if _export_all is not None and not _export_all.empty:
+                        _export_all.to_excel(writer, sheet_name="Hitters", index=False)
                         sheets_written += 1
                     if p_slate is not None and not p_slate.empty:
                         p_slate.to_excel(writer, sheet_name="Pitchers", index=False)
@@ -14732,7 +14910,7 @@ if all_hitters:
     # especially if park factors and weather are good for the hitter too"
     #
     # Qualifying criteria:
-    #   - Hitter grade A/A+ OR HR Game% ≥ 16% (top-tier matchup plays)
+    #   - Hitter grade A/A+ OR HR Game% ≥ 14% (top-tier matchup plays)
     #   - Opposing pitcher is EXPLOIT or EXPLOIT+ grade
     #   - Pitcher HR/9 ≥ 1.2 (above-average HR rate allowed)
     #   - OR pitcher barrel% allowed ≥ 7.5 (above-average hard contact allowed)
@@ -14947,10 +15125,11 @@ if all_hitters:
         st.markdown("**🔥 Today's Smash Spots — Triple-Threat HR Opportunities**")
         st.caption(
             "Hitters where multiple factors align: facing an EXPLOIT/EXPLOIT+ pitcher, "
-            "favorable env (park × weather × pull-wind), AND strong HR Game%. "
-            "**ELITE SMASH** = EXPLOIT+ + favorable env (≥1.05) + HR%≥19%. "
-            "**STRONG SMASH** = EXPLOIT/+ + favorable env (≥1.05) + HR%≥15%. "
-            "**SMASH** = EXPLOIT/+ + (favorable env OR park) + HR%≥15%. "
+            "a non-hostile env (park × weather × pull-wind), AND a strong HR Score. "
+            f"**ELITE SMASH** = HR Score ≥{SMASH_ELITE_SCORE} + EXPLOIT/+ + favorable env (≥{SMASH_ENV_FAVORABLE:.2f}). "
+            f"**STRONG SMASH** = HR Score ≥{SMASH_STRONG_SCORE} + EXPLOIT/+ + neutral+ env (≥{SMASH_ENV_NEUTRAL:.2f}). "
+            f"**SMASH** = HR Score ≥{SMASH_BASE_SCORE} + EXPLOIT/+ + neutral+ env (≥{SMASH_ENV_NEUTRAL:.2f}). "
+            "(ELITE/TOUGH pitcher blocks all tiers.) "
             "Shows up to 8 per tier, **max 2 hitters per team within each tier** "
             "(avoids stacking one lineup). For the complete unlimited list, see the "
             "🔥 All Smash Spots (slate-wide) section near the top."
@@ -15160,392 +15339,403 @@ st.caption(
     "Ask about tonight's slate, or pick a common question below. Answers come "
     "straight from tonight's data — no reload until you hit Ask."
 )
-try:
-    # v44.22 (user: load times after each question too long). Wrap the input
-    # in st.form so the page does NOT rerun on every keystroke — it only
-    # recomputes when you press Ask. Plus a dropdown of ready-to-go common
-    # questions so you don't have to type the common ones.
-    _common_qs = [
-        "— pick a common question —",
-        "Who is most likely to homer tonight?",
-        "Top 10 by Dinger Score",
-        "Top 10 by HR Score",
-        "Who's most likely to get a hit?",
-        "Who's most likely to get 2+ total bases?",
-        "Best value plays (pick score)",
-        "Who are the moonshot targets?",
-        "Who are the laser targets?",
-        "Who's hot right now?",
-        "Best hitters in the best park tonight",
-        "Best HR bats vs LHP tonight",
-        "Best HR bats vs RHP tonight",
-        "Top HR plays in confirmed lineups",
-        "Who should I avoid tonight?",
-        "What is Barrel%?",
-        "What is Dinger Score?",
-        "What is Blast%?",
-    ]
-    with st.form("_ask_bot_form"):
-        _c1, _c2 = st.columns([2, 1])
-        with _c1:
-            _typed_q = st.text_input(
-                "Your question:",
-                key="_ask_bot_q",
-                placeholder="who is most likely to homer tonight",
-            )
-        with _c2:
-            _picked_q = st.selectbox(
-                "or pick one:", _common_qs, index=0, key="_ask_bot_pick")
-        _ask_go = st.form_submit_button("🔎 Ask")
-    # Typed question wins; else the dropdown pick (if not the placeholder)
-    _ask_q = ""
-    if _ask_go:
-        _ask_q = _typed_q.strip() or (
-            _picked_q if _picked_q != _common_qs[0] else "")
+# v45.03: fragment-isolate the Ask bot. Pressing Ask reran the WHOLE
+# script (full ~500-hitter pipeline) just to answer one question. As a
+# fragment it reruns only this section. Reads combined_all as a module
+# global (already computed above), so no args needed.
+@_fragment
+def _ask_bot_fragment():
+    try:
+        # v44.22 (user: load times after each question too long). Wrap the input
+        # in st.form so the page does NOT rerun on every keystroke — it only
+        # recomputes when you press Ask. Plus a dropdown of ready-to-go common
+        # questions so you don't have to type the common ones.
+        _common_qs = [
+            "— pick a common question —",
+            "Who is most likely to homer tonight?",
+            "Top 10 by Dinger Score",
+            "Top 10 by HR Score",
+            "Who's most likely to get a hit?",
+            "Who's most likely to get 2+ total bases?",
+            "Best value plays (pick score)",
+            "Who are the moonshot targets?",
+            "Who are the laser targets?",
+            "Who's hot right now?",
+            "Best hitters in the best park tonight",
+            "Best HR bats vs LHP tonight",
+            "Best HR bats vs RHP tonight",
+            "Top HR plays in confirmed lineups",
+            "Who should I avoid tonight?",
+            "What is Barrel%?",
+            "What is Dinger Score?",
+            "What is Blast%?",
+        ]
+        with st.form("_ask_bot_form"):
+            _c1, _c2 = st.columns([2, 1])
+            with _c1:
+                _typed_q = st.text_input(
+                    "Your question:",
+                    key="_ask_bot_q",
+                    placeholder="who is most likely to homer tonight",
+                )
+            with _c2:
+                _picked_q = st.selectbox(
+                    "or pick one:", _common_qs, index=0, key="_ask_bot_pick")
+            _ask_go = st.form_submit_button("🔎 Ask")
+        # Typed question wins; else the dropdown pick (if not the placeholder)
+        _ask_q = ""
+        if _ask_go:
+            _ask_q = _typed_q.strip() or (
+                _picked_q if _picked_q != _common_qs[0] else "")
 
-    if _ask_q and combined_all is not None and not combined_all.empty:
-        _ans = None
-        _ql = _ask_q.lower().strip()
+        if _ask_q and combined_all is not None and not combined_all.empty:
+            _ans = None
+            _ql = _ask_q.lower().strip()
 
-        # ---- Stat/metric glossary (no data needed) ----
-        _glossary = {
-            "barrel": "**Barrel%** = the share of a hitter's batted balls hit at the ideal exit-velocity + launch-angle combo for extra bases. It's the single most stable HR predictor in the model (Section G reliability ~2.0).",
-            "dinger": "**Dinger Score** = a 0-100 curated HR predictor. Raw power base (avg EV, barrel%, pulled-air barrel%, hard-hit%, ISO, blast%) tilted by tonight's context (recent form, park+weather, matchup) so it moves per slate.",
-            "hr score": "**HR Score** = the primary 0-100 HR ranking. A tier-weighted composite: HR probability (30%), power signals (25%), swing mechanics (12%), matchup (12%), form (10%), environment (6%), discipline (3%), context (2%).",
-            "pick score": "**Pick Score** = the ranking the app actually ships its Top 10 from. Blends HR game%, matchup, power, arsenal, form, environment, and lineup/platoon bonuses.",
-            "iso": "**ISO** (Isolated Power) = SLG minus AVG — measures raw extra-base power, stripping out singles.",
-            "hard hit": "**Hard-Hit%** = share of batted balls at 95+ mph exit velocity.",
-            "pull air": "**Pull-Air%** = share of batted balls pulled in the air — the launch pattern that produces the most home runs.",
-            "blast": "**Blast%** = share of a hitter's competitive swings that are 'blasts' — Statcast's label for the fast-swing + squared-up combos that do the most damage. High blast% = elite bat speed meeting the ball flush.",
-            "matchup_opp": "**Matchup** = the hitter's projected advantage vs tonight's specific pitcher (0-100, higher = better spot).",
-            "env": "**Env Boost** = park + weather multiplier on HR likelihood. >1.0 favors hitters (warm, thin air, wind out), <1.0 favors pitchers.",
-            "moonshot": "**Moonshot target** = the one hitter per game most likely to hit a 400+ ft home run (distance-driven: barrel, pull-air, blast, ISO + tonight's matchup).",
-            "laser": "**Laser target** = the one hitter per game most likely to hit a 105+ mph home run (exit-velocity driven: avg EV, hard-hit% + matchup).",
-        }
-        for _k, _v in _glossary.items():
-            if ("what is " in _ql or "what's " in _ql or "explain" in _ql or "define" in _ql) and _k in _ql:
-                _ans = _v
-                break
-
-        # ---- moonshot / laser target questions ----
-        if _ans is None and ("moonshot" in _ql or "laser" in _ql) and \
-           not any(w in _ql for w in ["what is", "what's", "explain", "define"]):
-            _tag = "is_moonshot_target" if "moonshot" in _ql else "is_laser_target"
-            _tlabel = "🌙 Moonshot" if "moonshot" in _ql else "⚡ Laser"
-            if _tag in combined_all.columns:
-                _tg = combined_all[pd.to_numeric(combined_all[_tag], errors="coerce") == 1]
-                if not _tg.empty:
-                    _lines = [f"**{_tlabel} targets tonight:**"]
-                    for _, _r in _tg.iterrows():
-                        _lines.append(
-                            f"- **{_r.get('player_name','?')}** ({_r.get('team','')})"
-                            + (f" · {float(_r['hr_game_pct']):.1f}% HR" if pd.notna(_r.get('hr_game_pct')) else "")
-                            + (f" · {_r.get('matchup','')}" if pd.notna(_r.get('matchup')) else "")
-                        )
-                    _ans = "\n".join(_lines)
-
-        # ---- "who's hot" (form) ----
-        if _ans is None and ("hot" in _ql or "streak" in _ql or "on fire" in _ql) and \
-           "streak_label" in combined_all.columns:
-            _hot = combined_all.copy()
-            if "is_bench" in _hot.columns:
-                _hot = _hot[~_hot["is_bench"].fillna(False).astype(bool)]
-            _hot = _hot[_hot["streak_label"].astype(str).str.contains(
-                "🔥|hot|📈", case=False, na=False)]
-            if "hr_score" in _hot.columns:
-                _hot = _hot.nlargest(10, "hr_score")
-            if not _hot.empty:
-                _lines = ["**Hitters trending hot tonight:**"]
-                for _, _r in _hot.iterrows():
-                    _lines.append(
-                        f"- **{_r.get('player_name','?')}** ({_r.get('team','')}) "
-                        f"— {_r.get('streak_label','')}"
-                        + (f" · HR Score {float(_r['hr_score']):.0f}" if pd.notna(_r.get('hr_score')) else ""))
-                _ans = "\n".join(_lines)
-
-        # ---- best park / environment ----
-        if _ans is None and ("park" in _ql or "coors" in _ql or "environment" in _ql or "weather" in _ql) and \
-           "env_boost" in combined_all.columns:
-            _ep = combined_all.copy()
-            if "is_bench" in _ep.columns:
-                _ep = _ep[~_ep["is_bench"].fillna(False).astype(bool)]
-            _ep = _ep[pd.to_numeric(_ep["env_boost"], errors="coerce").notna()]
-            if not _ep.empty:
-                _best_env = _ep.nlargest(1, "env_boost")["env_boost"].iloc[0]
-                _bestgames = _ep[_ep["env_boost"] >= _best_env - 0.02]
-                if "hr_score" in _bestgames.columns:
-                    _bestgames = _bestgames.nlargest(8, "hr_score")
-                _lines = [f"**Best HR environment tonight (env boost up to {float(_best_env):.2f}×):**"]
-                for _, _r in _bestgames.iterrows():
-                    _lines.append(
-                        f"- **{_r.get('player_name','?')}** ({_r.get('team','')}) "
-                        f"— env {float(_r.get('env_boost',1)):.2f}×"
-                        + (f" · {float(_r['hr_game_pct']):.1f}% HR" if pd.notna(_r.get('hr_game_pct')) else ""))
-                _ans = "\n".join(_lines)
-
-        # ---- v44.25: team / game targeting ("best hitters in COL @ LAD",
-        # "who to target on the Yankees") ----
-        if _ans is None and any(w in _ql for w in ["target", "team", "game", "on the", "in the"]) and \
-           "team" in combined_all.columns:
-            _pool = combined_all.copy()
-            if "is_bench" in _pool.columns:
-                _pool = _pool[~_pool["is_bench"].fillna(False).astype(bool)]
-            _match = None
-            # match a game string like "COL @ LAD" or a team abbr/name in the query
-            if "game" in _pool.columns:
-                for _g in _pool["game"].dropna().astype(str).unique():
-                    _parts = [p.strip().lower() for p in _g.replace("@", " ").split()]
-                    if any(p and p in _ql for p in _parts):
-                        _match = _pool[_pool["game"] == _g]
-                        _mlabel = _g
-                        break
-            if _match is None:
-                for _tm in _pool["team"].dropna().astype(str).unique():
-                    if _tm.lower() in _ql:
-                        _match = _pool[_pool["team"] == _tm]
-                        _mlabel = _tm
-                        break
-            if _match is not None and not _match.empty:
-                _sortcol = "hr_score" if "hr_score" in _match.columns else "hr_game_pct"
-                _match = _match[pd.to_numeric(_match[_sortcol], errors="coerce").notna()].nlargest(8, _sortcol)
-                _lines = [f"**Best HR targets — {_mlabel}:**"]
-                for _, _r in _match.iterrows():
-                    _lines.append(
-                        f"- **{_r.get('player_name','?')}** ({_r.get('team','')}) "
-                        f"— HR Score {float(_r.get('hr_score', 0)):.0f}"
-                        + (f" · {float(_r['hr_game_pct']):.1f}% HR" if pd.notna(_r.get('hr_game_pct')) else "")
-                        + (f" · 💥{float(_r['dinger_score']):.0f}" if pd.notna(_r.get('dinger_score')) else ""))
-                _ans = "\n".join(_lines)
-
-        # ---- v44.25: handedness ("best hitters vs lefties / vs RHP") ----
-        if _ans is None and ("bats" in combined_all.columns) and \
-           any(w in _ql for w in ["lefty", "lefties", "lhp", "left-handed pitch",
-                                   "righty", "righties", "rhp", "right-handed pitch",
-                                   "vs left", "vs right"]):
-            _vs_lhp = any(w in _ql for w in ["lefty", "lefties", "lhp", "left-handed", "vs left"])
-            # hitters who HIT the opposite hand well: vs LHP → prefer RHB/switch
-            _pool = combined_all.copy()
-            if "is_bench" in _pool.columns:
-                _pool = _pool[~_pool["is_bench"].fillna(False).astype(bool)]
-            _want = ["R", "S"] if _vs_lhp else ["L", "S"]
-            _pool = _pool[_pool["bats"].astype(str).str.upper().str[:1].isin(_want)]
-            _sortcol = "hr_score" if "hr_score" in _pool.columns else "hr_game_pct"
-            _pool = _pool[pd.to_numeric(_pool[_sortcol], errors="coerce").notna()].nlargest(10, _sortcol)
-            if not _pool.empty:
-                _hlabel = "vs LHP (RHB/switch)" if _vs_lhp else "vs RHP (LHB/switch)"
-                _lines = [f"**Best HR bats {_hlabel}:**"]
-                for _, _r in _pool.iterrows():
-                    _lines.append(
-                        f"- **{_r.get('player_name','?')}** ({_r.get('team','')}, "
-                        f"{_r.get('bats','?')}) — HR Score {float(_r.get('hr_score',0)):.0f}"
-                        + (f" · {float(_r['hr_game_pct']):.1f}% HR" if pd.notna(_r.get('hr_game_pct')) else ""))
-                _ans = "\n".join(_lines)
-
-        # ---- v44.25: fade / avoid (inverse — lowest scores) ----
-        if _ans is None and any(w in _ql for w in ["avoid", "fade", "stay away", "worst", "don't play", "dont play"]):
-            _sortcol = "hr_score" if "hr_score" in combined_all.columns else "hr_game_pct"
-            _pool = combined_all.copy()
-            if "is_bench" in _pool.columns:
-                _pool = _pool[~_pool["is_bench"].fillna(False).astype(bool)]
-            _pool = _pool[pd.to_numeric(_pool[_sortcol], errors="coerce").notna()]
-            # only among "notable" hitters people might consider (top half by PA)
-            if "pa" in _pool.columns:
-                _pool = _pool[pd.to_numeric(_pool["pa"], errors="coerce") >= _pool["pa"].median()]
-            _low = _pool.nsmallest(8, _sortcol)
-            if not _low.empty:
-                _lines = ["**Lowest HR outlook tonight (fade candidates among regulars):**"]
-                for _, _r in _low.iterrows():
-                    _lines.append(
-                        f"- {_r.get('player_name','?')} ({_r.get('team','')}) "
-                        f"— HR Score {float(_r.get('hr_score',0)):.0f}"
-                        + (f" · {float(_r['hr_game_pct']):.1f}% HR" if pd.notna(_r.get('hr_game_pct')) else ""))
-                _ans = "\n".join(_lines)
-
-        # ---- v44.25: confirmed lineups ----
-        if _ans is None and "confirm" in _ql and "lineup_confirmed" in combined_all.columns:
-            _pool = combined_all[combined_all["lineup_confirmed"].fillna(False).astype(bool)]
-            if "is_bench" in _pool.columns:
-                _pool = _pool[~_pool["is_bench"].fillna(False).astype(bool)]
-            _sortcol = "hr_score" if "hr_score" in _pool.columns else "hr_game_pct"
-            _pool = _pool[pd.to_numeric(_pool[_sortcol], errors="coerce").notna()].nlargest(12, _sortcol)
-            if not _pool.empty:
-                _lines = [f"**Top HR plays in CONFIRMED lineups ({len(_pool)} shown):**"]
-                for _, _r in _pool.iterrows():
-                    _lines.append(
-                        f"- **{_r.get('player_name','?')}** ({_r.get('team','')}) "
-                        f"— HR Score {float(_r.get('hr_score',0)):.0f}"
-                        + (f" · {float(_r['hr_game_pct']):.1f}% HR" if pd.notna(_r.get('hr_game_pct')) else ""))
-                _ans = "\n".join(_lines)
-            else:
-                _ans = "No confirmed lineups yet — check back closer to game time."
-
-        # ---- ranking questions: "top N by <stat>", "who's most likely to
-        # homer", "best hitters tonight", "who should I play" ----
-        if _ans is None:
-            import re as _re
-            _stat_aliases = {
-                "dinger": "dinger_score", "dinger score": "dinger_score",
-                "hr score": "hr_score", "hr%": "hr_game_pct",
-                "hr game": "hr_game_pct", "pick score": "pick_score",
-                "barrel": "barrel_pct", "iso": "iso",
-                "exit velo": "avg_ev", "ev": "avg_ev", "hard hit": "hard_hit",
-                "power": "power_score", "hit%": "hit_game_pct",
-                "total bases": "expected_total_bases", "2 bases": "expected_total_bases",
-                "two bases": "expected_total_bases", "extra base": "expected_total_bases",
+            # ---- Stat/metric glossary (no data needed) ----
+            _glossary = {
+                "barrel": "**Barrel%** = the share of a hitter's batted balls hit at the ideal exit-velocity + launch-angle combo for extra bases. It's the single most stable HR predictor in the model (Section G reliability ~2.0).",
+                "dinger": "**Dinger Score** = a 0-100 curated HR predictor. Raw power base (avg EV, barrel%, pulled-air barrel%, hard-hit%, ISO, blast%) tilted by tonight's context (recent form, park+weather, matchup) so it moves per slate.",
+                "hr score": "**HR Score** = the primary 0-100 HR ranking. A tier-weighted composite: HR probability (30%), power signals (25%), swing mechanics (12%), matchup (12%), form (10%), environment (6%), discipline (3%), context (2%).",
+                "pick score": "**Pick Score** = the ranking the app actually ships its Top 10 from. Blends HR game%, matchup, power, arsenal, form, environment, and lineup/platoon bonuses.",
+                "iso": "**ISO** (Isolated Power) = SLG minus AVG — measures raw extra-base power, stripping out singles.",
+                "hard hit": "**Hard-Hit%** = share of batted balls at 95+ mph exit velocity.",
+                "pull air": "**Pull-Air%** = share of batted balls pulled in the air — the launch pattern that produces the most home runs.",
+                "blast": "**Blast%** = share of a hitter's competitive swings that are 'blasts' — Statcast's label for the fast-swing + squared-up combos that do the most damage. High blast% = elite bat speed meeting the ball flush.",
+                "matchup_opp": "**Matchup** = the hitter's projected advantage vs tonight's specific pitcher (0-100, higher = better spot).",
+                "env": "**Env Boost** = park + weather multiplier on HR likelihood. >1.0 favors hitters (warm, thin air, wind out), <1.0 favors pitchers.",
+                "moonshot": "**Moonshot target** = the one hitter per game most likely to hit a 400+ ft home run (distance-driven: barrel, pull-air, blast, ISO + tonight's matchup).",
+                "laser": "**Laser target** = the one hitter per game most likely to hit a 105+ mph home run (exit-velocity driven: avg EV, hard-hit% + matchup).",
             }
-            # Intent phrases that mean "rank the hitters" even without "top".
-            _rank_intent = any(p in _ql for p in [
-                "top", "best", "highest", "most likely", "who should",
-                "who's most", "who is most", "who to", "who should i",
-                "most likely to homer", "go yard", "go deep", "who will homer",
-                "ranking", "rank", "leaders", "who has the",
-            ])
-            # Intent → which column to rank on.
-            _intent_col = None
-            if any(p in _ql for p in ["homer", "home run", "go yard", "go deep",
-                                       "dinger", "hr ", "leave the yard"]):
-                _intent_col = "hr_score" if "hr_score" in combined_all.columns else "hr_game_pct"
-            elif any(p in _ql for p in ["hit", "get a hit", "base hit"]) and "hit_game_pct" in combined_all.columns:
-                _intent_col = "hit_game_pct"
-            elif any(p in _ql for p in ["total base", "2 base", "two base", "extra base"]) and "expected_total_bases" in combined_all.columns:
-                _intent_col = "expected_total_bases"
-
-            _n_match = _re.search(r"(?:top|best)\s+(\d+)", _ql)
-            _n = int(_n_match.group(1)) if _n_match else 5
-            _n = min(max(_n, 1), 25)
-
-            if _rank_intent:
-                _target_col = None
-                # explicit stat alias wins. v44.56 (code review #9): match on
-                # WORD BOUNDARIES, not raw substring — otherwise "iso" matches
-                # "comparison", "ev" matches many words, "hit" matches "white".
-                import re as _re_alias
-                for _alias, _col in _stat_aliases.items():
-                    if _col not in combined_all.columns:
-                        continue
-                    if _re_alias.search(r"\b" + _re_alias.escape(_alias.strip()) + r"\b", _ql):
-                        _target_col = _col
+            import re as _re_gloss
+            for _k, _v in _glossary.items():
+                if ("what is " in _ql or "what's " in _ql or "explain" in _ql or "define" in _ql):
+                    # v45.09 (review): word-boundary match, not substring — short
+                    # keys ('env','iso','ev') were matching inside unrelated words.
+                    if _re_gloss.search(r'\b' + _re_gloss.escape(_k) + r'\b', _ql):
+                        _ans = _v
                         break
-                # else intent-derived column
-                if _target_col is None:
-                    _target_col = _intent_col
-                # else sensible default: HR ranking (this is a HR app)
-                if _target_col is None:
-                    _target_col = ("hr_score" if "hr_score" in combined_all.columns
-                                   else "dinger_score" if "dinger_score" in combined_all.columns
-                                   else None)
-                if _target_col and _target_col in combined_all.columns:
-                    _pool = combined_all.copy()
-                    if "is_bench" in _pool.columns:
-                        _pool = _pool[~_pool["is_bench"].fillna(False).astype(bool)]
-                    _pool = _pool[pd.to_numeric(_pool[_target_col], errors="coerce").notna()]
-                    _topn = _pool.nlargest(_n, _target_col)
-                    if not _topn.empty:
-                        _nice = {"hr_score": "HR Score", "hr_game_pct": "HR Game%",
-                                 "dinger_score": "Dinger Score", "pick_score": "Pick Score",
-                                 "hit_game_pct": "Hit%", "expected_total_bases": "xTotal Bases",
-                                 "barrel_pct": "Barrel%", "iso": "ISO", "avg_ev": "Avg EV",
-                                 "hard_hit": "Hard Hit%", "power_score": "Power"}.get(_target_col, _target_col)
-                        _lines = [f"**Most likely to homer tonight (by {_nice}):**"
-                                  if _target_col in ("hr_score", "hr_game_pct", "dinger_score")
-                                  else f"**Top {len(_topn)} by {_nice}:**"]
-                        for _i, (_, _r) in enumerate(_topn.iterrows(), 1):
-                            _v = _r[_target_col]
-                            _vs = f"{float(_v):.1f}" if isinstance(_v, (int, float)) else str(_v)
-                            _extra = []
-                            if _target_col != "hr_game_pct" and pd.notna(_r.get("hr_game_pct")):
-                                _extra.append(f"{float(_r['hr_game_pct']):.1f}% HR")
-                            if _target_col != "dinger_score" and pd.notna(_r.get("dinger_score")):
-                                _extra.append(f"💥{float(_r['dinger_score']):.0f}")
-                            if pd.notna(_r.get("matchup")):
-                                _extra.append(str(_r.get("matchup")))
+
+            # ---- moonshot / laser target questions ----
+            if _ans is None and ("moonshot" in _ql or "laser" in _ql) and \
+               not any(w in _ql for w in ["what is", "what's", "explain", "define"]):
+                _tag = "is_moonshot_target" if "moonshot" in _ql else "is_laser_target"
+                _tlabel = "🌙 Moonshot" if "moonshot" in _ql else "⚡ Laser"
+                if _tag in combined_all.columns:
+                    _tg = combined_all[pd.to_numeric(combined_all[_tag], errors="coerce") == 1]
+                    if not _tg.empty:
+                        _lines = [f"**{_tlabel} targets tonight:**"]
+                        for _, _r in _tg.iterrows():
                             _lines.append(
-                                f"{_i}. **{_r.get('player_name','?')}** "
-                                f"({_r.get('team','')}) — {_nice} {_vs}"
-                                + (f" · {' · '.join(_extra)}" if _extra else "")
+                                f"- **{_r.get('player_name','?')}** ({_r.get('team','')})"
+                                + (f" · {float(_r['hr_game_pct']):.1f}% HR" if pd.notna(_r.get('hr_game_pct')) else "")
+                                + (f" · {_r.get('matchup','')}" if pd.notna(_r.get('matchup')) else "")
                             )
                         _ans = "\n".join(_lines)
 
-        # ---- "how is <player>" / "<player> stats" ----
-        if _ans is None and "player_name" in combined_all.columns:
-            _names = combined_all["player_name"].dropna().astype(str)
-            _hit = None
-            for _nm in _names:
-                _last = _nm.split()[-1].lower() if _nm.split() else ""
-                if _nm.lower() in _ql or (len(_last) > 3 and _last in _ql):
-                    _hit = _nm
-                    break
-            if _hit:
-                _pr = combined_all[combined_all["player_name"] == _hit].iloc[0]
-                _bits = [f"**{_hit}** ({_pr.get('team','')})"]
-                for _lbl, _c, _f in [
-                    ("HR Score", "hr_score", "{:.0f}"),
-                    ("💥 Dinger", "dinger_score", "{:.0f}"),
-                    ("HR Game%", "hr_game_pct", "{:.1f}%"),
-                    ("Grade", "grade", "{}"),
-                    ("Barrel%", "barrel_pct", "{:.1f}"),
-                    ("ISO", "iso", "{:.3f}"),
-                    ("Avg EV", "avg_ev", "{:.1f}"),
-                    ("Matchup", "matchup_opp", "{:.0f}"),
-                    ("vs", "matchup", "{}"),
-                ]:
-                    _v = _pr.get(_c)
-                    if pd.notna(_v) and _v != "":
-                        try:
-                            _bits.append(f"{_lbl} {_f.format(_v)}")
-                        except Exception:
-                            pass
-                _ans = "  ·  ".join(_bits)
+            # ---- "who's hot" (form) ----
+            if _ans is None and ("hot" in _ql or "streak" in _ql or "on fire" in _ql) and \
+               "streak_label" in combined_all.columns:
+                _hot = combined_all.copy()
+                if "is_bench" in _hot.columns:
+                    _hot = _hot[~_hot["is_bench"].fillna(False).astype(bool)]
+                _hot = _hot[_hot["streak_label"].astype(str).str.contains(
+                    "🔥|hot|📈", case=False, na=False)]
+                if "hr_score" in _hot.columns:
+                    _hot = _hot.nlargest(10, "hr_score")
+                if not _hot.empty:
+                    _lines = ["**Hitters trending hot tonight:**"]
+                    for _, _r in _hot.iterrows():
+                        _lines.append(
+                            f"- **{_r.get('player_name','?')}** ({_r.get('team','')}) "
+                            f"— {_r.get('streak_label','')}"
+                            + (f" · HR Score {float(_r['hr_score']):.0f}" if pd.notna(_r.get('hr_score')) else ""))
+                    _ans = "\n".join(_lines)
 
-        # ---- LLM fallback (only if user configured a key) ----
-        if _ans is None:
-            _api_key = None
-            try:
-                _api_key = st.secrets.get("anthropic_api_key", "")
-            except Exception:
-                _api_key = ""
-            if _api_key:
+            # ---- best park / environment ----
+            if _ans is None and ("park" in _ql or "coors" in _ql or "environment" in _ql or "weather" in _ql) and \
+               "env_boost" in combined_all.columns:
+                _ep = combined_all.copy()
+                if "is_bench" in _ep.columns:
+                    _ep = _ep[~_ep["is_bench"].fillna(False).astype(bool)]
+                _ep = _ep[pd.to_numeric(_ep["env_boost"], errors="coerce").notna()]
+                if not _ep.empty:
+                    _best_env = _ep.nlargest(1, "env_boost")["env_boost"].iloc[0]
+                    _bestgames = _ep[_ep["env_boost"] >= _best_env - 0.02]
+                    if "hr_score" in _bestgames.columns:
+                        _bestgames = _bestgames.nlargest(8, "hr_score")
+                    _lines = [f"**Best HR environment tonight (env boost up to {float(_best_env):.2f}×):**"]
+                    for _, _r in _bestgames.iterrows():
+                        _lines.append(
+                            f"- **{_r.get('player_name','?')}** ({_r.get('team','')}) "
+                            f"— env {float(_r.get('env_boost',1)):.2f}×"
+                            + (f" · {float(_r['hr_game_pct']):.1f}% HR" if pd.notna(_r.get('hr_game_pct')) else ""))
+                    _ans = "\n".join(_lines)
+
+            # ---- v44.25: team / game targeting ("best hitters in COL @ LAD",
+            # "who to target on the Yankees") ----
+            if _ans is None and any(w in _ql for w in ["target", "team", "game", "on the", "in the"]) and \
+               "team" in combined_all.columns:
+                _pool = combined_all.copy()
+                if "is_bench" in _pool.columns:
+                    _pool = _pool[~_pool["is_bench"].fillna(False).astype(bool)]
+                _match = None
+                # match a game string like "COL @ LAD" or a team abbr/name in the query
+                if "game" in _pool.columns:
+                    for _g in _pool["game"].dropna().astype(str).unique():
+                        _parts = [p.strip().lower() for p in _g.replace("@", " ").split()]
+                        if any(p and p in _ql for p in _parts):
+                            _match = _pool[_pool["game"] == _g]
+                            _mlabel = _g
+                            break
+                if _match is None:
+                    for _tm in _pool["team"].dropna().astype(str).unique():
+                        if _tm.lower() in _ql:
+                            _match = _pool[_pool["team"] == _tm]
+                            _mlabel = _tm
+                            break
+                if _match is not None and not _match.empty:
+                    _sortcol = "hr_score" if "hr_score" in _match.columns else "hr_game_pct"
+                    _match = _match[pd.to_numeric(_match[_sortcol], errors="coerce").notna()].nlargest(8, _sortcol)
+                    _lines = [f"**Best HR targets — {_mlabel}:**"]
+                    for _, _r in _match.iterrows():
+                        _lines.append(
+                            f"- **{_r.get('player_name','?')}** ({_r.get('team','')}) "
+                            f"— HR Score {float(_r.get('hr_score', 0)):.0f}"
+                            + (f" · {float(_r['hr_game_pct']):.1f}% HR" if pd.notna(_r.get('hr_game_pct')) else "")
+                            + (f" · 💥{float(_r['dinger_score']):.0f}" if pd.notna(_r.get('dinger_score')) else ""))
+                    _ans = "\n".join(_lines)
+
+            # ---- v44.25: handedness ("best hitters vs lefties / vs RHP") ----
+            if _ans is None and ("bats" in combined_all.columns) and \
+               any(w in _ql for w in ["lefty", "lefties", "lhp", "left-handed pitch",
+                                       "righty", "righties", "rhp", "right-handed pitch",
+                                       "vs left", "vs right"]):
+                _vs_lhp = any(w in _ql for w in ["lefty", "lefties", "lhp", "left-handed", "vs left"])
+                # hitters who HIT the opposite hand well: vs LHP → prefer RHB/switch
+                _pool = combined_all.copy()
+                if "is_bench" in _pool.columns:
+                    _pool = _pool[~_pool["is_bench"].fillna(False).astype(bool)]
+                _want = ["R", "S"] if _vs_lhp else ["L", "S"]
+                _pool = _pool[_pool["bats"].astype(str).str.upper().str[:1].isin(_want)]
+                _sortcol = "hr_score" if "hr_score" in _pool.columns else "hr_game_pct"
+                _pool = _pool[pd.to_numeric(_pool[_sortcol], errors="coerce").notna()].nlargest(10, _sortcol)
+                if not _pool.empty:
+                    _hlabel = "vs LHP (RHB/switch)" if _vs_lhp else "vs RHP (LHB/switch)"
+                    _lines = [f"**Best HR bats {_hlabel}:**"]
+                    for _, _r in _pool.iterrows():
+                        _lines.append(
+                            f"- **{_r.get('player_name','?')}** ({_r.get('team','')}, "
+                            f"{_r.get('bats','?')}) — HR Score {float(_r.get('hr_score',0)):.0f}"
+                            + (f" · {float(_r['hr_game_pct']):.1f}% HR" if pd.notna(_r.get('hr_game_pct')) else ""))
+                    _ans = "\n".join(_lines)
+
+            # ---- v44.25: fade / avoid (inverse — lowest scores) ----
+            if _ans is None and any(w in _ql for w in ["avoid", "fade", "stay away", "worst", "don't play", "dont play"]):
+                _sortcol = "hr_score" if "hr_score" in combined_all.columns else "hr_game_pct"
+                _pool = combined_all.copy()
+                if "is_bench" in _pool.columns:
+                    _pool = _pool[~_pool["is_bench"].fillna(False).astype(bool)]
+                _pool = _pool[pd.to_numeric(_pool[_sortcol], errors="coerce").notna()]
+                # only among "notable" hitters people might consider (top half by PA)
+                if "pa" in _pool.columns:
+                    _pool = _pool[pd.to_numeric(_pool["pa"], errors="coerce") >= _pool["pa"].median()]
+                _low = _pool.nsmallest(8, _sortcol)
+                if not _low.empty:
+                    _lines = ["**Lowest HR outlook tonight (fade candidates among regulars):**"]
+                    for _, _r in _low.iterrows():
+                        _lines.append(
+                            f"- {_r.get('player_name','?')} ({_r.get('team','')}) "
+                            f"— HR Score {float(_r.get('hr_score',0)):.0f}"
+                            + (f" · {float(_r['hr_game_pct']):.1f}% HR" if pd.notna(_r.get('hr_game_pct')) else ""))
+                    _ans = "\n".join(_lines)
+
+            # ---- v44.25: confirmed lineups ----
+            if _ans is None and "confirm" in _ql and "lineup_confirmed" in combined_all.columns:
+                _pool = combined_all[combined_all["lineup_confirmed"].fillna(False).astype(bool)]
+                if "is_bench" in _pool.columns:
+                    _pool = _pool[~_pool["is_bench"].fillna(False).astype(bool)]
+                _sortcol = "hr_score" if "hr_score" in _pool.columns else "hr_game_pct"
+                _pool = _pool[pd.to_numeric(_pool[_sortcol], errors="coerce").notna()].nlargest(12, _sortcol)
+                if not _pool.empty:
+                    _lines = [f"**Top HR plays in CONFIRMED lineups ({len(_pool)} shown):**"]
+                    for _, _r in _pool.iterrows():
+                        _lines.append(
+                            f"- **{_r.get('player_name','?')}** ({_r.get('team','')}) "
+                            f"— HR Score {float(_r.get('hr_score',0)):.0f}"
+                            + (f" · {float(_r['hr_game_pct']):.1f}% HR" if pd.notna(_r.get('hr_game_pct')) else ""))
+                    _ans = "\n".join(_lines)
+                else:
+                    _ans = "No confirmed lineups yet — check back closer to game time."
+
+            # ---- ranking questions: "top N by <stat>", "who's most likely to
+            # homer", "best hitters tonight", "who should I play" ----
+            if _ans is None:
+                import re as _re
+                _stat_aliases = {
+                    "dinger": "dinger_score", "dinger score": "dinger_score",
+                    "hr score": "hr_score", "hr%": "hr_game_pct",
+                    "hr game": "hr_game_pct", "pick score": "pick_score",
+                    "barrel": "barrel_pct", "iso": "iso",
+                    "exit velo": "avg_ev", "ev": "avg_ev", "hard hit": "hard_hit",
+                    "power": "power_score", "hit%": "hit_game_pct",
+                    "total bases": "expected_total_bases", "2 bases": "expected_total_bases",
+                    "two bases": "expected_total_bases", "extra base": "expected_total_bases",
+                }
+                # Intent phrases that mean "rank the hitters" even without "top".
+                _rank_intent = any(p in _ql for p in [
+                    "top", "best", "highest", "most likely", "who should",
+                    "who's most", "who is most", "who to", "who should i",
+                    "most likely to homer", "go yard", "go deep", "who will homer",
+                    "ranking", "rank", "leaders", "who has the",
+                ])
+                # Intent → which column to rank on.
+                _intent_col = None
+                if any(p in _ql for p in ["homer", "home run", "go yard", "go deep",
+                                           "dinger", "hr ", "leave the yard"]):
+                    _intent_col = "hr_score" if "hr_score" in combined_all.columns else "hr_game_pct"
+                elif any(p in _ql for p in ["hit", "get a hit", "base hit"]) and "hit_game_pct" in combined_all.columns:
+                    _intent_col = "hit_game_pct"
+                elif any(p in _ql for p in ["total base", "2 base", "two base", "extra base"]) and "expected_total_bases" in combined_all.columns:
+                    _intent_col = "expected_total_bases"
+
+                _n_match = _re.search(r"(?:top|best)\s+(\d+)", _ql)
+                _n = int(_n_match.group(1)) if _n_match else 5
+                _n = min(max(_n, 1), 25)
+
+                if _rank_intent:
+                    _target_col = None
+                    # explicit stat alias wins. v44.56 (code review #9): match on
+                    # WORD BOUNDARIES, not raw substring — otherwise "iso" matches
+                    # "comparison", "ev" matches many words, "hit" matches "white".
+                    import re as _re_alias
+                    for _alias, _col in _stat_aliases.items():
+                        if _col not in combined_all.columns:
+                            continue
+                        if _re_alias.search(r"\b" + _re_alias.escape(_alias.strip()) + r"\b", _ql):
+                            _target_col = _col
+                            break
+                    # else intent-derived column
+                    if _target_col is None:
+                        _target_col = _intent_col
+                    # else sensible default: HR ranking (this is a HR app)
+                    if _target_col is None:
+                        _target_col = ("hr_score" if "hr_score" in combined_all.columns
+                                       else "dinger_score" if "dinger_score" in combined_all.columns
+                                       else None)
+                    if _target_col and _target_col in combined_all.columns:
+                        _pool = combined_all.copy()
+                        if "is_bench" in _pool.columns:
+                            _pool = _pool[~_pool["is_bench"].fillna(False).astype(bool)]
+                        _pool = _pool[pd.to_numeric(_pool[_target_col], errors="coerce").notna()]
+                        _topn = _pool.nlargest(_n, _target_col)
+                        if not _topn.empty:
+                            _nice = {"hr_score": "HR Score", "hr_game_pct": "HR Game%",
+                                     "dinger_score": "Dinger Score", "pick_score": "Pick Score",
+                                     "hit_game_pct": "Hit%", "expected_total_bases": "xTotal Bases",
+                                     "barrel_pct": "Barrel%", "iso": "ISO", "avg_ev": "Avg EV",
+                                     "hard_hit": "Hard Hit%", "power_score": "Power"}.get(_target_col, _target_col)
+                            _lines = [f"**Most likely to homer tonight (by {_nice}):**"
+                                      if _target_col in ("hr_score", "hr_game_pct", "dinger_score")
+                                      else f"**Top {len(_topn)} by {_nice}:**"]
+                            for _i, (_, _r) in enumerate(_topn.iterrows(), 1):
+                                _v = _r[_target_col]
+                                _vs = f"{float(_v):.1f}" if isinstance(_v, (int, float)) else str(_v)
+                                _extra = []
+                                if _target_col != "hr_game_pct" and pd.notna(_r.get("hr_game_pct")):
+                                    _extra.append(f"{float(_r['hr_game_pct']):.1f}% HR")
+                                if _target_col != "dinger_score" and pd.notna(_r.get("dinger_score")):
+                                    _extra.append(f"💥{float(_r['dinger_score']):.0f}")
+                                if pd.notna(_r.get("matchup")):
+                                    _extra.append(str(_r.get("matchup")))
+                                _lines.append(
+                                    f"{_i}. **{_r.get('player_name','?')}** "
+                                    f"({_r.get('team','')}) — {_nice} {_vs}"
+                                    + (f" · {' · '.join(_extra)}" if _extra else "")
+                                )
+                            _ans = "\n".join(_lines)
+
+            # ---- "how is <player>" / "<player> stats" ----
+            if _ans is None and "player_name" in combined_all.columns:
+                _names = combined_all["player_name"].dropna().astype(str)
+                _hit = None
+                for _nm in _names:
+                    _last = _nm.split()[-1].lower() if _nm.split() else ""
+                    if _nm.lower() in _ql or (len(_last) > 3 and _last in _ql):
+                        _hit = _nm
+                        break
+                if _hit:
+                    _pr = combined_all[combined_all["player_name"] == _hit].iloc[0]
+                    _bits = [f"**{_hit}** ({_pr.get('team','')})"]
+                    for _lbl, _c, _f in [
+                        ("HR Score", "hr_score", "{:.0f}"),
+                        ("💥 Dinger", "dinger_score", "{:.0f}"),
+                        ("HR Game%", "hr_game_pct", "{:.1f}%"),
+                        ("Grade", "grade", "{}"),
+                        ("Barrel%", "barrel_pct", "{:.1f}"),
+                        ("ISO", "iso", "{:.3f}"),
+                        ("Avg EV", "avg_ev", "{:.1f}"),
+                        ("Matchup", "matchup_opp", "{:.0f}"),
+                        ("vs", "matchup", "{}"),
+                    ]:
+                        _v = _pr.get(_c)
+                        if pd.notna(_v) and _v != "":
+                            try:
+                                _bits.append(f"{_lbl} {_f.format(_v)}")
+                            except Exception:
+                                pass
+                    _ans = "  ·  ".join(_bits)
+
+            # ---- LLM fallback (only if user configured a key) ----
+            if _ans is None:
+                _api_key = None
                 try:
-                    import anthropic as _anthropic
-                    # Ground the model with a compact slate snapshot
-                    _ctx_cols = [c for c in ["player_name", "team", "hr_score",
-                                 "dinger_score", "hr_game_pct", "grade", "matchup"]
-                                 if c in combined_all.columns]
-                    _ctx = combined_all[_ctx_cols].head(60).to_csv(index=False)
-                    _client = _anthropic.Anthropic(api_key=_api_key)
-                    _msg = _client.messages.create(
-                        model="claude-sonnet-4-6",
-                        max_tokens=600,
-                        messages=[{"role": "user", "content": (
-                            f"You are a helpful assistant inside an MLB home-run "
-                            f"props app. Answer ONLY from this slate data (CSV). "
-                            f"Be concise. If the answer isn't in the data, say so.\\n\\n"
-                            f"SLATE DATA:\\n{_ctx}\\n\\nQUESTION: {_ask_q}"
-                        )}],
-                    )
-                    _ans = "".join(
-                        b.text for b in _msg.content if getattr(b, "type", "") == "text"
-                    )
-                except Exception as _le:
-                    log_swallowed_error("ask_bot_llm", _le, surface=False)
+                    _api_key = st.secrets.get("anthropic_api_key", "")
+                except Exception:
+                    _api_key = ""
+                if _api_key:
+                    try:
+                        import anthropic as _anthropic
+                        # Ground the model with a compact slate snapshot
+                        _ctx_cols = [c for c in ["player_name", "team", "hr_score",
+                                     "dinger_score", "hr_game_pct", "grade", "matchup"]
+                                     if c in combined_all.columns]
+                        _ctx = combined_all[_ctx_cols].head(60).to_csv(index=False)
+                        _client = _anthropic.Anthropic(api_key=_api_key)
+                        _msg = _client.messages.create(
+                            model="claude-sonnet-4-6",
+                            max_tokens=600,
+                            messages=[{"role": "user", "content": (
+                                f"You are a helpful assistant inside an MLB home-run "
+                                f"props app. Answer ONLY from this slate data (CSV). "
+                                f"Be concise. If the answer isn't in the data, say so.\\n\\n"
+                                f"SLATE DATA:\\n{_ctx}\\n\\nQUESTION: {_ask_q}"
+                            )}],
+                        )
+                        _ans = "".join(
+                            b.text for b in _msg.content if getattr(b, "type", "") == "text"
+                        )
+                    except Exception as _le:
+                        log_swallowed_error("ask_bot_llm", _le, surface=False)
+                        _ans = (
+                            "I couldn't reach the AI service for that question, but I "
+                            "can answer things like *top 5 dinger scores*, *how is "
+                            "[player]*, or *what is barrel%* directly from the data."
+                        )
+                else:
                     _ans = (
-                        "I couldn't reach the AI service for that question, but I "
-                        "can answer things like *top 5 dinger scores*, *how is "
-                        "[player]*, or *what is barrel%* directly from the data."
+                        "I can answer that kind of question if an Anthropic API key is "
+                        "added to the app's secrets. Without one, I can still answer: "
+                        "**top N by [stat]** (dinger, HR score, barrel, ISO, EV…), "
+                        "**how is [player]**, and **what is [metric]** — all straight "
+                        "from tonight's data, free."
                     )
-            else:
-                _ans = (
-                    "I can answer that kind of question if an Anthropic API key is "
-                    "added to the app's secrets. Without one, I can still answer: "
-                    "**top N by [stat]** (dinger, HR score, barrel, ISO, EV…), "
-                    "**how is [player]**, and **what is [metric]** — all straight "
-                    "from tonight's data, free."
-                )
 
-        if _ans:
-            st.markdown(_ans)
-except Exception as _ask_e:
-    log_swallowed_error("ask_bot", _ask_e, surface=False)
+            if _ans:
+                st.markdown(_ans)
+    except Exception as _ask_e:
+        log_swallowed_error("ask_bot", _ask_e, surface=False)
+_ask_bot_fragment()
 
 st.markdown("---")
 st.markdown("<div id='sec-compare'></div>", unsafe_allow_html=True)
@@ -15556,251 +15746,257 @@ st.caption(
     "hitter ranks higher than another."
 )
 
-try:
-    if combined_all is not None and not combined_all.empty:
-        # Build the selector — only hitters with player_id and a name
-        _hh_pool = combined_all[
-            combined_all["player_id"].notna()
-            & combined_all["player_name"].notna()
-        ][["player_id", "player_name", "team"]].drop_duplicates(subset="player_id").copy()
-        _hh_pool["__display"] = _hh_pool.apply(
-            lambda r: f"{r['player_name']}" + (
-                f" ({r['team']})" if pd.notna(r.get("team")) and r.get("team") else ""
-            ),
-            axis=1,
-        )
-        _display_to_pid = dict(zip(_hh_pool["__display"], _hh_pool["player_id"]))
-        _hh_options = sorted(_hh_pool["__display"].tolist())
+# v45.03: fragment-isolate H2H. The ✕/Clear buttons + multiselect reran
+# the whole pipeline; as a fragment they rerun only this section. Reads
+# combined_all as a module global.
+@_fragment
+def _h2h_fragment():
+    try:
+        if combined_all is not None and not combined_all.empty:
+            # Build the selector — only hitters with player_id and a name
+            _hh_pool = combined_all[
+                combined_all["player_id"].notna()
+                & combined_all["player_name"].notna()
+            ][["player_id", "player_name", "team"]].drop_duplicates(subset="player_id").copy()
+            _hh_pool["__display"] = _hh_pool.apply(
+                lambda r: f"{r['player_name']}" + (
+                    f" ({r['team']})" if pd.notna(r.get("team")) and r.get("team") else ""
+                ),
+                axis=1,
+            )
+            _display_to_pid = dict(zip(_hh_pool["__display"], _hh_pool["player_id"]))
+            _hh_options = sorted(_hh_pool["__display"].tolist())
 
-        # v44.98 (review bug #3): apply any pending selection change BEFORE the
-        # multiselect is created. Writing to a widget's session_state key AFTER
-        # the widget exists raises StreamlitAPIException (was surfaced as
-        # "Comparison tool error"). The ✕/Clear buttons below set _pending +
-        # rerun; we consume it here, before instantiation.
-        if "_h2h_pending" in st.session_state:
-            st.session_state["_h2h_compare_selector"] = st.session_state.pop("_h2h_pending")
+            # v44.98 (review bug #3): apply any pending selection change BEFORE the
+            # multiselect is created. Writing to a widget's session_state key AFTER
+            # the widget exists raises StreamlitAPIException (was surfaced as
+            # "Comparison tool error"). The ✕/Clear buttons below set _pending +
+            # rerun; we consume it here, before instantiation.
+            if "_h2h_pending" in st.session_state:
+                st.session_state["_h2h_compare_selector"] = st.session_state.pop("_h2h_pending")
 
-        _hh_selected = st.multiselect(
-            "Pick hitters (2-4):",
-            options=_hh_options,
-            max_selections=4,
-            key="_h2h_compare_selector",
-            help="Type to search. Picks limited to 4 for readability.",
-        )
+            _hh_selected = st.multiselect(
+                "Pick hitters (2-4):",
+                options=_hh_options,
+                max_selections=4,
+                key="_h2h_compare_selector",
+                help="Type to search. Picks limited to 4 for readability.",
+            )
 
-        # v44.15 (user-requested: easier remove without retyping everyone). The
-        # multiselect's native × chips work, but these explicit buttons make
-        # dropping one player (or clearing all) obvious and one-click.
-        if _hh_selected:
-            _rm_cols = st.columns(len(_hh_selected) + 1)
-            for _i, _sel in enumerate(_hh_selected):
-                with _rm_cols[_i]:
-                    if st.button(f"✕ {_sel[:14]}", key=f"_h2h_rm_{_i}",
-                                 help=f"Remove {_sel} from the comparison"):
-                        # set pending (applied before widget on next run), rerun
-                        st.session_state["_h2h_pending"] = [
-                            x for x in _hh_selected if x != _sel
-                        ]
+            # v44.15 (user-requested: easier remove without retyping everyone). The
+            # multiselect's native × chips work, but these explicit buttons make
+            # dropping one player (or clearing all) obvious and one-click.
+            if _hh_selected:
+                _rm_cols = st.columns(len(_hh_selected) + 1)
+                for _i, _sel in enumerate(_hh_selected):
+                    with _rm_cols[_i]:
+                        if st.button(f"✕ {_sel[:14]}", key=f"_h2h_rm_{_i}",
+                                     help=f"Remove {_sel} from the comparison"):
+                            # set pending (applied before widget on next run), rerun
+                            st.session_state["_h2h_pending"] = [
+                                x for x in _hh_selected if x != _sel
+                            ]
+                            st.rerun()
+                with _rm_cols[-1]:
+                    if st.button("Clear all", key="_h2h_clear",
+                                 help="Remove everyone and start over"):
+                        st.session_state["_h2h_pending"] = []
                         st.rerun()
-            with _rm_cols[-1]:
-                if st.button("Clear all", key="_h2h_clear",
-                             help="Remove everyone and start over"):
-                    st.session_state["_h2h_pending"] = []
-                    st.rerun()
 
-        if len(_hh_selected) >= 2:
-            _hh_ids = [_display_to_pid[d] for d in _hh_selected]
-            _hh_rows = combined_all[
-                combined_all["player_id"].isin(_hh_ids)
-            ].drop_duplicates(subset="player_id").copy()
-            _hh_rows["__order"] = _hh_rows["player_id"].apply(_hh_ids.index)
-            _hh_rows = _hh_rows.sort_values("__order")
+            if len(_hh_selected) >= 2:
+                _hh_ids = [_display_to_pid[d] for d in _hh_selected]
+                _hh_rows = combined_all[
+                    combined_all["player_id"].isin(_hh_ids)
+                ].drop_duplicates(subset="player_id").copy()
+                _hh_rows["__order"] = _hh_rows["player_id"].apply(_hh_ids.index)
+                _hh_rows = _hh_rows.sort_values("__order")
 
-            # Categories: (col, display_label, direction, format)
-            # direction: True = higher better, False = lower better, None = no winner
-            _h2h_categories = [
-                ("hr_game_pct",    "HR Game%",         True,  "pct"),
-                ("pick_score",     "Pick Score",       True,  "num1"),
-                ("dinger_score",   "💥 Dinger Score",  True,  "num0"),
-                ("grade_context",  "Grade (w/platoon)", None, "text"),
-                ("matchup_opp",    "Matchup",          True,  "num1"),
-                ("env_boost",      "Env Boost",        True,  "mult"),
-                ("power_score",    "Power",            True,  "num1"),
-                ("hr_form",        "Form",             True,  "num0"),
-                ("lift_score",     "Lift",             True,  "num1"),
-                ("barrel_pct",     "Barrel %",         True,  "pct1"),
-                ("hard_hit",       "Hard Hit %",       True,  "pct1"),
-                ("iso",            "ISO",              True,  "iso"),
-                ("avg_ev",         "Avg EV",           True,  "num1"),
-                ("pulled_brl_pct", "Pull Brl %",       True,  "pct1"),
-                ("pull_air_pct",   "Pull Air %",       True,  "pct1"),
-                ("recent_iso_5",   "ISO L5",           True,  "iso"),
-                ("recent_iso_10",  "ISO L10",          True,  "iso"),
-                ("form_trend_flag","Form Trend",       None,  "text"),
-                ("hr_last_10",     "HR L10",           True,  "int"),
-                ("games_since_hr", "Games no HR",      False, "int"),
-                ("smash_spot",     "Smash",            None,  "text"),
-                ("hr_profile_label", "Profile",        None,  "text"),
-                ("gb_type_flag",   "GB Profile",       None,  "text"),
-                ("plate_discipline_flag", "Zone Match", None,  "text"),
-                ("zone_fit_flag",  "Zone Fit",         None,  "text"),
-                ("exposure_flag",  "Pitch Exp",        None,  "text"),
-                ("hr_luck_gap",    "Luck Gap",         True,  "float1"),
-                ("hr_conv_ratio",  "Conv",             True,  "float2"),
-                ("ideal_hr_screen", "Ideal Screen",    None,  "text"),
-                ("platoon_hitter_flag", "Platoon Tag", None,  "text"),
-            ]
-
-            def _fmt(val, fmt):
-                if pd.isna(val) or val is None or (isinstance(val, str) and val == ""):
-                    return "—"
-                try:
-                    if fmt in ("pct", "pct1"):
-                        return f"{float(val):.1f}%"
-                    if fmt == "num1":
-                        return f"{float(val):.1f}"
-                    if fmt in ("num0", "int"):
-                        return f"{int(round(float(val)))}"
-                    if fmt == "iso":
-                        return f"{float(val):.3f}"
-                    if fmt == "mult":
-                        return f"{float(val):.2f}×"
-                    return str(val)
-                except (TypeError, ValueError):
-                    return str(val)
-
-            _table_rows = []
-            for col, label, direction, fmt in _h2h_categories:
-                if col not in _hh_rows.columns:
-                    continue
-                raw_values = []
-                for _, r in _hh_rows.iterrows():
-                    v = r.get(col)
-                    if pd.isna(v) or v is None or (isinstance(v, str) and v == ""):
-                        raw_values.append(None)
-                    else:
-                        raw_values.append(v)
-                if all(v is None for v in raw_values):
-                    continue
-                # v42l: compute winner based on DISPLAYED values (post-rounding)
-                # so two values that round to the same display string are
-                # correctly tied with no 🏆. Previously a 0.9612 vs 0.9608 both
-                # displayed as "0.96" but the raw 0.9612 got the trophy,
-                # which looks like a bug from the user perspective.
-                #
-                # Two-step: (1) compute raw winner candidate, (2) verify the
-                # displayed string for that candidate differs from all others;
-                # if it doesn't, it's a tie, no winner.
-                winner_idx = None
-                numeric_pairs = [
-                    (i, float(v)) for i, v in enumerate(raw_values)
-                    if v is not None and not isinstance(v, str)
+                # Categories: (col, display_label, direction, format)
+                # direction: True = higher better, False = lower better, None = no winner
+                _h2h_categories = [
+                    ("hr_game_pct",    "HR Game%",         True,  "pct"),
+                    ("pick_score",     "Pick Score",       True,  "num1"),
+                    ("dinger_score",   "💥 Dinger Score",  True,  "num0"),
+                    ("grade_context",  "Grade (w/platoon)", None, "text"),
+                    ("matchup_opp",    "Matchup",          True,  "num1"),
+                    ("env_boost",      "Env Boost",        True,  "mult"),
+                    ("power_score",    "Power",            True,  "num1"),
+                    ("hr_form",        "Form",             True,  "num0"),
+                    ("lift_score",     "Lift",             True,  "num1"),
+                    ("barrel_pct",     "Barrel %",         True,  "pct1"),
+                    ("hard_hit",       "Hard Hit %",       True,  "pct1"),
+                    ("iso",            "ISO",              True,  "iso"),
+                    ("avg_ev",         "Avg EV",           True,  "num1"),
+                    ("pulled_brl_pct", "Pull Brl %",       True,  "pct1"),
+                    ("pull_air_pct",   "Pull Air %",       True,  "pct1"),
+                    ("recent_iso_5",   "ISO L5",           True,  "iso"),
+                    ("recent_iso_10",  "ISO L10",          True,  "iso"),
+                    ("form_trend_flag","Form Trend",       None,  "text"),
+                    ("hr_last_10",     "HR L10",           True,  "int"),
+                    ("games_since_hr", "Games no HR",      False, "int"),
+                    ("smash_spot",     "Smash",            None,  "text"),
+                    ("hr_profile_label", "Profile",        None,  "text"),
+                    ("gb_type_flag",   "GB Profile",       None,  "text"),
+                    ("plate_discipline_flag", "Zone Match", None,  "text"),
+                    ("zone_fit_flag",  "Zone Fit",         None,  "text"),
+                    ("exposure_flag",  "Pitch Exp",        None,  "text"),
+                    ("hr_luck_gap",    "Luck Gap",         True,  "float1"),
+                    ("hr_conv_ratio",  "Conv",             True,  "float2"),
+                    ("ideal_hr_screen", "Ideal Screen",    None,  "text"),
+                    ("platoon_hitter_flag", "Platoon Tag", None,  "text"),
                 ]
-                if direction is True and numeric_pairs:
-                    candidate_idx = max(numeric_pairs, key=lambda x: x[1])[0]
-                elif direction is False and numeric_pairs:
-                    candidate_idx = min(numeric_pairs, key=lambda x: x[1])[0]
-                else:
-                    candidate_idx = None
 
-                if candidate_idx is not None:
-                    # Build the displayed strings for ALL candidates to check
-                    # for true ties at the display level.
-                    candidate_display = _fmt(raw_values[candidate_idx], fmt)
-                    other_displays = [
-                        _fmt(raw_values[i], fmt)
-                        for i, v in enumerate(raw_values)
-                        if i != candidate_idx and v is not None
+                def _fmt(val, fmt):
+                    if pd.isna(val) or val is None or (isinstance(val, str) and val == ""):
+                        return "—"
+                    try:
+                        if fmt in ("pct", "pct1"):
+                            return f"{float(val):.1f}%"
+                        if fmt == "num1":
+                            return f"{float(val):.1f}"
+                        if fmt in ("num0", "int"):
+                            return f"{int(round(float(val)))}"
+                        if fmt == "iso":
+                            return f"{float(val):.3f}"
+                        if fmt == "mult":
+                            return f"{float(val):.2f}×"
+                        return str(val)
+                    except (TypeError, ValueError):
+                        return str(val)
+
+                _table_rows = []
+                for col, label, direction, fmt in _h2h_categories:
+                    if col not in _hh_rows.columns:
+                        continue
+                    raw_values = []
+                    for _, r in _hh_rows.iterrows():
+                        v = r.get(col)
+                        if pd.isna(v) or v is None or (isinstance(v, str) and v == ""):
+                            raw_values.append(None)
+                        else:
+                            raw_values.append(v)
+                    if all(v is None for v in raw_values):
+                        continue
+                    # v42l: compute winner based on DISPLAYED values (post-rounding)
+                    # so two values that round to the same display string are
+                    # correctly tied with no 🏆. Previously a 0.9612 vs 0.9608 both
+                    # displayed as "0.96" but the raw 0.9612 got the trophy,
+                    # which looks like a bug from the user perspective.
+                    #
+                    # Two-step: (1) compute raw winner candidate, (2) verify the
+                    # displayed string for that candidate differs from all others;
+                    # if it doesn't, it's a tie, no winner.
+                    winner_idx = None
+                    numeric_pairs = [
+                        (i, float(v)) for i, v in enumerate(raw_values)
+                        if v is not None and not isinstance(v, str)
                     ]
-                    # Only award the trophy if no other candidate ties at display
-                    if candidate_display not in other_displays:
-                        winner_idx = candidate_idx
-                    # else: tie at display level, no winner
-                row_dict = {"Stat": label}
-                for i, (display, raw_val) in enumerate(zip(_hh_selected, raw_values)):
-                    s = _fmt(raw_val, fmt)
-                    if i == winner_idx and s != "—":
-                        s = f"🏆 {s}"
-                    row_dict[display] = s
-                _table_rows.append(row_dict)
-
-            if _table_rows:
-                _comp_df = pd.DataFrame(_table_rows)
-                st.dataframe(_comp_df, hide_index=True, use_container_width=True)
-                # v44.15 (user-requested): tally now tracks TIES explicitly and
-                # declares an overall leader "including ties", plus a copy-text
-                # export of the whole comparison.
-                _wins = {d: 0 for d in _hh_selected}
-                _contested = 0   # rows with a clear single winner
-                _tied = 0        # rows where top value was shared (numeric tie)
-                for row in _table_rows:
-                    _trophies = [d for d in _hh_selected
-                                 if str(row.get(d, "")).startswith("🏆")]
-                    if len(_trophies) == 1:
-                        _contested += 1
-                        _wins[_trophies[0]] += 1
+                    if direction is True and numeric_pairs:
+                        candidate_idx = max(numeric_pairs, key=lambda x: x[1])[0]
+                    elif direction is False and numeric_pairs:
+                        candidate_idx = min(numeric_pairs, key=lambda x: x[1])[0]
                     else:
-                        # No single trophy on a numeric row = a tie at the top.
-                        # (Categorical rows like Grade/Profile have no winner by
-                        # design; we only count a "tie" when the row is numeric
-                        # AND at least 2 hitters share the leading value.)
-                        _row_stat = row.get("Stat", "")
-                        _is_numeric_row = any(
-                            _row_stat == lbl and direction is not None
-                            for _, lbl, direction, _ in _h2h_categories
-                        )
-                        if _is_numeric_row:
-                            _tied += 1
-                # Overall leader including ties: most category wins; if the win
-                # count ties between hitters, it's an overall tie.
-                _max_w = max(_wins.values()) if _wins else 0
-                _leaders = [d for d, w in _wins.items() if w == _max_w and _max_w > 0]
-                _wins_str = " · ".join(
-                    f"**{d}**: {w}" for d, w in sorted(_wins.items(), key=lambda x: -x[1])
-                )
-                if len(_leaders) == 1:
-                    _verdict = (
-                        f"🏆 **{_leaders[0]} leads** — wins {_max_w} of "
-                        f"{_contested} decided categories"
-                        + (f" ({_tied} tied)" if _tied else "")
-                    )
-                elif len(_leaders) > 1:
-                    _verdict = (
-                        f"🤝 **Even** — {' & '.join(_leaders)} each win {_max_w} "
-                        f"categories" + (f" ({_tied} tied)" if _tied else "")
-                    )
-                else:
-                    _verdict = "No decided categories (all tied or non-numeric)."
-                st.markdown(_verdict)
-                st.caption(f"Category wins: {_wins_str}  ·  {_tied} tied  ·  "
-                           f"categorical rows (Grade/Profile/Smash) have no winner.")
+                        candidate_idx = None
 
-                # Copy-as-text export
-                _cmp_report = ["HEAD-TO-HEAD: " + " vs ".join(_hh_selected), ""]
-                _colw = max(len(r["Stat"]) for r in _table_rows) + 1
-                _hdr = "Stat".ljust(_colw) + "  " + "  ".join(
-                    d[:16].ljust(16) for d in _hh_selected)
-                _cmp_report.append(_hdr)
-                for row in _table_rows:
-                    _cmp_report.append(
-                        row["Stat"].ljust(_colw) + "  " + "  ".join(
-                            str(row.get(d, "—"))[:16].ljust(16) for d in _hh_selected)
+                    if candidate_idx is not None:
+                        # Build the displayed strings for ALL candidates to check
+                        # for true ties at the display level.
+                        candidate_display = _fmt(raw_values[candidate_idx], fmt)
+                        other_displays = [
+                            _fmt(raw_values[i], fmt)
+                            for i, v in enumerate(raw_values)
+                            if i != candidate_idx and v is not None
+                        ]
+                        # Only award the trophy if no other candidate ties at display
+                        if candidate_display not in other_displays:
+                            winner_idx = candidate_idx
+                        # else: tie at display level, no winner
+                    row_dict = {"Stat": label}
+                    for i, (display, raw_val) in enumerate(zip(_hh_selected, raw_values)):
+                        s = _fmt(raw_val, fmt)
+                        if i == winner_idx and s != "—":
+                            s = f"🏆 {s}"
+                        row_dict[display] = s
+                    _table_rows.append(row_dict)
+
+                if _table_rows:
+                    _comp_df = pd.DataFrame(_table_rows)
+                    st.dataframe(_comp_df, hide_index=True, use_container_width=True)
+                    # v44.15 (user-requested): tally now tracks TIES explicitly and
+                    # declares an overall leader "including ties", plus a copy-text
+                    # export of the whole comparison.
+                    _wins = {d: 0 for d in _hh_selected}
+                    _contested = 0   # rows with a clear single winner
+                    _tied = 0        # rows where top value was shared (numeric tie)
+                    for row in _table_rows:
+                        _trophies = [d for d in _hh_selected
+                                     if str(row.get(d, "")).startswith("🏆")]
+                        if len(_trophies) == 1:
+                            _contested += 1
+                            _wins[_trophies[0]] += 1
+                        else:
+                            # No single trophy on a numeric row = a tie at the top.
+                            # (Categorical rows like Grade/Profile have no winner by
+                            # design; we only count a "tie" when the row is numeric
+                            # AND at least 2 hitters share the leading value.)
+                            _row_stat = row.get("Stat", "")
+                            _is_numeric_row = any(
+                                _row_stat == lbl and direction is not None
+                                for _, lbl, direction, _ in _h2h_categories
+                            )
+                            if _is_numeric_row:
+                                _tied += 1
+                    # Overall leader including ties: most category wins; if the win
+                    # count ties between hitters, it's an overall tie.
+                    _max_w = max(_wins.values()) if _wins else 0
+                    _leaders = [d for d, w in _wins.items() if w == _max_w and _max_w > 0]
+                    _wins_str = " · ".join(
+                        f"**{d}**: {w}" for d, w in sorted(_wins.items(), key=lambda x: -x[1])
                     )
-                _cmp_report.append("")
-                _cmp_report.append(_verdict.replace("**", "").replace("🏆 ", "").replace("🤝 ", ""))
-                with st.popover("📋 Copy comparison"):
-                    st.code("\n".join(_cmp_report), language="text")
-            else:
-                st.info(
-                    "These players don't have enough comparable data populated "
-                    "yet. Try other selections or check that lineups have posted."
-                )
-        elif len(_hh_selected) == 1:
-            st.info("Pick at least 2 hitters to compare.")
-    else:
-        st.caption("Waiting for hitter data to populate.")
-except Exception as _h2h_e:
-    st.caption(f"Comparison tool error: {type(_h2h_e).__name__}: {str(_h2h_e)[:120]}")
+                    if len(_leaders) == 1:
+                        _verdict = (
+                            f"🏆 **{_leaders[0]} leads** — wins {_max_w} of "
+                            f"{_contested} decided categories"
+                            + (f" ({_tied} tied)" if _tied else "")
+                        )
+                    elif len(_leaders) > 1:
+                        _verdict = (
+                            f"🤝 **Even** — {' & '.join(_leaders)} each win {_max_w} "
+                            f"categories" + (f" ({_tied} tied)" if _tied else "")
+                        )
+                    else:
+                        _verdict = "No decided categories (all tied or non-numeric)."
+                    st.markdown(_verdict)
+                    st.caption(f"Category wins: {_wins_str}  ·  {_tied} tied  ·  "
+                               f"categorical rows (Grade/Profile/Smash) have no winner.")
+
+                    # Copy-as-text export
+                    _cmp_report = ["HEAD-TO-HEAD: " + " vs ".join(_hh_selected), ""]
+                    _colw = max(len(r["Stat"]) for r in _table_rows) + 1
+                    _hdr = "Stat".ljust(_colw) + "  " + "  ".join(
+                        d[:16].ljust(16) for d in _hh_selected)
+                    _cmp_report.append(_hdr)
+                    for row in _table_rows:
+                        _cmp_report.append(
+                            row["Stat"].ljust(_colw) + "  " + "  ".join(
+                                str(row.get(d, "—"))[:16].ljust(16) for d in _hh_selected)
+                        )
+                    _cmp_report.append("")
+                    _cmp_report.append(_verdict.replace("**", "").replace("🏆 ", "").replace("🤝 ", ""))
+                    with st.popover("📋 Copy comparison"):
+                        st.code("\n".join(_cmp_report), language="text")
+                else:
+                    st.info(
+                        "These players don't have enough comparable data populated "
+                        "yet. Try other selections or check that lineups have posted."
+                    )
+            elif len(_hh_selected) == 1:
+                st.info("Pick at least 2 hitters to compare.")
+        else:
+            st.caption("Waiting for hitter data to populate.")
+    except Exception as _h2h_e:
+        st.caption(f"Comparison tool error: {type(_h2h_e).__name__}: {str(_h2h_e)[:120]}")
+_h2h_fragment()
 
 st.divider()
 
@@ -17269,10 +17465,36 @@ if _valid_games:
         return f"{g['away_team_abbr']} @ {g['home_team_abbr']}{time_str}{rain}"
 
     _tab_labels = [_tab_label(g, c) for g, c in _valid_games]
-    _game_tabs = st.tabs(_tab_labels)
+    # v45.05: render only the SELECTED game, not all of them. st.tabs renders
+    # every tab's full content (styled tables × expanders) on every run — the
+    # single biggest render cost. Slates vary (some days 4 games, some 15,
+    # sometimes fewer — 0 during the All-Star break, handled by the enclosing
+    # `if _valid_games:`). A selectbox renders just one game regardless of count,
+    # so the saving scales with slate size. Body logic below is unchanged; we
+    # just skip games that aren't selected. "Show all" is the escape hatch.
+    _n_games = len(_valid_games)
+    _show_all_games = False
+    _sel_col, _all_col = st.columns([3, 1])
+    with _sel_col:
+        _selected_game_label = st.selectbox(
+            f"🎮 Select game to view ({_n_games} game"
+            + ("s" if _n_games != 1 else "") + " on this slate):",
+            options=_tab_labels,
+            index=0,
+            key="_game_selector",
+            help="Renders one game at a time for speed. Pick another to switch.",
+        )
+    with _all_col:
+        _show_all_games = st.checkbox(
+            "Show all", value=False, key="_show_all_games",
+            help="Render every game at once (slower).",
+        )
+    _selected_idx = _tab_labels.index(_selected_game_label) if _selected_game_label in _tab_labels else 0
 
-    for _tab, (game, ctx) in zip(_game_tabs, _valid_games):
-      with _tab:
+    for _game_idx, (game, ctx) in enumerate(_valid_games):
+        # v45.04: skip rendering games that aren't selected (unless "Show all").
+        if not _show_all_games and _game_idx != _selected_idx:
+            continue
         # RAIN-RISK BANNER - shown ABOVE the game header so it can't be missed
         wx = ctx.get("weather") or {}
         pp = wx.get("precip_prob")
