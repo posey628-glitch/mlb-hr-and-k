@@ -1711,7 +1711,7 @@ def add_hr_criteria(df: pd.DataFrame) -> pd.DataFrame:
 #   - MUST-HAVE (10 thresholds): "hitters making authoritative contact,
 #     elevating the ball, pulling it in the air, producing the exact
 #     batted-ball profile that leads to home runs"
-#   - NUCLEAR (14 thresholds, stricter overlap): "only the best 3-8 HR
+#   - NUCLEAR (12 thresholds, stricter overlap): "only the best 3-8 HR
 #     plays" per slate
 #
 # Both run alongside the existing 4-point hr_criteria — neither replaces
@@ -1807,8 +1807,8 @@ def add_must_have_criteria(df: pd.DataFrame) -> pd.DataFrame:
     Adds columns:
       - must_have_<metric>  bool|None for each of the 10 metrics
                             (must_have_barrel, must_have_pullbrl, etc.)
-      - must_have_met       int 0-10  count of thresholds passed
-      - must_have_total     int 0-10  count of evaluatable thresholds (with data)
+      - must_have_met       int 0-9   count of thresholds passed
+      - must_have_total     int 0-9   count of evaluatable thresholds (with data)
       - must_have_label     str       e.g. "✓✓✗✓✓✓✗··✓ 6/8"
       - must_have_pass      bool      True if 10/10 (or all-available passed)
 
