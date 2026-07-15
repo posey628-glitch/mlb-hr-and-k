@@ -48,11 +48,6 @@ _LAST_ERROR: str | None = None
 _LAST_SOURCE: str | None = None
 
 
-def get_last_weather_error() -> str | None:
-    """Return the last weather fetch error (or None if last fetch succeeded)."""
-    return _LAST_ERROR
-
-
 def _normalize_target_dt(when) -> datetime:
     """Normalize various time inputs to a naive datetime rounded to the hour."""
     if when is None:
