@@ -47,6 +47,39 @@ import streamlit as st
 _LAST_ERROR: str | None = None
 _LAST_SOURCE: str | None = None
 
+# v45.21 (review P7 #15): physical sanity bands for parsed weather values.
+# API glitches (wind 350 mph, temp 5000) previously flowed downstream —
+# bounded by the final env clamp but still saturating env wrongly and
+# displaying absurd numbers. In-band: passthrough. Slightly out: clamp.
+# Wildly impossible (>3× outside band): treat as missing (None).
+_SANITY_BANDS = {
+    "temp_f": (-10.0, 125.0),
+    "wind_mph": (0.0, 60.0),
+    "wind_dir_deg": (0.0, 360.0),
+    "humidity": (0.0, 100.0),
+    "pressure_hpa": (850.0, 1100.0),
+    "precip_prob": (0.0, 100.0),
+}
+
+
+def _sane(key, val):
+    """Clamp a parsed weather value to its physical band; wildly impossible
+    values (>3× outside the band) become None — missing beats fabricated."""
+    if val is None:
+        return None
+    band = _SANITY_BANDS.get(key)
+    if band is None:
+        return val
+    lo, hi = band
+    try:
+        v = float(val)
+    except (TypeError, ValueError):
+        return None
+    span = hi - lo
+    if v < lo - 3 * span or v > hi + 3 * span:
+        return None  # glitch, not weather
+    return min(hi, max(lo, v))
+
 
 def _normalize_target_dt(when) -> datetime:
     """Normalize various time inputs to a naive datetime rounded to the hour."""
@@ -105,12 +138,12 @@ def _parse_om_response_for_hour(response: dict, target_dt: datetime) -> dict:
         return None
 
     return {
-        "temp_f": _safe("temperature_2m"),
-        "wind_mph": _safe("wind_speed_10m"),
-        "wind_dir_deg": _safe("wind_direction_10m"),
-        "humidity": _safe("relative_humidity_2m"),
-        "pressure_hpa": _safe("surface_pressure"),
-        "precip_prob": _safe("precipitation_probability"),
+        "temp_f": _sane("temp_f", _safe("temperature_2m")),
+        "wind_mph": _sane("wind_mph", _safe("wind_speed_10m")),
+        "wind_dir_deg": _sane("wind_dir_deg", _safe("wind_direction_10m")),
+        "humidity": _sane("humidity", _safe("relative_humidity_2m")),
+        "pressure_hpa": _sane("pressure_hpa", _safe("surface_pressure")),
+        "precip_prob": _sane("precip_prob", _safe("precipitation_probability")),
         "_source": "OpenMeteo",
     }
 
@@ -186,13 +219,13 @@ def _parse_wttr_response_for_hour(response: dict, target_dt: datetime) -> dict:
             return None
 
     return {
-        "temp_f": _f("tempF"),
-        "wind_mph": _f("windspeedMiles"),
-        "wind_dir_deg": _f("winddirDegree"),
-        "humidity": _f("humidity"),
+        "temp_f": _sane("temp_f", _f("tempF")),
+        "wind_mph": _sane("wind_mph", _f("windspeedMiles")),
+        "wind_dir_deg": _sane("wind_dir_deg", _f("winddirDegree")),
+        "humidity": _sane("humidity", _f("humidity")),
         # wttr.in pressure is in mb (hPa equivalent for our purposes)
-        "pressure_hpa": _f("pressure"),
-        "precip_prob": _f("chanceofrain"),
+        "pressure_hpa": _sane("pressure_hpa", _f("pressure")),
+        "precip_prob": _sane("precip_prob", _f("chanceofrain")),
         "_source": "wttr.in",
     }
 
