@@ -459,9 +459,8 @@ def researcher_framework_backtest(merged_df: pd.DataFrame) -> dict:
     # v44.51 (user-requested): grade the ELITE CONVERGENCE cohort — hitters
     # who clear high bars across ALL custom metrics at once. This tests whether
     # full multi-model agreement actually produces a higher HR rate (the whole
-    # premise of the section). Thresholds mirror the display section.
-    _ec_cols = ["hr_score", "dinger_score", "power_composite",
-                "barrel_matchup_score", "two_way_matchup_score"]
+    # premise of the section). Thresholds mirror the display section
+    # (hr_score, dinger_score, power_composite, barrel/two-way matchup).
     if all(c in merged_df.columns for c in ["hr_score", "homered"]):
         ec = merged_df.dropna(subset=["hr_score", "homered"]).copy()
         _ec_mask = pd.to_numeric(ec["hr_score"], errors="coerce") >= 80
