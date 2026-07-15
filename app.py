@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.19-coverage-clarity"
+APP_VERSION = "2026.06.10-v45.20-calibration"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -4631,6 +4631,59 @@ if show_pattern_analysis:
                         f"{merged['snapshot_date'].nunique()} slates._"
                     )
 
+                    # ====== v45.20: Calibration (reviews P4/P5/P7 #1 ask) ======
+                    with st.expander("🎯 Calibration — what the scores actually mean", expanded=False):
+                        st.caption(
+                            "The most fundamental model test. Left: observed HR "
+                            "rate by **HR Score band** (gives '87' a real-world "
+                            "meaning). Right: **predicted vs observed** by HR "
+                            "Game% band — rows predicted ~15% should homer ~15% "
+                            "of the time. `gap_pts` = observed − predicted: "
+                            "positive = model underestimates that band, negative "
+                            "= overestimates. Bands with small n are noise — "
+                            "judge only n ≥ 25."
+                        )
+                        try:
+                            from pattern_analysis import (
+                                score_calibration_table,
+                                probability_calibration_table,
+                            )
+                            _cal1 = score_calibration_table(merged)
+                            _cal2 = probability_calibration_table(merged)
+                            _cc1, _cc2 = st.columns(2)
+                            with _cc1:
+                                st.markdown("**HR Score → observed HR rate**")
+                                if _cal1.empty:
+                                    st.caption("hr_score/homered not in history yet.")
+                                else:
+                                    st.dataframe(_cal1, hide_index=True,
+                                                 use_container_width=True)
+                            with _cc2:
+                                st.markdown("**HR Game% — predicted vs observed**")
+                                if _cal2.empty:
+                                    st.caption("hr_game_pct/homered not in history yet.")
+                                else:
+                                    st.dataframe(_cal2, hide_index=True,
+                                                 use_container_width=True)
+                                    _big = _cal2[_cal2["n"] >= 25]
+                                    if not _big.empty:
+                                        _worst = _big.loc[_big["gap_pts"].abs().idxmax()]
+                                        if abs(float(_worst["gap_pts"])) >= 5:
+                                            st.caption(
+                                                f"⚠️ Largest reliable miscalibration: "
+                                                f"the {_worst['band']} band runs "
+                                                f"{_worst['gap_pts']:+.1f} pts vs predicted "
+                                                f"(n={int(_worst['n'])}). Worth watching as "
+                                                f"history grows."
+                                            )
+                                        else:
+                                            st.caption(
+                                                "✅ No reliable band is off by ≥5 pts — "
+                                                "predictions are tracking reality so far."
+                                            )
+                        except Exception as _cal_e:
+                            log_swallowed_error("calibration_tables", _cal_e, surface=False)
+
                     # ====== Section A: Researcher framework backtest ======
                     st.markdown("---")
                     st.markdown("### A. Does the researcher's framework actually work?")
@@ -7063,7 +7116,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.19 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.20 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -13448,6 +13501,48 @@ if all_hitters:
             stash_diagnostic("pipeline_health", f"⚠️ Schema: {_sp}", level="warning")
     except Exception as _sce:
         log_swallowed_error("schema_assert", _sce, surface=False)
+
+    # v45.20 (review P7): merge-integrity + range sanity validators.
+    # (a) Duplicate (player_id, game): a dup means a hitter got scored twice
+    #     (merge fanout) → rankings and slate aggregates silently wrong.
+    # (b) Range checks: hr_game_pct must live in [0,100]; env_boost within the
+    #     documented context caps (±0.02 tolerance for float dust). Violations
+    #     mean a calculation upstream broke, even if nothing crashed.
+    try:
+        if {"player_id", "game"}.issubset(combined_all.columns):
+            _dups = combined_all.dropna(subset=["player_id"]).duplicated(
+                subset=["player_id", "game"]).sum()
+            if _dups:
+                stash_diagnostic(
+                    "pipeline_health",
+                    f"⚠️ Merge integrity: {int(_dups)} duplicate "
+                    f"(player_id, game) row(s) in combined_all — a hitter is "
+                    f"being scored twice (merge fanout). Rankings may be wrong.",
+                    level="warning",
+                )
+        _range_msgs = []
+        if "hr_game_pct" in combined_all.columns:
+            _hg = pd.to_numeric(combined_all["hr_game_pct"], errors="coerce")
+            _bad = int(((_hg < 0) | (_hg > 100)).sum())
+            if _bad:
+                _range_msgs.append(f"hr_game_pct out of [0,100] on {_bad} row(s)")
+        if "env_boost" in combined_all.columns:
+            _eb = pd.to_numeric(combined_all["env_boost"], errors="coerce")
+            _lo, _hi = CTX_MULT_CAP[0] - 0.02, CTX_MULT_CAP[1] + 0.02
+            _bad = int(((_eb < _lo) | (_eb > _hi)).sum())
+            if _bad:
+                _range_msgs.append(
+                    f"env_boost outside caps [{CTX_MULT_CAP[0]},{CTX_MULT_CAP[1]}] "
+                    f"on {_bad} row(s)")
+        if _range_msgs:
+            stash_diagnostic(
+                "pipeline_health",
+                "⚠️ Range sanity: " + " · ".join(_range_msgs)
+                + " — an upstream calculation broke without crashing.",
+                level="warning",
+            )
+    except Exception as _rve:
+        log_swallowed_error("range_validators", _rve, surface=False)
 
     # v44.11: Dinger Score v2 column (power base × per-slate context) — a
     # first-class column so it appears per-game and gets snapshotted/graded.
