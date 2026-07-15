@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.17-deep-dive-fixes"
+APP_VERSION = "2026.06.10-v45.18-ui-polish"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -1212,6 +1212,18 @@ if _version_state["version"] != APP_VERSION:
 # Also remember in session_state so other code paths can read it (e.g. the
 # diagnostic at the top of the page, sidebar metadata).
 st.session_state["_app_version"] = APP_VERSION
+
+
+def _player_col(label="Player", **kw):
+    """v45.18 (UI): TextColumn for the player-name column, PINNED to the left
+    so it stays visible while wide tables scroll horizontally (the single
+    biggest mobile readability win). `pinned` is a newer Streamlit
+    column_config parameter — fall back to unpinned on older versions
+    instead of crashing."""
+    try:
+        return st.column_config.TextColumn(label, pinned=True, **kw)
+    except TypeError:
+        return st.column_config.TextColumn(label, **kw)
 
 
 def safe_int(val) -> Optional[int]:
@@ -4067,7 +4079,7 @@ if show_transactions:
                         "date": st.column_config.TextColumn("Date", width="small"),
                         "icon": st.column_config.TextColumn("", width="small"),
                         "category": st.column_config.TextColumn("Type", width="small"),
-                        "player_name": st.column_config.TextColumn("Player"),
+                        "player_name": _player_col("Player"),
                         "from_team": st.column_config.TextColumn("From"),
                         "to_team": st.column_config.TextColumn("To"),
                         "description": st.column_config.TextColumn("Details"),
@@ -7023,7 +7035,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.17 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.18 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -9202,17 +9214,71 @@ except Exception as _pub_e:
 
 st.markdown("<div id='sec-top10'></div>", unsafe_allow_html=True)
 st.subheader("🏆 Top 10 Picks of the Day")
+
+# v45.18 (UI): "Tonight in 10 seconds" — one-line orientation strip so a
+# casual visitor instantly knows the shape of the slate before the picks.
+try:
+    _n_games_strip = len(game_context_map)
+    if _n_games_strip:
+        _conf_games = sum(
+            1 for _c in game_context_map.values()
+            if _c.get("away_lineup_confirmed") and _c.get("home_lineup_confirmed")
+        )
+        _tbd_ct = 0
+        for _c in game_context_map.values():
+            for _sd in ("away_p_row", "home_p_row"):
+                _pr = _c.get(_sd) or {}
+                # TBD proxy's defining trait: no player_id (team-average row)
+                _pid_chk = _pr.get("player_id") if _pr else None
+                if (not _pr) or _pid_chk is None or (
+                        hasattr(pd, "isna") and pd.isna(_pid_chk)):
+                    _tbd_ct += 1
+        _best_gpk, _best_env = None, -1.0
+        for _gpk2, _c in game_context_map.items():
+            try:
+                _e = float(_c.get("hr_mult", 1.0) or 1.0)
+            except (TypeError, ValueError):
+                _e = 1.0
+            if _e > _best_env:
+                _best_env, _best_gpk = _e, _gpk2
+        _best_lbl = ""
+        if _best_gpk is not None and not slate.empty:
+            _bg = slate[slate["gamePk"] == _best_gpk]
+            if not _bg.empty:
+                _b0 = _bg.iloc[0]
+                _best_lbl = f"{_b0['away_team_abbr']} @ {_b0['home_team_abbr']}"
+        _strip = [f"🗓️ **{_n_games_strip}** game{'s' if _n_games_strip != 1 else ''}"]
+        _strip.append(f"🔒 **{_conf_games}** with both lineups confirmed")
+        if _tbd_ct:
+            _strip.append(f"❔ **{_tbd_ct}** TBD pitcher{'s' if _tbd_ct != 1 else ''}")
+        if _best_lbl:
+            _env_word = ("great" if _best_env >= 1.10 else
+                         "good" if _best_env >= 1.03 else "neutral")
+            _strip.append(f"🌤️ best HR environment: **{_best_lbl}** ({_env_word})")
+        st.markdown(" · ".join(_strip))
+except Exception as _strip_e:
+    log_swallowed_error("tonight_strip", _strip_e, surface=False)
+
+# v45.18 (UI): caption tightened to the two facts everyone needs; full
+# methodology moved into a collapsed expander for those who want it.
 st.caption(
-    "**HR Score (0-95)** is the primary metric — comprehensive composite of "
-    "8 weighted tiers (HR probability, power, swing mechanics, matchup, form, "
-    "environment, discipline, lineup context). **Rescaled per slate**, so the "
-    "best play of the night reads ~95 and worst ~10. "
-    "**Important:** HR Score 95 is NOT a probability — it means 'top tier of "
-    "tonight's slate.' The actual HR probability is in the HR Game% column. "
-    "The 🎯 column shows color (🟢≥70 / 🟡 50-69 / 🟠 25-49 / 🔴 <25). "
-    "Smash flag 🔥 derives from HR Score for consistency. "
-    "Max 2 per game; max 3 if slate is small."
+    "**HR Score** ranks tonight's slate 0-95 (best play ≈ 95 — it's a rank, "
+    "not a probability; the real probability is **HR Game%**). Max 2 picks "
+    "per game."
 )
+with st.expander("ℹ️ How the Top 10 works", expanded=False):
+    st.markdown(
+        "- **HR Score (0-95)** — comprehensive composite of 8 weighted tiers "
+        "(HR probability, power, swing mechanics, matchup, form, environment, "
+        "discipline, lineup context). **Rescaled per slate**, so the best play "
+        "of the night reads ~95 and the worst ~10.\n"
+        "- **HR Score is NOT a probability** — 95 means 'top tier of tonight's "
+        "slate.' The actual per-game HR probability is the **HR Game%** column.\n"
+        "- **🎯 color**: 🟢 ≥70 / 🟡 50-69 / 🟠 25-49 / 🔴 <25.\n"
+        "- **🔥 Smash flag** derives from HR Score + pitcher grade + environment "
+        "(and requires a confirmed lineup) so labels can never contradict scores.\n"
+        "- **Diversity rule**: max 2 hitters per game (3 if the slate is small)."
+    )
 
 
 # LINEUP-FILL WARNING (June 2026)
@@ -9956,7 +10022,7 @@ if combined_picks is not None and not combined_picks.empty:
                 _avail = [c for c in _profile_cols if c in _cp.columns]
                 # v43.81: shared column config so hr_score isn't 92.4000 etc.
                 _profile_config = {
-                    "player_name": st.column_config.TextColumn("Player", width="medium"),
+                    "player_name": _player_col("Player", width="medium"),
                     "team": st.column_config.TextColumn("Team", width="small"),
                     "lineup_pos": st.column_config.NumberColumn(
                         "Slot", format="%d", width="small",
@@ -11584,7 +11650,7 @@ if combined_picks is not None and not combined_picks.empty:
                         "homer. Lift Score makes that distinction visible."
                     ),
                 ),
-                "player_name": st.column_config.TextColumn("Hitter"),
+                "player_name": _player_col("Hitter"),
                 "team": st.column_config.TextColumn("Tm", width="small"),
                 "game": st.column_config.TextColumn("Game"),
                 "opp_pitcher": st.column_config.TextColumn("vs Pitcher"),
@@ -11971,7 +12037,7 @@ if combined_picks is not None and not combined_picks.empty:
                             "convergence_label": st.column_config.TextColumn(
                                 "Consensus", width="small",
                             ),
-                            "player_name": st.column_config.TextColumn("Player"),
+                            "player_name": _player_col("Player"),
                             "pick_score": st.column_config.NumberColumn(
                                 "Pick", format="%.1f", width="small"),
                             "hr_game_pct": st.column_config.NumberColumn(
@@ -12035,7 +12101,7 @@ if combined_picks is not None and not combined_picks.empty:
                         hide_index=True, use_container_width=True,
                         column_config={
                             "convergence_label": st.column_config.TextColumn("Consensus", width="small"),
-                            "player_name": st.column_config.TextColumn("Hitter"),
+                            "player_name": _player_col("Hitter"),
                             "team": st.column_config.TextColumn("Tm", width="small"),
                             "opp_pitcher_grade": st.column_config.TextColumn("Pitcher", width="small"),
                             "hr_game_pct": st.column_config.NumberColumn("HR%", format="%.1f%%"),
@@ -12095,7 +12161,7 @@ if combined_picks is not None and not combined_picks.empty:
                                     _col: st.column_config.NumberColumn(
                                         _kind[:-1] + " Score", format="%.1f", width="small",
                                         help=COLUMN_HELP.get(_col)),
-                                    "player_name": st.column_config.TextColumn("Player"),
+                                    "player_name": _player_col("Player"),
                                     "hr_game_pct": st.column_config.NumberColumn(
                                         "HR%", format="%.1f", width="small"),
                                     "pick_score": st.column_config.NumberColumn(
@@ -12157,7 +12223,7 @@ if combined_picks is not None and not combined_picks.empty:
                         _elite[_el_cols].reset_index(drop=True),
                         hide_index=True, use_container_width=True,
                         column_config={
-                            "player_name": st.column_config.TextColumn("Hitter"),
+                            "player_name": _player_col("Hitter"),
                             "team": st.column_config.TextColumn("Tm", width="small"),
                             "hr_game_pct": st.column_config.NumberColumn("HR%", format="%.1f%%"),
                             "pick_score": st.column_config.NumberColumn("Pick", format="%.1f", width="small"),
@@ -12188,7 +12254,7 @@ if combined_picks is not None and not combined_picks.empty:
                         hide_index=True, use_container_width=True,
                         column_config={
                             "smash_spot": st.column_config.TextColumn("Tier", width="medium"),
-                            "player_name": st.column_config.TextColumn("Hitter"),
+                            "player_name": _player_col("Hitter"),
                             "team": st.column_config.TextColumn("Tm", width="small"),
                             "hr_game_pct": st.column_config.NumberColumn("HR%", format="%.1f%%"),
                             "pick_score": st.column_config.NumberColumn("Pick", format="%.1f", width="small"),
@@ -12279,7 +12345,7 @@ if combined_picks is not None and not combined_picks.empty:
                     ),
                     "arsenal_flag": st.column_config.TextColumn("Arsenal", width="medium"),
                     "hr_profile_label": st.column_config.TextColumn("HR Profile", width="medium"),
-                    "player_name": st.column_config.TextColumn("Hitter"),
+                    "player_name": _player_col("Hitter"),
                     "team": st.column_config.TextColumn("Tm", width="small"),
                     "game": st.column_config.TextColumn("Game"),
                     "opp_pitcher": st.column_config.TextColumn("vs Pitcher"),
@@ -12620,7 +12686,7 @@ if combined_picks is not None and not combined_picks.empty:
                                 "vulnerability (derived from grade). Environment-free."
                             ),
                         ),
-                        "player_name": st.column_config.TextColumn("Hitter"),
+                        "player_name": _player_col("Hitter"),
                         "team": st.column_config.TextColumn("Tm", width="small"),
                         "opp_pitcher": st.column_config.TextColumn("vs Pitcher"),
                         "power_score": st.column_config.NumberColumn(
@@ -14226,7 +14292,7 @@ if all_hitters:
                     breakout_df[breakout_cols].reset_index(drop=True),
                     hide_index=True, use_container_width=True,
                     column_config={
-                        "player_name": st.column_config.TextColumn("Player"),
+                        "player_name": _player_col("Player"),
                         "pa": st.column_config.NumberColumn("PA", format="%d"),
                         "barrel_pct": st.column_config.NumberColumn("Brl%", format="%.1f"),
                         "hard_hit": st.column_config.NumberColumn("HH%", format="%.1f"),
@@ -14347,7 +14413,7 @@ if all_hitters:
                     search_results[search_cols].reset_index(drop=True),
                     hide_index=True, use_container_width=True,
                     column_config={
-                        "player_name": st.column_config.TextColumn("Player"),
+                        "player_name": _player_col("Player"),
                         "status": st.column_config.TextColumn("Status", width="small"),
                         "pick_score": st.column_config.NumberColumn("Pick", format="%.1f"),
                         "hr_game_pct": st.column_config.NumberColumn("HR%", format="%.2f"),
@@ -14851,7 +14917,7 @@ if all_hitters:
                 st.dataframe(
                     disp, hide_index=True, use_container_width=True,
                     column_config={
-                        "player_name": st.column_config.TextColumn("Hitter"),
+                        "player_name": _player_col("Hitter"),
                         "team": st.column_config.TextColumn("Tm"),
                         "game": st.column_config.TextColumn("Game"),
                         "hr_game_pct": st.column_config.NumberColumn("HR%", format="%.1f%%"),
@@ -14878,7 +14944,7 @@ if all_hitters:
                 st.dataframe(
                     disp, hide_index=True, use_container_width=True,
                     column_config={
-                        "player_name": st.column_config.TextColumn("Hitter"),
+                        "player_name": _player_col("Hitter"),
                         "team": st.column_config.TextColumn("Tm"),
                         "game": st.column_config.TextColumn("Game"),
                         "power_score": st.column_config.NumberColumn(
@@ -14959,7 +15025,7 @@ if all_hitters:
                 st.dataframe(
                     disp, hide_index=True, use_container_width=True,
                     column_config={
-                        "player_name": st.column_config.TextColumn("Hitter"),
+                        "player_name": _player_col("Hitter"),
                         "team": st.column_config.TextColumn("Tm"),
                         "game": st.column_config.TextColumn("Game"),
                         "opp_pitcher": st.column_config.TextColumn("vs P", width="small"),
@@ -15000,7 +15066,7 @@ if all_hitters:
                 elite_sorted[elite_cols], hide_index=True, use_container_width=True,
                 column_config={
                     "grade": st.column_config.TextColumn("Grd", width="small"),
-                    "player_name": st.column_config.TextColumn("Hitter"),
+                    "player_name": _player_col("Hitter"),
                     "team": st.column_config.TextColumn("Tm", width="small"),
                     "game": st.column_config.TextColumn("Game"),
                     "opp_pitcher": st.column_config.TextColumn("vs P"),
@@ -15068,7 +15134,7 @@ if all_hitters:
             st.dataframe(
                 perfect_storm[ps_cols], hide_index=True, use_container_width=True,
                 column_config={
-                    "player_name": st.column_config.TextColumn("Hitter"),
+                    "player_name": _player_col("Hitter"),
                     "team": st.column_config.TextColumn("Tm", width="small"),
                     "game": st.column_config.TextColumn("Game"),
                     "grade": st.column_config.TextColumn("HGrd", width="small"),
@@ -15199,7 +15265,7 @@ if all_hitters:
             st.dataframe(
                 due_pool[due_cols], hide_index=True, use_container_width=True,
                 column_config={
-                    "player_name": st.column_config.TextColumn("Hitter"),
+                    "player_name": _player_col("Hitter"),
                     "team": st.column_config.TextColumn("Tm", width="small"),
                     "game": st.column_config.TextColumn("Game"),
                     "opp_pitcher": st.column_config.TextColumn("vs P"),
@@ -15283,7 +15349,7 @@ if all_hitters:
             smash_df[smash_cols], hide_index=True, use_container_width=True,
             column_config={
                 "smash_spot": st.column_config.TextColumn("Flag", width="medium"),
-                "player_name": st.column_config.TextColumn("Hitter"),
+                "player_name": _player_col("Hitter"),
                 "team": st.column_config.TextColumn("Tm", width="small"),
                 "game": st.column_config.TextColumn("Game"),
                 "opp_pitcher": st.column_config.TextColumn("vs Pitcher"),
@@ -16536,7 +16602,7 @@ def build_col_config():
                 "barrel% vs sinkers is 18%, that's the exploit."
             ),
         ),
-        "player_name": st.column_config.TextColumn("Hitter"),
+        "player_name": _player_col("Hitter"),
         "lineup_pos": st.column_config.NumberColumn(
             "#", width="small",
             help=(
@@ -17915,7 +17981,7 @@ if _valid_games:
                         st.dataframe(
                             _gd[_dcols], hide_index=True, use_container_width=True,
                             column_config={
-                                "player_name": st.column_config.TextColumn("Hitter"),
+                                "player_name": _player_col("Hitter"),
                                 "team": st.column_config.TextColumn("Tm", width="small"),
                                 "dinger_score": st.column_config.NumberColumn(
                                     "💥 Dinger", format="%.0f",
@@ -18332,7 +18398,7 @@ if _valid_games:
                         ),
                         hide_index=True, use_container_width=True,
                         column_config={
-                            "player_name": st.column_config.TextColumn("Hitter"),
+                            "player_name": _player_col("Hitter"),
                             "barrel_pct": st.column_config.NumberColumn("Brl%", format="%.1f%%"),
                             "iso": st.column_config.NumberColumn("ISO", format="%.3f"),
                             "xwoba": st.column_config.NumberColumn("xwOBA", format="%.3f"),
@@ -18367,7 +18433,7 @@ if _valid_games:
                         ),
                         hide_index=True, use_container_width=True,
                         column_config={
-                            "player_name": st.column_config.TextColumn("Hitter"),
+                            "player_name": _player_col("Hitter"),
                             "barrel_pct": st.column_config.NumberColumn("Brl%", format="%.1f%%"),
                             "iso": st.column_config.NumberColumn("ISO", format="%.3f"),
                             "xwoba": st.column_config.NumberColumn("xwOBA", format="%.3f"),
@@ -18941,7 +19007,7 @@ with st.expander("🎛️ Custom Grade Builder — pick your own metrics", expan
                                 "Data", width="small",
                                 help="Metrics with data for this hitter / metrics selected. Rows below the 60% floor are hidden.",
                             ),
-                            "player_name":   st.column_config.TextColumn("Hitter"),
+                            "player_name":   _player_col("Hitter"),
                             "team":          st.column_config.TextColumn("Team", width="small"),
                             "opp_pitcher":   st.column_config.TextColumn("vs Pitcher"),
                         },
