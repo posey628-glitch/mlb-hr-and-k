@@ -1006,20 +1006,6 @@ def save_snapshot(snapshot_date, matchup_df: pd.DataFrame,
         return False
 
 
-def save_snapshot_durable(snapshot_date) -> bool:
-    """True iff the LAST save_snapshot call wrote to durable storage (Gist).
-
-    UI uses this to show "✅ Saved (durable)" vs "⚠️ Saved (this session only)".
-    Lightweight check: just verifies the Gist has this date right now.
-    """
-    if not durable_storage_configured():
-        return False
-    try:
-        return str(snapshot_date) in _list_snapshots_from_gist()
-    except Exception:
-        return False
-
-
 def load_snapshot(snapshot_key) -> dict | None:
     """Load a previously saved snapshot.
 
@@ -1062,39 +1048,6 @@ def load_snapshot(snapshot_key) -> dict | None:
         return None
 
 
-def load_snapshot_before_hour(snapshot_date, target_hour_et: int) -> dict | None:
-    """Load the snapshot taken closest to (but BEFORE) a given hour on a date.
-
-    v42: used by evaluate_hitter_projections to grade each game against the
-    snapshot that was current right before first pitch. A 1pm-game evaluation
-    uses a snapshot taken at 11am or 12pm if one exists. A 7pm-game evaluation
-    uses a 5pm or 6pm snapshot if available, falling back to the latest
-    available snapshot from earlier in the day.
-
-    Returns None if no snapshots before target_hour exist for this date.
-    """
-    date_str = str(snapshot_date)
-    all_keys = list_snapshots()
-    eligible = []
-    for k in all_keys:
-        if k.startswith(date_str + "T"):
-            try:
-                hour = int(k.split("T")[1])
-                if hour < target_hour_et:
-                    eligible.append((hour, k))
-            except (ValueError, IndexError):
-                continue
-        elif k == date_str:
-            # Legacy format — assume late-night (best guess)
-            eligible.append((23, k))
-    if not eligible:
-        return None
-    # Take the latest snapshot that's still before target_hour
-    eligible.sort()
-    _, best_key = eligible[-1]
-    return load_snapshot(best_key)
-
-
 def list_snapshots() -> list[str]:
     """Return list of snapshot keys we have (date-only and date+hour formats).
 
@@ -1124,18 +1077,6 @@ def list_snapshots() -> list[str]:
         pass
     # v43.87: filter internal metadata keys
     return sorted(k for k in keys if not str(k).startswith("_"))
-
-
-def list_snapshot_dates() -> list[str]:
-    """Return list of unique DATES we have any snapshot for (collapses hours).
-
-    Useful for UI that wants to show 'we have snapshots for these days' rather
-    than the full hourly granularity.
-    """
-    dates = set()
-    for k in list_snapshots():
-        dates.add(k.split("T")[0])
-    return sorted(dates)
 
 
 # ----------------------------------------------------------------------------
@@ -1857,151 +1798,6 @@ def fetch_pitcher_outcomes(target_date) -> dict:
     same fetched feeds with fetch_hitter_outcomes — no double fetch).
     """
     return _extract_all_from_feeds(target_date).get("pitchers", {})
-
-
-def _fetch_hitter_outcomes_legacy(target_date) -> dict:
-    """Pre-v44.55 sequential implementation, kept for reference/fallback."""
-    # Strip hour portion if present (v42 hourly snapshots use "DATE T HH" format)
-    target_date_str = str(target_date).split("T")[0]
-    try:
-        url = (
-            f"https://statsapi.mlb.com/api/v1/schedule"
-            f"?sportId=1&date={target_date_str}&hydrate=team,probablePitcher"
-        )
-        r = requests.get(url, headers=HEADERS, timeout=20)
-        r.raise_for_status()
-        data = r.json()
-    except Exception:
-        return {}
-
-    out = {}
-    for date_block in data.get("dates", []):
-        for g in date_block.get("games", []):
-            game_pk = g.get("gamePk")
-            if not game_pk:
-                continue
-            # Fetch detailed boxscore for this game
-            try:
-                box_url = f"https://statsapi.mlb.com/api/v1.1/game/{game_pk}/feed/live"
-                br = requests.get(box_url, headers=HEADERS, timeout=15)
-                br.raise_for_status()
-                box = br.json()
-            except Exception:
-                continue
-            try:
-                liveData = box.get("liveData", {})
-                boxscore = liveData.get("boxscore", {}) or {}
-                for side in ("away", "home"):
-                    team_block = boxscore.get("teams", {}).get(side, {}) or {}
-                    players = team_block.get("players", {}) or {}
-                    for pid_key, player in players.items():
-                        pid = (player.get("person") or {}).get("id")
-                        if not pid:
-                            continue
-                        bat = (player.get("stats") or {}).get("batting") or {}
-                        if not bat:
-                            continue
-                        # v43.70 (outcome tracker expansion): capture 2B/3B/R
-                        # to derive total_bases for the 2+ bases prop backtest,
-                        # and runs for run-scored analysis. Existing HR/H/K/BB
-                        # unchanged.
-                        doubles_ = int(bat.get("doubles") or 0)
-                        triples_ = int(bat.get("triples") or 0)
-                        hr_ = int(bat.get("homeRuns") or 0)
-                        h_ = int(bat.get("hits") or 0)
-                        singles_ = max(0, h_ - doubles_ - triples_ - hr_)
-                        total_bases = singles_ + 2*doubles_ + 3*triples_ + 4*hr_
-                        out[pid] = {
-                            "hr": hr_,
-                            "ab": int(bat.get("atBats") or 0),
-                            "h": h_,
-                            "k": int(bat.get("strikeOuts") or 0),
-                            "bb": int(bat.get("baseOnBalls") or 0),
-                            "rbi": int(bat.get("rbi") or 0),
-                            # v43.70 additions
-                            "doubles": doubles_,
-                            "triples": triples_,
-                            "total_bases": total_bases,
-                            "runs": int(bat.get("runs") or 0),
-                            # Convenience binary flags for the analysis section
-                            "homered": hr_ > 0,
-                            "got_hit": h_ > 0,
-                            "got_2plus_bases": total_bases >= 2,
-                            "got_3plus_bases": total_bases >= 3,
-                        }
-            except Exception:
-                continue
-    return out
-
-
-def _fetch_pitcher_outcomes_legacy(target_date) -> dict:
-    """
-    For a given date, fetch what each starting pitcher actually did.
-    Returns {player_id: {"ip": float, "k": int, "er": int, "bb": int, "hr": int, "h": int}}
-
-    v42g: same date-key fix as fetch_hitter_outcomes — strip the hour portion
-    so hourly snapshot keys work.
-    """
-    target_date_str = str(target_date).split("T")[0]
-    try:
-        url = (
-            f"https://statsapi.mlb.com/api/v1/schedule"
-            f"?sportId=1&date={target_date_str}&hydrate=team"
-        )
-        r = requests.get(url, headers=HEADERS, timeout=20)
-        r.raise_for_status()
-        data = r.json()
-    except Exception:
-        return {}
-
-    out = {}
-    for date_block in data.get("dates", []):
-        for g in date_block.get("games", []):
-            game_pk = g.get("gamePk")
-            if not game_pk:
-                continue
-            try:
-                box_url = f"https://statsapi.mlb.com/api/v1.1/game/{game_pk}/feed/live"
-                br = requests.get(box_url, headers=HEADERS, timeout=15)
-                br.raise_for_status()
-                box = br.json()
-            except Exception:
-                continue
-            try:
-                liveData = box.get("liveData", {})
-                boxscore = liveData.get("boxscore", {}) or {}
-                for side in ("away", "home"):
-                    team_block = boxscore.get("teams", {}).get(side, {}) or {}
-                    players = team_block.get("players", {}) or {}
-                    for pid_key, player in players.items():
-                        pid = (player.get("person") or {}).get("id")
-                        if not pid:
-                            continue
-                        pit = (player.get("stats") or {}).get("pitching") or {}
-                        if not pit:
-                            continue
-                        # Only count starters - inningsPitched > 0 and gameStarted
-                        gs_flag = pit.get("gamesStarted", 0)
-                        if not gs_flag:
-                            continue
-                        try:
-                            ip_str = str(pit.get("inningsPitched") or "0.0")
-                            # MLB IP format: "5.2" means 5 and 2/3 innings
-                            whole, _, frac = ip_str.partition(".")
-                            ip = float(whole) + (float(frac or 0) / 3.0)
-                        except Exception:
-                            ip = 0.0
-                        out[pid] = {
-                            "ip": ip,
-                            "k": int(pit.get("strikeOuts") or 0),
-                            "er": int(pit.get("earnedRuns") or 0),
-                            "bb": int(pit.get("baseOnBalls") or 0),
-                            "hr": int(pit.get("homeRuns") or 0),
-                            "h": int(pit.get("hits") or 0),
-                        }
-            except Exception:
-                continue
-    return out
 
 
 # ----------------------------------------------------------------------------
