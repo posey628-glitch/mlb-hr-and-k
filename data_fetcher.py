@@ -144,6 +144,20 @@ def clip_outliers(df: pd.DataFrame, caps: dict | None = None) -> pd.DataFrame:
 # and the user can flag the issue for proper investigation.
 
 @st.cache_data(ttl=21600)  # 6hr — zone data updates daily
+def _has_real_values(df: pd.DataFrame, col: str, min_n: int = 20) -> bool:
+    """v45.19: value-level fetch validation. A Savant fetch can 'succeed' at
+    the URL/column level yet return unparseable or empty values — the frame
+    then merges in and creates phantom all-NaN columns downstream (seen in the
+    column-completeness diagnostic as 0%-populated fields; same failure family
+    as the IAA field loss). Require the key column to carry at least `min_n`
+    real values before trusting the fetch."""
+    try:
+        return (df is not None and not df.empty and col in df.columns
+                and int(df[col].notna().sum()) >= min_n)
+    except Exception:
+        return False
+
+
 def get_pitcher_zone_tiers(season: int = None, stats_day: str = "") -> pd.DataFrame:
     """Pitcher % of pitches by zone tier (heart, shadow, chase, waste).
 
@@ -199,7 +213,11 @@ def get_pitcher_zone_tiers(season: int = None, stats_day: str = "") -> pd.DataFr
                     out[f"pitcher_{tier}_pct"] = pd.to_numeric(df[col_map[tier]], errors="coerce")
                 else:
                     out[f"pitcher_{tier}_pct"] = pd.NA
-            return out.dropna(subset=["player_id"])
+            out = out.dropna(subset=["player_id"])
+            # v45.19: all-NaN heart% = fetch miss, not a merge (see hitter twin)
+            if not _has_real_values(out, "pitcher_heart_pct", min_n=20):
+                continue
+            return out
         except Exception:
             continue
     return pd.DataFrame()
@@ -255,7 +273,12 @@ def get_hitter_zone_tiers(season: int = None, stats_day: str = "") -> pd.DataFra
                     out[f"hitter_{tier}_woba"] = pd.to_numeric(df[col_map[tier]], errors="coerce")
                 else:
                     out[f"hitter_{tier}_woba"] = pd.NA
-            return out.dropna(subset=["player_id"])
+            out = out.dropna(subset=["player_id"])
+            # v45.19: value-level guard — headers can match while values are
+            # unparseable; all-NaN wOBA must count as a MISS, not a merge.
+            if not _has_real_values(out, "hitter_heart_woba", min_n=20):
+                continue
+            return out
         except Exception:
             continue
     return pd.DataFrame()
@@ -530,6 +553,16 @@ def get_hitter_handedness_statcast(season: int = None,
     # Fetch both sides; either may fail independently
     df_l = _fetch_one_side("L")
     df_r = _fetch_one_side("R")
+
+    # v45.19: value-level guard — a side that fetched headers but parsed to
+    # all-NaN would merge phantom vs_lhp_/vs_rhp_ columns (0%-populated) into
+    # hitter_stats. Treat an all-NaN key column as a fetch miss for that side.
+    if not df_l.empty and not _has_real_values(
+            df_l, "barrel_pct" if "barrel_pct" in df_l.columns else "avg_ev", min_n=20):
+        df_l = pd.DataFrame()
+    if not df_r.empty and not _has_real_values(
+            df_r, "barrel_pct" if "barrel_pct" in df_r.columns else "avg_ev", min_n=20):
+        df_r = pd.DataFrame()
 
     if df_l.empty and df_r.empty:
         return pd.DataFrame()
