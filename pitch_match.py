@@ -365,35 +365,3 @@ def pitch_match_score(
         "mini_arsenal": mini_arsenal,  # v43.29: user-requested top-3 pitch breakdown
         "breakdown": breakdown,
     }
-
-
-def lineup_pitch_match(
-    lineup: list[dict],
-    pitcher_id: int,
-    hitter_arsenal_all: pd.DataFrame,
-    pitcher_arsenal_all: pd.DataFrame,
-) -> pd.DataFrame:
-    """Run pitch_match_score for every hitter in a lineup vs one pitcher."""
-    if not lineup or pitcher_id is None or pd.isna(pitcher_id):
-        return pd.DataFrame()
-
-    pid_col_p = "player_id"
-    p_arsenal = pitcher_arsenal_all[
-        pitcher_arsenal_all.get(pid_col_p) == pitcher_id
-    ] if pid_col_p in pitcher_arsenal_all.columns else pd.DataFrame()
-
-    rows = []
-    for p in lineup:
-        bid = p.get("id")
-        if not bid:
-            continue
-        h_arsenal = hitter_arsenal_all[
-            hitter_arsenal_all.get("player_id") == bid
-        ] if "player_id" in hitter_arsenal_all.columns else pd.DataFrame()
-        res = pitch_match_score(bid, p_arsenal, h_arsenal)
-        rows.append({
-            "player_id": bid,
-            "player_name": p["name"],
-            **{k: v for k, v in res.items() if k != "breakdown"},
-        })
-    return pd.DataFrame(rows)
