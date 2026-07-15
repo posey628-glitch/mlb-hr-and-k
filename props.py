@@ -20,7 +20,6 @@ CALIBRATION NOTE:
 
 from __future__ import annotations
 
-import math
 import numpy as np
 import pandas as pd
 
@@ -186,7 +185,10 @@ def hr_prob_per_pa(
     # split sample size, and apply to h_base.
     # Switch hitters bat opposite of pitcher arm → look up that side.
     p_throws_now = (pitcher_row.get("p_throws") or pitcher_row.get("throws") or "").upper() if pitcher_row else ""
-    h_bats_now = (hitter_row.get("bats") or "").upper() if hitter_row else ""
+    # v43.81 cleanup: h_bats_now was computed but never used (reviewer-flagged).
+    # The hitter's bat side is unused in this multiplier calc because the split
+    # is keyed off the pitcher's throwing hand, not the hitter's bat side —
+    # switch-hitter splits already reflect them batting from the favorable side.
     # Determine which split applies. A LHB always faces vs-RHP if pitcher is R,
     # but the hitter's split is denoted by the pitcher's hand (vs-LHP, vs-RHP).
     h_split_key = None
@@ -315,7 +317,7 @@ def hr_prob_per_pa(
     p_throws_early = (pitcher_row.get("p_throws") or pitcher_row.get("throws") or "").upper() if pitcher_row else ""
     split_hr_per_pa = None
     split_pa_count = 0
-    split_source = None  # for debugging: "hr_per_pa" or "slg_derived"
+    # v43.81 cleanup: split_source debugging local removed (reviewer-flagged).
     # Determine which side of the pitcher's splits to use.
     # - LHB → vs_lhb_ (pitcher's stats vs LHB)
     # - RHB → vs_rhb_
@@ -341,7 +343,6 @@ def hr_prob_per_pa(
                 and split_pa is not None and not pd.isna(split_pa) and split_pa >= 40):
             split_hr_per_pa = float(split_hr) / 100.0  # convert pct → rate
             split_pa_count = float(split_pa)
-            split_source = "hr_per_pa"
         else:
             # FALLBACK: derive from SLG split (when MLB API doesn't return raw counts).
             # SLG correlates strongly with HR/PA. Empirical mapping (2023-2024 data):
@@ -373,7 +374,6 @@ def hr_prob_per_pa(
                     derived_hr_pct = max(0.5, min(7.0, (slg_val - 0.236) * 17.5))
                     split_hr_per_pa = derived_hr_pct / 100.0
                     split_pa_count = 80  # treat as moderately reliable, shrinks somewhat
-                    split_source = "slg_derived"
                 except (TypeError, ValueError):
                     pass
 
@@ -1202,40 +1202,6 @@ def american_from_prob(p: float) -> int:
     if p >= 0.5:
         return int(round(-p / (1 - p) * 100))
     return int(round((1 - p) / p * 100))
-
-
-def edge_vs_market(model_prob: float, market_odds: int) -> dict:
-    """
-    Compare model probability to a sportsbook line.
-
-    Returns:
-      market_prob   - what the book is implying (includes vig)
-      fair_odds     - what odds the model thinks are fair
-      edge_pct      - (model_prob - market_prob) / market_prob * 100
-      kelly         - optional Kelly stake (cap at 25% for safety)
-
-    v43.62 (reviewer fix #2.10): odds=0 guard.
-    """
-    if model_prob is None or market_odds is None or market_odds == 0:
-        return {}
-    mp = implied_prob_from_american(market_odds)
-    if mp is None:
-        return {}
-    edge_pct = (model_prob - mp) / mp * 100
-    fair = american_from_prob(model_prob)
-    # Decimal odds for Kelly
-    dec = 1 + (market_odds / 100 if market_odds > 0 else 100 / -market_odds)
-    b = dec - 1
-    q = 1 - model_prob
-    kelly_full = (b * model_prob - q) / b if b > 0 else 0
-    kelly_quarter = max(0, min(0.25, kelly_full / 4))  # quarter Kelly capped
-    return {
-        "market_prob": round(mp, 4),
-        "fair_odds": fair,
-        "edge_pct": round(edge_pct, 1),
-        "kelly_quarter": round(kelly_quarter, 4),
-        "recommend": "✅ BET" if edge_pct > 5 else "—" if edge_pct > -3 else "❌ FADE",
-    }
 
 
 def verdict_color(score: float, scale: tuple = (40, 60)) -> str:
