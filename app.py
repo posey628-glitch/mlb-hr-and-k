@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.18-ui-polish"
+APP_VERSION = "2026.06.10-v45.19-coverage-clarity"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -5720,22 +5720,50 @@ if show_pattern_analysis:
 
 if show_diagnostic:
     with st.expander("🔬 Data diagnostic — column completeness"):
-        if not hitter_stats.empty:
-            st.markdown("**Hitter columns (% populated):**")
-            avail = pd.DataFrame([
-                {"column": c, "populated": int(hitter_stats[c].notna().sum()),
-                 "pct": f"{hitter_stats[c].notna().sum() / len(hitter_stats) * 100:.0f}%"}
-                for c in hitter_stats.columns
-            ])
-            st.dataframe(avail, hide_index=True, use_container_width=True)
-        if not pitcher_stats.empty:
-            st.markdown("**Pitcher columns (% populated):**")
-            avail = pd.DataFrame([
-                {"column": c, "populated": int(pitcher_stats[c].notna().sum()),
-                 "pct": f"{pitcher_stats[c].notna().sum() / len(pitcher_stats) * 100:.0f}%"}
-                for c in pitcher_stats.columns
-            ])
-            st.dataframe(avail, hide_index=True, use_container_width=True)
+        # v45.19: columns fall into two very different classes and mixing them
+        # made this table cry wolf. SLATE-SCOPED columns (handedness splits,
+        # day/night splits, IL status, p_throws) are only fetched for TONIGHT'S
+        # slate players — measuring them over the full ~600-player pool always
+        # reads ~0%, especially on small slates. That's by design (API cost),
+        # not a dead feature: the true slate-level coverage lives in Pipeline
+        # Health. POOL-WIDE columns at 0% are the real signal — usually a
+        # Savant endpoint quietly dropping a field (like IAA).
+        _SLATE_SCOPED_PREFIXES = ("vs_lhp_", "vs_rhp_", "vs_lhb_", "vs_rhb_",
+                                  "vs_day_", "vs_night_")
+        _SLATE_SCOPED_EXACT = {"on_il", "days_since_return",
+                               "il_count_this_season", "p_throws"}
+
+        def _split_coverage(frame, label):
+            if frame.empty:
+                return
+            pool_rows, slate_rows = [], []
+            n = len(frame)
+            for c in frame.columns:
+                filled = int(frame[c].notna().sum())
+                pct = filled / n * 100
+                row = {"column": c, "populated": filled, "pct": f"{pct:.0f}%"}
+                if c.startswith(_SLATE_SCOPED_PREFIXES) or c in _SLATE_SCOPED_EXACT:
+                    slate_rows.append(row)
+                else:
+                    if pct == 0:
+                        row["column"] = f"⚠️ {c}"
+                    pool_rows.append(row)
+            st.markdown(f"**{label} — pool-wide columns** (sorted worst-first; "
+                        f"⚠️ 0% = field likely no longer returned by the endpoint):")
+            pool_df = pd.DataFrame(pool_rows)
+            pool_df["_sort"] = pool_df["pct"].str.rstrip("%").astype(float)
+            st.dataframe(pool_df.sort_values("_sort").drop(columns="_sort"),
+                         hide_index=True, use_container_width=True)
+            if slate_rows:
+                st.markdown(f"**{label} — slate-scoped columns** (fetched ONLY "
+                            f"for tonight's slate players — low % over the full "
+                            f"pool is BY DESIGN, not a dead feature. True "
+                            f"coverage: see Pipeline Health's slate-level lines):")
+                st.dataframe(pd.DataFrame(slate_rows), hide_index=True,
+                             use_container_width=True)
+
+        _split_coverage(hitter_stats, "Hitter")
+        _split_coverage(pitcher_stats, "Pitcher")
 
     # Live network probe - this is the critical diagnostic
     with st.expander("🌐 Live API connectivity probe (click to run)"):
@@ -7035,7 +7063,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.18 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.19 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
