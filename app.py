@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.15-module-audit"
+APP_VERSION = "2026.06.10-v45.16-public-predictors"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -7023,7 +7023,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.15 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.16 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -9127,6 +9127,79 @@ st.divider()
 # ============================================================================
 # TOP 5 PICKS OF THE DAY — combined HR signal across all factors
 # ============================================================================
+# ============================================================
+# v45.16: PUBLIC "what's predicting homers" — top 5 signals, names only.
+# Reuses the exact Section G aggregation (rolling_feature_importance) so this
+# public list and the owner-side Pattern Analysis can never disagree. No
+# numbers by design — just the ranked names, readable by anyone. Hidden
+# until the learning loop has >=5 slates so we never show noise as signal.
+# ============================================================
+try:
+    _FRIENDLY_METRIC_NAMES = {
+        "avg_ev": "Average Exit Velocity",
+        "hard_hit": "Hard-Hit Rate",
+        "nuclear_met": "Nuclear Checklist (12-point elite power profile)",
+        "must_have_met": "Must-Have Checklist (9-point power baseline)",
+        "pulled_brl_pct": "Pulled-Barrel Rate",
+        "pull_air_pct": "Pulled-Air Rate",
+        "barrel_pct": "Barrel Rate",
+        "blast_pct": "Blast Rate (bat speed)",
+        "iso": "ISO (raw power)",
+        "fb_pct": "Fly-Ball Rate",
+        "pull_pct": "Pull Rate",
+        "xslg": "Expected Slugging (xSLG)",
+        "slg": "Slugging %",
+        "xwoba": "Expected wOBA",
+        "hr_game_pct": "HR Game % (our per-game HR probability)",
+        "hr_score": "HR Score (our main composite)",
+        "dinger_score": "Dinger Score (our combined power metric)",
+        "pick_score": "Pick Score (Top-10 ranking formula)",
+        "power_score": "Power Score",
+        "matchup": "Matchup Score",
+        "matchup_opp": "Opponent Matchup Score",
+        "pitch_hr_score": "Pitch-Type HR Matchup",
+        "barrel_matchup_score": "Barrel Matchup Score",
+        "two_way_matchup_score": "Two-Way Matchup Score",
+        "env_boost": "Environment Boost (park × weather)",
+        "sleeper_score": "Sleeper Score",
+        "discipline_score": "Plate Discipline Score",
+        "launch_angle": "Launch Angle",
+        "lift_score": "Lift Score",
+        "recent_iso": "Recent ISO (hot-streak power)",
+        "hr_form": "HR Form (recent trend)",
+    }
+    _pub_hist = st.session_state.get("_pub_pattern_history")
+    if _pub_hist is None:
+        from backtest import load_pattern_history as _load_ph
+        _pub_hist = _load_ph() or []
+        st.session_state["_pub_pattern_history"] = _pub_hist
+    if isinstance(_pub_hist, list) and len(_pub_hist) >= 5:
+        from pattern_analysis import rolling_feature_importance as _rfi_pub
+        _imp_pub = _rfi_pub(_pub_hist, lookback_days=14)
+        if _imp_pub is not None and not _imp_pub.empty:
+            # Positive predictors with >=5 graded days — same consistency
+            # floor the owner-side Proposed Weights use.
+            _q_pub = _imp_pub[
+                (_imp_pub["n_days"] >= 5) & (_imp_pub["avg_corr"] > 0)
+            ].sort_values("avg_corr", ascending=False).head(5)
+            if len(_q_pub) >= 3:
+                with st.container(border=True):
+                    st.markdown("#### 🔮 What's predicting homers best right now")
+                    _pub_lines = []
+                    for _rank, _feat in enumerate(_q_pub["feature"].tolist(), start=1):
+                        _nm = _FRIENDLY_METRIC_NAMES.get(
+                            str(_feat), str(_feat).replace("_", " ").title())
+                        _pub_lines.append(f"**{_rank}.** {_nm}")
+                    st.markdown("  \n".join(_pub_lines))
+                    st.caption(
+                        f"Ranked by how strongly each signal has lined up with "
+                        f"actual home runs over our last {min(len(_pub_hist), 14)} "
+                        f"graded slates. Updates daily as results come in — "
+                        f"the order shifts as the season evolves."
+                    )
+except Exception as _pub_e:
+    log_swallowed_error("public_top5_predictors", _pub_e, surface=False)
+
 st.markdown("<div id='sec-top10'></div>", unsafe_allow_html=True)
 st.subheader("🏆 Top 10 Picks of the Day")
 st.caption(
@@ -10380,24 +10453,39 @@ if combined_picks is not None and not combined_picks.empty:
         n_st = max(1, len(_starters))
         n_bn = len(_bench)
 
-        def _hand_cov(col, label):
+        def _hand_cov(col, label, pitcher_side=False):
             if col not in combined_picks.columns:
                 return None
-            st_n = _starters[col].notna().sum() if len(_starters) else 0
-            line = f"{label}: starters {st_n}/{n_st} ({100*st_n/n_st:.0f}%)"
-            if n_bn > 0:
-                bn_n = _bench[col].notna().sum()
-                line += f", bench {bn_n}/{n_bn} ({100*bn_n/n_bn:.0f}%)"
-            return line
+            _st_f, _bn_f = _starters, _bench
+            _note = ""
+            # v45.16: pitcher-side splits can't exist for hitters facing a TBD
+            # proxy (no player_id → no splits). Exclude those rows from the
+            # denominator so a 1-game slate with one TBD side doesn't read as a
+            # 50% fetch failure — and say how many were excluded.
+            if pitcher_side and "opp_pitcher" in combined_picks.columns:
+                _tbd_st = (_st_f["opp_pitcher"].astype(str).str.upper() == "TBD").sum() if len(_st_f) else 0
+                if _tbd_st:
+                    _st_f = _st_f[_st_f["opp_pitcher"].astype(str).str.upper() != "TBD"]
+                    _note = f" [{_tbd_st} starter(s) face TBD — excluded]"
+                if len(_bn_f):
+                    _bn_f = _bn_f[_bn_f["opp_pitcher"].astype(str).str.upper() != "TBD"]
+            _n_st = max(1, len(_st_f))
+            st_n = _st_f[col].notna().sum() if len(_st_f) else 0
+            line = f"{label}: starters {st_n}/{_n_st} ({100*st_n/_n_st:.0f}%)"
+            _n_bn = len(_bn_f)
+            if _n_bn > 0:
+                bn_n = _bn_f[col].notna().sum()
+                line += f", bench {bn_n}/{_n_bn} ({100*bn_n/_n_bn:.0f}%)"
+            return line + _note
 
         cov_pieces = []
-        for col, label in [
-            ("vs_lhp_pa", "vs LHP"),
-            ("vs_rhp_pa", "vs RHP"),
-            ("opp_pitcher_vs_lhb_pa", "Pitcher vs LHB"),
-            ("opp_pitcher_vs_rhb_pa", "Pitcher vs RHB"),
+        for col, label, _pside in [
+            ("vs_lhp_pa", "vs LHP", False),
+            ("vs_rhp_pa", "vs RHP", False),
+            ("opp_pitcher_vs_lhb_pa", "Pitcher vs LHB", True),
+            ("opp_pitcher_vs_rhb_pa", "Pitcher vs RHB", True),
         ]:
-            line = _hand_cov(col, label)
+            line = _hand_cov(col, label, pitcher_side=_pside)
             if line:
                 cov_pieces.append(line)
 
