@@ -126,32 +126,6 @@ def clip_outliers(df: pd.DataFrame, caps: dict | None = None) -> pd.DataFrame:
     return df
 
 
-def safe_request(url: str, timeout: int = 20, max_retries: int = 3,
-                  **kwargs) -> requests.Response | None:
-    """HTTP GET with exponential backoff retry. Returns None on final failure.
-
-    Replaces patterns like `requests.get(url, headers=HEADERS, timeout=20)` that
-    fail hard on the first transient error. Backoff schedule: 1.5s, 3s, 6s.
-    Returns None instead of raising so callers can decide whether to fall back
-    to a cached value, skip the source, or surface an error. The returned
-    Response (if any) is already .raise_for_status()-cleared.
-
-    Existing fetch functions in this file have their own try/except blocks and
-    don't need to be retrofitted unless they're observed to fail transiently.
-    Use this helper for new fetches or specifically-fragile endpoints.
-    """
-    import time
-    for attempt in range(max_retries):
-        try:
-            r = requests.get(url, headers=HEADERS, timeout=timeout, **kwargs)
-            r.raise_for_status()
-            return r
-        except Exception:
-            if attempt < max_retries - 1:
-                time.sleep(1.5 * (2 ** attempt))
-    return None
-
-
 # ----------------------------------------------------------------------------
 # Zone tier fetchers (v43 — experimental, defensive)
 # ----------------------------------------------------------------------------
@@ -1711,22 +1685,6 @@ def get_active_roster_ids(team_id: int) -> set:
         }
     except Exception:
         return set()
-
-
-@st.cache_data(ttl=3600)
-def get_all_team_rosters(slate: pd.DataFrame) -> dict:
-    """
-    Returns {team_id: [hitter dicts]} for every team on today's slate.
-    Used so users can scan any hitter, not just confirmed lineups.
-    """
-    rosters = {}
-    team_ids = set()
-    for _, g in slate.iterrows():
-        team_ids.add(int(g["away_team_id"]))
-        team_ids.add(int(g["home_team_id"]))
-    for tid in team_ids:
-        rosters[tid] = get_team_roster(tid)
-    return rosters
 
 
 @st.cache_data(ttl=3600)  # 1hr — schedule/lineups don't change for past games
@@ -3710,30 +3668,6 @@ def get_sprint_speed(season: int = CURRENT_SEASON) -> pd.DataFrame:
 # Statcast Run Values per pitch type (better pitch quality metric than whiff%)
 # ----------------------------------------------------------------------------
 
-@st.cache_data(ttl=86400)
-def get_pitch_run_values(season: int = CURRENT_SEASON) -> pd.DataFrame:
-    """
-    Run value per 100 pitches by pitcher + pitch type.
-    Negative = good for pitcher. -1.5 is elite, +1.5 is brutal.
-    """
-    url = (
-        "https://baseballsavant.mlb.com/leaderboard/pitch-arsenals"
-        f"?year={season}&min=10&type=run_value&hand=&csv=true"
-    )
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=20)
-        r.raise_for_status()
-        df = pd.read_csv(io.StringIO(r.text))
-        if "last_name, first_name" in df.columns:
-            df["player_name"] = df["last_name, first_name"].apply(
-                lambda s: " ".join(reversed([p.strip() for p in str(s).split(",")]))
-                if isinstance(s, str) and "," in s else s
-            )
-        return df
-    except Exception:
-        return pd.DataFrame()
-
-
 # ----------------------------------------------------------------------------
 # Traditional stats from MLB Stats API (WHIP, HR/9, OBP, HR totals)
 # ----------------------------------------------------------------------------
@@ -4447,47 +4381,6 @@ def fill_pitcher_stats_for_slate(pitcher_stats: pd.DataFrame, slate: pd.DataFram
 # ----------------------------------------------------------------------------
 # Recent form: rolling 15-game Statcast
 # ----------------------------------------------------------------------------
-
-@st.cache_data(ttl=3600)
-def get_recent_form_hitter(player_id: int, season: int = CURRENT_SEASON, days: int = 15) -> dict:
-    """
-    Pulls last N days of statcast pitch-level data for one hitter and
-    aggregates a few rolling indicators.
-    """
-    end = date.today()
-    from datetime import timedelta
-    start = end - timedelta(days=days)
-    url = (
-        "https://baseballsavant.mlb.com/statcast_search/csv"
-        f"?all=true&hfPT=&hfAB=&hfGT=R%7C&hfPR=&hfZ=&stadium=&hfBBL=&hfNewZones="
-        "&hfPull=&hfC=&hfSea={s}%7C&hfSit=&player_type=batter&hfOuts=&opponent="
-        "&pitcher_throws=&batter_stands=&hfSA=&game_date_gt={st}&game_date_lt={en}"
-        "&batters_lookup%5B%5D={pid}&team=&position=&hfRO=&home_road=&hfFlag="
-        "&metric_1=&hfInn=&min_pitches=0&min_results=0&group_by=name&sort_col=pitches"
-        "&player_event_sort=api_p_release_speed&sort_order=desc&min_pas=0&type=details"
-    ).format(s=season, st=start.isoformat(), en=end.isoformat(), pid=player_id)
-
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=30)
-        r.raise_for_status()
-        df = pd.read_csv(io.StringIO(r.text))
-        if df.empty:
-            return {}
-        bbe = df[df["type"] == "X"] if "type" in df.columns else df
-        return {
-            "pa": int(df["pitch_number"].count()) if "pitch_number" in df.columns else len(df),
-            "xwoba_recent": float(df["estimated_woba_using_speedangle"].mean())
-                if "estimated_woba_using_speedangle" in df.columns else None,
-            "barrel_pct_recent": float((bbe["launch_speed_angle"] == 6).mean() * 100)
-                if "launch_speed_angle" in bbe.columns and len(bbe) > 0 else None,
-            "hard_hit_recent": float((bbe["launch_speed"] >= 95).mean() * 100)
-                if "launch_speed" in bbe.columns and len(bbe) > 0 else None,
-            "avg_ev_recent": float(bbe["launch_speed"].mean())
-                if "launch_speed" in bbe.columns and len(bbe) > 0 else None,
-        }
-    except Exception:
-        return {}
-
 
 # ----------------------------------------------------------------------------
 # Team-level pitching - used as fallback when probable pitcher is TBD
