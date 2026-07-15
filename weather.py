@@ -281,7 +281,7 @@ def _fetch_single_om(lat: float, lon: float, target_dt_str: str) -> dict:
         return {}
 
 
-def fetch_weather(lat: float, lon: float, when) -> dict:
+def _fetch_weather_full_chain(lat: float, lon: float, when) -> dict:
     """
     Return weather forecast nearest to `when` for the given coords.
 
@@ -291,6 +291,10 @@ def fetch_weather(lat: float, lon: float, when) -> dict:
 
     `when` accepts datetime, pd.Timestamp, ISO string, or None.
     Cache key is normalized to (rounded lat/lon, hour-of-day).
+
+    v45.17: renamed from fetch_weather (the public name is the batch-aware
+    wrapper below, which now calls THIS full chain — previously it skipped
+    straight to _fetch_single_om, silently dropping the wttr.in fallback).
     """
     if lat is None or lon is None:
         return {}
@@ -485,8 +489,10 @@ def _fetch_with_batch_cache_check(lat: float, lon: float, when) -> dict:
     key = (lat, lon, target_dt.isoformat())
     if key in _BATCH_CACHE:
         return _BATCH_CACHE[key]
-    # Fall through to cached single-location API call
-    return _fetch_single_om(lat, lon, target_dt.isoformat())
+    # v45.17 (deep-dive fix): fall through to the FULL chain (Open-Meteo →
+    # wttr.in → {}), not _fetch_single_om alone — the OM-only fall-through
+    # silently dropped the wttr.in fallback for per-venue batch misses.
+    return _fetch_weather_full_chain(lat, lon, target_dt)
 
 
 # Override the public name to use the batch-aware version
