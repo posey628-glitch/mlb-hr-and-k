@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.16-public-predictors"
+APP_VERSION = "2026.06.10-v45.17-deep-dive-fixes"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -7023,7 +7023,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.16 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.17 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -10495,6 +10495,21 @@ if combined_picks is not None and not combined_picks.empty:
                 "**Handedness-split coverage** · " + " · ".join(cov_pieces)
                 + "  ← bench naturally has lower coverage (no recent PA); "
                 + "starter % is the meaningful one. 0% on starters = dead feature.",
+            )
+        # v45.17 (deep dive): surface background fetch errors that were being
+        # stored in session_state but never displayed — a splits or HR-profile
+        # fetch could fail completely silently. Only shows when non-empty.
+        _bg_errs = []
+        for _ek, _elabel in (("_hitter_splits_err", "hitter-splits fetch"),
+                             ("_hr_profile_err", "HR-profile fetch")):
+            _ev = st.session_state.get(_ek)
+            if _ev:
+                _bg_errs.append(f"{_elabel}: `{str(_ev)[:120]}`")
+        if _bg_errs:
+            stash_diagnostic(
+                "pipeline_health",
+                "⚠️ **Background fetch errors** (features silently degraded "
+                "this run) · " + " · ".join(_bg_errs),
             )
     except Exception:
         pass
