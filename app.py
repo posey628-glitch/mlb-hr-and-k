@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.21-weather-sanity"
+APP_VERSION = "2026.06.10-v45.22-table-views"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -7116,7 +7116,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.21 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.22 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -17242,6 +17242,48 @@ def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
     # Auto-hide columns that are completely empty (no point showing them)
     cols_to_show = [c for c in cols_to_show if matchup_df[c].notna().any()]
 
+    # v45.22 (review P8): table views. Filter the (already availability-
+    # checked) column list down to the selected view. Sets intersect with
+    # cols_to_show so a missing column never breaks anything; "All columns"
+    # is the previous behavior. Identity + verdict + reliability columns ride
+    # along in every view so the who/how-good/how-trustworthy read never
+    # disappears.
+    _TABLE_VIEWS = {
+        "🏠 Overview": [
+            "player_name", "lineup_pos", "bats",
+            "hr_score_signal", "hr_score", "grade", "hr_game_pct",
+            "dinger_score", "smash_spot", "streak_label",
+            "matchup_opp", "data_completeness",
+        ],
+        "⚡ Power": [
+            "player_name", "grade", "hr_game_pct",
+            "barrel_pct", "pulled_brl_pct", "iso", "avg_ev", "avg_hr_ev",
+            "hard_hit", "blast_pct", "fb_pct", "la", "xwoba", "xwobacon",
+            "avg_hr_distance", "max_hit_speed", "power_score", "lift_score",
+            "smash_spot", "data_completeness",
+        ],
+        "🎯 Matchup": [
+            "player_name", "grade", "hr_game_pct", "hr_score",
+            "matchup", "matchup_opp", "pitch_match_score", "pitch_hr_score",
+            "best_pitch", "best_pitch_xwoba", "worst_pitch", "mini_arsenal",
+            "arsenal_flag", "gb_flag", "day_night_flag", "split_confidence",
+            "smash_spot", "data_completeness",
+        ],
+        "🔬 Researcher": [
+            "player_name", "grade", "hr_game_pct",
+            "hr_criteria_label", "must_have_label", "must_have_met",
+            "nuclear_label", "nuclear_met", "nuclear_grade",
+            "near_hr_est", "avg_dist", "barrel_count", "hr_profile_label",
+            "hit_alert", "hit_game_pct", "tb_grade", "expected_total_bases",
+            "sleeper_score", "data_completeness",
+        ],
+    }
+    _view_mode = st.session_state.get("_table_view_mode", "🏠 Overview")
+    if _view_mode in _TABLE_VIEWS:
+        _view_set = _TABLE_VIEWS[_view_mode]
+        _avail = set(cols_to_show)
+        cols_to_show = [c for c in _view_set if c in _avail]
+
     if not qualified.empty:
         st.markdown(f"**{team_label}**")
 
@@ -17803,7 +17845,39 @@ if _valid_games:
     # just skip games that aren't selected. "Show all" is the escape hatch.
     _n_games = len(_valid_games)
     _show_all_games = False
-    _sel_col, _all_col = st.columns([3, 1])
+
+    # v45.22 (review P8): player search — find any hitter instantly instead of
+    # hunting through games. Shows the decision columns + which game they're in.
+    _psearch = st.text_input(
+        "🔍 Find a player", value="", key="_player_search",
+        placeholder="Type a name (e.g. Judge) — shows their key numbers + game",
+    )
+    if _psearch and len(_psearch.strip()) >= 2:
+        try:
+            _q_norm = _psearch.strip().lower()
+            _hits = combined_all[
+                combined_all["player_name"].astype(str).str.lower()
+                .str.contains(_q_norm, regex=False, na=False)
+            ]
+            if _hits.empty:
+                st.caption(f"No hitter matching '{_psearch}' on this slate.")
+            else:
+                _srch_cols = [c for c in [
+                    "player_name", "team", "game", "lineup_pos", "grade",
+                    "hr_game_pct", "hr_score", "dinger_score", "smash_spot",
+                    "data_completeness",
+                ] if c in _hits.columns]
+                st.dataframe(
+                    _hits[_srch_cols].head(10),
+                    hide_index=True, use_container_width=True,
+                    column_config={"player_name": _player_col("Player")},
+                )
+                if len(_hits) > 10:
+                    st.caption(f"Showing 10 of {len(_hits)} matches — narrow the search.")
+        except Exception as _pse:
+            log_swallowed_error("player_search", _pse, surface=False)
+
+    _sel_col, _view_col, _all_col = st.columns([3, 2, 1])
     with _sel_col:
         _selected_game_label = st.selectbox(
             f"🎮 Select game to view ({_n_games} game"
@@ -17812,6 +17886,19 @@ if _valid_games:
             index=0,
             key="_game_selector",
             help="Renders one game at a time for speed. Pick another to switch.",
+        )
+    with _view_col:
+        # v45.22 (review P8): table views — users scan a handful of columns,
+        # not 60. Overview = the decision view; the others group the depth.
+        st.selectbox(
+            "📊 Table view:",
+            options=["🏠 Overview", "⚡ Power", "🎯 Matchup",
+                     "🔬 Researcher", "📋 All columns"],
+            index=0,
+            key="_table_view_mode",
+            help="Overview shows the ~10 decision columns. Switch views for "
+                 "power stats, matchup detail, or the researcher framework. "
+                 "'All columns' shows everything (the old behavior).",
         )
     with _all_col:
         _show_all_games = st.checkbox(
