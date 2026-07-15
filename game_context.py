@@ -294,13 +294,6 @@ def get_starting_catcher(game_pk: int) -> dict:
         return {"name": None, "k_factor": 1.0}
 
 
-def get_catcher_k_factor(catcher_name: str | None) -> float:
-    """Direct lookup: catcher name → K factor. Returns 1.0 if not in table."""
-    if not catcher_name:
-        return 1.0
-    return CATCHER_FRAMING_K_FACTORS.get(catcher_name, 1.0)
-
-
 # ---------------------------------------------------------------------------
 # Vegas implied totals — pulled from ESPN. Currently disabled in app.py
 # (use_vegas = False) but kept here in case we want to re-enable.
