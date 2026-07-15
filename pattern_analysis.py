@@ -1289,6 +1289,77 @@ def propose_dinger_weights(importance_df: pd.DataFrame,
     return result
 
 
+# ============================================================================
+# v45.20: CALIBRATION — what do the scores actually MEAN?
+# The convergent #1 recommendation of the external review series (Passes 4, 5
+# and 7 all flagged it 🔴 Critical): a score of 87 should have a real-world
+# meaning, and a predicted 20% should homer ~20% of the time. These two tables
+# answer both, straight from the snapshot+outcome history.
+# ============================================================================
+def score_calibration_table(merged_df: pd.DataFrame,
+                             score_col: str = "hr_score",
+                             outcome_col: str = "homered") -> pd.DataFrame:
+    """Observed HR rate by score band.
+
+    Returns DataFrame: band, n, hr_rate_pct — e.g. "80-89: n=64, 17.2%".
+    Bands with n < 10 are still returned (caller decides how to caveat).
+    Empty DataFrame if inputs missing.
+    """
+    if (merged_df is None or merged_df.empty
+            or score_col not in merged_df.columns
+            or outcome_col not in merged_df.columns):
+        return pd.DataFrame()
+    df = merged_df[[score_col, outcome_col]].copy()
+    df[score_col] = pd.to_numeric(df[score_col], errors="coerce")
+    df[outcome_col] = pd.to_numeric(df[outcome_col], errors="coerce")
+    df = df.dropna()
+    if df.empty:
+        return pd.DataFrame()
+    edges = [0, 50, 60, 70, 80, 90, 200]
+    labels = ["<50", "50-59", "60-69", "70-79", "80-89", "90+"]
+    df["band"] = pd.cut(df[score_col], bins=edges, labels=labels,
+                        right=False, include_lowest=True)
+    out = (df.groupby("band", observed=True)
+             .agg(n=(outcome_col, "size"), hr_rate=(outcome_col, "mean"))
+             .reset_index())
+    out["hr_rate_pct"] = (out["hr_rate"] * 100).round(1)
+    return out.drop(columns=["hr_rate"])
+
+
+def probability_calibration_table(merged_df: pd.DataFrame,
+                                    prob_col: str = "hr_game_pct",
+                                    outcome_col: str = "homered") -> pd.DataFrame:
+    """Predicted vs observed HR rate by predicted-probability band.
+
+    THE calibration test: rows predicted ~20% should homer ~20% of the time.
+    Returns DataFrame: band, n, predicted_pct (mean prediction in band),
+    observed_pct, gap_pts (observed − predicted; + = model underestimates).
+    """
+    if (merged_df is None or merged_df.empty
+            or prob_col not in merged_df.columns
+            or outcome_col not in merged_df.columns):
+        return pd.DataFrame()
+    df = merged_df[[prob_col, outcome_col]].copy()
+    df[prob_col] = pd.to_numeric(df[prob_col], errors="coerce")
+    df[outcome_col] = pd.to_numeric(df[outcome_col], errors="coerce")
+    df = df.dropna()
+    if df.empty:
+        return pd.DataFrame()
+    edges = [0, 5, 10, 15, 20, 25, 101]
+    labels = ["<5%", "5-10%", "10-15%", "15-20%", "20-25%", "25%+"]
+    df["band"] = pd.cut(df[prob_col], bins=edges, labels=labels,
+                        right=False, include_lowest=True)
+    out = (df.groupby("band", observed=True)
+             .agg(n=(outcome_col, "size"),
+                  predicted=(prob_col, "mean"),
+                  observed=(outcome_col, "mean"))
+             .reset_index())
+    out["predicted_pct"] = out["predicted"].round(1)
+    out["observed_pct"] = (out["observed"] * 100).round(1)
+    out["gap_pts"] = (out["observed_pct"] - out["predicted_pct"]).round(1)
+    return out.drop(columns=["predicted", "observed"])
+
+
 def compute_adaptive_score(current_slate: pd.DataFrame,
                             importance_df: pd.DataFrame,
                             top_n_features: int = 5) -> pd.Series:
