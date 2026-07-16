@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.23-pattern-top10"
+APP_VERSION = "2026.06.10-v45.24-export-polish"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -7149,7 +7149,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.23 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.24 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -15044,6 +15044,24 @@ if all_hitters:
                 if _export_all is not None and not _export_all.empty:
                     _export_all = _int_cast(_export_all, _INTEGER_COUNT_COLS)
 
+                def _export_lead(df):
+                    """v45.24 (export review): put the human columns first on
+                    ranking sheets — player, team, opponent, then the verdict
+                    scores — so the first screenful is the information someone
+                    opened the sheet for. IDs and flags slide right. Reference
+                    sheets (Hitters/Pitchers) keep raw order for integrity."""
+                    try:
+                        _lead = [c for c in [
+                            "player_name", "team", "game", "opp_pitcher",
+                            "grade", "hr_game_pct", "hr_score", "dinger_score",
+                            "pick_score", "smash_spot", "sleeper_score",
+                            "power_score", "matchup_opp",
+                        ] if c in df.columns]
+                        _rest = [c for c in df.columns if c not in _lead]
+                        return df[_lead + _rest]
+                    except Exception:
+                        return df
+
                 with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
                     sheets_written = 0
                     if _export_all is not None and not _export_all.empty:
@@ -15056,12 +15074,12 @@ if all_hitters:
                         top_hr = qualified.dropna(subset=["hr_game_pct"]).sort_values(
                             "hr_game_pct", ascending=False).head(20)
                         if not top_hr.empty:
-                            top_hr.to_excel(writer, sheet_name="Top 20 HR", index=False)
+                            _export_lead(top_hr).to_excel(writer, sheet_name="Top 20 HR", index=False)
                     if "power_score" in qualified.columns:
                         top_pow = qualified.dropna(subset=["power_score"]).sort_values(
                             "power_score", ascending=False).head(20)
                         if not top_pow.empty:
-                            top_pow.to_excel(writer, sheet_name="Top 20 Power", index=False)
+                            _export_lead(top_pow).to_excel(writer, sheet_name="Top 20 Power", index=False)
                     if "sleeper_score" in qualified.columns:
                         # Apply the SAME filters as the display widget:
                         #   1. Exclude TOUGH/ELITE pitcher matchups (trap protection)
@@ -15098,15 +15116,15 @@ if all_hitters:
                         top_sl = sleep_export.sort_values(
                             "sleeper_score", ascending=False).head(20)
                         if not top_sl.empty:
-                            top_sl.to_excel(writer, sheet_name="Top 20 Sleepers", index=False)
+                            _export_lead(top_sl).to_excel(writer, sheet_name="Top 20 Sleepers", index=False)
                     # NEW: Top 10 Picks (the curated daily picks from Top Picks section)
                     try:
                         if top_picks_export is not None and not top_picks_export.empty:
-                            top_picks_export.to_excel(writer, sheet_name="Top 10 Picks", index=False)
+                            _export_lead(top_picks_export).to_excel(writer, sheet_name="Top 10 Picks", index=False)
                         # Honorable mentions — diversity-filtered plays worth knowing
                         if (honorable_mentions is not None
                                 and not honorable_mentions.empty):
-                            honorable_mentions.to_excel(writer, sheet_name="Honorable Mentions", index=False)
+                            _export_lead(honorable_mentions).to_excel(writer, sheet_name="Honorable Mentions", index=False)
                         # Best Matchups — pure hitter/pitcher quality, env-free
                         if (best_matchups_export is not None
                                 and not best_matchups_export.empty):
@@ -15146,13 +15164,13 @@ if all_hitters:
                             smash_export = smash_export.sort_values(
                                 ["_tier", "hr_game_pct"], ascending=[False, False]
                             ).drop(columns=["_tier"])
-                            smash_export.to_excel(writer, sheet_name="Smash Spots", index=False)
+                            _export_lead(smash_export).to_excel(writer, sheet_name="Smash Spots", index=False)
                     # NEW: Green Signal sheets - hitters & pitchers with 🟢 alert
                     if combined_all is not None and "alert" in combined_all.columns:
                         green_hitters = combined_all[combined_all["alert"] == "🟢"].sort_values(
                             "hr_game_pct", ascending=False, na_position="last")
                         if not green_hitters.empty:
-                            green_hitters.to_excel(writer, sheet_name="Green Hitters", index=False)
+                            _export_lead(green_hitters).to_excel(writer, sheet_name="Green Hitters", index=False)
                     if p_slate is not None and "alert" in p_slate.columns:
                         green_pitchers = p_slate[p_slate["alert"] == "🟢"].sort_values(
                             "test_score", ascending=False, na_position="last")
@@ -15162,6 +15180,51 @@ if all_hitters:
                     if sheets_written == 0:
                         pd.DataFrame({"empty": ["no data"]}).to_excel(
                             writer, sheet_name="Empty", index=False)
+
+                    # ==== v45.24 (export review): workbook polish ====
+                    # (1) Data Dictionary — generated from COLUMN_HELP, so the
+                    #     workbook self-documents its 260+ fields.
+                    try:
+                        _dd = pd.DataFrame(
+                            [{"column": k, "meaning": v}
+                             for k, v in COLUMN_HELP.items()]
+                        ).sort_values("column")
+                        _dd.to_excel(writer, sheet_name="Data Dictionary", index=False)
+                    except Exception:
+                        pass
+                    # (2) Executive-summary sheet order: decisions first,
+                    #     reference data last. Unknown sheets keep position
+                    #     after the known set. (3) Freeze panes on every sheet:
+                    #     header row + columns through player_name, so
+                    #     horizontal scrolling never loses who the row is.
+                    try:
+                        _desired = [
+                            "Top 10 Picks", "Honorable Mentions", "Smash Spots",
+                            "Top 20 HR", "Top 20 Power", "Top 20 Sleepers",
+                            "Best Matchups", "Green Hitters", "Green Pitchers",
+                            "2-Leg Parlays", "3-Leg Parlays", "Sleeper Parlays",
+                            "Round Robin", "Hitters", "Pitchers",
+                            "Data Dictionary",
+                        ]
+                        _rank = {t: i for i, t in enumerate(_desired)}
+                        writer.book._sheets.sort(
+                            key=lambda ws: _rank.get(ws.title, len(_desired)))
+                        for _ws in writer.book.worksheets:
+                            try:
+                                _pn_col = None
+                                for _cell in _ws[1]:
+                                    if str(_cell.value) == "player_name":
+                                        _pn_col = _cell.column  # 1-based
+                                        break
+                                _anchor = _ws.cell(
+                                    row=2,
+                                    column=(_pn_col + 1) if _pn_col else 1,
+                                ).coordinate
+                                _ws.freeze_panes = _anchor
+                            except Exception:
+                                continue
+                    except Exception:
+                        pass
                 buffer.seek(0)
                 st.download_button(
                     "📥 Export ALL to Excel",
