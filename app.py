@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.22-table-views"
+APP_VERSION = "2026.06.10-v45.23-pattern-top10"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -5785,11 +5785,25 @@ if show_diagnostic:
                                   "vs_day_", "vs_night_")
         _SLATE_SCOPED_EXACT = {"on_il", "days_since_return",
                                "il_count_this_season", "p_throws"}
+        # v45.23: KNOWN-retired fields — raw Savant names superseded by our
+        # renamed canonical columns, plus fields the endpoint stopped
+        # returning. All verified either unconsumed by scoring or covered by
+        # documented fallbacks (e.g. pitcher slg → xwoba/barrel proxies; real
+        # ERA prioritized in the coalesce step). Kept out of the ⚠️ bucket so
+        # the alarm only means ONE thing: a NEW unexpected 0% column.
+        _RETIRED_FIELDS = {
+            "hits", "abs", "avg_hit_angle", "barrels", "launch_speed",
+            "launch_angle", "avg_hit_distance", "pull_air_percent",
+            "straightaway_air_percent", "opposite_air_percent",
+            "zone_percent", "csw_percent", "in_zone_swing_miss_percent",
+            "iso_allowed_raw", "plate_appearances", "earned_runs",
+            "walks_drawn", "whip_savant", "era_savant",
+        }
 
         def _split_coverage(frame, label):
             if frame.empty:
                 return
-            pool_rows, slate_rows = [], []
+            pool_rows, slate_rows, retired_rows = [], [], []
             n = len(frame)
             for c in frame.columns:
                 filled = int(frame[c].notna().sum())
@@ -5797,16 +5811,35 @@ if show_diagnostic:
                 row = {"column": c, "populated": filled, "pct": f"{pct:.0f}%"}
                 if c.startswith(_SLATE_SCOPED_PREFIXES) or c in _SLATE_SCOPED_EXACT:
                     slate_rows.append(row)
+                elif c in _RETIRED_FIELDS and pct == 0:
+                    retired_rows.append(row)
+                elif (label == "Pitcher" and c in ("iso", "slg", "obp")
+                        and pct == 0):
+                    # pitcher-side opponent iso/slg/obp: endpoint-dropped;
+                    # total_bases falls back to xwoba/barrel proxies (documented)
+                    retired_rows.append(row)
                 else:
                     if pct == 0:
                         row["column"] = f"⚠️ {c}"
                     pool_rows.append(row)
             st.markdown(f"**{label} — pool-wide columns** (sorted worst-first; "
-                        f"⚠️ 0% = field likely no longer returned by the endpoint):")
+                        f"⚠️ 0% = NEW unexpected loss — a field the endpoint "
+                        f"stopped returning that isn't on the known-retired list):")
             pool_df = pd.DataFrame(pool_rows)
             pool_df["_sort"] = pool_df["pct"].str.rstrip("%").astype(float)
             st.dataframe(pool_df.sort_values("_sort").drop(columns="_sort"),
                          hide_index=True, use_container_width=True)
+            if retired_rows:
+                with st.expander(f"{label}: {len(retired_rows)} known-retired "
+                                 f"field(s) — no action needed"):
+                    st.caption(
+                        "Raw Savant names superseded by renamed canonical "
+                        "columns, or fields the endpoint stopped returning. "
+                        "All verified unconsumed by scoring or covered by "
+                        "documented fallbacks."
+                    )
+                    st.dataframe(pd.DataFrame(retired_rows), hide_index=True,
+                                 use_container_width=True)
             if slate_rows:
                 st.markdown(f"**{label} — slate-scoped columns** (fetched ONLY "
                             f"for tonight's slate players — low % over the full "
@@ -7116,7 +7149,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.22 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.23 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -9270,6 +9303,9 @@ try:
         from pattern_analysis import rolling_feature_importance as _rfi_pub
         _imp_pub = _rfi_pub(_pub_hist, lookback_days=14)
         if _imp_pub is not None and not _imp_pub.empty:
+            # v45.23: stash for the Pattern-Based Top 10 (same importance df,
+            # computed once)
+            st.session_state["_pub_importance_df"] = _imp_pub
             # Positive predictors with >=5 graded days — same consistency
             # floor the owner-side Proposed Weights use.
             _q_pub = _imp_pub[
@@ -11788,6 +11824,71 @@ if combined_picks is not None and not combined_picks.empty:
         # >40% of the total score, that's a concentrated bet that may not be
         # as robust as it looks.
         # =====================================================================
+        # ==== v45.23: Pattern-Based Top 10 (experimental challenger) ====
+        # The user-facing extension of the "What's predicting homers best"
+        # card: rank tonight's starters PURELY by the top-5 empirically-best
+        # predictors, weighted by their measured correlation strength
+        # (compute_adaptive_score — same engine as owner-side Pattern
+        # Analysis). This challenger feeds NOTHING in main scoring; it is
+        # displayed for contrast and its score is snapshotted + correlation-
+        # tracked nightly so the data decides whether it beats the champion.
+        try:
+            _imp_for_adaptive = st.session_state.get("_pub_importance_df")
+            if _imp_for_adaptive is None:
+                _ph_tmp = st.session_state.get("_pub_pattern_history")
+                if isinstance(_ph_tmp, list) and len(_ph_tmp) >= 5:
+                    from pattern_analysis import rolling_feature_importance as _rfi_a
+                    _imp_for_adaptive = _rfi_a(_ph_tmp, lookback_days=14)
+            if (_imp_for_adaptive is not None and not _imp_for_adaptive.empty
+                    and not q_sorted.empty):
+                from pattern_analysis import compute_adaptive_score as _cas
+                _adaptive_ser = _cas(q_sorted, _imp_for_adaptive, top_n_features=5)
+                if _adaptive_ser is not None and _adaptive_ser.notna().sum() >= 5:
+                    _adf = q_sorted.copy()
+                    _adf["adaptive_score"] = _adaptive_ser
+                    # stash (pid, game) → score for combined_all persistence
+                    st.session_state["_adaptive_score_map"] = {
+                        (r["player_id"], r.get("game")): float(r["adaptive_score"])
+                        for _, r in _adf.dropna(subset=["adaptive_score"]).iterrows()
+                        if not pd.isna(r.get("player_id"))
+                    }
+                    with st.expander(
+                            "🧬 Pattern-Based Top 10 — ranked ONLY by what's "
+                            "actually predicting homers right now (experimental)",
+                            expanded=False):
+                        st.caption(
+                            "A challenger list: tonight's starters ranked purely "
+                            "by the top-5 predictors from the card above, each "
+                            "weighted by its measured correlation with real HRs "
+                            "over our graded slates. Compare it against the main "
+                            "Top 10 — where they agree, conviction is highest. "
+                            "This score is tracked nightly against outcomes, so "
+                            "the data itself will tell us if it starts beating "
+                            "the main model."
+                        )
+                        _acols = [c for c in [
+                            "player_name", "team", "game", "adaptive_score",
+                            "hr_score", "grade", "hr_game_pct", "smash_spot",
+                        ] if c in _adf.columns]
+                        st.dataframe(
+                            _adf.sort_values("adaptive_score", ascending=False)
+                                .head(10)[_acols].reset_index(drop=True),
+                            hide_index=True, use_container_width=True,
+                            column_config={
+                                "player_name": _player_col("Player"),
+                                "adaptive_score": st.column_config.NumberColumn(
+                                    "Pattern Score", format="%.1f",
+                                    help="0-100 percentile of the reliability-"
+                                         "weighted top-5-predictor blend."),
+                                "hr_score": st.column_config.NumberColumn(
+                                    "HR Score (main)", format="%.1f"),
+                                "hr_game_pct": st.column_config.NumberColumn(
+                                    "HR%", format="%.2f"),
+                            },
+                        )
+        except Exception as _adx:
+            log_swallowed_error("adaptive_top10", _adx, surface=False)
+
         with st.expander("🔍 Pick Audit — why is each pick ranked here?", expanded=False):
             st.caption(
                 "For each top 10 pick: dominant pick_score components, sample "
@@ -13502,6 +13603,18 @@ if all_hitters:
     except Exception as _sce:
         log_swallowed_error("schema_assert", _sce, surface=False)
 
+    # v45.23: persist the Pattern-Based challenger score onto combined_all.
+    # save_snapshot stores combined_all, and adaptive_score is now in
+    # HR_CANDIDATE_FEATURES — so every graded slate automatically measures
+    # the challenger against real outcomes, right alongside hr_score.
+    try:
+        _amap = st.session_state.get("_adaptive_score_map")
+        if _amap and {"player_id", "game"}.issubset(combined_all.columns):
+            combined_all["adaptive_score"] = combined_all.apply(
+                lambda r: _amap.get((r["player_id"], r.get("game"))), axis=1)
+    except Exception as _ape:
+        log_swallowed_error("adaptive_persist", _ape, surface=False)
+
     # v45.20 (review P7): merge-integrity + range sanity validators.
     # (a) Duplicate (player_id, game): a dup means a hitter got scored twice
     #     (merge fanout) → rankings and slate aggregates silently wrong.
@@ -14560,6 +14673,71 @@ if all_hitters:
                     "as roster-fill or bench, the lineup may not be posted yet, "
                     "or the cache may be stale (refresh the page after lineups post)."
                 )
+
+                # v45.23 (reviews P5/P8/P12 — "Explain This Pick"): plain-
+                # English WHY for the top matches. Composed from columns that
+                # already exist; explains the rank, never computes anything.
+                def _why_lines(row) -> str:
+                    reasons, cautions = [], []
+                    def _f(col):
+                        v = row.get(col)
+                        try:
+                            return None if v is None or pd.isna(v) else float(v)
+                        except (TypeError, ValueError):
+                            return None
+                    brl, pbrl, ev = _f("barrel_pct"), _f("pulled_brl_pct"), _f("avg_ev")
+                    iso_v, hh = _f("iso"), _f("hard_hit")
+                    if brl is not None and brl >= 12:
+                        reasons.append(f"elite barrel rate ({brl:.1f}%)")
+                    elif brl is not None and brl >= 8:
+                        reasons.append(f"strong barrel rate ({brl:.1f}%)")
+                    if pbrl is not None and pbrl >= 8:
+                        reasons.append(f"pulls the ball in the air ({pbrl:.1f}% pulled-barrels)")
+                    if ev is not None and ev >= 91.5:
+                        reasons.append(f"heavy contact ({ev:.1f} mph avg EV)")
+                    if iso_v is not None and iso_v >= 0.240 and len(reasons) < 3:
+                        reasons.append(f"big power output ({iso_v:.3f} ISO)")
+                    if hh is not None and hh >= 48 and len(reasons) < 3:
+                        reasons.append(f"hard-hit machine ({hh:.1f}%)")
+                    opp_g = str(row.get("opp_pitcher_grade") or "")
+                    if "EXPLOIT" in opp_g:
+                        reasons.append(f"HR-vulnerable pitcher tonight ({opp_g})")
+                    elif opp_g in ("ELITE", "TOUGH"):
+                        cautions.append(f"tough pitcher matchup ({opp_g})")
+                    eb = _f("env_boost")
+                    if eb is not None and eb >= 1.08:
+                        reasons.append(f"HR-friendly park/weather ({eb:.2f}×)")
+                    elif eb is not None and eb <= 0.92:
+                        cautions.append(f"suppressive environment ({eb:.2f}×)")
+                    _streak = str(row.get("streak_label") or "")
+                    if _streak and _streak not in ("", "·", "nan"):
+                        reasons.append(f"form: {_streak}")
+                    if str(row.get("smash_spot") or "").strip() not in ("", "·", "nan"):
+                        reasons.append(f"flagged {row.get('smash_spot')}")
+                    if row.get("is_roster_fill"):
+                        cautions.append("lineup not posted yet")
+                    dc = _f("data_completeness")
+                    if dc is not None and dc < 60:
+                        cautions.append(f"thin data ({dc:.0f}% complete)")
+                    if not reasons:
+                        reasons.append("balanced profile — no single dominant signal")
+                    out = "; ".join(reasons[:4])
+                    if cautions:
+                        out += f" · ⚠️ {'; '.join(cautions[:2])}"
+                    return out
+
+                try:
+                    for _, _wrow in search_results.head(3).iterrows():
+                        _gr = str(_wrow.get("grade") or "?")
+                        _hg = _wrow.get("hr_game_pct")
+                        _hg_str = (f" ({float(_hg):.1f}% HR)"
+                                   if _hg is not None and not pd.isna(_hg) else "")
+                        st.markdown(
+                            f"💡 **{_wrow.get('player_name', '?')}** — grade "
+                            f"**{_gr}**{_hg_str}: {_why_lines(_wrow)}"
+                        )
+                except Exception as _we:
+                    log_swallowed_error("explain_pick", _we, surface=False)
             else:
                 st.warning(
                     f"🔍 No players match `{_player_search}` on tonight's slate. "
@@ -17278,7 +17456,7 @@ def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
             "sleeper_score", "data_completeness",
         ],
     }
-    _view_mode = st.session_state.get("_table_view_mode", "🏠 Overview")
+    _view_mode = st.session_state.get("_table_view_mode", "📋 All columns")
     if _view_mode in _TABLE_VIEWS:
         _view_set = _TABLE_VIEWS[_view_mode]
         _avail = set(cols_to_show)
@@ -17846,37 +18024,6 @@ if _valid_games:
     _n_games = len(_valid_games)
     _show_all_games = False
 
-    # v45.22 (review P8): player search — find any hitter instantly instead of
-    # hunting through games. Shows the decision columns + which game they're in.
-    _psearch = st.text_input(
-        "🔍 Find a player", value="", key="_player_search",
-        placeholder="Type a name (e.g. Judge) — shows their key numbers + game",
-    )
-    if _psearch and len(_psearch.strip()) >= 2:
-        try:
-            _q_norm = _psearch.strip().lower()
-            _hits = combined_all[
-                combined_all["player_name"].astype(str).str.lower()
-                .str.contains(_q_norm, regex=False, na=False)
-            ]
-            if _hits.empty:
-                st.caption(f"No hitter matching '{_psearch}' on this slate.")
-            else:
-                _srch_cols = [c for c in [
-                    "player_name", "team", "game", "lineup_pos", "grade",
-                    "hr_game_pct", "hr_score", "dinger_score", "smash_spot",
-                    "data_completeness",
-                ] if c in _hits.columns]
-                st.dataframe(
-                    _hits[_srch_cols].head(10),
-                    hide_index=True, use_container_width=True,
-                    column_config={"player_name": _player_col("Player")},
-                )
-                if len(_hits) > 10:
-                    st.caption(f"Showing 10 of {len(_hits)} matches — narrow the search.")
-        except Exception as _pse:
-            log_swallowed_error("player_search", _pse, surface=False)
-
     _sel_col, _view_col, _all_col = st.columns([3, 2, 1])
     with _sel_col:
         _selected_game_label = st.selectbox(
@@ -17892,13 +18039,13 @@ if _valid_games:
         # not 60. Overview = the decision view; the others group the depth.
         st.selectbox(
             "📊 Table view:",
-            options=["🏠 Overview", "⚡ Power", "🎯 Matchup",
-                     "🔬 Researcher", "📋 All columns"],
+            options=["📋 All columns", "🏠 Overview", "⚡ Power",
+                     "🎯 Matchup", "🔬 Researcher"],
             index=0,
             key="_table_view_mode",
-            help="Overview shows the ~10 decision columns. Switch views for "
-                 "power stats, matchup detail, or the researcher framework. "
-                 "'All columns' shows everything (the old behavior).",
+            help="All columns is the full table (default). Switch views for "
+                 "the ~10-column Overview, power stats, matchup detail, or "
+                 "the researcher framework.",
         )
     with _all_col:
         _show_all_games = st.checkbox(
