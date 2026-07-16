@@ -1039,6 +1039,7 @@ HR_CANDIDATE_FEATURES = [
     "pull_pct", "pull_air_pct", "pulled_brl_pct",
     "fb_pct", "xslg", "slg", "xwoba",
     "hr_score", "hr_game_pct", "hr_pa_pct",
+    "adaptive_score",  # v45.23: pattern-based challenger — tracked vs champion
     "must_have_met", "nuclear_met",
     "matchup_opp", "power_score", "pitch_hr_score",
     "lift_score", "discipline_score",
