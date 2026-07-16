@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.24-export-polish"
+APP_VERSION = "2026.06.10-v45.25-help-accuracy"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -740,18 +740,83 @@ COLUMN_HELP = {
                       "actual lineup posts.",
     "il_flag": "Injury / inactive status. 🏥 = not on active roster, "
                "possibly injured or optioned.",
-    "grade": "HR play grade (A+ through F). A+ ≥ 25% HR Game%, A 21-25%, "
-             "B+ 17-21%, B 13-17%, C+ 10-13%, C 7-10%, D 4-7%, F < 4%.",
+    "grade": "HR play grade (A+ through F) — driven by HR Game% (the "
+             "probability), NOT by HR Score. A+ ≥ 25% HR Game%, A 21-25%, "
+             "B+ 17-21%, B 13-17%, C+ 10-13%, C 7-10%, D 4-7%, F < 4%. "
+             "Cap layers can lower it one tier: hostile environment "
+             "(env < 0.85), same-side platoon, mechanical fail. Grade and "
+             "HR Score measure different things (probability vs composite "
+             "rank), so they can legitimately disagree — agreement = conviction.",
     "smash_spot": "🔥🔥🔥 elite three-way smash (hitter + pitcher + park "
                   "all align). 🔥🔥 strong, 🔥 modest.",
+    # === v45.25: completeness sweep — every user-facing column gets an entry
+    # (these also feed the workbook's Data Dictionary sheet) ===
+    "player_name": "The hitter. Pinned to the left in wide tables.",
+    "team": "The hitter's team (abbreviation).",
+    "game": "Tonight's matchup this row belongs to (Away @ Home).",
+    "opp_pitcher": "The starting pitcher this hitter faces tonight.",
+    "bats": "Hitter's handedness: L / R / S (switch).",
+    "rank": "Row rank within this table's sort.",
+    "hr_score_signal": "🎯 color band for HR Score: 🟢 ≥70 · 🟡 50-69 · "
+                       "🟠 25-49 · 🔴 <25. Same info as HR Score, at a glance.",
+    "la": "Average launch angle (degrees). HR-optimal contact lives ~20-35°.",
+    "xwobacon": "Expected wOBA on contact — contact quality only, "
+                "strikeouts excluded. ⬆️ HIGHER = better.",
+    "avg_hr_ev": "Average exit velocity on this hitter's home runs this "
+                 "season (mph).",
+    "avg_dist": "Average batted-ball distance (ft) from the Savant distance "
+                "leaderboard. Informational — not in grades/rankings (v43.75).",
+    "barrel_count": "Season count of barreled balls (raw count, pairs with "
+                    "Barrel%).",
+    "near_hr_est": "Estimated near-misses: deep drives that fell just short "
+                   "of HR distance. Informational — not in grades (v43.75).",
+    "hr_profile_label": "Distance-based power profile from avg HR distance "
+                        "and near-miss volume (e.g. 'deep threat').",
+    "hr_criteria_label": "Researcher HR checklist: how many of the core HR "
+                         "criteria this hitter meets tonight (met/total).",
+    "must_have_label": "Researcher framework: which of the 9 Must-Have "
+                       "conditions are met (✅) / missed (·) / no data.",
+    "nuclear_label": "Researcher framework: which of the 12 Nuclear "
+                     "(elite-power) conditions are met.",
+    "best_pitch": "The pitch type this hitter punishes most (career xwOBA "
+                  "vs that pitch).",
+    "best_pitch_xwoba": "Hitter's career xwOBA vs their best pitch type.",
+    "worst_pitch": "The pitch type this hitter struggles with most.",
+    "mini_arsenal": "The opposing pitcher's top pitches with usage % — what "
+                    "this hitter will actually see tonight.",
+    "arsenal_flag": "Arsenal exploitation: does the pitcher's pitch mix "
+                    "overlap with what this hitter punishes? 🎯 = strong "
+                    "overlap, ⚠️ = pitcher's mix avoids his strengths.",
+    "gb_flag": "Pitcher batted-ball type: 🪱 heavy ground-ball (HR "
+               "suppressive) vs 🎈 fly-ball prone (HR friendly).",
+    "day_night_flag": "Day/night split signal: flags hitters meaningfully "
+                      "better or worse in tonight's start-time context.",
+    "split_confidence": "Sample-size confidence in the handedness split "
+                        "being shown (more PA vs tonight's pitcher hand = "
+                        "higher confidence).",
+    "streak_label": "Recent HR streak or drought (e.g. '🔥 3 HR in 5 games').",
+    "form_trend_flag": "Direction of recent form: heating up ↗ / cooling ↘ "
+                       "vs season baseline.",
+    "same_game_flag": "Correlation warning — shares a game (and pitcher) "
+                      "with another Top 10 pick. Don't parlay correlated picks.",
+    "slate_leader_flag": "👑 leads tonight's slate in a key power metric.",
+    "hit_alert": "Hits outlook signal (base-hit probability lens, separate "
+                 "from the HR model).",
+    "tb_grade": "Total-bases outlook grade (expected TB lens, separate from "
+                "the HR model).",
     # === v44.80: custom scores + newer metrics (were missing hover help) ===
-    "hr_score": "The primary HR ranking (0-100), matchup-aware. Blends the "
-                "hitter's power profile with tonight's pitcher, park, and weather. "
-                "⬆️ HIGHER = better HR play. This is the headline model score.",
+    "hr_score": "The primary HR ranking (0-99), matchup-aware and rescaled "
+                "to TONIGHT's slate: best play ~95+, worst ~10, median ~50. "
+                "Above 95, elite plays soft-compress into 95-99.5 so they "
+                "still sort — never reaches 100 (it's a rank, NOT a "
+                "probability; the probability is HR Game%). Blends the "
+                "hitter's power profile with tonight's pitcher, park, and "
+                "weather. ⬆️ HIGHER = better HR play. Note: the letter "
+                "grade comes from HR Game%, not from this score.",
     "dinger_score": "Curated season-power composite (0-100) from the highest-"
                     "reliability HR signals (pulled-barrel%, EV, barrel%, hard-hit, "
                     "ISO, blast%). Pure raw-power lens. ⬆️ HIGHER = better.",
-    "power_composite": "'💥+ Combo' (0-100): 55% HR Score + 45% Dinger Score. "
+    "power_composite": "'💥+ Combo' (0-99): 55% HR Score + 45% Dinger Score. "
                        "Blends the matchup-aware and pure-power views. ⬆️ HIGHER = better.",
     "barrel_matchup_score": "'🎯 Brl Match' (0-100): the hitter's barrel ability × "
                             "how many barrels this pitcher allows. ⬆️ HIGHER = better "
@@ -7149,7 +7214,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.24 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.25 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -9379,16 +9444,23 @@ except Exception as _strip_e:
 # v45.18 (UI): caption tightened to the two facts everyone needs; full
 # methodology moved into a collapsed expander for those who want it.
 st.caption(
-    "**HR Score** ranks tonight's slate 0-95 (best play ≈ 95 — it's a rank, "
+    "**HR Score** ranks tonight's slate 0-99 (~95+ = elite tier — it's a rank, "
     "not a probability; the real probability is **HR Game%**). Max 2 picks "
     "per game."
 )
 with st.expander("ℹ️ How the Top 10 works", expanded=False):
     st.markdown(
-        "- **HR Score (0-95)** — comprehensive composite of 8 weighted tiers "
+        "- **HR Score (0-99)** — comprehensive composite of 8 weighted tiers "
         "(HR probability, power, swing mechanics, matchup, form, environment, "
         "discipline, lineup context). **Rescaled per slate**, so the best play "
-        "of the night reads ~95 and the worst ~10.\n"
+        "of the night reads ~95 and the worst ~10. Above 95, elite plays are "
+        "soft-compressed into 95-99.5 so they still sort — the score never "
+        "reaches 100 (it's a rank, not a probability).\n"
+        "- **HR Grade vs HR Score**: the letter grade comes from **HR Game%** "
+        "(the probability, banded A+ to F, with environment/platoon caps) — "
+        "NOT from HR Score. They can legitimately disagree: a hitter can rank "
+        "high on the composite but carry a lower probability grade, and vice "
+        "versa. When both agree, conviction is highest.\n"
         "- **HR Score is NOT a probability** — 95 means 'top tier of tonight's "
         "slate.' The actual per-game HR probability is the **HR Game%** column.\n"
         "- **🎯 color**: 🟢 ≥70 / 🟡 50-69 / 🟠 25-49 / 🔴 <25.\n"
@@ -9773,7 +9845,7 @@ if all_hitters_for_picks:
         if len(_score_vals) > 0:
             stash_diagnostic(
                 "slate_audit",
-                f"**HR Score (0-95)** · min {_score_vals.min():.0f} · "
+                f"**HR Score (0-99)** · min {_score_vals.min():.0f} · "
                 f"med {_score_vals.median():.0f} · max {_score_vals.max():.0f} · "
                 f"top 10 hitters score ≥ {_score_vals.nlargest(10).min():.0f}",
             )
@@ -15953,7 +16025,7 @@ def _ask_bot_fragment():
             _glossary = {
                 "barrel": "**Barrel%** = the share of a hitter's batted balls hit at the ideal exit-velocity + launch-angle combo for extra bases. It's the single most stable HR predictor in the model (Section G reliability ~2.0).",
                 "dinger": "**Dinger Score** = a 0-100 curated HR predictor. Raw power base (avg EV, barrel%, pulled-air barrel%, hard-hit%, ISO, blast%) tilted by tonight's context (recent form, park+weather, matchup) so it moves per slate.",
-                "hr score": "**HR Score** = the primary 0-100 HR ranking. A tier-weighted composite: HR probability (30%), power signals (25%), swing mechanics (12%), matchup (12%), form (10%), environment (6%), discipline (3%), context (2%).",
+                "hr score": "**HR Score** = the primary 0-99 HR ranking (slate-rescaled; ~95+ = elite tier, never 100 — a rank, not a probability). A tier-weighted composite: HR probability (30%), power signals (25%), swing mechanics (12%), matchup (12%), form (10%), environment (6%), discipline (3%), context (2%).",
                 "pick score": "**Pick Score** = the ranking the app actually ships its Top 10 from. Blends HR game%, matchup, power, arsenal, form, environment, and lineup/platoon bonuses.",
                 "iso": "**ISO** (Isolated Power) = SLG minus AVG — measures raw extra-base power, stripping out singles.",
                 "hard hit": "**Hard-Hit%** = share of batted balls at 95+ mph exit velocity.",
@@ -17024,12 +17096,18 @@ def build_col_config():
         "grade": st.column_config.TextColumn(
             "HR Grade", width="small",
             help=(
-                "**HR letter grade** (legacy/secondary — primary HR metric is HR Score 0-95).\n"
-                "Comprehensive composite-derived letter (v43.37+):\n"
-                "A+ : everything aligns (top ~5%) · A : strong\n"
-                "B+/B : solid / above avg · C+/C : middle of pack\n"
-                "D/F : weak · — : insufficient sample\n"
-                "Cap layers: hostile env, same-side platoon, mechanical fail (pull<35 + EV<88)."
+                "**HR letter grade** — driven by HR Game% (the probability), "
+                "NOT by HR Score:\n"
+                "A+ ≥25% · A 21-25% · B+ 17-21% · B 13-17%\n"
+                "C+ 10-13% · C 7-10% · D 4-7% · F <4% · — : no sample\n"
+                "Cap layers can lower it one tier: hostile environment "
+                "(env <0.85), same-side platoon, mechanical fail (pull<35 + EV<88).\n\n"
+                "**Why Grade and HR Score can disagree:** they measure different "
+                "things. Grade = tonight's HR *probability* (banded, capped). "
+                "HR Score = 0-99 *rank* of the full composite vs this slate. "
+                "A hitter can rank higher on the composite (great power+matchup "
+                "profile) while carrying a lower probability grade (or a "
+                "cap) — and vice versa. Agreement between them = conviction."
             ),
         ),
         "smash_spot": st.column_config.TextColumn(
