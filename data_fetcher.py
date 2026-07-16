@@ -2522,7 +2522,9 @@ def get_pitcher_stats(season: int = None, stats_day: str = "") -> pd.DataFrame:
     # WHIP from (H + BB) / IP - if Savant gave us hits and walks
     # Cap at 5.0 to prevent absurd values from tiny IP samples (Savant IP is
     # estimated from PA which can be off by ~30% in small samples).
-    if "hits" in df.columns and "walks_drawn" in df.columns and "ip_savant" in df.columns:
+    if ("hits" in df.columns and "walks_drawn" in df.columns and "ip_savant" in df.columns
+            and _has_real_values(df, "hits", min_n=20)
+            and _has_real_values(df, "walks_drawn", min_n=20)):
         whip_raw = (df["hits"] + df["walks_drawn"]) / df["ip_savant"].replace(0, pd.NA)
         df["whip_savant"] = whip_raw.clip(upper=5.0).round(2)
         df["whip"] = df["whip_savant"]
@@ -2532,7 +2534,8 @@ def get_pitcher_stats(season: int = None, stats_day: str = "") -> pd.DataFrame:
     # ip_savant=5.58 but real IP was 4.1, making ERA derive to 16.62 vs
     # real ~12.4. The cap prevents the display from showing nonsense values.
     # Real ERA gets prioritized in the coalesce step (app.py) when available.
-    if "earned_runs" in df.columns and "ip_savant" in df.columns:
+    if ("earned_runs" in df.columns and "ip_savant" in df.columns
+            and _has_real_values(df, "earned_runs", min_n=20)):
         era_raw = df["earned_runs"] * 9 / df["ip_savant"].replace(0, pd.NA)
         df["era_savant"] = era_raw.clip(upper=12.0).round(2)
         df["era"] = df["era_savant"]
