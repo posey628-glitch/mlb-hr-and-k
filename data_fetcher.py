@@ -1507,13 +1507,18 @@ def get_slate(game_date: Optional[str] = None) -> pd.DataFrame:
         # once. Drop non-playable statuses. Keep anything scheduled, live,
         # warmup, pre-game, delayed, or final — only exclude games MLB has
         # marked as not happening.
-        _dead_statuses = {
+        # v45.29: PREFIX match, not exact — MLB emits colon-suffixed variants
+        # ("Suspended: Rain", "Postponed: Inclement Weather"); exact isin()
+        # let those slip through as live games. "Delayed" deliberately NOT
+        # in the prefix set: delayed games still get played.
+        _dead_prefixes = (
             "Postponed", "Cancelled", "Canceled", "Suspended",
-            "Forfeit", "Completed Early: Rain",
-        }
+            "Forfeit", "Completed Early",
+        )
         if "status" in df.columns:
             _before = len(df)
-            df = df[~df["status"].isin(_dead_statuses)].reset_index(drop=True)
+            _status_str = df["status"].astype(str)
+            df = df[~_status_str.str.startswith(_dead_prefixes)].reset_index(drop=True)
             _dropped = _before - len(df)
             if _dropped > 0:
                 # Surface it so the user sees WHY a game vanished rather
