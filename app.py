@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.25-help-accuracy"
+APP_VERSION = "2026.06.10-v45.26-measurement-fixes"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -4033,6 +4033,27 @@ if _eval_metrics and _eval_date:
                            f"{_eval_metrics.get('hitters_who_played', 0)} hitters "
                            f"| avg HR rate {_slate_rate:.1f}% "
                            f"| Brier {_eval_metrics.get('brier_score', 0):.4f}")
+            # v45.26 (user's skew concern): on a 1-2 game slate the "top 10"
+            # is mostly one game's lineup — picks share the same pitchers,
+            # park, and weather, so hit rates are CORRELATED noise, not
+            # signal. Say so explicitly instead of letting 0% or 100% read
+            # as a verdict. (Brier over all hitters is less distorted; the
+            # per-day correlations feeding Section G are now sample-weighted
+            # so tiny days can't swing the rolling averages.)
+            try:
+                _n_games_eval = len({str(p.get("game")) for p in _ps_preds
+                                     if p.get("game")}) or None
+                if (_n_games_eval is not None and _n_games_eval <= 2) or \
+                        len(_ps_preds) <= 3:
+                    _report.append(
+                        f"⚠️ SMALL SLATE ({_n_games_eval or '?'} game(s), "
+                        f"{len(_ps_preds)} pick(s)) — picks share the same "
+                        f"game context, so hit-rate/edge here is noise, not "
+                        f"signal. Judge only multi-game days and rolling "
+                        f"aggregates."
+                    )
+            except Exception:
+                pass
             _report.append("")
             _report.append(f"PICK_SCORE TOP 10 — {_top10_hits}/{len(_ps_preds)} "
                            f"({_hit_rate:.0f}%), edge {_edge:+.1f}pp")
@@ -7214,7 +7235,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.25 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.26 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -9373,8 +9394,12 @@ try:
             st.session_state["_pub_importance_df"] = _imp_pub
             # Positive predictors with >=5 graded days — same consistency
             # floor the owner-side Proposed Weights use.
+            from pattern_analysis import MODEL_OUTPUT_FEATURES as _MOF
             _q_pub = _imp_pub[
                 (_imp_pub["n_days"] >= 5) & (_imp_pub["avg_corr"] > 0)
+                # v45.26 (user's catch): raw measurable skills only — never
+                # our own outputs (hr_game_pct etc.) citing themselves
+                & (~_imp_pub["feature"].isin(_MOF))
             ].sort_values("avg_corr", ascending=False).head(5)
             if len(_q_pub) >= 3:
                 with st.container(border=True):
