@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.31-launchcast"
+APP_VERSION = "2026.06.10-v45.32-ballpark-theme"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -884,76 +884,77 @@ COLUMN_HELP = {
 # CUSTOM CSS — Dark + Sleek + Electric Blue (v25 aesthetic overhaul)
 # ============================================================================
 # Color palette:
-#   Background:    #0a0e1a (deep navy-black)
-#   Card surface:  #131826 (lifted dark)
-#   Card border:   #1f2738
-#   Primary text:  #e8ecf3
-#   Muted text:    #8893a8
-#   Accent:        #00d4ff (electric blue)
-#   Accent hover:  #33ddff
+#   Background:    #081710 (deep navy-black)
+#   Card surface:  #10281A (lifted dark)
+#   Card border:   #27492F
+#   Primary text:  #F2EDDD
+#   Muted text:    #A8B5A0
+#   Accent:        #F5C518 (electric blue)
+#   Accent hover:  #FFD966
 #   Success:       #00ff9d (neon green for HR/win signals)
-#   Warning:       #ffb84d
+#   Warning:       #FF9F1C
 #   Danger:        #ff4d6d
 # ============================================================================
 st.markdown("""
 <style>
 /* Import sleek modern font */
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600&family=Oswald:wght@500;600;700&display=swap');
 
 /* === GLOBAL === */
 html, body, [class*="css"], .stApp {
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif !important;
-    color: #e8ecf3 !important;
+    color: #F2EDDD !important;
 }
 
 .stApp {
     background:
-        radial-gradient(ellipse at top, #0d1525 0%, #0a0e1a 50%, #060912 100%) fixed !important;
+        radial-gradient(ellipse at top, #0D2416 0%, #081710 50%, #051009 100%) fixed !important;
 }
 
 /* === SIDEBAR === */
 section[data-testid="stSidebar"] {
-    background: linear-gradient(180deg, #0d1422 0%, #0a0e1a 100%) !important;
-    border-right: 1px solid #1f2738 !important;
+    background: linear-gradient(180deg, #0B2013 0%, #081710 100%) !important;
+    border-right: 1px solid #27492F !important;
 }
 section[data-testid="stSidebar"] * {
-    color: #e8ecf3 !important;
+    color: #F2EDDD !important;
 }
 section[data-testid="stSidebar"] .stMarkdown h1,
 section[data-testid="stSidebar"] .stMarkdown h2,
 section[data-testid="stSidebar"] .stMarkdown h3 {
-    color: #00d4ff !important;
+    color: #F5C518 !important;
     font-weight: 700 !important;
-    text-shadow: 0 0 20px rgba(0, 212, 255, 0.3);
+    text-shadow: 0 0 20px rgba(245, 197, 24, 0.3);
 }
 
 /* === HEADERS === */
 h1, h2, h3, h4, h5, h6 {
     color: #ffffff !important;
-    font-weight: 700 !important;
-    letter-spacing: -0.02em !important;
+    font-family: 'Oswald', 'Inter', sans-serif !important;
+    font-weight: 600 !important;
+    letter-spacing: 0.03em !important;
 }
 h1 {
-    background: linear-gradient(135deg, #00d4ff 0%, #5eb3ff 100%);
+    background: linear-gradient(135deg, #F5C518 0%, #FFF3D6 100%);
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
     background-clip: text;
     font-weight: 800 !important;
-    text-shadow: 0 0 40px rgba(0, 212, 255, 0.4);
+    text-shadow: 0 0 40px rgba(245, 197, 24, 0.4);
 }
 h2 {
-    border-bottom: 1px solid #1f2738;
+    border-bottom: 1px solid #27492F;
     padding-bottom: 0.4em;
     margin-top: 1.2em;
 }
 h3 {
-    color: #00d4ff !important;
+    color: #F5C518 !important;
 }
 
 /* === BUTTONS === */
 .stButton > button {
-    background: linear-gradient(135deg, #1a2842 0%, #131826 100%) !important;
-    color: #00d4ff !important;
+    background: linear-gradient(135deg, #1C3A26 0%, #10281A 100%) !important;
+    color: #F5C518 !important;
     border: 1px solid #2a3a5a !important;
     border-radius: 8px !important;
     font-weight: 600 !important;
@@ -961,48 +962,48 @@ h3 {
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
 }
 .stButton > button:hover {
-    background: linear-gradient(135deg, #00d4ff 0%, #0099cc 100%) !important;
-    color: #0a0e1a !important;
-    border: 1px solid #00d4ff !important;
-    box-shadow: 0 0 20px rgba(0, 212, 255, 0.5) !important;
+    background: linear-gradient(135deg, #F5C518 0%, #C99B12 100%) !important;
+    color: #081710 !important;
+    border: 1px solid #F5C518 !important;
+    box-shadow: 0 0 20px rgba(245, 197, 24, 0.5) !important;
     transform: translateY(-1px);
 }
 .stButton > button:active {
     transform: translateY(0);
 }
 .stDownloadButton > button {
-    background: linear-gradient(135deg, #00d4ff 0%, #0099cc 100%) !important;
-    color: #0a0e1a !important;
+    background: linear-gradient(135deg, #F5C518 0%, #C99B12 100%) !important;
+    color: #081710 !important;
     border: none !important;
     font-weight: 700 !important;
-    box-shadow: 0 0 20px rgba(0, 212, 255, 0.4) !important;
+    box-shadow: 0 0 20px rgba(245, 197, 24, 0.4) !important;
 }
 .stDownloadButton > button:hover {
-    box-shadow: 0 0 30px rgba(0, 212, 255, 0.7) !important;
+    box-shadow: 0 0 30px rgba(245, 197, 24, 0.7) !important;
     transform: translateY(-1px);
 }
 
 /* === METRICS === */
 [data-testid="stMetric"] {
-    background: linear-gradient(135deg, #131826 0%, #0f1420 100%) !important;
-    border: 1px solid #1f2738 !important;
+    background: linear-gradient(135deg, #10281A 0%, #0C2113 100%) !important;
+    border: 1px solid #27492F !important;
     border-radius: 12px !important;
     padding: 1em !important;
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
     transition: all 0.2s ease;
 }
 [data-testid="stMetric"]:hover {
-    border-color: #00d4ff !important;
-    box-shadow: 0 0 24px rgba(0, 212, 255, 0.25) !important;
+    border-color: #F5C518 !important;
+    box-shadow: 0 0 24px rgba(245, 197, 24, 0.25) !important;
 }
 [data-testid="stMetricValue"] {
-    color: #00d4ff !important;
+    color: #F5C518 !important;
     font-weight: 700 !important;
     font-family: 'JetBrains Mono', monospace !important;
     font-size: 1.6em !important;
 }
 [data-testid="stMetricLabel"] {
-    color: #8893a8 !important;
+    color: #A8B5A0 !important;
     font-size: 0.85em !important;
     font-weight: 500 !important;
     text-transform: uppercase;
@@ -1014,52 +1015,52 @@ h3 {
 
 /* === DATAFRAMES === */
 [data-testid="stDataFrame"] {
-    background: #0f1420 !important;
-    border: 1px solid #1f2738 !important;
+    background: #0C2113 !important;
+    border: 1px solid #27492F !important;
     border-radius: 10px !important;
     overflow: hidden;
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
 }
 [data-testid="stDataFrame"] table {
-    background: #0f1420 !important;
-    color: #e8ecf3 !important;
+    background: #0C2113 !important;
+    color: #F2EDDD !important;
 }
 [data-testid="stDataFrame"] thead {
-    background: linear-gradient(180deg, #1a2842 0%, #131826 100%) !important;
+    background: linear-gradient(180deg, #1C3A26 0%, #10281A 100%) !important;
 }
 [data-testid="stDataFrame"] thead th {
-    color: #00d4ff !important;
+    color: #F5C518 !important;
     font-weight: 700 !important;
     text-transform: uppercase;
     font-size: 0.75em !important;
     letter-spacing: 0.05em;
-    border-bottom: 2px solid #00d4ff !important;
+    border-bottom: 2px solid #F5C518 !important;
 }
 [data-testid="stDataFrame"] tbody tr:hover {
-    background: rgba(0, 212, 255, 0.05) !important;
+    background: rgba(245, 197, 24, 0.05) !important;
 }
 [data-testid="stDataFrame"] tbody td {
-    border-bottom: 1px solid #1a2030 !important;
+    border-bottom: 1px solid #16301F !important;
     font-family: 'JetBrains Mono', monospace !important;
     font-size: 0.9em !important;
 }
 
 /* === EXPANDERS === */
 .streamlit-expanderHeader, [data-testid="stExpander"] summary {
-    background: linear-gradient(135deg, #131826 0%, #0f1420 100%) !important;
-    color: #e8ecf3 !important;
-    border: 1px solid #1f2738 !important;
+    background: linear-gradient(135deg, #10281A 0%, #0C2113 100%) !important;
+    color: #F2EDDD !important;
+    border: 1px solid #27492F !important;
     border-radius: 8px !important;
     font-weight: 600 !important;
     transition: all 0.2s ease;
 }
 .streamlit-expanderHeader:hover, [data-testid="stExpander"] summary:hover {
-    border-color: #00d4ff !important;
-    background: linear-gradient(135deg, #1a2030 0%, #131826 100%) !important;
+    border-color: #F5C518 !important;
+    background: linear-gradient(135deg, #16301F 0%, #10281A 100%) !important;
 }
 [data-testid="stExpander"] {
     background: #0d1220 !important;
-    border: 1px solid #1f2738 !important;
+    border: 1px solid #27492F !important;
     border-radius: 8px !important;
     margin: 0.5em 0;
 }
@@ -1071,8 +1072,8 @@ h3 {
     backdrop-filter: blur(10px);
 }
 [data-baseweb="notification"][kind="info"], div[data-testid="stAlert"][data-baseweb="notification"] {
-    background: rgba(0, 212, 255, 0.08) !important;
-    border-left-color: #00d4ff !important;
+    background: rgba(245, 197, 24, 0.08) !important;
+    border-left-color: #F5C518 !important;
     color: #c5e8ff !important;
 }
 [data-baseweb="notification"][kind="positive"] {
@@ -1082,7 +1083,7 @@ h3 {
 }
 [data-baseweb="notification"][kind="warning"] {
     background: rgba(255, 184, 77, 0.08) !important;
-    border-left-color: #ffb84d !important;
+    border-left-color: #FF9F1C !important;
     color: #ffd9a0 !important;
 }
 [data-baseweb="notification"][kind="negative"] {
@@ -1094,110 +1095,110 @@ h3 {
 /* === INPUTS === */
 .stTextInput input, .stNumberInput input, .stDateInput input,
 .stTextArea textarea, .stSelectbox [data-baseweb="select"] > div {
-    background: #131826 !important;
-    color: #e8ecf3 !important;
-    border: 1px solid #1f2738 !important;
+    background: #10281A !important;
+    color: #F2EDDD !important;
+    border: 1px solid #27492F !important;
     border-radius: 6px !important;
     font-family: 'JetBrains Mono', monospace !important;
 }
 .stTextInput input:focus, .stNumberInput input:focus,
 .stSelectbox [data-baseweb="select"] > div:focus-within {
-    border-color: #00d4ff !important;
-    box-shadow: 0 0 0 2px rgba(0, 212, 255, 0.25) !important;
+    border-color: #F5C518 !important;
+    box-shadow: 0 0 0 2px rgba(245, 197, 24, 0.25) !important;
 }
 
 /* === TABS === */
 .stTabs [data-baseweb="tab-list"] {
     gap: 4px;
     background: transparent;
-    border-bottom: 1px solid #1f2738;
+    border-bottom: 1px solid #27492F;
 }
 .stTabs [data-baseweb="tab"] {
-    background: #131826 !important;
-    color: #8893a8 !important;
+    background: #10281A !important;
+    color: #A8B5A0 !important;
     border-radius: 8px 8px 0 0 !important;
-    border: 1px solid #1f2738 !important;
+    border: 1px solid #27492F !important;
     border-bottom: none !important;
     padding: 0.5em 1.2em !important;
     font-weight: 600 !important;
     transition: all 0.2s ease;
 }
 .stTabs [data-baseweb="tab"]:hover {
-    background: #1a2030 !important;
-    color: #e8ecf3 !important;
+    background: #16301F !important;
+    color: #F2EDDD !important;
 }
 .stTabs [aria-selected="true"] {
-    background: linear-gradient(180deg, #1a2842 0%, #131826 100%) !important;
-    color: #00d4ff !important;
-    border-color: #00d4ff !important;
-    box-shadow: 0 -2px 0 0 #00d4ff inset !important;
+    background: linear-gradient(180deg, #1C3A26 0%, #10281A 100%) !important;
+    color: #F5C518 !important;
+    border-color: #F5C518 !important;
+    box-shadow: 0 -2px 0 0 #F5C518 inset !important;
 }
 
 /* === CHECKBOXES & RADIOS === */
 .stCheckbox label, .stRadio label {
-    color: #e8ecf3 !important;
+    color: #F2EDDD !important;
 }
 .stCheckbox > label > div[role="checkbox"][aria-checked="true"] {
-    background: #00d4ff !important;
-    border-color: #00d4ff !important;
+    background: #F5C518 !important;
+    border-color: #F5C518 !important;
 }
 
 /* === SLIDERS === */
 .stSlider [data-baseweb="slider"] [role="slider"] {
-    background: #00d4ff !important;
-    box-shadow: 0 0 12px rgba(0, 212, 255, 0.5) !important;
+    background: #F5C518 !important;
+    box-shadow: 0 0 12px rgba(245, 197, 24, 0.5) !important;
 }
 .stSlider [data-baseweb="slider"] div[data-testid="stTickBar"] > div {
-    background: #00d4ff !important;
+    background: #F5C518 !important;
 }
 
 /* === DIVIDERS === */
 hr {
     border: none !important;
-    border-top: 1px solid #1f2738 !important;
+    border-top: 1px solid #27492F !important;
     margin: 1.5em 0 !important;
 }
 
 /* === CAPTIONS === */
 .caption, [data-testid="stCaptionContainer"] {
-    color: #8893a8 !important;
+    color: #A8B5A0 !important;
     font-size: 0.85em !important;
 }
 
 /* === LINKS === */
 a, a:visited {
-    color: #00d4ff !important;
+    color: #F5C518 !important;
     text-decoration: none;
     transition: all 0.2s ease;
 }
 a:hover {
-    color: #33ddff !important;
-    text-shadow: 0 0 8px rgba(0, 212, 255, 0.4);
+    color: #FFD966 !important;
+    text-shadow: 0 0 8px rgba(245, 197, 24, 0.4);
 }
 
 /* === CODE BLOCKS === */
 code {
-    background: #0a0e1a !important;
-    color: #00d4ff !important;
-    border: 1px solid #1f2738 !important;
+    background: #081710 !important;
+    color: #F5C518 !important;
+    border: 1px solid #27492F !important;
     padding: 0.15em 0.4em !important;
     border-radius: 4px !important;
     font-family: 'JetBrains Mono', monospace !important;
     font-size: 0.88em !important;
 }
 pre {
-    background: #0a0e1a !important;
-    border: 1px solid #1f2738 !important;
+    background: #081710 !important;
+    border: 1px solid #27492F !important;
     border-radius: 8px !important;
 }
 
 /* === TOOLTIPS === */
 [data-baseweb="tooltip"] {
-    background: #131826 !important;
-    color: #e8ecf3 !important;
-    border: 1px solid #00d4ff !important;
+    background: #10281A !important;
+    color: #F2EDDD !important;
+    border: 1px solid #F5C518 !important;
     border-radius: 6px !important;
-    box-shadow: 0 0 20px rgba(0, 212, 255, 0.3) !important;
+    box-shadow: 0 0 20px rgba(245, 197, 24, 0.3) !important;
 }
 
 /* === SUBTLE ANIMATIONS === */
@@ -1211,20 +1212,20 @@ pre {
     height: 10px;
 }
 ::-webkit-scrollbar-track {
-    background: #0a0e1a;
+    background: #081710;
 }
 ::-webkit-scrollbar-thumb {
-    background: #1f2738;
+    background: #27492F;
     border-radius: 5px;
 }
 ::-webkit-scrollbar-thumb:hover {
-    background: #00d4ff;
+    background: #F5C518;
 }
 
 /* === BIG VERSION CALLOUT === */
 .stMarkdown h3:has(code) {
-    background: linear-gradient(135deg, rgba(0, 212, 255, 0.08) 0%, transparent 100%);
-    border-left: 3px solid #00d4ff;
+    background: linear-gradient(135deg, rgba(245, 197, 24, 0.08) 0%, transparent 100%);
+    border-left: 3px solid #F5C518;
     padding: 0.6em 1em;
     border-radius: 0 8px 8px 0;
 }
@@ -1236,20 +1237,20 @@ pre {
 
 /* === PROGRESS BARS === */
 .stProgress > div > div {
-    background: linear-gradient(90deg, #00d4ff 0%, #0099cc 100%) !important;
-    box-shadow: 0 0 10px rgba(0, 212, 255, 0.5);
+    background: linear-gradient(90deg, #F5C518 0%, #C99B12 100%) !important;
+    box-shadow: 0 0 10px rgba(245, 197, 24, 0.5);
 }
 
 /* === SPINNER === */
 .stSpinner > div {
-    border-top-color: #00d4ff !important;
+    border-top-color: #F5C518 !important;
 }
 
 /* === MULTISELECT TAGS === */
 [data-baseweb="tag"] {
-    background: linear-gradient(135deg, #1a2842 0%, #131826 100%) !important;
-    color: #00d4ff !important;
-    border: 1px solid #00d4ff !important;
+    background: linear-gradient(135deg, #1C3A26 0%, #10281A 100%) !important;
+    color: #F5C518 !important;
+    border: 1px solid #F5C518 !important;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -3660,7 +3661,25 @@ if use_sprint_speed:
 # HEADER + DATA AVAILABILITY
 # ============================================================================
 
-st.title(f"🚀 LaunchCast — {selected_date.strftime('%A, %B %d, %Y')}")
+st.markdown(
+    f"""
+<div style="background: linear-gradient(180deg, #0D2416 0%, #081710 100%);
+            border: 2px solid #27492F; border-bottom: 3px solid #F5C518;
+            border-radius: 10px; padding: 14px 22px; margin-bottom: 6px;">
+  <div style="font-family: 'Oswald', sans-serif; font-size: 2.1rem;
+              font-weight: 700; letter-spacing: 0.12em; color: #F5C518;
+              text-shadow: 0 0 24px rgba(245, 197, 24, 0.35); line-height: 1.1;">
+    🚀 LAUNCHCAST
+  </div>
+  <div style="font-family: 'JetBrains Mono', monospace; font-size: 0.95rem;
+              color: #F2EDDD; letter-spacing: 0.14em; margin-top: 4px;
+              text-transform: uppercase;">
+    ⚾ {selected_date.strftime('%A · %B %d, %Y')}
+  </div>
+</div>
+""",
+    unsafe_allow_html=True,
+)
 
 
 # v43.71 — prominent Gist corruption banner.
@@ -7249,7 +7268,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.31 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.32 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -15881,7 +15900,7 @@ st.divider()
 #      survives into combined_all
 # ============================================================================
 # ============================================================================
-# v44.17 — ASK DINGERMAVEN (data-grounded Q&A bot)
+# v44.17 — ASK LAUNCHCAST (data-grounded Q&A bot)
 # ============================================================================
 # Answers questions about TONIGHT'S SLATE directly from combined_all — no API
 # key required for the common question types (top hitters by any stat, a
