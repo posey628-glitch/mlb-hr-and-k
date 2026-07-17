@@ -84,6 +84,9 @@ SNAPSHOT_DIR = _get_snapshot_dir()
 # Setup (one-time, user-side):
 #   1. Create GitHub PAT with `gist` scope
 #   2. Create a secret gist with filename `dingermaven_snapshots.json`, content `{}`
+#      (NOTE: the gist filename keeps the legacy "dingermaven" name on purpose —
+#       it is a STORAGE KEY holding all snapshot/correlation history. Renaming it
+#       would orphan the entire history. App branding is LaunchCast as of v45.31.)
 #   3. Add to Streamlit Secrets:
 #        gist_token = "ghp_..."
 #        gist_id = "abc123..."
