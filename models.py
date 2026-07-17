@@ -1702,10 +1702,10 @@ def add_hr_criteria(df: pd.DataFrame) -> pd.DataFrame:
 # v43.66 — RESEARCHER'S FRAMEWORK (Must-Have + Nuclear filters)
 # ----------------------------------------------------------------------------
 # A trusted external researcher's HR-prediction framework, added as a
-# SECONDARY checkpoint alongside DingerMaven's existing HR Score / Grade /
+# SECONDARY checkpoint alongside LaunchCast's existing HR Score / Grade /
 # Pick Score. The researcher's lens is pure batted-ball PROFILE — no
 # matchup, park, weather, or pitcher quality. Useful for comparing
-# DingerMaven's matchup-aware ranking against a profile-only sanity check.
+# LaunchCast's matchup-aware ranking against a profile-only sanity check.
 #
 # Two tiers:
 #   - MUST-HAVE (10 thresholds): "hitters making authoritative contact,
