@@ -1,7 +1,7 @@
 """
 app.py
 =======
-DingerMaven dashboard - Streamlit main entry.
+LaunchCast dashboard - Streamlit main entry.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.29-ppd-handling"
+APP_VERSION = "2026.06.10-v45.31-launchcast"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -624,7 +624,7 @@ except Exception:
 # ============================================================================
 
 st.set_page_config(
-    page_title="DingerMaven",
+    page_title="LaunchCast",
     page_icon="⚾",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -2152,7 +2152,7 @@ def pitcher_grade_sort_key(grade):
 # ============================================================================
 
 with st.sidebar:
-    st.title("💣 DingerMaven")
+    st.title("🚀 LaunchCast")
     # v44.39 (user: "logging in later pushes me to the next day, but I don't
     # want that until all games are done"). date.today() uses the server's
     # clock (UTC on Streamlit Cloud) and flips at midnight — so a late-night
@@ -2187,7 +2187,7 @@ with st.sidebar:
             "- [🏆 Top 10 Picks](#sec-top10)",
             "- [💎 Sleepers & Best Plays](#sec-sleepers)",
             "- [🔥 Elite Convergence](#sec-elite)",
-            "- [🤖 Ask DingerMaven](#sec-ask)",
+            "- [🤖 Ask LaunchCast](#sec-ask)",
             "- [🆚 Head-to-Head Compare](#sec-compare)",
             "- [🎮 Game-by-Game Matchups](#sec-games)",
             "- [🛠️ Tools & Diagnostics](#sec-tools)",
@@ -3660,7 +3660,7 @@ if use_sprint_speed:
 # HEADER + DATA AVAILABILITY
 # ============================================================================
 
-st.title(f"💣 DingerMaven — {selected_date.strftime('%A, %B %d, %Y')}")
+st.title(f"🚀 LaunchCast — {selected_date.strftime('%A, %B %d, %Y')}")
 
 
 # v43.71 — prominent Gist corruption banner.
@@ -7249,7 +7249,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.29 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.31 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -10294,9 +10294,9 @@ if combined_picks is not None and not combined_picks.empty:
                     st.caption(
                         "Pure batted-ball profile lens (no matchup/park/weather). "
                         "Shows which hitters match the researcher's threshold "
-                        "framework. Compare against DingerMaven's HR Score "
+                        "framework. Compare against LaunchCast's HR Score "
                         "(matchup-aware) — strong picks should clear the profile bar "
-                        "too. Big divergence = DingerMaven sees a matchup edge "
+                        "too. Big divergence = LaunchCast sees a matchup edge "
                         "(elite park, terrible pitcher) the profile alone misses, "
                         "or vice versa."
                     )
@@ -10582,11 +10582,24 @@ if combined_picks is not None and not combined_picks.empty:
                     new_smash_per_pid[_key] = ""
                     continue
                 # v45.14 (P2 #3): restore the lineup-confirmation gate the
-                # override had dropped. (Also removed the dead
-                # pitcher_favorable/pitcher_hostile locals — smash_tier
-                # computes pitcher favorability internally.)
+                # override had dropped.
+                # v45.30 REGRESSION FIX (user's "44 ELITE" paste exposed it):
+                # lineup_confirmed is a TEAM-level flag — bench players
+                # inherit True once their team's lineup posts, even though
+                # they're not IN it, so they were earning smash flags. Mirror
+                # the game-loop's rigor: confirmed AND not bench AND not a
+                # roster-fill AND holding an actual lineup position.
                 _lc = _row.get("lineup_confirmed")
                 _lineup_ok = bool(_lc) if _lc is not None and not pd.isna(_lc) else False
+                _ib = _row.get("is_bench")
+                if _ib is not None and not pd.isna(_ib) and bool(_ib):
+                    _lineup_ok = False
+                _irf = _row.get("is_roster_fill")
+                if _irf is not None and not pd.isna(_irf) and bool(_irf):
+                    _lineup_ok = False
+                _lp_chk = _row.get("lineup_pos")
+                if _lp_chk is None or pd.isna(_lp_chk):
+                    _lineup_ok = False
                 new_smash_per_pid[_key] = smash_tier(
                     _sc, _row.get("opp_pitcher_grade"), _row.get("env_boost"),
                     lineup_confirmed=_lineup_ok,
@@ -12764,7 +12777,7 @@ if combined_picks is not None and not combined_picks.empty:
                             "combined_all not yet built — try refreshing)"
                         )
                     tweet_body = (
-                        f"💣 DingerMaven Top 5 — {date_str}\n\n"
+                        f"🚀 LaunchCast Top 5 — {date_str}\n\n"
                         f"{picks_block}"
                         f"{smash_line}\n\n"
                         f"#MLB #HRprops #DFS"
@@ -12788,7 +12801,7 @@ if combined_picks is not None and not combined_picks.empty:
                     except Exception:
                         pass
                     tweet_body = (
-                        f"💣 DingerMaven Top 5 — {date_str}\n\n"
+                        f"🚀 LaunchCast Top 5 — {date_str}\n\n"
                         f"{picks_block}"
                         f"{edge_line}\n\n"
                         f"#MLB #HRprops #DFS"
@@ -12835,7 +12848,7 @@ if combined_picks is not None and not combined_picks.empty:
                             yest_pretty = yest_date_str
                         emoji = "🟢" if edge >= 5 else "🟡" if edge >= 0 else "🔴"
                         tweet_body = (
-                            f"💣 DingerMaven Recap — {yest_pretty}\n\n"
+                            f"🚀 LaunchCast Recap — {yest_pretty}\n\n"
                             f"{emoji} Top 10 picks: {top10_hits}/10 hit a HR\n"
                             f"Hit rate: {hit_rate:.0f}% vs slate avg {slate_rate:.1f}%\n"
                             f"Edge: {edge:+.1f}pp"
@@ -12871,7 +12884,7 @@ if combined_picks is not None and not combined_picks.empty:
                         t10_hrs = weekly_summary.get("top10_hrs_hit", 0)
                         t10_picks = weekly_summary.get("top10_picks_total", 0)
                         tweet_body = (
-                            f"💣 DingerMaven {n_days}-Day Recap\n\n"
+                            f"🚀 LaunchCast {n_days}-Day Recap\n\n"
                             f"{emoji} Top 10 picks: {t10_hrs}/{t10_picks} HRs ({t10_rate:.1f}%)\n"
                             f"Slate avg: {slate_rate:.1f}%\n"
                             f"Edge vs slate: {edge_pp:+.1f}pp\n\n"
@@ -12881,7 +12894,7 @@ if combined_picks is not None and not combined_picks.empty:
                         )
                 else:  # Top 5 short or Top 10 full
                     tweet_body = (
-                        f"💣 DingerMaven Top {len(pick_lines)} — {date_str}\n\n"
+                        f"🚀 LaunchCast Top {len(pick_lines)} — {date_str}\n\n"
                         f"{picks_block}\n\n"
                         f"#MLB #HRprops #DFS"
                     )
@@ -15340,7 +15353,7 @@ if all_hitters:
                 st.download_button(
                     "📥 Export ALL to Excel",
                     data=buffer.getvalue(),
-                    file_name=f"dingermaven_{selected_date}.xlsx",
+                    file_name=f"launchcast_{selected_date}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     help="Hitters + Pitchers + Top lists in one Excel workbook.",
                     key="dl_excel_all",
@@ -15360,7 +15373,7 @@ if all_hitters:
                 st.download_button(
                     "📥 Export ALL to CSV",
                     data=csv_buf.getvalue(),
-                    file_name=f"dingermaven_{selected_date}.csv",
+                    file_name=f"launchcast_{selected_date}.csv",
                     mime="text/csv",
                     help="Combined CSV - openpyxl not installed for Excel export.",
                     key="dl_csv_all",
@@ -16002,7 +16015,7 @@ except Exception as _ec_err:
     log_swallowed_error("elite_convergence_section", _ec_err, surface=False)
 
 st.markdown("<div id='sec-ask'></div>", unsafe_allow_html=True)
-st.subheader("🤖 Ask DingerMaven")
+st.subheader("🤖 Ask LaunchCast")
 st.caption(
     "Ask about tonight's slate, or pick a common question below. Answers come "
     "straight from tonight's data — no reload until you hit Ask."
@@ -16943,10 +16956,10 @@ def build_col_config():
             ),
         ),
         # v43.66 (researcher framework): Must-Have (10) + Nuclear (14)
-        # checkpoints alongside DingerMaven's 4-point criteria. Pure
+        # checkpoints alongside LaunchCast's 4-point criteria. Pure
         # batted-ball profile lens — does NOT influence HR Score, Grade,
         # or Pick Score (those remain matchup-aware). Lets the user
-        # cross-check DingerMaven's ranking against an external trusted
+        # cross-check LaunchCast's ranking against an external trusted
         # framework on each row.
         "must_have_label": st.column_config.TextColumn(
             "Must-Have ✓✗",
@@ -18895,7 +18908,7 @@ if _valid_games:
                             f"📥 Export this game ({game['away_team_abbr']} @ "
                             f"{game['home_team_abbr']}) to CSV",
                             data=_cbuf.getvalue(),
-                            file_name=f"dingermaven_{_gm_name}_{selected_date}.csv",
+                            file_name=f"launchcast_{_gm_name}_{selected_date}.csv",
                             mime="text/csv",
                             key=f"gamecsv_{game.get('gamePk', _gm_name)}",
                             help="Both lineups' hitters for this matchup, sorted by HR Game%.",
@@ -19662,5 +19675,5 @@ if owner_mode:
 st.caption(
     f"Built {datetime.now().strftime('%Y-%m-%d %H:%M')} · "
     f"Sources: MLB Stats API, Baseball Savant, Open-Meteo · "
-    f"DingerMaven"
+    f"LaunchCast"
 )
