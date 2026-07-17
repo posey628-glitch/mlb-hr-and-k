@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.28-static-sweep"
+APP_VERSION = "2026.06.10-v45.29-ppd-handling"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -2796,6 +2796,20 @@ with st.sidebar:
 with st.spinner("Loading slate and stats..."):
     try:
         slate = get_slate(selected_date.isoformat())
+        # v45.29 (Pirates PPD): the postponement filter was correctly dropping
+        # dead games but doing it SILENTLY — the counter existed in df.attrs
+        # yet nothing displayed it. Now the user sees why a game vanished.
+        try:
+            _ppd_ct = int(slate.attrs.get("dropped_games", 0) or 0)
+            if _ppd_ct > 0:
+                st.info(
+                    f"ℹ️ **{_ppd_ct} game{'s' if _ppd_ct != 1 else ''} removed "
+                    f"from today's slate** — marked postponed/cancelled/"
+                    f"suspended by MLB. Projections cover only games still "
+                    f"scheduled to be played."
+                )
+        except Exception:
+            pass
     except (ConnectionError, requests.exceptions.RequestException) as _e:
         # MLB Stats API is temporarily unavailable. Show a friendly message
         # and stop instead of letting the raw traceback through.
@@ -7235,7 +7249,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.28 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.29 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
