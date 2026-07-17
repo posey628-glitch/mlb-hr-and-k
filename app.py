@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.27-instant-game-switch"
+APP_VERSION = "2026.06.10-v45.28-static-sweep"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -7235,7 +7235,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.27 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.28 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -18249,8 +18249,6 @@ if _valid_games:
             home_tab = f"🏠 {game['home_team_abbr']} vs {game['away_team_abbr']}"
 
             # Game header with start time
-            away_k_mean = ctx["away_k_proj"].get("mean") if ctx.get("away_k_proj") else None
-            home_k_mean = ctx["home_k_proj"].get("mean") if ctx.get("home_k_proj") else None
 
             # Format game time to user's local timezone (assumes ET, which is most common)
             game_dt = game.get("gameTime")
@@ -18406,7 +18404,6 @@ if _valid_games:
                         _dist = _z("avg_hr_distance")
                         _mopp = _z("matchup_opp")
                         _parse = _z("pitch_hr_score")
-                        _pmatch = _z("pitch_match_score")
                         _env = _z("env_boost")
                         _rhr = _z("recent_hr_weighted_rate")
                         if _laser is None:
