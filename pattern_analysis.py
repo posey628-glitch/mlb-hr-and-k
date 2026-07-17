@@ -1044,8 +1044,7 @@ HR_CANDIDATE_FEATURES = [
     "matchup_opp", "power_score", "pitch_hr_score",
     "lift_score", "discipline_score",
     "recent_hr_weighted_rate",
-    "env_boost", "dinger_score", "power_composite", "barrel_matchup_score", "two_way_matchup_score",
-    # v44.76 (user: does sleeper_score actually affect HR probability? — and
+    "env_boost", "dinger_score", "power_composite", "barrel_matchup_score", "two_way_matchup_score",    # v44.76 (user: does sleeper_score actually affect HR probability? — and
     # audit whether every pick_score component earns its weight). Track the
     # remaining pick_score inputs so their real HR correlation is visible. If
     # sleeper_score's correlation is ~0 or negative, that's evidence its 5%
@@ -1068,6 +1067,29 @@ HR_CANDIDATE_FEATURES = [
     "moonshot_score", "laser_score",  # v44.78: slate-wide power-type composites
     "opp_pitcher_xwoba", "must_have_total", "nuclear_total",
 ]
+
+# v45.26 (user's circularity catch): OUR OWN computed outputs and framework
+# flags. They stay in HR_CANDIDATE_FEATURES so nightly tracking still measures
+# them (self-evaluation: "does hr_score predict?"), but they're EXCLUDED from
+# surfaces that should show raw measurable skills only — the public "what's
+# predicting homers" card and the adaptive challenger. Without this, the
+# challenger blends in hr_game_pct and becomes a partial copy of the champion
+# (the 9/10-overlap symptom), and the public card shows the model citing
+# itself as evidence.
+MODEL_OUTPUT_FEATURES = {
+    "hr_score", "hr_game_pct", "hr_pa_pct", "adaptive_score",
+    "dinger_score", "power_composite", "pick_score",
+    "must_have_met", "nuclear_met", "must_have_total", "nuclear_total",
+    "matchup_opp", "power_score", "pitch_hr_score", "pitch_match_score",
+    "lift_score", "discipline_score", "sleeper_score", "convergence_count",
+    "barrel_matchup_score", "two_way_matchup_score", "env_boost",
+    "is_moonshot_target", "is_laser_target", "moonshot_score", "laser_score",
+    "ps_power", "ps_hr_game", "ps_matchup_opp", "ps_pitch_hr",
+    "ps_form", "ps_lift", "ps_env", "ps_sleeper", "ps_discipline",
+    "ps_bonus_recent_hr", "ps_bonus_platoon", "ps_bonus_lineup",
+    "hit_game_pct", "expected_total_bases", "tb_pa",
+    "recent_hr_weighted_rate",
+}
 
 
 def compute_daily_correlations(merged_df: pd.DataFrame,
@@ -1139,20 +1161,32 @@ def rolling_feature_importance(correlation_history: list,
     if not recent:
         return pd.DataFrame()
 
-    # Collect corr values per feature across days
+    # Collect (corr, n) per feature across days.
+    # v45.26 (user's small-slate concern): a 1-game 19-hitter day previously
+    # counted EQUALLY with a 270-hitter day in these averages — which feed
+    # Proposed Weights. Now each day's correlation is weighted by sqrt(n):
+    # gentle enough to keep small days informative, strong enough that they
+    # can't swing the average. n was always stored per day, so existing
+    # history re-aggregates correctly with no re-banking. Missing n → 1.
     per_feat = {}
     for entry in recent:
         corrs = entry.get("correlations", {})
         for feat, obj in corrs.items():
-            per_feat.setdefault(feat, []).append(obj.get("corr", 0.0))
+            _n_day = obj.get("n", 1) or 1
+            per_feat.setdefault(feat, []).append(
+                (obj.get("corr", 0.0), float(_n_day)))
 
     rows = []
-    for feat, corrs in per_feat.items():
-        if len(corrs) < 3:  # need at least 3 days
+    for feat, pairs in per_feat.items():
+        if len(pairs) < 3:  # need at least 3 days
             continue
-        arr = pd.Series(corrs)
-        avg_corr = float(arr.mean())
-        std = float(arr.std(ddof=0))
+        corrs = [p[0] for p in pairs]
+        weights = [max(1.0, p[1]) ** 0.5 for p in pairs]
+        w_total = sum(weights)
+        avg_corr = float(sum(c * w for c, w in zip(corrs, weights)) / w_total)
+        # weighted std around the weighted mean
+        std = float((sum(w * (c - avg_corr) ** 2
+                          for c, w in zip(corrs, weights)) / w_total) ** 0.5)
         # Trend: compare recent third to older third. Requires ≥6 days —
         # below that there aren't enough points to split into thirds, so
         # trend is UNDEFINED, not zero.
@@ -1160,10 +1194,15 @@ def rolling_feature_importance(correlation_history: list,
         # old code hard-coded trend=0.0 below 6 days, which rendered as a
         # real-looking "no movement" reading when the truth is "not computed
         # yet." Now flag it so the UI can show n/a instead of a fake zero.
+        # v45.26: trend thirds are also sample-weighted.
         n = len(corrs)
         if n >= 6:
-            recent_third = float(pd.Series(corrs[-max(2, n//3):]).mean())
-            older_third = float(pd.Series(corrs[:max(2, n//3)]).mean())
+            k = max(2, n // 3)
+            def _wmean(pl):
+                wt = sum(max(1.0, p[1]) ** 0.5 for p in pl)
+                return float(sum(p[0] * max(1.0, p[1]) ** 0.5 for p in pl) / wt)
+            recent_third = _wmean(pairs[-k:])
+            older_third = _wmean(pairs[:k])
             trend = round(recent_third - older_third, 4)
             trend_valid = True
         else:
@@ -1382,10 +1421,15 @@ def compute_adaptive_score(current_slate: pd.DataFrame,
     if current_slate.empty or importance_df.empty:
         return pd.Series(dtype=float, index=current_slate.index)
 
-    # Filter to reliable predictors
+    # Filter to reliable predictors.
+    # v45.26 (user's circularity catch): exclude our OWN model outputs
+    # (hr_game_pct, hr_score, framework flags, ps_* components...). Without
+    # this the challenger blends in the champion's outputs and becomes a
+    # partial copy of it — raw measurable skills only.
     reliable = importance_df[
         (importance_df["avg_corr"].abs() >= 0.05)
         & (importance_df["n_days"] >= 5)
+        & (~importance_df["feature"].isin(MODEL_OUTPUT_FEATURES))
     ].head(top_n_features)
     if reliable.empty:
         return pd.Series(dtype=float, index=current_slate.index)
