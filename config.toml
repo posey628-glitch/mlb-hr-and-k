@@ -1,0 +1,14 @@
+# LaunchCast ballpark theme (v45.32)
+# INSTALL: place this file at  .streamlit/config.toml  in the GitHub repo root
+# (create the .streamlit folder if it doesn't exist). Streamlit Cloud applies
+# it automatically on the next deploy — it themes the NATIVE widgets (inputs,
+# selectboxes, dataframes, buttons) that page CSS can't fully reach, so the
+# whole app matches the scoreboard look instead of just the styled sections.
+
+[theme]
+base = "dark"
+primaryColor = "#F5C518"            # scoreboard amber — buttons, focus, accents
+backgroundColor = "#081710"         # deep field green-black
+secondaryBackgroundColor = "#10281A"  # card/sidebar green
+textColor = "#F2EDDD"               # chalk white
+font = "sans serif"
