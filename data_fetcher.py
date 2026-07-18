@@ -144,6 +144,50 @@ def clip_outliers(df: pd.DataFrame, caps: dict | None = None) -> pd.DataFrame:
 # and the user can flag the issue for proper investigation.
 
 @st.cache_data(ttl=21600)  # 6hr — zone data updates daily
+@st.cache_data(ttl=21600)
+def get_hitter_sweet_spot(season: int, stats_day: str = "") -> pd.DataFrame:
+    """v45.33: Sweet Spot % — share of batted balls in the 8-32° launch-angle
+    window (review P6 recommendation; availability proven by the retired
+    splits.py's working custom-leaderboard URL). ISOLATED fetch on purpose:
+    its own URL means a Savant change here can never break the main hitter
+    fetch. TRACKED-ONLY for now — feeds Section G correlation evidence with
+    ZERO scoring impact, so the reweight measurement stays pure. Returns
+    DataFrame[player_id, sweet_spot_pct] or empty on any failure."""
+    url = (
+        f"https://baseballsavant.mlb.com/leaderboard/custom"
+        f"?year={season}&type=batter&filter=&min=30"
+        f"&selections=player_id,pa,sweet_spot_percent"
+        f"&chart=false&x=pa&y=pa&r=no&csv=true"
+    )
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=25)
+        r.raise_for_status()
+        if not r.text or len(r.text) < 100:
+            return pd.DataFrame()
+        df = pd.read_csv(io.StringIO(r.text))
+        if df.empty:
+            return pd.DataFrame()
+        col_map = {}
+        for c in df.columns:
+            cl = c.lower().replace(" ", "_")
+            if cl in ("player_id", "playerid", "id", "mlb_id"):
+                col_map["player_id"] = c
+            elif "sweet_spot" in cl:
+                col_map["ss"] = c
+        if "player_id" not in col_map or "ss" not in col_map:
+            return pd.DataFrame()
+        out = pd.DataFrame()
+        out["player_id"] = pd.to_numeric(df[col_map["player_id"]], errors="coerce").astype("Int64")
+        out["sweet_spot_pct"] = pd.to_numeric(df[col_map["ss"]], errors="coerce")
+        out = out.dropna(subset=["player_id"])
+        # value-level guard (v45.19 pattern): all-NaN = fetch miss, not a merge
+        if not _has_real_values(out, "sweet_spot_pct", min_n=20):
+            return pd.DataFrame()
+        return out
+    except Exception:
+        return pd.DataFrame()
+
+
 def _has_real_values(df: pd.DataFrame, col: str, min_n: int = 20) -> bool:
     """v45.19: value-level fetch validation. A Savant fetch can 'succeed' at
     the URL/column level yet return unparseable or empty values — the frame
