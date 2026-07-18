@@ -106,30 +106,10 @@ def merge_snapshots_with_outcomes(snapshots: dict) -> pd.DataFrame:
             # Build one combined row
             row = {"snapshot_date": snapshot_date, "player_id": pid,
                    "_snap_key": str(snap_key)}
-            # Projection columns (whitelist what's useful for analysis)
-            # v43.88 (review finding): this whitelist predated v43.83's
-            # snapshot expansion, so only 12 of the 24 HR_CANDIDATE_FEATURES
-            # made it into the merged frame — daily correlations silently
-            # tracked half the intended predictor set. Now includes the
-            # full candidate set plus pick_score decomposition context.
-            for col in [
-                "player_name", "team", "hr_score", "hr_game_pct", "pick_score",
-                "grade", "barrel_pct", "iso", "avg_ev", "blast_pct", "blast_pct_real",
-                "pull_pct", "pull_air_pct", "pulled_brl_pct", "hard_hit",
-                "fb_pct", "gb_pct", "ld_pct",
-                "must_have_met", "must_have_total", "must_have_pass",
-                "nuclear_met", "nuclear_total", "nuclear_grade",
-                "hit_game_pct", "tb_game_pct", "expected_total_bases", "tb_pa",
-                "hr_pa_pct", "power_score",
-                "xwoba", "xslg", "slg", "obp", "ops",
-                "k_pct", "bb_pct", "whiff_pct",
-                "discipline_score", "lift_score", "matchup_opp",
-                "recent_hr", "recent_hr_weighted_rate",
-                "pitch_hr_score", "pitch_match_score",
-                "env_boost", "opp_pitcher_xwoba", "dinger_score", "power_composite", "barrel_matchup_score", "two_way_matchup_score",
-                "is_moonshot_target", "is_laser_target",
-                "sleeper_score", "lineup_pos", "is_roster_fill",
-            ]:
+            # Projection columns — v45.33: DERIVED whitelist (context cols +
+            # the full candidate set). See _snapshot_merge_cols() for why the
+            # hand-kept literal list had to die (three silent-untracking bugs).
+            for col in _snapshot_merge_cols():
                 if col in pick:
                     row[col] = pick[col]
             # Outcome columns
@@ -1038,6 +1018,7 @@ HR_CANDIDATE_FEATURES = [
     "barrel_pct", "iso", "avg_ev", "hard_hit", "blast_pct",
     "pull_pct", "pull_air_pct", "pulled_brl_pct",
     "fb_pct", "xslg", "slg", "xwoba",
+    "sweet_spot_pct",  # v45.33: tracked-only (P6 rec) — Section G judges it before any weight
     "hr_score", "hr_game_pct", "hr_pa_pct",
     "adaptive_score",  # v45.23: pattern-based challenger — tracked vs champion
     "must_have_met", "nuclear_met",
@@ -1067,6 +1048,30 @@ HR_CANDIDATE_FEATURES = [
     "moonshot_score", "laser_score",  # v44.78: slate-wide power-type composites
     "opp_pitcher_xwoba", "must_have_total", "nuclear_total",
 ]
+
+# v45.33 STRUCTURAL FIX: the snapshot-merge projection whitelist is now
+# DERIVED from HR_CANDIDATE_FEATURES instead of maintained by hand. The
+# hand-kept literal list has now caused THREE silent-untracking bugs
+# (v43.88: half the original candidates; v44.77's ps_* decomposition —
+# 12 columns, never tracked; v45.23's adaptive_score challenger). Snapshots
+# store these columns wholesale, so deriving the whitelist retroactively
+# recovers all stripped history on the next merge. Context columns are the
+# non-candidate extras (identity, grades, outcome-adjacent fields).
+_SNAPSHOT_CONTEXT_COLS = [
+    "player_name", "team", "grade", "pick_score",
+    "blast_pct_real", "gb_pct", "ld_pct",
+    "must_have_pass", "nuclear_grade",
+    "tb_game_pct", "lineup_pos", "is_roster_fill",
+]
+
+
+def _snapshot_merge_cols():
+    seen, out = set(), []
+    for c in _SNAPSHOT_CONTEXT_COLS + list(HR_CANDIDATE_FEATURES):
+        if c not in seen:
+            seen.add(c)
+            out.append(c)
+    return out
 
 # v45.26 (user's circularity catch): OUR OWN computed outputs and framework
 # flags. They stay in HR_CANDIDATE_FEATURES so nightly tracking still measures
