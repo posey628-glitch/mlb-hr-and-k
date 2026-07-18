@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.35-bands-deepdive"
+APP_VERSION = "2026.06.10-v45.37-segments"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -4954,6 +4954,51 @@ if show_pattern_analysis:
                         except Exception as _cal_e:
                             log_swallowed_error("calibration_tables", _cal_e, surface=False)
 
+                    # ====== v45.37: Handedness × Park × Environment segments ======
+                    with st.expander("🧪 Segments — handedness × park × environment", expanded=False):
+                        st.caption(
+                            "Your idea made queryable: do RHB facing LHP in "
+                            "favorable conditions homer more than the norm? "
+                            "**lift** = segment HR rate ÷ overall rate. Hitter "
+                            "hand is backfilled for ALL history (handedness is "
+                            "static); pitcher-hand segments accumulate from "
+                            "v45.37 snapshots forward. Trust n ≥ 25; ⚠️ rows "
+                            "are shown for transparency, not conclusions. As "
+                            "segments prove real, they graduate to scoring "
+                            "candidates."
+                        )
+                        try:
+                            from pattern_analysis import (
+                                handedness_segment_table, park_hand_table)
+                            _bmap = {}
+                            try:
+                                if not hitter_stats.empty and "bats" in hitter_stats.columns:
+                                    _bm = hitter_stats.dropna(subset=["player_id"])
+                                    _bmap = dict(zip(
+                                        pd.to_numeric(_bm["player_id"], errors="coerce"),
+                                        _bm["bats"]))
+                            except Exception:
+                                _bmap = {}
+                            _seg = handedness_segment_table(merged, bats_map=_bmap)
+                            _prk = park_hand_table(merged, bats_map=_bmap)
+                            _sc1, _sc2 = st.columns(2)
+                            with _sc1:
+                                st.markdown("**Hand × pitcher hand × environment**")
+                                if _seg.empty:
+                                    st.caption("Needs graded history with hands — accumulating.")
+                                else:
+                                    st.dataframe(_seg, hide_index=True,
+                                                 use_container_width=True)
+                            with _sc2:
+                                st.markdown("**Home park × hitter hand**")
+                                if _prk.empty:
+                                    st.caption("Needs graded history — accumulating.")
+                                else:
+                                    st.dataframe(_prk, hide_index=True,
+                                                 use_container_width=True)
+                        except Exception as _seg_e:
+                            log_swallowed_error("segment_tables", _seg_e, surface=False)
+
                     # ====== Section A: Researcher framework backtest ======
                     st.markdown("---")
                     st.markdown("### A. Does the researcher's framework actually work?")
@@ -5508,10 +5553,12 @@ if show_pattern_analysis:
                                         "The Dinger power weights the model SHIP with, vs. what "
                                         "they'd be if derived purely from accumulated evidence "
                                         "(|correlation| × reliability, normalized to the same total). "
-                                        "This is a **recommendation to evaluate, not an auto-change** — "
-                                        "the shipped model only moves when you decide the evidence is "
-                                        "strong enough. Big deltas on a reliable signal = a reweight "
-                                        "worth considering."
+                                        "**Apply (½-step)** is what a reweight would actually ship: "
+                                        "half the distance from Current toward Proposed — converging "
+                                        "on the evidence over cycles without chasing any single "
+                                        "window's noise. This is a **recommendation to evaluate, not "
+                                        "an auto-change** — the shipped model only moves when you "
+                                        "decide the evidence is strong enough."
                                     )
                                     if _prop.get("features"):
                                         _rel_badge = ("🟢 reliable enough to consider"
@@ -5525,6 +5572,7 @@ if show_pattern_analysis:
                                                 "Feature": _f,
                                                 "Current": _d["current"],
                                                 "Proposed": _d["proposed"],
+                                                "Apply (½-step)": _d.get("apply"),
                                                 "Δ": _d["delta"],
                                                 "Corr": _ev.get("corr"),
                                                 "Reliab": _ev.get("reliability"),
@@ -7419,7 +7467,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.35 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.37 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -9605,7 +9653,6 @@ except Exception as _pub_e:
     log_swallowed_error("public_top5_predictors", _pub_e, surface=False)
 
 st.markdown("<div id='sec-top10'></div>", unsafe_allow_html=True)
-st.markdown("<div id='sec-top10'></div>", unsafe_allow_html=True)
 _section_banner("🏆 Top 10 Picks of the Day", "The marquee — tonight's best home run plays, ranked")
 
 # v45.18 (UI): "Tonight in 10 seconds" — one-line orientation strip so a
@@ -9827,6 +9874,10 @@ for gpk, ctx in game_context_map.items():
         x["opp_pitcher"] = g_row.get(f"{opp_side}_pitcher", "TBD") or "TBD"
         opp_p_row = ctx.get(f"{opp_side}_p_row") or {}
         x["opp_pitcher_xwoba"] = opp_p_row.get("xwoba")
+        # v45.37: stamp opponent pitcher HAND on hitter rows — snapshotted so
+        # the hand×hand×environment segment history can accumulate.
+        _opt = safe_str(opp_p_row.get("p_throws"))[:1].upper()
+        x["opp_p_throws"] = _opt if _opt in ("L", "R") else None
         x["env_boost"] = round(float(hr_mult), 4)
         all_hitters_for_picks.append(x)
 
@@ -13862,6 +13913,9 @@ for gpk, ctx in game_context_map.items():
         x["team"] = g_row[f"{side}_team_abbr"]
         opp_side = "home" if side == "away" else "away"
         x["opp_pitcher"] = g_row.get(f"{opp_side}_pitcher", "TBD") or "TBD"
+        _opr_ca = ctx.get(f"{opp_side}_p_row") or {}
+        _opt_ca = safe_str(_opr_ca.get("p_throws"))[:1].upper()
+        x["opp_p_throws"] = _opt_ca if _opt_ca in ("L", "R") else None
         # v42k: env_boost was previously only set on the all_hitters_for_picks
         # path that feeds combined_picks. combined_all never carried it, so
         # the H2H comparison tool, breakout candidates display, and any other
@@ -13887,6 +13941,8 @@ for gpk, ctx in game_context_map.items():
                           + _dh_suffix_by_gpk.get(gpk, ""))  # v45.12: DH-match
             xb["team"] = g_row[f"{side}_team_abbr"]
             xb["opp_pitcher"] = g_row.get(f"{opp_side}_pitcher", "TBD") or "TBD"
+            _opt_cb = safe_str((ctx.get(f"{opp_side}_p_row") or {}).get("p_throws"))[:1].upper()
+            xb["opp_p_throws"] = _opt_cb if _opt_cb in ("L", "R") else None
             xb["env_boost"] = round(float(ctx.get("hr_mult", 1.0) or 1.0), 4)
             xb["is_bench"] = True  # tag so users can filter/sort bench rows
             all_hitters.append(xb)
