@@ -1059,6 +1059,7 @@ HR_CANDIDATE_FEATURES = [
 # non-candidate extras (identity, grades, outcome-adjacent fields).
 _SNAPSHOT_CONTEXT_COLS = [
     "player_name", "team", "grade", "pick_score",
+    "bats", "opp_p_throws", "game",  # v45.37: hand×hand×park segment history
     "blast_pct_real", "gb_pct", "ld_pct",
     "must_have_pass", "nuclear_grade",
     "tb_game_pct", "lineup_pos", "is_roster_fill",
@@ -1246,7 +1247,8 @@ def rolling_feature_importance(correlation_history: list,
 def propose_dinger_weights(importance_df: pd.DataFrame,
                            current_weights: dict,
                            weight_sum: float = 10.0,
-                           min_days: int = 5) -> dict:
+                           min_days: int = 5,
+                           damping: float = 0.5) -> dict:
     """v44.68 (user endgame: synthesize our OWN properly-weighted metric).
 
     Takes accumulated feature importance and proposes what the Dinger power
@@ -1319,6 +1321,12 @@ def propose_dinger_weights(importance_df: pd.DataFrame,
         result["features"][feat] = {
             "current": round(float(cur_w), 2),
             "proposed": round(float(proposed), 2),
+            # v45.36: what we'd ACTUALLY ship — a damped half-step toward the
+            # evidence. First-window proposals carry noise; moving 50% of the
+            # way per reweight cycle converges on the truth over cycles
+            # without chasing any single window's noise. Convex combination
+            # of two same-sum weight sets preserves the total exactly.
+            "apply": round(float(cur_w) + damping * (float(proposed) - float(cur_w)), 2),
             "delta": round(float(proposed) - float(cur_w), 2),
             "evidence": evidence,
         }
@@ -1332,6 +1340,107 @@ def propose_dinger_weights(importance_df: pd.DataFrame,
            else "Still early — treat as directional, not final.")
     )
     return result
+
+
+def handedness_segment_table(merged_df: pd.DataFrame,
+                              bats_map: dict = None,
+                              outcome_col: str = "homered",
+                              min_n: int = 25) -> pd.DataFrame:
+    """v45.37 (user idea): do RHB vs LHP in favorable environments homer more
+    than the norm? HR rate by hitter-hand × pitcher-hand × environment tier.
+
+    bats backfills from a static player_id→bats map (handedness never
+    changes), so history is hand-aware retroactively; opp_p_throws exists
+    only on rows snapshotted from v45.37 onward, so hand-vs-hand segments
+    grow forward. Rows missing either hand fall out of those segments only.
+    Returns: segment, n, hr_rate_pct, lift (vs overall), small-n flagged.
+    """
+    if merged_df is None or merged_df.empty or outcome_col not in merged_df.columns:
+        return pd.DataFrame()
+    df = merged_df.copy()
+    if "bats" not in df.columns:
+        df["bats"] = pd.NA
+    if bats_map:
+        _pid = pd.to_numeric(df.get("player_id"), errors="coerce")
+        df["bats"] = df["bats"].where(df["bats"].notna(), _pid.map(bats_map))
+    df["bats"] = df["bats"].astype(str).str.upper().str[:1]
+    df.loc[~df["bats"].isin(["L", "R", "S"]), "bats"] = pd.NA
+    if "opp_p_throws" not in df.columns:
+        df["opp_p_throws"] = pd.NA
+    df["opp_p_throws"] = df["opp_p_throws"].astype(str).str.upper().str[:1]
+    df.loc[~df["opp_p_throws"].isin(["L", "R"]), "opp_p_throws"] = pd.NA
+    _eb = pd.to_numeric(df.get("env_boost"), errors="coerce")
+    df["env_tier"] = pd.cut(_eb, bins=[0, 0.95, 1.05, 99],
+                            labels=["🔴 suppressed", "🟠 neutral", "🟢 favorable"])
+    df["_hr"] = pd.to_numeric(df[outcome_col], errors="coerce")
+    base = df["_hr"].mean()
+    if pd.isna(base) or base <= 0:
+        return pd.DataFrame()
+    rows = []
+    # hand × hand × env (needs both hands)
+    _hh = df.dropna(subset=["bats", "opp_p_throws", "_hr"])
+    if not _hh.empty:
+        g = (_hh.groupby(["bats", "opp_p_throws", "env_tier"], observed=True)
+                 .agg(n=("_hr", "size"), rate=("_hr", "mean")).reset_index())
+        for _, r in g.iterrows():
+            rows.append({
+                "segment": f"{r['bats']}HB vs {r['opp_p_throws']}HP · {r['env_tier']}",
+                "n": int(r["n"]),
+                "hr_rate_pct": round(float(r["rate"]) * 100, 1),
+                "lift": round(float(r["rate"]) / base, 2),
+                "flag": "" if r["n"] >= min_n else "⚠️ small n",
+            })
+    # hand × env only (works on backfilled history immediately)
+    _h = df.dropna(subset=["bats", "_hr"])
+    if not _h.empty:
+        g2 = (_h.groupby(["bats", "env_tier"], observed=True)
+                 .agg(n=("_hr", "size"), rate=("_hr", "mean")).reset_index())
+        for _, r in g2.iterrows():
+            rows.append({
+                "segment": f"{r['bats']}HB (any pitcher) · {r['env_tier']}",
+                "n": int(r["n"]),
+                "hr_rate_pct": round(float(r["rate"]) * 100, 1),
+                "lift": round(float(r["rate"]) / base, 2),
+                "flag": "" if r["n"] >= min_n else "⚠️ small n",
+            })
+    out = pd.DataFrame(rows)
+    return out.sort_values(["n", "lift"], ascending=[False, False]).reset_index(drop=True) if not out.empty else out
+
+
+def park_hand_table(merged_df: pd.DataFrame,
+                     bats_map: dict = None,
+                     outcome_col: str = "homered",
+                     min_n: int = 25) -> pd.DataFrame:
+    """v45.37: HR rate by home park (from the game's home team) × hitter hand.
+    Only rows with a parseable 'AWY @ HOM' game string count; segments under
+    min_n are flagged, not hidden (the user decides what to trust)."""
+    if (merged_df is None or merged_df.empty
+            or outcome_col not in merged_df.columns
+            or "game" not in merged_df.columns):
+        return pd.DataFrame()
+    df = merged_df.copy()
+    _g = df["game"].astype(str)
+    df["home_park"] = _g.str.extract(r"@\s*([A-Z]{2,3})")[0]
+    if "bats" not in df.columns:
+        df["bats"] = pd.NA
+    if bats_map:
+        _pid = pd.to_numeric(df.get("player_id"), errors="coerce")
+        df["bats"] = df["bats"].where(df["bats"].notna(), _pid.map(bats_map))
+    df["bats"] = df["bats"].astype(str).str.upper().str[:1]
+    df.loc[~df["bats"].isin(["L", "R", "S"]), "bats"] = pd.NA
+    df["_hr"] = pd.to_numeric(df[outcome_col], errors="coerce")
+    df = df.dropna(subset=["home_park", "bats", "_hr"])
+    if df.empty:
+        return pd.DataFrame()
+    base = df["_hr"].mean()
+    g = (df.groupby(["home_park", "bats"], observed=True)
+           .agg(n=("_hr", "size"), rate=("_hr", "mean")).reset_index())
+    g["hr_rate_pct"] = (g["rate"] * 100).round(1)
+    g["lift"] = (g["rate"] / base).round(2)
+    g["flag"] = g["n"].map(lambda n: "" if n >= min_n else "⚠️ small n")
+    return (g.drop(columns=["rate"])
+             .sort_values(["n", "lift"], ascending=[False, False])
+             .reset_index(drop=True))
 
 
 # ============================================================================
