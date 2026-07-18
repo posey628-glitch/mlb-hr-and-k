@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.32-ballpark-theme"
+APP_VERSION = "2026.06.10-v45.33-tracking-recovery"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -760,6 +760,7 @@ COLUMN_HELP = {
     "hr_score_signal": "🎯 color band for HR Score: 🟢 ≥70 · 🟡 50-69 · "
                        "🟠 25-49 · 🔴 <25. Same info as HR Score, at a glance.",
     "la": "Average launch angle (degrees). HR-optimal contact lives ~20-35°.",
+    "sweet_spot_pct": "Sweet Spot % — share of batted balls launched in the 8-32° window (the productive-contact zone). League avg ~33%. Tracked for predictive value; not yet weighted in any score.",
     "xwobacon": "Expected wOBA on contact — contact quality only, "
                 "strikeouts excluded. ⬆️ HIGHER = better.",
     "avg_hr_ev": "Average exit velocity on this hitter's home runs this "
@@ -3229,6 +3230,22 @@ if not hitter_hand_statcast.empty and "player_id" in hitter_stats.columns:
 _bat_tracking_status = "⏸️ disabled (toggle in sidebar to enable)"
 if use_bat_tracking:
     try:
+        # v45.33: Sweet Spot % — tracked-only enrichment (isolated fetch,
+        # fill-if-missing merge, zero scoring impact). Feeds Section G so the
+        # evidence is already banked when post-reweight experiments begin.
+        try:
+            from data_fetcher import get_hitter_sweet_spot
+            if not slate.empty:
+                _ss_df = get_hitter_sweet_spot(
+                    season=selected_date.year, stats_day=_stats_day_key())
+                if (_ss_df is not None and not _ss_df.empty
+                        and "player_id" in hitter_stats.columns):
+                    hitter_stats = merge_on_player_id(
+                        hitter_stats, _ss_df, cols=["sweet_spot_pct"],
+                        overwrite=False)
+        except Exception as _ss_e:
+            log_swallowed_error("sweet_spot_fetch", _ss_e, surface=False)
+
         from data_fetcher import get_bat_tracking
         # v43.62 (reviewer-validated): get_bat_tracking now returns a 3-tuple
         # (df, status, savant_cols). The savant_cols list survives @st.cache_data
@@ -7268,7 +7285,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.32 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.33 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -9381,7 +9398,8 @@ st.divider()
 # ============================================================
 try:
     _FRIENDLY_METRIC_NAMES = {
-        "avg_ev": "Average Exit Velocity",
+        "sweet_spot_pct": "Sweet spot rate (ideal launch-angle contact)",
+    "avg_ev": "Average Exit Velocity",
         "hard_hit": "Hard-Hit Rate",
         "nuclear_met": "Nuclear Checklist (12-point elite power profile)",
         "must_have_met": "Must-Have Checklist (9-point power baseline)",
@@ -17648,7 +17666,7 @@ def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
         "⚡ Power": [
             "player_name", "grade", "hr_game_pct",
             "barrel_pct", "pulled_brl_pct", "iso", "avg_ev", "avg_hr_ev",
-            "hard_hit", "blast_pct", "fb_pct", "la", "xwoba", "xwobacon",
+            "hard_hit", "blast_pct", "sweet_spot_pct", "fb_pct", "la", "xwoba", "xwobacon",
             "avg_hr_distance", "max_hit_speed", "power_score", "lift_score",
             "smash_spot", "data_completeness",
         ],
