@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.33-tracking-recovery"
+APP_VERSION = "2026.06.10-v45.35-bands-deepdive"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -740,7 +740,7 @@ COLUMN_HELP = {
                       "actual lineup posts.",
     "il_flag": "Injury / inactive status. 🏥 = not on active roster, "
                "possibly injured or optioned.",
-    "grade": "HR play grade (A+ through F) — driven by HR Game% (the "
+    "grade": "Prob Grade (A+ through F) — the PROBABILITY letter, driven by HR Game% (the "
              "probability), NOT by HR Score. A+ ≥ 25% HR Game%, A 21-25%, "
              "B+ 17-21%, B 13-17%, C+ 10-13%, C 7-10%, D 4-7%, F < 4%. "
              "Cap layers can lower it one tier: hostile environment "
@@ -929,6 +929,56 @@ section[data-testid="stSidebar"] .stMarkdown h3 {
 }
 
 /* === HEADERS === */
+/* v45.34: LaunchCast ballpark components */
+.lc-banner {
+    background: linear-gradient(180deg, #0D2416 0%, #0A1D12 100%);
+    border: 1px solid #27492F;
+    border-left: 6px solid #F5C518;
+    border-radius: 8px;
+    padding: 10px 18px;
+    margin: 26px 0 10px 0;
+}
+.lc-banner .lc-title {
+    font-family: 'Oswald', sans-serif;
+    font-size: 1.45rem;
+    font-weight: 600;
+    letter-spacing: 0.09em;
+    color: #F5C518;
+    text-transform: uppercase;
+    line-height: 1.15;
+}
+.lc-banner .lc-sub {
+    font-family: 'Inter', sans-serif;
+    font-size: 0.86rem;
+    color: #A8B5A0;
+    margin-top: 2px;
+}
+.lc-chalk {
+    border: none;
+    border-top: 2px dashed rgba(242, 237, 221, 0.25);
+    margin: 18px 0;
+}
+.lc-nav {
+    display: flex; flex-wrap: wrap; gap: 8px;
+    margin: 10px 0 4px 0;
+}
+.lc-nav a {
+    font-family: 'Oswald', sans-serif;
+    font-size: 0.86rem;
+    letter-spacing: 0.06em;
+    color: #F2EDDD !important;
+    text-decoration: none !important;
+    background: #10281A;
+    border: 1px solid #27492F;
+    border-radius: 999px;
+    padding: 5px 14px;
+    transition: all 0.15s ease;
+}
+.lc-nav a:hover {
+    border-color: #F5C518;
+    color: #F5C518 !important;
+    box-shadow: 0 0 12px rgba(245, 197, 24, 0.25);
+}
 h1, h2, h3, h4, h5, h6 {
     color: #ffffff !important;
     font-family: 'Oswald', 'Inter', sans-serif !important;
@@ -1279,6 +1329,77 @@ if _version_state["version"] != APP_VERSION:
 # Also remember in session_state so other code paths can read it (e.g. the
 # diagnostic at the top of the page, sidebar metadata).
 st.session_state["_app_version"] = APP_VERSION
+
+
+# ============================================================================
+# v45.35: CENTRAL METRIC BANDS — one defensible threshold map powering the
+# player deep-dive verdicts, the Top-10 cell tinting, and help-text legends.
+# Raw-skill thresholds are league-anchored (2026 norms); composite metrics
+# (our 0-100 percentile family) share uniform bands by construction.
+# A metric appears here ONLY if its bands are defensible — no fake precision.
+# ============================================================================
+_COMPOSITE_BANDS = [(80, "🟢", "elite"), (60, "🟡", "strong"),
+                    (40, "🟠", "middling"), (float("-inf"), "🔴", "weak")]
+METRIC_BANDS = {
+    # raw skills (league-anchored)
+    "barrel_pct":     [(12, "🟢", "elite"), (8, "🟡", "strong"), (5, "🟠", "average"), (float("-inf"), "🔴", "below avg")],
+    "pulled_brl_pct": [(9, "🟢", "elite"), (6, "🟡", "strong"), (3.5, "🟠", "average"), (float("-inf"), "🔴", "below avg")],
+    "avg_ev":         [(91.5, "🟢", "elite"), (89.5, "🟡", "strong"), (87.5, "🟠", "average"), (float("-inf"), "🔴", "soft")],
+    "hard_hit":       [(48, "🟢", "elite"), (42, "🟡", "strong"), (37, "🟠", "average"), (float("-inf"), "🔴", "below avg")],
+    "iso":            [(0.240, "🟢", "elite power"), (0.180, "🟡", "strong"), (0.140, "🟠", "average"), (float("-inf"), "🔴", "light")],
+    "xslg":           [(0.520, "🟢", "elite"), (0.450, "🟡", "strong"), (0.400, "🟠", "average"), (float("-inf"), "🔴", "weak")],
+    "xwoba":          [(0.370, "🟢", "elite"), (0.340, "🟡", "strong"), (0.315, "🟠", "average"), (float("-inf"), "🔴", "weak")],
+    "blast_pct":      [(15, "🟢", "elite (approx bands)"), (9, "🟡", "strong"), (5, "🟠", "average"), (float("-inf"), "🔴", "low")],
+    "sweet_spot_pct": [(38, "🟢", "elite"), (34, "🟡", "strong"), (30, "🟠", "average"), (float("-inf"), "🔴", "low")],
+    "hr_game_pct":    [(21, "🟢", "A-range probability"), (13, "🟡", "B-range"), (7, "🟠", "C-range"), (float("-inf"), "🔴", "long shot")],
+    # our 0-100 composite family — uniform percentile bands
+    "dinger_score": _COMPOSITE_BANDS, "power_composite": _COMPOSITE_BANDS,
+    "lift_score": _COMPOSITE_BANDS, "power_score": _COMPOSITE_BANDS,
+    "discipline_score": _COMPOSITE_BANDS, "pitch_match_score": _COMPOSITE_BANDS,
+    "pitch_hr_score": _COMPOSITE_BANDS, "matchup_opp": _COMPOSITE_BANDS,
+    "barrel_matchup_score": _COMPOSITE_BANDS, "two_way_matchup_score": _COMPOSITE_BANDS,
+    "sleeper_score": _COMPOSITE_BANDS,
+}
+_BAND_TINT = {"🟢": "background-color: rgba(0, 255, 157, 0.14)",
+              "🟡": "background-color: rgba(245, 197, 24, 0.14)",
+              "🟠": "background-color: rgba(255, 159, 28, 0.13)",
+              "🔴": "background-color: rgba(255, 77, 109, 0.10)"}
+
+
+def metric_signal(metric, value):
+    """(emoji, label) verdict for a metric value per METRIC_BANDS; ("", "") if
+    unbanded or missing."""
+    bands = METRIC_BANDS.get(metric)
+    if bands is None or value is None:
+        return "", ""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return "", ""
+    if pd.isna(v):
+        return "", ""
+    for thr, emo, lab in bands:
+        if v >= thr:
+            return emo, lab
+    return "", ""
+
+
+def _band_cell_style(metric):
+    """Styler function factory: subtle background tint per band (NaN → none)."""
+    def _f(v):
+        emo, _ = metric_signal(metric, v)
+        return _BAND_TINT.get(emo, "")
+    return _f
+
+
+def _section_banner(title, sub=""):
+    """v45.34: scoreboard-style section banner — amber rail, Oswald caps.
+    Replaces plain subheaders on major sections for the ballpark feel."""
+    _s = f'<div class="lc-sub">{sub}</div>' if sub else ""
+    st.markdown(
+        f'<div class="lc-banner"><div class="lc-title">{title}</div>{_s}</div>',
+        unsafe_allow_html=True,
+    )
 
 
 def _player_col(label="Player", **kw):
@@ -3693,6 +3814,19 @@ st.markdown(
               text-transform: uppercase;">
     ⚾ {selected_date.strftime('%A · %B %d, %Y')}
   </div>
+</div>
+""",
+    unsafe_allow_html=True,
+)
+st.markdown(
+    """
+<div class="lc-nav">
+  <a href="#sec-top10">🏆 Top 10</a>
+  <a href="#sec-games">🎮 Game Browser</a>
+  <a href="#sec-pitchers">🥎 Pitchers</a>
+  <a href="#sec-sleepers">💎 Sleepers</a>
+  <a href="#sec-compare">🆚 Head-to-Head</a>
+  <a href="#sec-ask">🤖 Ask LaunchCast</a>
 </div>
 """,
     unsafe_allow_html=True,
@@ -6362,7 +6496,7 @@ st.divider()
 # ============================================================================
 
 st.markdown("<div id='sec-pitchers'></div>", unsafe_allow_html=True)
-st.subheader("🥎 Pitcher Slate Overview")
+_section_banner("🥎 Pitcher Slate Overview", "Every probable starter graded — who to attack, who to avoid")
 st.caption(
     "Role-aware scoring: relievers and short-sample pitchers get reliability-adjusted "
     "Test/kHR/Proj K so opener days don't dominate the rankings. "
@@ -7285,7 +7419,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.33 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.35 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -9471,7 +9605,8 @@ except Exception as _pub_e:
     log_swallowed_error("public_top5_predictors", _pub_e, surface=False)
 
 st.markdown("<div id='sec-top10'></div>", unsafe_allow_html=True)
-st.subheader("🏆 Top 10 Picks of the Day")
+st.markdown("<div id='sec-top10'></div>", unsafe_allow_html=True)
+_section_banner("🏆 Top 10 Picks of the Day", "The marquee — tonight's best home run plays, ranked")
 
 # v45.18 (UI): "Tonight in 10 seconds" — one-line orientation strip so a
 # casual visitor instantly knows the shape of the slate before the picks.
@@ -9513,7 +9648,8 @@ try:
             _env_word = ("great" if _best_env >= 1.10 else
                          "good" if _best_env >= 1.03 else "neutral")
             _strip.append(f"🌤️ best HR environment: **{_best_lbl}** ({_env_word})")
-        st.markdown(" · ".join(_strip))
+        _strip.append('🎮 <a href="#sec-games" style="color:#F5C518;">jump to game browser</a>')
+        st.markdown(" · ".join(_strip), unsafe_allow_html=True)
 except Exception as _strip_e:
     log_swallowed_error("tonight_strip", _strip_e, surface=False)
 
@@ -9532,7 +9668,7 @@ with st.expander("ℹ️ How the Top 10 works", expanded=False):
         "of the night reads ~95 and the worst ~10. Above 95, elite plays are "
         "soft-compressed into 95-99.5 so they still sort — the score never "
         "reaches 100 (it's a rank, not a probability).\n"
-        "- **HR Grade vs HR Score**: the letter grade comes from **HR Game%** "
+        "- **Prob Grade vs HR Score**: the letter grade comes from **HR Game%** "
         "(the probability, banded A+ to F, with environment/platoon caps) — "
         "NOT from HR Score. They can legitimately disagree: a hitter can rank "
         "high on the composite but carry a lower probability grade, and vice "
@@ -11776,8 +11912,19 @@ if combined_picks is not None and not combined_picks.empty:
         ] if c in top10.columns]
         disp = top10[cols_to_show].copy()
 
+        # v45.35: band tinting on the marquee — subtle cell backgrounds per
+        # METRIC_BANDS for every banded column present. Styler works alongside
+        # column_config; sorting stays numeric; NaN cells get no tint.
+        try:
+            _tint_cols = [c for c in disp.columns if c in METRIC_BANDS]
+            _disp_render = disp.style
+            for _tc in _tint_cols:
+                _disp_render = _disp_render.map(_band_cell_style(_tc), subset=[_tc])
+        except Exception:
+            _disp_render = disp
+
         st.dataframe(
-            disp, hide_index=True, use_container_width=True,
+            _disp_render, hide_index=True, use_container_width=True,
             column_config={
                 "rank": st.column_config.NumberColumn("#", width="small"),
                 "slate_leader_flag": st.column_config.TextColumn(
@@ -13685,7 +13832,7 @@ st.divider()
 # TOP SLEEPERS + TOP HR PLAYS ACROSS THE WHOLE SLATE
 # ============================================================================
 st.markdown("<div id='sec-sleepers'></div>", unsafe_allow_html=True)
-st.subheader("💎 Top Sleepers & Best HR Plays")
+_section_banner("💎 Sleepers & Best HR Plays", "Under-the-radar power the market hasn't priced in")
 st.caption(
     "Combined view across every game today. **Sleepers**: hitters whose HR probability "
     "today exceeds their season pace (under-the-radar plays). **Top HR**: highest "
@@ -14899,6 +15046,114 @@ if all_hitters:
                         )
                 except Exception as _we:
                     log_swallowed_error("explain_pick", _we, surface=False)
+
+                # ==== v45.35: PLAYER DEEP DIVE (user ask) — exactly one match
+                # → full card: every metric grouped, color-verdict per band,
+                # what it means for THIS matchup. ====
+                try:
+                    if len(search_results) == 1:
+                        _dd = search_results.iloc[0]
+
+                        def _fmt_metric(label, col, fmt="{:.1f}", suffix=""):
+                            v = _dd.get(col)
+                            if v is None or pd.isna(v):
+                                return None
+                            emo, verdict = metric_signal(col, v)
+                            try:
+                                vs = fmt.format(float(v)) + suffix
+                            except (TypeError, ValueError):
+                                vs = str(v)
+                            tail = f" — _{verdict}_" if verdict else ""
+                            dot = f"{emo} " if emo else "· "
+                            return f"{dot}**{label}**: {vs}{tail}"
+
+                        with st.container(border=True):
+                            _gr = str(_dd.get("grade") or "?")
+                            _hg = _dd.get("hr_game_pct")
+                            _hs = _dd.get("hr_score")
+                            _hdr = (f"### 🔬 {_dd.get('player_name', '?')} — deep dive")
+                            st.markdown(_hdr)
+                            _idbits = [str(_dd.get("team") or "")]
+                            if _dd.get("game") and not pd.isna(_dd.get("game")):
+                                _idbits.append(str(_dd.get("game")))
+                            _lp = _dd.get("lineup_pos")
+                            if _lp is not None and not pd.isna(_lp):
+                                _idbits.append(f"batting {int(_lp)}")
+                            _hl = f"**Prob Grade {_gr}**"
+                            if _hg is not None and not pd.isna(_hg):
+                                _e1, _ = metric_signal("hr_game_pct", _hg)
+                                _hl += f" · {_e1} HR Game% **{float(_hg):.1f}%**"
+                            if _hs is not None and not pd.isna(_hs):
+                                _hl += f" · HR Score **{float(_hs):.0f}**"
+                            _sm = str(_dd.get("smash_spot") or "").strip()
+                            if _sm and _sm not in ("·", "nan"):
+                                _hl += f" · {_sm}"
+                            st.markdown(" · ".join(_idbits))
+                            st.markdown(_hl)
+                            _c1, _c2 = st.columns(2)
+                            with _c1:
+                                st.markdown("**💪 Power profile**")
+                                for line in filter(None, [
+                                    _fmt_metric("Barrel%", "barrel_pct", "{:.1f}", "%"),
+                                    _fmt_metric("Pulled-Brl%", "pulled_brl_pct", "{:.1f}", "%"),
+                                    _fmt_metric("Avg EV", "avg_ev", "{:.1f}", " mph"),
+                                    _fmt_metric("HardHit%", "hard_hit", "{:.1f}", "%"),
+                                    _fmt_metric("ISO", "iso", "{:.3f}"),
+                                    _fmt_metric("xSLG", "xslg", "{:.3f}"),
+                                    _fmt_metric("xwOBA", "xwoba", "{:.3f}"),
+                                    _fmt_metric("Blast%", "blast_pct", "{:.1f}", "%"),
+                                    _fmt_metric("SweetSpot%", "sweet_spot_pct", "{:.1f}", "%"),
+                                ]):
+                                    st.markdown(line)
+                                st.markdown("**🌤️ Environment**")
+                                _eb = _dd.get("env_boost")
+                                if _eb is not None and not pd.isna(_eb):
+                                    _ebf = float(_eb)
+                                    _ew = ("🟢 great for homers" if _ebf >= 1.08
+                                           else "🟡 HR-friendly" if _ebf >= 1.02
+                                           else "🟠 neutral" if _ebf >= 0.95
+                                           else "🔴 suppressive")
+                                    st.markdown(f"· **Park+Weather**: {_ebf:.2f}× — _{_ew}_")
+                            with _c2:
+                                st.markdown("**🎯 Tonight's matchup**")
+                                _op = _dd.get("opp_pitcher")
+                                _og = str(_dd.get("opp_pitcher_grade") or "")
+                                if _op and not pd.isna(_op):
+                                    _ogtxt = f" — grade **{_og}**" if _og and _og != "nan" else ""
+                                    st.markdown(f"· **vs**: {_op}{_ogtxt}")
+                                for line in filter(None, [
+                                    _fmt_metric("Matchup (opp)", "matchup_opp", "{:.0f}"),
+                                    _fmt_metric("Pitch-HR fit", "pitch_hr_score", "{:.0f}"),
+                                    _fmt_metric("Pitch match", "pitch_match_score", "{:.0f}"),
+                                    _fmt_metric("Barrel matchup", "barrel_matchup_score", "{:.0f}"),
+                                    _fmt_metric("Two-way matchup", "two_way_matchup_score", "{:.0f}"),
+                                ]):
+                                    st.markdown(line)
+                                _bp = _dd.get("best_pitch")
+                                if _bp and not pd.isna(_bp):
+                                    st.markdown(f"· **Punishes**: {_bp}")
+                                st.markdown("**📈 Form & verdicts**")
+                                for line in filter(None, [
+                                    _fmt_metric("Dinger Score", "dinger_score", "{:.0f}"),
+                                    _fmt_metric("💥+ Combo", "power_composite", "{:.0f}"),
+                                    _fmt_metric("Sleeper", "sleeper_score", "{:.0f}"),
+                                ]):
+                                    st.markdown(line)
+                                _stk = str(_dd.get("streak_label") or "").strip()
+                                if _stk and _stk not in ("·", "nan"):
+                                    st.markdown(f"· **Form**: {_stk}")
+                                _dc = _dd.get("data_completeness")
+                                if _dc is not None and not pd.isna(_dc):
+                                    st.markdown(f"· **Data completeness**: {float(_dc):.0f}%")
+                            st.caption(
+                                "🟢 elite · 🟡 strong · 🟠 average · 🔴 below — bands are "
+                                "league-anchored for raw stats and percentile-based for "
+                                "LaunchCast composites (hover any column header for detail)."
+                            )
+                    elif len(search_results) > 1:
+                        st.caption("💡 Narrow the search to exactly one player for the full deep dive.")
+                except Exception as _dde:
+                    log_swallowed_error("deep_dive", _dde, surface=False)
             else:
                 st.warning(
                     f"🔍 No players match `{_player_search}` on tonight's slate. "
@@ -16052,7 +16307,7 @@ except Exception as _ec_err:
     log_swallowed_error("elite_convergence_section", _ec_err, surface=False)
 
 st.markdown("<div id='sec-ask'></div>", unsafe_allow_html=True)
-st.subheader("🤖 Ask LaunchCast")
+_section_banner("🤖 Ask LaunchCast", "Ask anything about tonight's slate — answers straight from the data")
 st.caption(
     "Ask about tonight's slate, or pick a common question below. Answers come "
     "straight from tonight's data — no reload until you hit Ask."
@@ -16462,7 +16717,7 @@ _ask_bot_fragment()
 
 st.markdown("---")
 st.markdown("<div id='sec-compare'></div>", unsafe_allow_html=True)
-st.subheader("🆚 Head-to-Head Comparison")
+_section_banner("🆚 Head-to-Head", "Stack any two hitters side by side")
 st.caption(
     "Pick 2-4 hitters to compare side-by-side. The leader in each category "
     "is marked 🏆. Helpful for deciding between picks or auditing why one "
@@ -16728,7 +16983,7 @@ st.divider()
 # GAME-BY-GAME MATCHUPS
 # ============================================================================
 st.markdown("<div id='sec-games'></div>", unsafe_allow_html=True)
-st.subheader("🎮 Isolated Game-by-Game Matchups")
+_section_banner("🎮 Game-by-Game Breakdown", "Pick a game below — full matchup tables, both lineups, park && weather")
 st.caption("Real data only. Empty cells = data not available for that player.")
 
 
@@ -17183,9 +17438,9 @@ def build_col_config():
             ),
         ),
         "grade": st.column_config.TextColumn(
-            "HR Grade", width="small",
+            "Prob Grade", width="small",
             help=(
-                "**HR letter grade** — driven by HR Game% (the probability), "
+                "**Prob Grade** (probability letter grade) — driven by HR Game%, "
                 "NOT by HR Score:\n"
                 "A+ ≥25% · A 21-25% · B+ 17-21% · B 13-17%\n"
                 "C+ 10-13% · C 7-10% · D 4-7% · F <4% · — : no sample\n"
@@ -18262,7 +18517,17 @@ if _valid_games:
         _n_games = len(_valid_games)
         _show_all_games = False
 
-        _sel_col, _view_col, _all_col = st.columns([3, 2, 1])
+        # v45.34: the game picker was easy to miss — now it lives in a
+        # bordered panel with its own mini-header so it can't be overlooked.
+        _picker_box = st.container(border=True)
+        with _picker_box:
+            st.markdown(
+                '<div style="font-family: \'Oswald\', sans-serif; '
+                'letter-spacing: 0.08em; color: #F5C518; font-size: 1.02rem; '
+                'text-transform: uppercase;">🎮 Choose your game</div>',
+                unsafe_allow_html=True,
+            )
+            _sel_col, _view_col, _all_col = st.columns([3, 2, 1])
         with _sel_col:
             _selected_game_label = st.selectbox(
                 f"🎮 Select game to view ({_n_games} game"
@@ -19190,11 +19455,26 @@ if _diag.get("slate_audit"):
 
 
 def _render_diag_list(items, empty_msg):
-    """Render a list of stashed diagnostic dicts with proper level handling."""
+    """Render a list of stashed diagnostic dicts with proper level handling.
+
+    v45.34 (user ask: "issues should stand out so I know we have to check"):
+    a verdict headline leads, and warnings/errors render FIRST in colored
+    blocks — informational lines follow. An issue can no longer hide in the
+    middle of twelve info bullets."""
     if not items:
         st.caption(empty_msg)
         return
-    for _d in items:
+    _issues = [d for d in items if d.get("level") in ("warning", "error")]
+    _infos = [d for d in items if d.get("level") not in ("warning", "error")]
+    if _issues:
+        st.error(
+            f"🔴 **{len(_issues)} ISSUE{'S' if len(_issues) != 1 else ''} "
+            f"NEED{'' if len(_issues) != 1 else 'S'} ATTENTION** — shown "
+            f"first below. Everything else is informational."
+        )
+    else:
+        st.success("✅ **No issues detected** — all lines below are informational.")
+    for _d in _issues + _infos:
         _level = _d.get("level", "caption")
         _msg = _d.get("message", "")
         if _level == "warning":
