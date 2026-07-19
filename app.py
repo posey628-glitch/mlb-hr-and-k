@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.44-nav-logic"
+APP_VERSION = "2026.06.10-v45.45-card-bulletproof"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -1413,9 +1413,27 @@ def _render_deep_dive_card(_dd):
             _dd = _dd[~_dd.index.duplicated()]
     except Exception:
         pass
+
+    def _fnum(v):
+        """v45.45 (quick-card crash): EVERY numeric pulled from the row goes
+        through here — None/NaN/strings/oddballs come back as None or a clean
+        float, never an exception mid-render. (Root cause: the card called
+        float() on data_completeness, which is a TEXT flag like '✅ full' —
+        ValueError on card open.)"""
+        try:
+            if v is None:
+                return None
+            if isinstance(v, str):
+                v = v.strip().rstrip("%")
+                if not v or v in ("—", "-", "nan", "None"):
+                    return None
+            f = float(v)
+            return None if pd.isna(f) else f
+        except (TypeError, ValueError):
+            return None
     def _fmt_metric(label, col, fmt="{:.1f}", suffix=""):
-        v = _dd.get(col)
-        if v is None or pd.isna(v):
+        v = _fnum(_dd.get(col))
+        if v is None:
             return None
         emo, verdict = metric_signal(col, v)
         try:
@@ -1435,15 +1453,17 @@ def _render_deep_dive_card(_dd):
         _idbits = [str(_dd.get("team") or "")]
         if _dd.get("game") and not pd.isna(_dd.get("game")):
             _idbits.append(str(_dd.get("game")))
-        _lp = _dd.get("lineup_pos")
-        if _lp is not None and not pd.isna(_lp):
+        _lp = _fnum(_dd.get("lineup_pos"))
+        if _lp is not None:
             _idbits.append(f"batting {int(_lp)}")
         _hl = f"**Prob Grade {_gr}**"
-        if _hg is not None and not pd.isna(_hg):
+        _hg = _fnum(_hg)
+        if _hg is not None:
             _e1, _ = metric_signal("hr_game_pct", _hg)
-            _hl += f" · {_e1} HR Game% **{float(_hg):.1f}%**"
-        if _hs is not None and not pd.isna(_hs):
-            _hl += f" · HR Score **{float(_hs):.0f}**"
+            _hl += f" · {_e1} HR Game% **{_hg:.1f}%**"
+        _hs = _fnum(_hs)
+        if _hs is not None:
+            _hl += f" · HR Score **{_hs:.0f}**"
         _sm = str(_dd.get("smash_spot") or "").strip()
         if _sm and _sm not in ("·", "nan"):
             _hl += f" · {_sm}"
@@ -1466,9 +1486,8 @@ def _render_deep_dive_card(_dd):
             ]):
                 st.markdown(line)
             st.markdown("**🌤️ Environment**")
-            _eb = _dd.get("env_boost")
-            if _eb is not None and not pd.isna(_eb):
-                _ebf = float(_eb)
+            _ebf = _fnum(_dd.get("env_boost"))
+            if _ebf is not None:
                 _ew = ("🟢 great for homers" if _ebf >= 1.08
                        else "🟡 HR-friendly" if _ebf >= 1.02
                        else "🟠 neutral" if _ebf >= 0.95
@@ -1503,8 +1522,12 @@ def _render_deep_dive_card(_dd):
             if _stk and _stk not in ("·", "nan"):
                 st.markdown(f"· **Form**: {_stk}")
             _dc = _dd.get("data_completeness")
-            if _dc is not None and not pd.isna(_dc):
-                st.markdown(f"· **Data completeness**: {float(_dc):.0f}%")
+            if _dc is not None and isinstance(_dc, str) and _dc.strip() and _dc != "nan":
+                st.markdown(f"· **Data**: {_dc}")
+            else:
+                _dcn = _fnum(_dc)
+                if _dcn is not None:
+                    st.markdown(f"· **Data completeness**: {_dcn:.0f}%")
         # ==== v45.41 (user ask): handedness splits — the
         # hitter vs BOTH pitcher hands, tonight's side
         # starred, plus what tonight's pitcher has allowed
@@ -1512,8 +1535,7 @@ def _render_deep_dive_card(_dd):
         # platoon matchup in one place. ====
         try:
             def _sv(col):
-                v = _dd.get(col)
-                return None if v is None or pd.isna(v) else float(v)
+                return _fnum(_dd.get(col))
 
             _opp_hand = str(_dd.get("opp_p_throws") or "").upper()[:1]
             _split_rows = [
@@ -1593,10 +1615,10 @@ if hasattr(st, "dialog"):
         try:
             _render_deep_dive_card(_row)
         except Exception as _qc_err:
-            st.error("⚠️ Couldn't render this player's card — the row has "
-                     "unexpected data. Try the search box instead; this has "
-                     "been logged.")
-            log_swallowed_error("quick_card_render", _qc_err, surface=False)
+            st.error(f"⚠️ Couldn't render this player's card — "
+                     f"{type(_qc_err).__name__}: {str(_qc_err)[:140]}. "
+                     f"Recorded in Pipeline Health — paste it to get it fixed.")
+            log_swallowed_error("quick_card_render", _qc_err, surface=True)
 else:
     def _quick_card_dialog(_row):  # older Streamlit: inline fallback
         try:
@@ -7730,7 +7752,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.44 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.45 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
