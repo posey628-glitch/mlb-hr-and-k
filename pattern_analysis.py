@@ -1514,6 +1514,23 @@ def probability_calibration_table(merged_df: pd.DataFrame,
     return out.drop(columns=["predicted", "observed"])
 
 
+def adaptive_selected_features(importance_df: pd.DataFrame,
+                                top_n: int = 5) -> pd.DataFrame:
+    """v45.40: THE single source of truth for which features the adaptive
+    challenger uses — raw skills only (MODEL_OUTPUT_FEATURES excluded),
+    |corr| ≥ 0.05, ≥5 days. compute_adaptive_score and every display of
+    "drivers" MUST both use this, so what's shown is always what's used
+    (a raw importance head(5) in the owner report previously listed excluded
+    outputs as drivers — display and reality can no longer diverge)."""
+    if importance_df is None or importance_df.empty:
+        return pd.DataFrame()
+    return importance_df[
+        (importance_df["avg_corr"].abs() >= 0.05)
+        & (importance_df["n_days"] >= 5)
+        & (~importance_df["feature"].isin(MODEL_OUTPUT_FEATURES))
+    ].head(top_n)
+
+
 def compute_adaptive_score(current_slate: pd.DataFrame,
                             importance_df: pd.DataFrame,
                             top_n_features: int = 5) -> pd.Series:
@@ -1540,11 +1557,7 @@ def compute_adaptive_score(current_slate: pd.DataFrame,
     # (hr_game_pct, hr_score, framework flags, ps_* components...). Without
     # this the challenger blends in the champion's outputs and becomes a
     # partial copy of it — raw measurable skills only.
-    reliable = importance_df[
-        (importance_df["avg_corr"].abs() >= 0.05)
-        & (importance_df["n_days"] >= 5)
-        & (~importance_df["feature"].isin(MODEL_OUTPUT_FEATURES))
-    ].head(top_n_features)
+    reliable = adaptive_selected_features(importance_df, top_n_features)
     if reliable.empty:
         return pd.Series(dtype=float, index=current_slate.index)
 
