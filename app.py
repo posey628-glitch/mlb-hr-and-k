@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.37-segments"
+APP_VERSION = "2026.06.10-v45.38-suspended-fix"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -1360,10 +1360,15 @@ METRIC_BANDS = {
     "barrel_matchup_score": _COMPOSITE_BANDS, "two_way_matchup_score": _COMPOSITE_BANDS,
     "sleeper_score": _COMPOSITE_BANDS,
 }
-_BAND_TINT = {"🟢": "background-color: rgba(0, 255, 157, 0.14)",
-              "🟡": "background-color: rgba(245, 197, 24, 0.14)",
-              "🟠": "background-color: rgba(255, 159, 28, 0.13)",
-              "🔴": "background-color: rgba(255, 77, 109, 0.10)"}
+# v45.38 (user: shades too close to tell apart): stronger alphas, more
+# separated hues, and a colored left edge per band so tiers read instantly
+# even for close hues.
+_BAND_TINT = {
+    "🟢": "background-color: rgba(0, 230, 118, 0.32); box-shadow: inset 3px 0 0 #00E676",
+    "🟡": "background-color: rgba(255, 214, 0, 0.30); box-shadow: inset 3px 0 0 #FFD600",
+    "🟠": "background-color: rgba(255, 109, 0, 0.30); box-shadow: inset 3px 0 0 #FF6D00",
+    "🔴": "background-color: rgba(213, 0, 0, 0.28); box-shadow: inset 3px 0 0 #FF1744",
+}
 
 
 def metric_signal(metric, value):
@@ -2925,11 +2930,14 @@ with st.spinner("Loading slate and stats..."):
         try:
             _ppd_ct = int(slate.attrs.get("dropped_games", 0) or 0)
             if _ppd_ct > 0:
+                _ppd_det = slate.attrs.get("dropped_details") or []
+                _det_txt = ("  \n" + "  \n".join(f"· {d}" for d in _ppd_det[:6])) if _ppd_det else ""
                 st.info(
                     f"ℹ️ **{_ppd_ct} game{'s' if _ppd_ct != 1 else ''} removed "
-                    f"from today's slate** — marked postponed/cancelled/"
-                    f"suspended by MLB. Projections cover only games still "
-                    f"scheduled to be played."
+                    f"from today's slate** (marked as not being played by MLB):"
+                    f"{_det_txt}  \n"
+                    f"_Delayed and suspended-resumption games are KEPT — only "
+                    f"postponed/cancelled games are removed._"
                 )
         except Exception:
             pass
@@ -7467,7 +7475,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.37 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.38 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -18552,7 +18560,14 @@ if _valid_games:
                     time_str = f" {dt.strftime('%H:%M')}"
             except Exception:
                 time_str = ""
-        return f"{g['away_team_abbr']} @ {g['home_team_abbr']}{time_str}{rain}"
+        # v45.38 (user ask): doubleheaders show Game 1 / Game 2 explicitly
+        _dh = ""
+        try:
+            if str(g.get("doubleHeader", "N")).upper() in ("Y", "S"):
+                _dh = f" · Game {int(g.get('gameNumber', 1) or 1)}"
+        except (TypeError, ValueError):
+            _dh = ""
+        return f"{g['away_team_abbr']} @ {g['home_team_abbr']}{_dh}{time_str}{rain}"
 
     _tab_labels = [_tab_label(g, c) for g, c in _valid_games]
     # v45.05: render only the SELECTED game, not all of them. st.tabs renders
