@@ -1523,6 +1523,9 @@ def get_slate(game_date: Optional[str] = None) -> pd.DataFrame:
                 "gamePk": g["gamePk"],
                 "gameTime": g.get("gameDate"),
                 "status": g.get("status", {}).get("detailedState"),
+                # v45.38: doubleheader identification for game labels
+                "doubleHeader": g.get("doubleHeader", "N"),
+                "gameNumber": g.get("gameNumber", 1),
                 "venue": g.get("venue", {}).get("name"),
                 "venue_id": g.get("venue", {}).get("id"),  # v43.26 — for park history
                 "away_team": away["team"]["name"],
@@ -1555,14 +1558,29 @@ def get_slate(game_date: Optional[str] = None) -> pd.DataFrame:
         # ("Suspended: Rain", "Postponed: Inclement Weather"); exact isin()
         # let those slip through as live games. "Delayed" deliberately NOT
         # in the prefix set: delayed games still get played.
+        # v45.38 (user's missing BOS@TB game): "Suspended" REMOVED from the
+        # drop list. A suspended game appearing on TODAY's date is a game
+        # that RESUMES today — hitters bat, homers count. Rain-delayed
+        # ("Delayed...") was always kept. Only never-happening statuses drop.
         _dead_prefixes = (
-            "Postponed", "Cancelled", "Canceled", "Suspended",
+            "Postponed", "Cancelled", "Canceled",
             "Forfeit", "Completed Early",
         )
         if "status" in df.columns:
             _before = len(df)
             _status_str = df["status"].astype(str)
-            df = df[~_status_str.str.startswith(_dead_prefixes)].reset_index(drop=True)
+            _drop_mask = _status_str.str.startswith(_dead_prefixes)
+            # v45.38: capture WHO got dropped and WHY, so the UI can name
+            # them ("PIT @ CHC — Postponed") instead of a bare count.
+            try:
+                _dd_rows = df[_drop_mask]
+                _dropped_details = [
+                    f"{r.get('away_team_abbr', '?')} @ {r.get('home_team_abbr', '?')} — {r.get('status', '?')}"
+                    for _, r in _dd_rows.iterrows()
+                ]
+            except Exception:
+                _dropped_details = []
+            df = df[~_drop_mask].reset_index(drop=True)
             _dropped = _before - len(df)
             if _dropped > 0:
                 # Surface it so the user sees WHY a game vanished rather
@@ -1570,6 +1588,7 @@ def get_slate(game_date: Optional[str] = None) -> pd.DataFrame:
                 try:
                     globals().setdefault("_SLATE_DROPPED_GAMES", 0)
                     globals()["_SLATE_DROPPED_GAMES"] += _dropped
+                    globals()["_SLATE_DROPPED_DETAILS"] = _dropped_details
                 except Exception:
                     pass
     # v44.60 (code review #6): also embed the dropped count in the DataFrame's
@@ -1579,6 +1598,7 @@ def get_slate(game_date: Optional[str] = None) -> pd.DataFrame:
     # slate_dropped_games() can read the correct per-slate count either way.
     try:
         df.attrs["dropped_games"] = int(globals().get("_SLATE_DROPPED_GAMES", 0) or 0)
+        df.attrs["dropped_details"] = list(globals().get("_SLATE_DROPPED_DETAILS", []) or [])
     except Exception:
         pass
     return df
