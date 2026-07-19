@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.46-tour-accuracy"
+APP_VERSION = "2026.06.10-v45.47-amber-links"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -962,11 +962,14 @@ section[data-testid="stSidebar"] .stMarkdown h3 {
     display: flex; flex-wrap: wrap; gap: 8px;
     margin: 10px 0 4px 0;
 }
-.lc-nav a {
+.lc-nav a, .lc-nav a:link, .lc-nav a:visited {
+    /* v45.47 (user: some pills white, some amber): :visited was unstyled, so
+       already-jumped pills took the browser's visited color. All states now
+       explicit — and the pills are literally amber, as the tour says. */
     font-family: 'Oswald', sans-serif;
     font-size: 0.86rem;
     letter-spacing: 0.06em;
-    color: #F2EDDD !important;
+    color: #F5C518 !important;
     text-decoration: none !important;
     background: #10281A;
     border: 1px solid #27492F;
@@ -976,8 +979,18 @@ section[data-testid="stSidebar"] .stMarkdown h3 {
 }
 .lc-nav a:hover {
     border-color: #F5C518;
-    color: #F5C518 !important;
+    color: #FFD966 !important;
     box-shadow: 0 0 12px rgba(245, 197, 24, 0.25);
+}
+/* v45.47: same visited-state fix for every other in-app link (sidebar nav,
+   strip jump link, table links) — amber in all states, everywhere. */
+.stMarkdown a:link, .stMarkdown a:visited,
+section[data-testid="stSidebar"] a:link,
+section[data-testid="stSidebar"] a:visited {
+    color: #F5C518 !important;
+}
+.stMarkdown a:hover, section[data-testid="stSidebar"] a:hover {
+    color: #FFD966 !important;
 }
 h1, h2, h3, h4, h5, h6 {
     color: #ffffff !important;
@@ -7756,7 +7769,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.46 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.47 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
