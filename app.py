@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.43-fixes-tutorial"
+APP_VERSION = "2026.06.10-v45.44-nav-logic"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -4037,12 +4037,14 @@ st.markdown(
 st.markdown(
     """
 <div class="lc-nav">
-  <a href="#sec-top10">🏆 Top 10</a>
-  <a href="#sec-games">🎮 Game Browser</a>
+  <a href="#sec-tour">📖 Tour</a>
   <a href="#sec-pitchers">🥎 Pitchers</a>
+  <a href="#sec-top10">🏆 Top 10</a>
   <a href="#sec-sleepers">💎 Sleepers</a>
-  <a href="#sec-compare">🆚 Head-to-Head</a>
   <a href="#sec-ask">🤖 Ask LaunchCast</a>
+  <a href="#sec-compare">🆚 Head-to-Head</a>
+  <a href="#sec-games">🎮 Game Browser</a>
+  <a href="#sec-tools">🛠 Tools</a>
 </div>
 """,
     unsafe_allow_html=True,
@@ -4051,11 +4053,15 @@ st.markdown(
 # v45.43 (user ask): plain-English tutorial — what everything is, where it
 # lives, and a worked example. Collapsed by default; first thing a newcomer
 # can open.
+st.markdown("<div id='sec-tour'></div>", unsafe_allow_html=True)
 with st.expander("📖 New here? How to use LaunchCast (60-second tour)", expanded=False):
     st.markdown(
         "**What this site does:** every day, LaunchCast pulls live MLB data and "
         "ranks tonight's best home run plays — power skills × the actual pitcher "
         "matchup × park × weather.\n\n"
+        "**Page map (top → bottom):** Pitchers → 🏆 Top 10 → Sleepers → Ask → "
+        "Head-to-Head → 🎮 Game Browser → Tools. The amber pills above jump "
+        "anywhere instantly.\n\n"
         "**The 60-second flow:**\n"
         "1. **Read the strip at the top** — games tonight, slate size, and the "
         "best play in one line.\n"
@@ -7724,7 +7730,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.43 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.44 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
