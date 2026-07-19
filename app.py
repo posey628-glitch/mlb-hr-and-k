@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.40-driver-truth"
+APP_VERSION = "2026.06.10-v45.41-splits-dive"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -7480,7 +7480,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.40 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.41 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -15214,6 +15214,80 @@ if all_hitters:
                                 _dc = _dd.get("data_completeness")
                                 if _dc is not None and not pd.isna(_dc):
                                     st.markdown(f"· **Data completeness**: {float(_dc):.0f}%")
+                            # ==== v45.41 (user ask): handedness splits — the
+                            # hitter vs BOTH pitcher hands, tonight's side
+                            # starred, plus what tonight's pitcher has allowed
+                            # to this hitter's side. Both halves of the
+                            # platoon matchup in one place. ====
+                            try:
+                                def _sv(col):
+                                    v = _dd.get(col)
+                                    return None if v is None or pd.isna(v) else float(v)
+
+                                _opp_hand = str(_dd.get("opp_p_throws") or "").upper()[:1]
+                                _split_rows = [
+                                    ("PA", "pa", "{:.0f}", ""),
+                                    ("HR", "hr", "{:.0f}", ""),
+                                    ("HR/PA", "hr_per_pa", "{:.1f}", "%"),
+                                    ("SLG", "slg", "{:.3f}", ""),
+                                    ("OPS", "ops", "{:.3f}", ""),
+                                    ("K%", "k_percent", "{:.1f}", "%"),
+                                    ("BB%", "bb_percent", "{:.1f}", "%"),
+                                    ("Avg EV", "avg_ev", "{:.1f}", ""),
+                                    ("ISO", "iso", "{:.3f}", ""),
+                                ]
+                                _any_split = any(
+                                    _sv(f"vs_{s}_{c}") is not None
+                                    for s in ("lhp", "rhp")
+                                    for _, c, _, _ in _split_rows
+                                )
+                                if _any_split:
+                                    st.markdown("**⚔️ Splits — vs LHP / vs RHP**")
+                                    _tbl_rows = []
+                                    for _lab, _c, _fmt, _suf in _split_rows:
+                                        _lv, _rv = _sv(f"vs_lhp_{_c}"), _sv(f"vs_rhp_{_c}")
+                                        if _lv is None and _rv is None:
+                                            continue
+                                        _tbl_rows.append({
+                                            "stat": _lab,
+                                            "vs LHP" + (" ⭐ tonight" if _opp_hand == "L" else ""):
+                                                (_fmt.format(_lv) + _suf) if _lv is not None else "—",
+                                            "vs RHP" + (" ⭐ tonight" if _opp_hand == "R" else ""):
+                                                (_fmt.format(_rv) + _suf) if _rv is not None else "—",
+                                        })
+                                    if _tbl_rows:
+                                        st.dataframe(pd.DataFrame(_tbl_rows),
+                                                     hide_index=True,
+                                                     use_container_width=True)
+                                    _lpa, _lhr = _sv("vs_lhp_pa"), _sv("vs_lhp_hr")
+                                    if _opp_hand in ("L", "R"):
+                                        _spa = _sv(f"vs_{'lhp' if _opp_hand=='L' else 'rhp'}_pa")
+                                        if _spa is not None and _spa < 40:
+                                            st.caption(f"⚠️ Only {_spa:.0f} PA vs "
+                                                       f"{'LHP' if _opp_hand=='L' else 'RHP'} — "
+                                                       f"small-sample split; the model shrinks "
+                                                       f"it toward his overall rate.")
+                                # Tonight's pitcher — HR allowed to this hitter's side
+                                _bats = str(_dd.get("bats") or "").upper()[:1]
+                                if _opp_hand in ("L", "R") and _bats in ("L", "R", "S"):
+                                    _eff = ("R" if _opp_hand == "L" else "L") if _bats == "S" else _bats
+                                    _sd = "lhb" if _eff == "L" else "rhb"
+                                    _ppa = _sv(f"opp_pitcher_vs_{_sd}_pa")
+                                    _phr = _sv(f"opp_pitcher_vs_{_sd}_hr")
+                                    _prt = _sv(f"opp_pitcher_vs_{_sd}_hr_per_pa")
+                                    if _ppa is not None:
+                                        _rt = f" ({_prt:.1f}%)" if _prt is not None else ""
+                                        _sw = " (switch — bats " + _eff + " tonight)" if _bats == "S" else ""
+                                        st.markdown(
+                                            f"· **Tonight's pitcher vs {_eff}HB**{_sw}: "
+                                            f"{_ppa:.0f} PA faced, "
+                                            f"{_phr:.0f} HR allowed{_rt}"
+                                            if _phr is not None else
+                                            f"· **Tonight's pitcher vs {_eff}HB**{_sw}: {_ppa:.0f} PA faced"
+                                        )
+                            except Exception as _spe:
+                                log_swallowed_error("deep_dive_splits", _spe, surface=False)
+
                             st.caption(
                                 "🟢 elite · 🟡 strong · 🟠 average · 🔴 below — bands are "
                                 "league-anchored for raw stats and percentile-based for "
