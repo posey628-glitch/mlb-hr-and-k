@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.41-splits-dive"
+APP_VERSION = "2026.06.10-v45.42-quick-card"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -1344,6 +1344,7 @@ METRIC_BANDS = {
     # raw skills (league-anchored)
     "barrel_pct":     [(12, "🟢", "elite"), (8, "🟡", "strong"), (5, "🟠", "average"), (float("-inf"), "🔴", "below avg")],
     "pulled_brl_pct": [(9, "🟢", "elite"), (6, "🟡", "strong"), (3.5, "🟠", "average"), (float("-inf"), "🔴", "below avg")],
+    "pull_air_pct":   [(25, "🟢", "elite"), (20, "🟡", "strong"), (15, "🟠", "average"), (float("-inf"), "🔴", "low")],
     "avg_ev":         [(91.5, "🟢", "elite"), (89.5, "🟡", "strong"), (87.5, "🟠", "average"), (float("-inf"), "🔴", "soft")],
     "hard_hit":       [(48, "🟢", "elite"), (42, "🟡", "strong"), (37, "🟠", "average"), (float("-inf"), "🔴", "below avg")],
     "iso":            [(0.240, "🟢", "elite power"), (0.180, "🟡", "strong"), (0.140, "🟠", "average"), (float("-inf"), "🔴", "light")],
@@ -1395,6 +1396,191 @@ def _band_cell_style(metric):
         emo, _ = metric_signal(metric, v)
         return _BAND_TINT.get(emo, "")
     return _f
+
+
+def _render_deep_dive_card(_dd):
+    """v45.42: the full player card — extracted from the search block so the
+    search flow AND the quick-card dialog render the identical card."""
+    def _fmt_metric(label, col, fmt="{:.1f}", suffix=""):
+        v = _dd.get(col)
+        if v is None or pd.isna(v):
+            return None
+        emo, verdict = metric_signal(col, v)
+        try:
+            vs = fmt.format(float(v)) + suffix
+        except (TypeError, ValueError):
+            vs = str(v)
+        tail = f" — _{verdict}_" if verdict else ""
+        dot = f"{emo} " if emo else "· "
+        return f"{dot}**{label}**: {vs}{tail}"
+
+    with st.container(border=True):
+        _gr = str(_dd.get("grade") or "?")
+        _hg = _dd.get("hr_game_pct")
+        _hs = _dd.get("hr_score")
+        _hdr = (f"### 🔬 {_dd.get('player_name', '?')} — deep dive")
+        st.markdown(_hdr)
+        _idbits = [str(_dd.get("team") or "")]
+        if _dd.get("game") and not pd.isna(_dd.get("game")):
+            _idbits.append(str(_dd.get("game")))
+        _lp = _dd.get("lineup_pos")
+        if _lp is not None and not pd.isna(_lp):
+            _idbits.append(f"batting {int(_lp)}")
+        _hl = f"**Prob Grade {_gr}**"
+        if _hg is not None and not pd.isna(_hg):
+            _e1, _ = metric_signal("hr_game_pct", _hg)
+            _hl += f" · {_e1} HR Game% **{float(_hg):.1f}%**"
+        if _hs is not None and not pd.isna(_hs):
+            _hl += f" · HR Score **{float(_hs):.0f}**"
+        _sm = str(_dd.get("smash_spot") or "").strip()
+        if _sm and _sm not in ("·", "nan"):
+            _hl += f" · {_sm}"
+        st.markdown(" · ".join(_idbits))
+        st.markdown(_hl)
+        _c1, _c2 = st.columns(2)
+        with _c1:
+            st.markdown("**💪 Power profile**")
+            for line in filter(None, [
+                _fmt_metric("Barrel%", "barrel_pct", "{:.1f}", "%"),
+                _fmt_metric("Pulled-Brl%", "pulled_brl_pct", "{:.1f}", "%"),
+            _fmt_metric("Pull-Air%", "pull_air_pct", "{:.1f}", "%"),
+                _fmt_metric("Avg EV", "avg_ev", "{:.1f}", " mph"),
+                _fmt_metric("HardHit%", "hard_hit", "{:.1f}", "%"),
+                _fmt_metric("ISO", "iso", "{:.3f}"),
+                _fmt_metric("xSLG", "xslg", "{:.3f}"),
+                _fmt_metric("xwOBA", "xwoba", "{:.3f}"),
+                _fmt_metric("Blast%", "blast_pct", "{:.1f}", "%"),
+                _fmt_metric("SweetSpot%", "sweet_spot_pct", "{:.1f}", "%"),
+            ]):
+                st.markdown(line)
+            st.markdown("**🌤️ Environment**")
+            _eb = _dd.get("env_boost")
+            if _eb is not None and not pd.isna(_eb):
+                _ebf = float(_eb)
+                _ew = ("🟢 great for homers" if _ebf >= 1.08
+                       else "🟡 HR-friendly" if _ebf >= 1.02
+                       else "🟠 neutral" if _ebf >= 0.95
+                       else "🔴 suppressive")
+                st.markdown(f"· **Park+Weather**: {_ebf:.2f}× — _{_ew}_")
+        with _c2:
+            st.markdown("**🎯 Tonight's matchup**")
+            _op = _dd.get("opp_pitcher")
+            _og = str(_dd.get("opp_pitcher_grade") or "")
+            if _op and not pd.isna(_op):
+                _ogtxt = f" — grade **{_og}**" if _og and _og != "nan" else ""
+                st.markdown(f"· **vs**: {_op}{_ogtxt}")
+            for line in filter(None, [
+                _fmt_metric("Matchup (opp)", "matchup_opp", "{:.0f}"),
+                _fmt_metric("Pitch-HR fit", "pitch_hr_score", "{:.0f}"),
+                _fmt_metric("Pitch match", "pitch_match_score", "{:.0f}"),
+                _fmt_metric("Barrel matchup", "barrel_matchup_score", "{:.0f}"),
+                _fmt_metric("Two-way matchup", "two_way_matchup_score", "{:.0f}"),
+            ]):
+                st.markdown(line)
+            _bp = _dd.get("best_pitch")
+            if _bp and not pd.isna(_bp):
+                st.markdown(f"· **Punishes**: {_bp}")
+            st.markdown("**📈 Form & verdicts**")
+            for line in filter(None, [
+                _fmt_metric("Dinger Score", "dinger_score", "{:.0f}"),
+                _fmt_metric("💥+ Combo", "power_composite", "{:.0f}"),
+                _fmt_metric("Sleeper", "sleeper_score", "{:.0f}"),
+            ]):
+                st.markdown(line)
+            _stk = str(_dd.get("streak_label") or "").strip()
+            if _stk and _stk not in ("·", "nan"):
+                st.markdown(f"· **Form**: {_stk}")
+            _dc = _dd.get("data_completeness")
+            if _dc is not None and not pd.isna(_dc):
+                st.markdown(f"· **Data completeness**: {float(_dc):.0f}%")
+        # ==== v45.41 (user ask): handedness splits — the
+        # hitter vs BOTH pitcher hands, tonight's side
+        # starred, plus what tonight's pitcher has allowed
+        # to this hitter's side. Both halves of the
+        # platoon matchup in one place. ====
+        try:
+            def _sv(col):
+                v = _dd.get(col)
+                return None if v is None or pd.isna(v) else float(v)
+
+            _opp_hand = str(_dd.get("opp_p_throws") or "").upper()[:1]
+            _split_rows = [
+                ("PA", "pa", "{:.0f}", ""),
+                ("HR", "hr", "{:.0f}", ""),
+                ("HR/PA", "hr_per_pa", "{:.1f}", "%"),
+                ("SLG", "slg", "{:.3f}", ""),
+                ("OPS", "ops", "{:.3f}", ""),
+                ("K%", "k_percent", "{:.1f}", "%"),
+                ("BB%", "bb_percent", "{:.1f}", "%"),
+                ("Avg EV", "avg_ev", "{:.1f}", ""),
+                ("ISO", "iso", "{:.3f}", ""),
+            ]
+            _any_split = any(
+                _sv(f"vs_{s}_{c}") is not None
+                for s in ("lhp", "rhp")
+                for _, c, _, _ in _split_rows
+            )
+            if _any_split:
+                st.markdown("**⚔️ Splits — vs LHP / vs RHP**")
+                _tbl_rows = []
+                for _lab, _c, _fmt, _suf in _split_rows:
+                    _lv, _rv = _sv(f"vs_lhp_{_c}"), _sv(f"vs_rhp_{_c}")
+                    if _lv is None and _rv is None:
+                        continue
+                    _tbl_rows.append({
+                        "stat": _lab,
+                        "vs LHP" + (" ⭐ tonight" if _opp_hand == "L" else ""):
+                            (_fmt.format(_lv) + _suf) if _lv is not None else "—",
+                        "vs RHP" + (" ⭐ tonight" if _opp_hand == "R" else ""):
+                            (_fmt.format(_rv) + _suf) if _rv is not None else "—",
+                    })
+                if _tbl_rows:
+                    st.dataframe(pd.DataFrame(_tbl_rows),
+                                 hide_index=True,
+                                 use_container_width=True)
+                _lpa, _lhr = _sv("vs_lhp_pa"), _sv("vs_lhp_hr")
+                if _opp_hand in ("L", "R"):
+                    _spa = _sv(f"vs_{'lhp' if _opp_hand=='L' else 'rhp'}_pa")
+                    if _spa is not None and _spa < 40:
+                        st.caption(f"⚠️ Only {_spa:.0f} PA vs "
+                                   f"{'LHP' if _opp_hand=='L' else 'RHP'} — "
+                                   f"small-sample split; the model shrinks "
+                                   f"it toward his overall rate.")
+            # Tonight's pitcher — HR allowed to this hitter's side
+            _bats = str(_dd.get("bats") or "").upper()[:1]
+            if _opp_hand in ("L", "R") and _bats in ("L", "R", "S"):
+                _eff = ("R" if _opp_hand == "L" else "L") if _bats == "S" else _bats
+                _sd = "lhb" if _eff == "L" else "rhb"
+                _ppa = _sv(f"opp_pitcher_vs_{_sd}_pa")
+                _phr = _sv(f"opp_pitcher_vs_{_sd}_hr")
+                _prt = _sv(f"opp_pitcher_vs_{_sd}_hr_per_pa")
+                if _ppa is not None:
+                    _rt = f" ({_prt:.1f}%)" if _prt is not None else ""
+                    _sw = " (switch — bats " + _eff + " tonight)" if _bats == "S" else ""
+                    st.markdown(
+                        f"· **Tonight's pitcher vs {_eff}HB**{_sw}: "
+                        f"{_ppa:.0f} PA faced, "
+                        f"{_phr:.0f} HR allowed{_rt}"
+                        if _phr is not None else
+                        f"· **Tonight's pitcher vs {_eff}HB**{_sw}: {_ppa:.0f} PA faced"
+                    )
+        except Exception as _spe:
+            log_swallowed_error("deep_dive_splits", _spe, surface=False)
+
+        st.caption(
+            "🟢 elite · 🟡 strong · 🟠 average · 🔴 below — bands are "
+            "league-anchored for raw stats and percentile-based for "
+            "LaunchCast composites (hover any column header for detail)."
+        )
+
+
+if hasattr(st, "dialog"):
+    @st.dialog("🔬 Player Card", width="large")
+    def _quick_card_dialog(_row):
+        _render_deep_dive_card(_row)
+else:
+    def _quick_card_dialog(_row):  # older Streamlit: inline fallback
+        _render_deep_dive_card(_row)
 
 
 def _section_banner(title, sub=""):
@@ -7480,7 +7666,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.41 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.42 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -15123,176 +15309,7 @@ if all_hitters:
                     if len(search_results) == 1:
                         _dd = search_results.iloc[0]
 
-                        def _fmt_metric(label, col, fmt="{:.1f}", suffix=""):
-                            v = _dd.get(col)
-                            if v is None or pd.isna(v):
-                                return None
-                            emo, verdict = metric_signal(col, v)
-                            try:
-                                vs = fmt.format(float(v)) + suffix
-                            except (TypeError, ValueError):
-                                vs = str(v)
-                            tail = f" — _{verdict}_" if verdict else ""
-                            dot = f"{emo} " if emo else "· "
-                            return f"{dot}**{label}**: {vs}{tail}"
-
-                        with st.container(border=True):
-                            _gr = str(_dd.get("grade") or "?")
-                            _hg = _dd.get("hr_game_pct")
-                            _hs = _dd.get("hr_score")
-                            _hdr = (f"### 🔬 {_dd.get('player_name', '?')} — deep dive")
-                            st.markdown(_hdr)
-                            _idbits = [str(_dd.get("team") or "")]
-                            if _dd.get("game") and not pd.isna(_dd.get("game")):
-                                _idbits.append(str(_dd.get("game")))
-                            _lp = _dd.get("lineup_pos")
-                            if _lp is not None and not pd.isna(_lp):
-                                _idbits.append(f"batting {int(_lp)}")
-                            _hl = f"**Prob Grade {_gr}**"
-                            if _hg is not None and not pd.isna(_hg):
-                                _e1, _ = metric_signal("hr_game_pct", _hg)
-                                _hl += f" · {_e1} HR Game% **{float(_hg):.1f}%**"
-                            if _hs is not None and not pd.isna(_hs):
-                                _hl += f" · HR Score **{float(_hs):.0f}**"
-                            _sm = str(_dd.get("smash_spot") or "").strip()
-                            if _sm and _sm not in ("·", "nan"):
-                                _hl += f" · {_sm}"
-                            st.markdown(" · ".join(_idbits))
-                            st.markdown(_hl)
-                            _c1, _c2 = st.columns(2)
-                            with _c1:
-                                st.markdown("**💪 Power profile**")
-                                for line in filter(None, [
-                                    _fmt_metric("Barrel%", "barrel_pct", "{:.1f}", "%"),
-                                    _fmt_metric("Pulled-Brl%", "pulled_brl_pct", "{:.1f}", "%"),
-                                    _fmt_metric("Avg EV", "avg_ev", "{:.1f}", " mph"),
-                                    _fmt_metric("HardHit%", "hard_hit", "{:.1f}", "%"),
-                                    _fmt_metric("ISO", "iso", "{:.3f}"),
-                                    _fmt_metric("xSLG", "xslg", "{:.3f}"),
-                                    _fmt_metric("xwOBA", "xwoba", "{:.3f}"),
-                                    _fmt_metric("Blast%", "blast_pct", "{:.1f}", "%"),
-                                    _fmt_metric("SweetSpot%", "sweet_spot_pct", "{:.1f}", "%"),
-                                ]):
-                                    st.markdown(line)
-                                st.markdown("**🌤️ Environment**")
-                                _eb = _dd.get("env_boost")
-                                if _eb is not None and not pd.isna(_eb):
-                                    _ebf = float(_eb)
-                                    _ew = ("🟢 great for homers" if _ebf >= 1.08
-                                           else "🟡 HR-friendly" if _ebf >= 1.02
-                                           else "🟠 neutral" if _ebf >= 0.95
-                                           else "🔴 suppressive")
-                                    st.markdown(f"· **Park+Weather**: {_ebf:.2f}× — _{_ew}_")
-                            with _c2:
-                                st.markdown("**🎯 Tonight's matchup**")
-                                _op = _dd.get("opp_pitcher")
-                                _og = str(_dd.get("opp_pitcher_grade") or "")
-                                if _op and not pd.isna(_op):
-                                    _ogtxt = f" — grade **{_og}**" if _og and _og != "nan" else ""
-                                    st.markdown(f"· **vs**: {_op}{_ogtxt}")
-                                for line in filter(None, [
-                                    _fmt_metric("Matchup (opp)", "matchup_opp", "{:.0f}"),
-                                    _fmt_metric("Pitch-HR fit", "pitch_hr_score", "{:.0f}"),
-                                    _fmt_metric("Pitch match", "pitch_match_score", "{:.0f}"),
-                                    _fmt_metric("Barrel matchup", "barrel_matchup_score", "{:.0f}"),
-                                    _fmt_metric("Two-way matchup", "two_way_matchup_score", "{:.0f}"),
-                                ]):
-                                    st.markdown(line)
-                                _bp = _dd.get("best_pitch")
-                                if _bp and not pd.isna(_bp):
-                                    st.markdown(f"· **Punishes**: {_bp}")
-                                st.markdown("**📈 Form & verdicts**")
-                                for line in filter(None, [
-                                    _fmt_metric("Dinger Score", "dinger_score", "{:.0f}"),
-                                    _fmt_metric("💥+ Combo", "power_composite", "{:.0f}"),
-                                    _fmt_metric("Sleeper", "sleeper_score", "{:.0f}"),
-                                ]):
-                                    st.markdown(line)
-                                _stk = str(_dd.get("streak_label") or "").strip()
-                                if _stk and _stk not in ("·", "nan"):
-                                    st.markdown(f"· **Form**: {_stk}")
-                                _dc = _dd.get("data_completeness")
-                                if _dc is not None and not pd.isna(_dc):
-                                    st.markdown(f"· **Data completeness**: {float(_dc):.0f}%")
-                            # ==== v45.41 (user ask): handedness splits — the
-                            # hitter vs BOTH pitcher hands, tonight's side
-                            # starred, plus what tonight's pitcher has allowed
-                            # to this hitter's side. Both halves of the
-                            # platoon matchup in one place. ====
-                            try:
-                                def _sv(col):
-                                    v = _dd.get(col)
-                                    return None if v is None or pd.isna(v) else float(v)
-
-                                _opp_hand = str(_dd.get("opp_p_throws") or "").upper()[:1]
-                                _split_rows = [
-                                    ("PA", "pa", "{:.0f}", ""),
-                                    ("HR", "hr", "{:.0f}", ""),
-                                    ("HR/PA", "hr_per_pa", "{:.1f}", "%"),
-                                    ("SLG", "slg", "{:.3f}", ""),
-                                    ("OPS", "ops", "{:.3f}", ""),
-                                    ("K%", "k_percent", "{:.1f}", "%"),
-                                    ("BB%", "bb_percent", "{:.1f}", "%"),
-                                    ("Avg EV", "avg_ev", "{:.1f}", ""),
-                                    ("ISO", "iso", "{:.3f}", ""),
-                                ]
-                                _any_split = any(
-                                    _sv(f"vs_{s}_{c}") is not None
-                                    for s in ("lhp", "rhp")
-                                    for _, c, _, _ in _split_rows
-                                )
-                                if _any_split:
-                                    st.markdown("**⚔️ Splits — vs LHP / vs RHP**")
-                                    _tbl_rows = []
-                                    for _lab, _c, _fmt, _suf in _split_rows:
-                                        _lv, _rv = _sv(f"vs_lhp_{_c}"), _sv(f"vs_rhp_{_c}")
-                                        if _lv is None and _rv is None:
-                                            continue
-                                        _tbl_rows.append({
-                                            "stat": _lab,
-                                            "vs LHP" + (" ⭐ tonight" if _opp_hand == "L" else ""):
-                                                (_fmt.format(_lv) + _suf) if _lv is not None else "—",
-                                            "vs RHP" + (" ⭐ tonight" if _opp_hand == "R" else ""):
-                                                (_fmt.format(_rv) + _suf) if _rv is not None else "—",
-                                        })
-                                    if _tbl_rows:
-                                        st.dataframe(pd.DataFrame(_tbl_rows),
-                                                     hide_index=True,
-                                                     use_container_width=True)
-                                    _lpa, _lhr = _sv("vs_lhp_pa"), _sv("vs_lhp_hr")
-                                    if _opp_hand in ("L", "R"):
-                                        _spa = _sv(f"vs_{'lhp' if _opp_hand=='L' else 'rhp'}_pa")
-                                        if _spa is not None and _spa < 40:
-                                            st.caption(f"⚠️ Only {_spa:.0f} PA vs "
-                                                       f"{'LHP' if _opp_hand=='L' else 'RHP'} — "
-                                                       f"small-sample split; the model shrinks "
-                                                       f"it toward his overall rate.")
-                                # Tonight's pitcher — HR allowed to this hitter's side
-                                _bats = str(_dd.get("bats") or "").upper()[:1]
-                                if _opp_hand in ("L", "R") and _bats in ("L", "R", "S"):
-                                    _eff = ("R" if _opp_hand == "L" else "L") if _bats == "S" else _bats
-                                    _sd = "lhb" if _eff == "L" else "rhb"
-                                    _ppa = _sv(f"opp_pitcher_vs_{_sd}_pa")
-                                    _phr = _sv(f"opp_pitcher_vs_{_sd}_hr")
-                                    _prt = _sv(f"opp_pitcher_vs_{_sd}_hr_per_pa")
-                                    if _ppa is not None:
-                                        _rt = f" ({_prt:.1f}%)" if _prt is not None else ""
-                                        _sw = " (switch — bats " + _eff + " tonight)" if _bats == "S" else ""
-                                        st.markdown(
-                                            f"· **Tonight's pitcher vs {_eff}HB**{_sw}: "
-                                            f"{_ppa:.0f} PA faced, "
-                                            f"{_phr:.0f} HR allowed{_rt}"
-                                            if _phr is not None else
-                                            f"· **Tonight's pitcher vs {_eff}HB**{_sw}: {_ppa:.0f} PA faced"
-                                        )
-                            except Exception as _spe:
-                                log_swallowed_error("deep_dive_splits", _spe, surface=False)
-
-                            st.caption(
-                                "🟢 elite · 🟡 strong · 🟠 average · 🔴 below — bands are "
-                                "league-anchored for raw stats and percentile-based for "
-                                "LaunchCast composites (hover any column header for detail)."
-                            )
+                        _render_deep_dive_card(_dd)
                     elif len(search_results) > 1:
                         st.caption("💡 Narrow the search to exactly one player for the full deep dive.")
                 except Exception as _dde:
@@ -18064,7 +18081,7 @@ def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
         "⚡ Power": [
             "player_name", "grade", "hr_game_pct",
             "barrel_pct", "pulled_brl_pct", "iso", "avg_ev", "avg_hr_ev",
-            "hard_hit", "blast_pct", "sweet_spot_pct", "fb_pct", "la", "xwoba", "xwobacon",
+            "hard_hit", "blast_pct", "sweet_spot_pct", "pull_air_pct", "fb_pct", "la", "xwoba", "xwobacon",
             "avg_hr_distance", "max_hit_speed", "power_score", "lift_score",
             "smash_spot", "data_completeness",
         ],
@@ -18678,6 +18695,29 @@ if _valid_games:
                 unsafe_allow_html=True,
             )
             _sel_col, _view_col, _all_col = st.columns([3, 2, 1])
+            # v45.42 (user ask): click a player → instant popup card, NO page
+            # reload. The selectbox lives inside the fragment (fragment-scoped
+            # rerun) and opens an st.dialog modal with the full deep-dive.
+            try:
+                _qc_names = ["— pick a player —"]
+                if "player_name" in combined_all.columns:
+                    _qc_pool = combined_all
+                    if "is_bench" in _qc_pool.columns:
+                        _qc_pool = _qc_pool[~_qc_pool["is_bench"].fillna(False)]
+                    _qc_names += sorted(_qc_pool["player_name"].dropna().astype(str).unique())
+                _qc_pick = st.selectbox(
+                    "🔬 Quick player card (popup — no reload):",
+                    options=_qc_names, index=0, key="_quick_card_pick",
+                )
+                if (_qc_pick and _qc_pick != "— pick a player —"
+                        and st.session_state.get("_qc_last_opened") != _qc_pick):
+                    st.session_state["_qc_last_opened"] = _qc_pick
+                    _qc_rows = combined_all[
+                        combined_all["player_name"].astype(str) == _qc_pick]
+                    if not _qc_rows.empty:
+                        _quick_card_dialog(_qc_rows.iloc[0])
+            except Exception as _qce:
+                log_swallowed_error("quick_card", _qce, surface=False)
         with _sel_col:
             _selected_game_label = st.selectbox(
                 f"🎮 Select game to view ({_n_games} game"
@@ -18998,7 +19038,7 @@ if _valid_games:
                                     "hr_score": st.column_config.NumberColumn("HR Score", format="%.0f"),
                                     "avg_ev": st.column_config.NumberColumn("EV", format="%.1f"),
                                     "barrel_pct": st.column_config.NumberColumn("Brl%", format="%.1f"),
-                                    "pulled_brl_pct": st.column_config.NumberColumn("PBrl%", format="%.1f"),
+                                    "pulled_brl_pct": st.column_config.NumberColumn("PBrl%", format="%.1f", help=COLUMN_HELP.get("pulled_brl_pct", "")),
                                     "hard_hit": st.column_config.NumberColumn("HH%", format="%.0f"),
                                     "iso": st.column_config.NumberColumn("ISO", format="%.3f"),
                                     "blast_pct": st.column_config.NumberColumn("Blast%", format="%.1f"),
