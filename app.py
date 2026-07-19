@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.39-sweep"
+APP_VERSION = "2026.06.10-v45.40-driver-truth"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -5696,10 +5696,15 @@ if show_pattern_analysis:
                                             },
                                         )
                                         # Which features are actually driving the score?
-                                        used_features = importance_df.head(5)["feature"].tolist()
+                                        # v45.40: use THE selector the score itself
+                                        # uses — raw importance head(5) previously
+                                        # listed EXCLUDED outputs as "drivers".
+                                        from pattern_analysis import adaptive_selected_features as _asf
+                                        _sel_feats = _asf(importance_df, 5)
+                                        used_features = _sel_feats["feature"].tolist()
                                         _weights_str = " · ".join([
                                             f"**{r['feature']}** ({r['avg_corr']:+.3f})"
-                                            for _, r in importance_df.head(5).iterrows()
+                                            for _, r in _sel_feats.iterrows()
                                         ])
                                         st.markdown(
                                             f"**Features driving this score:** {_weights_str}"
@@ -7475,7 +7480,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.39 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.40 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
