@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.45-card-bulletproof"
+APP_VERSION = "2026.06.10-v45.46-tour-accuracy"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -4082,34 +4082,38 @@ with st.expander("📖 New here? How to use LaunchCast (60-second tour)", expand
         "ranks tonight's best home run plays — power skills × the actual pitcher "
         "matchup × park × weather.\n\n"
         "**Page map (top → bottom):** Pitchers → 🏆 Top 10 → Sleepers → Ask → "
-        "Head-to-Head → 🎮 Game Browser → Tools. The amber pills above jump "
-        "anywhere instantly.\n\n"
+        "Head-to-Head → 🎮 Game Browser → Tools.\n\n"
         "**The 60-second flow:**\n"
-        "1. **Read the strip at the top** — games tonight, slate size, and the "
-        "best play in one line.\n"
-        "2. **🏆 Top 10 Picks** — the marquee. Color-tinted cells show tiers "
-        "(🟢 elite → 🔴 weak). **Hover any column header** for what it means "
-        "and what counts as good. Open *How the Top 10 works* underneath for "
-        "the logic.\n"
-        "3. **🎮 Game Browser** — pick any game in the *Choose your game* "
+        "1. **Jump anywhere with the amber pills** right above this box — "
+        "they follow the page order, and 📖 Tour brings you back here.\n"
+        "2. **Confused by any term?** Open **📖 Legend & glossary** — it lives "
+        "in two places: the sidebar, and on the page just above the pitcher "
+        "table. It defines every stat, grade, and color. Plus: **hover any "
+        "column header** in any table for that column's meaning and what "
+        "counts as good.\n"
+        "3. **🏆 Top 10 Picks** — the marquee. The one-line slate summary "
+        "sits right above it (games tonight, confirmed lineups, best HR "
+        "environment, and a jump-to-games link). Color-tinted cells show "
+        "tiers (🟢 elite → 🔴 weak); *How the Top 10 works* underneath "
+        "explains the logic.\n"
+        "4. **🎮 Game Browser** — pick any game in the *Choose your game* "
         "panel; switching is instant. Change table views (Overview / Power / "
         "Matchup / All) with the dropdown beside it.\n"
-        "4. **🔬 Player cards** — in the same panel, pick a name under *Quick "
+        "5. **🔬 Player cards** — in the same panel, pick a name under *Quick "
         "player card* for an instant popup: every metric with a color verdict, "
         "splits vs lefties/righties (tonight's side starred ⭐), and what "
         "tonight's pitcher allows to his side. Or type a name in the search "
         "box up top — one match shows the same card.\n"
-        "5. **Key terms:** **HR Game%** = tonight's homer probability. "
+        "6. **Key terms:** **HR Game%** = tonight's homer probability. "
         "**Prob Grade** = that probability as a letter (A+ ≥25%). **HR Score** "
         "= 0-99 rank vs tonight's slate (~95+ elite). **Dinger** = pure power "
         "quality. **🔥 Smash Spots** = elite hitter + exploitable pitcher + "
         "friendly conditions.\n\n"
-        "**Example:** *Strip says 12 games → Top 10 shows Judge 🟢 across the "
-        "board, Grade A → Game Browser: NYY @ BOS → quick card: 28% HR Game%, "
-        "crushes lefties (⭐ tonight), pitcher has allowed 9 HR to righties → "
-        "that's a conviction play.* Everything else (Sleepers, Head-to-Head, "
-        "Ask LaunchCast, exports at the bottom) builds on the same numbers — "
-        "and every column, everywhere, has a hover explanation."
+        "**Example:** *Top 10 shows Judge 🟢 across the board, Grade A → "
+        "Game Browser: NYY @ BOS → quick card: 28% HR Game%, crushes lefties "
+        "(⭐ tonight), pitcher has allowed 9 HR to righties → that's a "
+        "conviction play.* Everything else (Sleepers, Head-to-Head, Ask "
+        "LaunchCast, exports at the bottom) builds on the same numbers."
     )
 
 
@@ -7752,7 +7756,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.45 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.46 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
