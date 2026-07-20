@@ -21,6 +21,7 @@ from __future__ import annotations
 import io
 from datetime import datetime
 
+import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
@@ -284,8 +285,7 @@ def pitch_match_score(
     try:
         usages = [b.get("pitcher_usage_raw", 0) for b in breakdown]
         if usages:
-            import numpy as _np
-            pitch_volatility = round(float(_np.std(usages)), 1)
+            pitch_volatility = round(float(np.std(usages)), 1)
         else:
             pitch_volatility = None
     except Exception:
