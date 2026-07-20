@@ -1338,7 +1338,9 @@ def add_power_score(
     # Use SOFTER combination: take average of factors rather than full multiply,
     # to prevent stacking pile-ups at the 99 cap. A 1.50 cap on full multiply
     # was still too generous when 4 factors all push the same direction.
-    env_factors = [float(park_mult), float(weather_mult)]
+    # v45.48 (review): clamp to 0.01 so a corrupt 0/negative multiplier can
+    # never hit math.log's domain error and crash scoring.
+    env_factors = [max(0.01, float(park_mult)), max(0.01, float(weather_mult))]
     if pitcher_hr9 is not None and not pd.isna(pitcher_hr9) and pitcher_hr9 > 0:
         p_factor = pitcher_hr9 / 1.20
         env_factors.append(max(0.75, min(1.25, p_factor)))
