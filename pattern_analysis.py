@@ -32,6 +32,7 @@ the dataset accumulates.
 from __future__ import annotations
 import logging
 from typing import Optional
+import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
@@ -189,7 +190,14 @@ def cohort_analysis(
         in_cohort = df[df[threshold_col] >= threshold_value]
     else:
         in_cohort = df[df[threshold_col] <= threshold_value]
-    out_cohort = df[~df.index.isin(in_cohort.index)]
+    # v45.48 (review): boolean-mask complement instead of index isin —
+    # identical semantics on our unique RangeIndex (NaN thresholds stay in
+    # out_cohort), but immune to any future duplicate-index frame.
+    if direction == "ge":
+        _in_mask = df[threshold_col] >= threshold_value
+    else:
+        _in_mask = df[threshold_col] <= threshold_value
+    out_cohort = df[~_in_mask.fillna(False)]
 
     in_rate = in_cohort[outcome_col].mean() if len(in_cohort) else 0.0
     out_rate = out_cohort[outcome_col].mean() if len(out_cohort) else 0.0
@@ -1178,7 +1186,12 @@ def rolling_feature_importance(correlation_history: list,
     for entry in recent:
         corrs = entry.get("correlations", {})
         for feat, obj in corrs.items():
-            _n_day = obj.get("n", 1) or 1
+            try:
+                _n_day = float(obj.get("n", 1) or 1)
+                if pd.isna(_n_day):
+                    _n_day = 1.0
+            except (TypeError, ValueError):
+                _n_day = 1.0
             per_feat.setdefault(feat, []).append(
                 (obj.get("corr", 0.0), float(_n_day)))
 
@@ -1277,6 +1290,9 @@ def propose_dinger_weights(importance_df: pd.DataFrame,
     imp = importance_df.set_index("feature") if "feature" in importance_df.columns else importance_df
     # Build a raw score per CURRENT feature: |corr| × reliability.
     raw = {}
+    # v45.48 (review, milestone-critical): the reliable gate must measure the
+    # EVIDENCE features only — a brand-new thin feature (kept at current
+    # weight, contributing nothing to the proposal) must not block the badge.
     _min_days_seen = 999
     for feat, cur_w in current_weights.items():
         if feat in imp.index:
@@ -1284,7 +1300,8 @@ def propose_dinger_weights(importance_df: pd.DataFrame,
             _corr = abs(float(row.get("avg_corr", 0.0)))
             _reliab = float(row.get("reliability", 1.0))
             _days = int(row.get("n_days", 0))
-            _min_days_seen = min(_min_days_seen, _days)
+            if _days >= min_days and abs(float(row.get("avg_corr", 0.0))) >= 0.03:
+                _min_days_seen = min(_min_days_seen, _days)
             if _days >= min_days and _corr >= 0.03:
                 # reliability modulates but doesn't dominate (0.5–1.5 band)
                 _reliab_mult = 0.5 + min(max(_reliab, 0.0), 3.0) / 3.0
@@ -1590,7 +1607,6 @@ def compute_adaptive_score(current_slate: pd.DataFrame,
         return pd.Series(dtype=float, index=current_slate.index)
 
     # Per-row NaN-tolerant weighted average (same pattern as pick_score fix)
-    import numpy as np
     weights_arr = np.array(weights)
     parts_df = pd.concat(
         [p.rename(str(i)) for i, p in enumerate(parts)], axis=1
