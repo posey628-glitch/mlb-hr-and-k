@@ -24,6 +24,10 @@ def hr_probability(
     pitcher_row: pd.Series,
     hr_mult: float,
 ) -> pd.DataFrame:
+    """NOTE (v45.49, reviewer): despite the name, this returns a composite
+    SCORE (feeds hr_score), NOT a 0-1 probability. The real probability is
+    props.hr_prob_per_pa -> hr_game_pct. Name kept for call-site stability;
+    proper rename queued for the structural project."""
     """
     Add per-hitter HR probability for THIS GAME.
 
