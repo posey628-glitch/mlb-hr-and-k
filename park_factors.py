@@ -122,7 +122,9 @@ def get_park(venue_name: str) -> dict:
         if k_lower in venue_lower or venue_lower in k_lower:
             # Require at least 5 characters to match to avoid false hits
             # (e.g., "field" alone matching every venue with "field" in name)
-            if len(k_lower) >= 8 or len(venue_lower) >= 8:
+            # v45.48 (review): AND, not OR — a tiny query like "field"
+            # must never match a long park name.
+            if len(k_lower) >= 8 and len(venue_lower) >= 8:
                 return _with_name(k, v)
     # 4. First-word fallback
     try:
