@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.50-lookup-fragments"
+APP_VERSION = "2026.06.10-v45.51-sweep"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -147,8 +147,11 @@ except Exception as _schema_import_err:
     # v45.48 (review): fail-LOUD — if schema.py can't import, say detection
     # is off instead of reporting "clean" (the string lands in Pipeline
     # Health as a warning via the normal _schema_problems path).
+    # v45.51: the `except ... as` name is deleted when the block exits, so
+    # capture it into a durable module-level name the closure can read.
+    _SCHEMA_IMPORT_ERR = type(_schema_import_err).__name__
     def _assert_schema(*a, **k):
-        return [f"schema.py unavailable ({type(_schema_import_err).__name__}) — "
+        return [f"schema.py unavailable ({_SCHEMA_IMPORT_ERR}) — "
                 f"column-drift detection DISABLED this run"]
     def _find_column(df, name):
         return name if (df is not None and name in getattr(df, "columns", [])) else None
@@ -5747,7 +5750,7 @@ if show_pattern_analysis:
                             disp["pass_rate"] = disp["pass_rate"].apply(lambda v: f"{v:.1%}")
                             disp["fail_rate"] = disp["fail_rate"].apply(lambda v: f"{v:.1%}")
                             disp["lift"] = disp["lift"].apply(
-                                lambda v: f"{v:.2f}×" if v else "—"
+                                lambda v: f"{v:.2f}×" if pd.notna(v) and v > 0 else "—"
                             )
                             st.dataframe(disp, hide_index=True, use_container_width=True)
                         else:
@@ -7805,7 +7808,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.50 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.51 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
