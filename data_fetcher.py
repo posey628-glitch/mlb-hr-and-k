@@ -143,7 +143,6 @@ def clip_outliers(df: pd.DataFrame, caps: dict | None = None) -> pd.DataFrame:
 # If the fetch fails: the field will be empty, plate_discipline_flag still works,
 # and the user can flag the issue for proper investigation.
 
-@st.cache_data(ttl=21600)  # 6hr — zone data updates daily
 @st.cache_data(ttl=21600)
 def get_hitter_sweet_spot(season: int, stats_day: str = "") -> pd.DataFrame:
     """v45.33: Sweet Spot % — share of batted balls in the 8-32° launch-angle
@@ -202,6 +201,7 @@ def _has_real_values(df: pd.DataFrame, col: str, min_n: int = 20) -> bool:
         return False
 
 
+@st.cache_data(ttl=21600)  # 6hr — zone data updates daily
 def get_pitcher_zone_tiers(season: int = None, stats_day: str = "") -> pd.DataFrame:
     """Pitcher % of pitches by zone tier (heart, shadow, chase, waste).
 
@@ -1307,9 +1307,9 @@ def get_bat_tracking(season: int | None = None, stats_day: str | None = None) ->
             # v43.82 (reviewer-noted): _to_percent_scale below captures `df`
             # from the enclosing scope. Safe because it's called immediately
             # below in the same function scope, not in a deferred context.
-            def _to_percent_scale(col_name):
+            def _to_percent_scale(col_name, _df=df):
                 """Sniff scale and multiply by 100 if it's a 0-1 decimal."""
-                series = pd.to_numeric(df[col_name], errors="coerce")
+                series = pd.to_numeric(_df[col_name], errors="coerce")
                 try:
                     _med = float(series.dropna().median())
                     if pd.notna(_med) and _med < 1.0:
@@ -2325,11 +2325,11 @@ def get_hitter_stats(season: int = None, stats_day: str = "") -> pd.DataFrame:
                             except (ValueError, TypeError):
                                 continue
 
-                        def _lookup_la(pid):
+                        def _lookup_la(pid, _dict=la_dict):
                             try:
                                 if pd.isna(pid):
                                     return None
-                                return la_dict.get(int(pid))
+                                return _dict.get(int(pid))
                             except (ValueError, TypeError):
                                 return None
 
@@ -2356,7 +2356,7 @@ def get_hitter_stats(season: int = None, stats_day: str = "") -> pd.DataFrame:
                             except (ValueError, TypeError):
                                 continue
 
-                        def _lookup_dist(pid):
+                        def _lookup_dist(pid, _dict=dist_dict):
                             try:
                                 if pd.isna(pid):
                                     return None
@@ -2401,11 +2401,11 @@ def get_hitter_stats(season: int = None, stats_day: str = "") -> pd.DataFrame:
                             except (ValueError, TypeError):
                                 continue
 
-                        def _lookup_brl(pid):
+                        def _lookup_brl(pid, _dict=brl_dict):
                             try:
                                 if pd.isna(pid):
                                     return None
-                                return brl_dict.get(int(pid))
+                                return _dict.get(int(pid))
                             except (ValueError, TypeError):
                                 return None
 
