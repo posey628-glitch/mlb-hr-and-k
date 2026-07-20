@@ -1055,6 +1055,7 @@ HR_CANDIDATE_FEATURES = [
     "is_moonshot_target", "is_laser_target", "pitch_match_score",
     "moonshot_score", "laser_score",  # v44.78: slate-wide power-type composites
     "opp_pitcher_xwoba", "must_have_total", "nuclear_total",
+    "ctx_lift_pp",
 ]
 
 # v45.33 STRUCTURAL FIX: the snapshot-merge projection whitelist is now
@@ -1091,6 +1092,7 @@ def _snapshot_merge_cols():
 # (the 9/10-overlap symptom), and the public card shows the model citing
 # itself as evidence.
 MODEL_OUTPUT_FEATURES = {
+    "ctx_lift_pp",  # v45.49: derived from hr_game_pct — tracked, never a predictor
     "hr_score", "hr_game_pct", "hr_pa_pct", "adaptive_score",
     "dinger_score", "power_composite", "pick_score",
     "must_have_met", "nuclear_met", "must_have_total", "nuclear_total",
