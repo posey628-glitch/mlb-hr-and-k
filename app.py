@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.48-review-fixes"
+APP_VERSION = "2026.06.10-v45.49-truth-and-lift"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -661,6 +661,11 @@ for _flag in ("_matchup_trace_done",):
 # build_col_config_with_help is the live path for injecting hover help.)
 # ============================================================================
 COLUMN_HELP = {
+    "ctx_lift_pp": "Context lift (pp) \u2014 tonight's HR Game% minus this hitter's "
+                   "own season-baseline per-game HR rate (HR/PA \u2192 ~4.1 PA game). "
+                   "Positive = tonight's matchup/park/weather setup makes him "
+                   "look BETTER than his usual self (🟢 \u2265+5pp). The sleeper "
+                   "lens: big lift + modest name = tonight-specific value.",
     # === Core HR-relevant hitter metrics ===
     "barrel_pct": "Barrel rate. % of batted balls that are 'barreled' (optimal "
                   "EV + launch angle combo — HRs come from barrels). ⬆️ HIGHER = "
@@ -745,13 +750,12 @@ COLUMN_HELP = {
                       "actual lineup posts.",
     "il_flag": "Injury / inactive status. 🏥 = not on active roster, "
                "possibly injured or optioned.",
-    "grade": "Prob Grade (A+ through F) — the PROBABILITY letter, driven by HR Game% (the "
-             "probability), NOT by HR Score. A+ ≥ 25% HR Game%, A 21-25%, "
-             "B+ 17-21%, B 13-17%, C+ 10-13%, C 7-10%, D 4-7%, F < 4%. "
-             "Cap layers can lower it one tier: hostile environment "
-             "(env < 0.85), same-side platoon, mechanical fail. Grade and "
-             "HR Score measure different things (probability vs composite "
-             "rank), so they can legitimately disagree — agreement = conviction.",
+    "grade": "HR Grade (A+ through F) — the letter form of HR SCORE (the "
+             "composite), NOT of HR Game%. A+ ≥80, A ≥70, B+ ≥60, B ≥50, "
+             "C+ ≥40, C ≥30, D ≥20, F <20; '—' = under 25 PA. Cap layers can "
+             "lower it: hostile env (<0.85), same-side platoon, mechanical "
+             "fail, and an absolute power floor on A+/A. The probability is "
+             "HR Game% — a lower-than-expected letter means a cap fired.",
     "smash_spot": "🔥🔥🔥 elite three-way smash (hitter + pitcher + park "
                   "all align). 🔥🔥 strong, 🔥 modest.",
     # === v45.25: completeness sweep — every user-facing column gets an entry
@@ -1363,6 +1367,7 @@ METRIC_BANDS = {
     "barrel_pct":     [(12, "🟢", "elite"), (8, "🟡", "strong"), (5, "🟠", "average"), (float("-inf"), "🔴", "below avg")],
     "pulled_brl_pct": [(9, "🟢", "elite"), (6, "🟡", "strong"), (3.5, "🟠", "average"), (float("-inf"), "🔴", "below avg")],
     "pull_air_pct":   [(25, "🟢", "elite"), (20, "🟡", "strong"), (15, "🟠", "average"), (float("-inf"), "🔴", "low")],
+    "ctx_lift_pp":    [(5, "🟢", "big lift"), (2.5, "🟡", "lift"), (0, "🟠", "neutral"), (float("-inf"), "🔴", "tougher than usual")],
     "avg_ev":         [(91.5, "🟢", "elite"), (89.5, "🟡", "strong"), (87.5, "🟠", "average"), (float("-inf"), "🔴", "soft")],
     "hard_hit":       [(48, "🟢", "elite"), (42, "🟡", "strong"), (37, "🟠", "average"), (float("-inf"), "🔴", "below avg")],
     "iso":            [(0.240, "🟢", "elite power"), (0.180, "🟡", "strong"), (0.140, "🟠", "average"), (float("-inf"), "🔴", "light")],
@@ -1474,7 +1479,7 @@ def _render_deep_dive_card(_dd):
         _lp = _fnum(_dd.get("lineup_pos"))
         if _lp is not None:
             _idbits.append(f"batting {int(_lp)}")
-        _hl = f"**Prob Grade {_gr}**"
+        _hl = f"**HR Grade {_gr}**"
         _hg = _fnum(_hg)
         if _hg is not None:
             _e1, _ = metric_signal("hr_game_pct", _hg)
@@ -1494,6 +1499,7 @@ def _render_deep_dive_card(_dd):
                 _fmt_metric("Barrel%", "barrel_pct", "{:.1f}", "%"),
                 _fmt_metric("Pulled-Brl%", "pulled_brl_pct", "{:.1f}", "%"),
             _fmt_metric("Pull-Air%", "pull_air_pct", "{:.1f}", "%"),
+            _fmt_metric("Tonight vs usual", "ctx_lift_pp", "{:+.1f}", "pp"),
                 _fmt_metric("Avg EV", "avg_ev", "{:.1f}", " mph"),
                 _fmt_metric("HardHit%", "hard_hit", "{:.1f}", "%"),
                 _fmt_metric("ISO", "iso", "{:.3f}"),
@@ -4123,7 +4129,7 @@ with st.expander("📖 New here? How to use LaunchCast (60-second tour)", expand
         "tonight's pitcher allows to his side. Or type a name in the search "
         "box up top — one match shows the same card.\n"
         "6. **Key terms:** **HR Game%** = tonight's homer probability. "
-        "**Prob Grade** = that probability as a letter (A+ ≥25%). **HR Score** "
+        "**HR Grade** = HR Score as a letter (A+ ≥80, with caps). **HR Score** "
         "= 0-99 rank vs tonight's slate (~95+ elite). **Dinger** = pure power "
         "quality. **🔥 Smash Spots** = elite hitter + exploitable pitcher + "
         "friendly conditions.\n\n"
@@ -4373,7 +4379,27 @@ if not st.session_state["_auto_eval_done"]:
                 f"'✅ Durable Gist')."
             )
         else:
+            # v45.49 (user: 1-game eval, validated): a late-day snapshot on
+            # a day-game-heavy slate captures only games still upcoming
+            # (hide_started filtering), so grading the LATEST snapshot can
+            # evaluate a 2-pick 'slate'. Grade the FULLEST snapshot of the
+            # target day instead (most distinct games; tie -> latest).
             _eval_target = _eligible[-1]
+            try:
+                from backtest import snapshot_hitters as _snap_rows
+                _tgt_day = str(_eligible[-1]).split("T")[0]
+                _day_keys = [k for k in _eligible if str(k).startswith(_tgt_day)]
+                _best_key, _best_games = None, -1
+                for _k in _day_keys:
+                    _p = load_snapshot(_k)
+                    _rows = _snap_rows(_p) if _p else []
+                    _ng = len({r.get("game") for r in _rows if r.get("game")})
+                    if _ng >= _best_games:  # >= keeps latest on ties
+                        _best_key, _best_games = _k, _ng
+                if _best_key is not None:
+                    _eval_target = _best_key
+            except Exception as _fse:
+                log_swallowed_error("eval_fullest_snapshot", _fse, surface=False)
             _snapshot = load_snapshot(_eval_target)
             if not _snapshot:
                 st.session_state["_auto_eval_error"] = (
@@ -4499,12 +4525,17 @@ if _eval_metrics and _eval_date:
             # pasting elsewhere loses every row. st.code() renders a copy
             # button that grabs the whole block as plain text, so the full
             # results + pattern context travel intact (e.g. back to here).
-            def _fmt_pred_rows(preds):
+            def _fmt_pred_rows(preds, is_legacy=False):
                 lines = []
                 for i, p in enumerate(preds, 1):
                     hr = "HR" if p.get("homered") else "--"
                     ps = p.get("pick_score")
                     hg = p.get("hr_game_pct")
+                    # v45.49 (reviewer, validated): legacy eval dicts carry
+                    # predicted_hr_pct — without this the legacy list printed
+                    # 'hr% --' on every row.
+                    if is_legacy and not isinstance(hg, (int, float)):
+                        hg = p.get("predicted_hr_pct")
                     ps_s = f"{ps:>5}" if isinstance(ps, (int, float)) else "  -- "
                     hg_s = f"{hg:>4}%" if isinstance(hg, (int, float)) else "  -- "
                     lines.append(
@@ -4547,7 +4578,7 @@ if _eval_metrics and _eval_date:
             _report.append("")
             _report.append(f"LEGACY hr_game_pct TOP 10 — {_legacy_hits}/"
                            f"{len(_legacy_preds)} ({_legacy_hit:.0f}%)")
-            _report.append(_fmt_pred_rows(_legacy_preds))
+            _report.append(_fmt_pred_rows(_legacy_preds, is_legacy=True))
             _report.append("")
             _report.append(f"Overlap {len(both)} | only pick_score: "
                            f"{', '.join(sorted(only_ps)) if only_ps else 'none'} "
@@ -7774,7 +7805,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.48 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.49 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -10026,11 +10057,10 @@ with st.expander("ℹ️ How the Top 10 works", expanded=False):
         "of the night reads ~95 and the worst ~10. Above 95, elite plays are "
         "soft-compressed into 95-99.5 so they still sort — the score never "
         "reaches 100 (it's a rank, not a probability).\n"
-        "- **Prob Grade vs HR Score**: the letter grade comes from **HR Game%** "
-        "(the probability, banded A+ to F, with environment/platoon caps) — "
-        "NOT from HR Score. They can legitimately disagree: a hitter can rank "
-        "high on the composite but carry a lower probability grade, and vice "
-        "versa. When both agree, conviction is highest.\n"
+        "- **HR Grade vs HR Score**: the letter IS HR Score in grade form "
+        "(A+ ≥80 … F <20) with cap layers (hostile env, same-side platoon, "
+        "mechanical fail, absolute power floor). The probability is **HR "
+        "Game%**. A letter lower than the score suggests = a cap fired.\n"
         "- **HR Score is NOT a probability** — 95 means 'top tier of tonight's "
         "slate.' The actual per-game HR probability is the **HR Game%** column.\n"
         "- **🎯 color**: 🟢 ≥70 / 🟡 50-69 / 🟠 25-49 / 🔴 <25.\n"
@@ -11107,6 +11137,7 @@ if combined_picks is not None and not combined_picks.empty:
             # v45.14 (P2 #12): key by (pid, game) so doubleheader rows keep
             # their own tier (pid-only collapsed both games to the last one).
             new_smash_per_pid = {}
+            _smash_gate_stats = {'rows': 0, 'pass': 0}
             for _, _row in combined_picks.iterrows():
                 _sc = _row.get("hr_score")
                 _pid = _row.get("player_id")
@@ -11132,9 +11163,16 @@ if combined_picks is not None and not combined_picks.empty:
                 _irf = _row.get("is_roster_fill")
                 if _irf is not None and not pd.isna(_irf) and bool(_irf):
                     _lineup_ok = False
-                _lp_chk = _row.get("lineup_pos")
-                if _lp_chk is None or pd.isna(_lp_chk):
-                    _lineup_ok = False
+                # v45.49 (user: smash never appears): enforce lineup_pos ONLY
+                # when the column exists on this frame — reading a column a
+                # frame variant lacks made the gate fail for EVERY row.
+                if "lineup_pos" in getattr(_row, "index", []):
+                    _lp_chk = _row.get("lineup_pos")
+                    if _lp_chk is None or pd.isna(_lp_chk):
+                        _lineup_ok = False
+                _smash_gate_stats["rows"] += 1
+                if _lineup_ok:
+                    _smash_gate_stats["pass"] += 1
                 new_smash_per_pid[_key] = smash_tier(
                     _sc, _row.get("opp_pitcher_grade"), _row.get("env_boost"),
                     lineup_confirmed=_lineup_ok,
@@ -11164,7 +11202,15 @@ if combined_picks is not None and not combined_picks.empty:
                 if "env_boost" in combined_picks.columns:
                     _has_fav_env = bool((pd.to_numeric(combined_picks["env_boost"], errors="coerce") >= 1.00).any())
                 _why = []
-                if _n_elite == 0:
+                # v45.49: if the lineup gate blocked EVERY row, say THAT.
+                _sg = globals().get("_smash_gate_stats") or {}
+                if _n_elite == 0 and _n_strong == 0 and _n_smash == 0 \
+                        and _sg.get("rows", 0) > 0 and _sg.get("pass", 0) == 0:
+                    _why.append("no CONFIRMED lineups posted yet — smash flags "
+                                "require a player IN a posted lineup, so they "
+                                "appear as lineups confirm (~3-4h before first "
+                                "pitch)")
+                elif _n_elite == 0:
                     if not _has_exploitplus:
                         _why.append("no pitcher graded EXPLOIT/EXPLOIT+ tonight (all tiers require it)")
                     elif not _has_fav_env:
@@ -11625,6 +11671,15 @@ if combined_picks is not None and not combined_picks.empty:
         ].copy()
     else:
         q = combined_picks.copy()
+    if q is None or q.empty:
+        st.info(
+            "\u23f3 **No eligible Top-10 picks yet** \u2014 early-day data is "
+            "still building (pitcher probables / probabilities pending). The "
+            "Top 10 does **not** wait for confirmed lineups \u2014 projected "
+            "starters are eligible, and a max-2-per-game rule keeps any one "
+            "game from dominating. It fills in as pitcher data posts "
+            "(typically by late morning ET)."
+        )
 
     # v44.99 (review #1): exclude bench players from the pick pool. They carry
     # season PA above threshold and a near-full pick_score (bench adj is only
@@ -13232,236 +13287,242 @@ if combined_picks is not None and not combined_picks.empty:
         # ====================================================================
         # MODEL PICKS TWEET — owner-only Twitter post generator
         # ====================================================================
-        if owner_mode and top10 is not None and not top10.empty:
-            with st.expander("🐦 Generate Twitter post for Top Picks (owner only)"):
-                st.caption(
-                    "One-click tweet of tonight's top HR plays. Multiple format "
-                    "options based on character count. Edit before posting."
-                )
-                tweet_format = st.radio(
-                    "Format:",
-                    options=["Top 5 (short)", "Top 10 (full)",
-                              "Top 5 + Smash Spots", "Top 5 + edge stat",
-                              "Yesterday's recap", "Weekly recap (7d)"],
-                    index=0,
-                    key="tweet_format_choice",
-                    horizontal=True,
-                )
-
-                # Build the tweet body
-                date_str = selected_date.strftime("%b %-d")
-                t10_subset = top10.head(5) if "short" in tweet_format.lower() or "+" in tweet_format else top10.head(10)
-
-                pick_lines = []
-                for i, (_, r) in enumerate(t10_subset.iterrows(), 1):
-                    name = r.get("player_name", "?")
-                    team = r.get("team", "")
-                    pct = r.get("hr_game_pct", 0)
-                    if pct and not pd.isna(pct):
-                        pick_lines.append(f"{i}. {name} ({team}) — {float(pct):.1f}%")
-                    else:
-                        pick_lines.append(f"{i}. {name} ({team})")
-                picks_block = "\n".join(pick_lines)
-
-                if tweet_format == "Top 5 + Smash Spots":
-                    # v43.14 (reviewer-validated, REAL fix for smash tweet):
-                    # Previous v43.4 made the failure honest but still produced
-                    # an empty line because combined_all doesn't exist at
-                    # this point in the render (it's built ~700 lines later).
-                    # The fix: read smash_spot from game_context_map's
-                    # per-game matchup frames, which ARE populated by now
-                    # (the games loop ran before this UI renders).
-                    smash_names = []
-                    try:
-                        # v45.08 (review): combined_all is built ~1000 lines
-                        # below this render, so it's always None here — read
-                        # smash_spot directly from game_context_map's per-game
-                        # matchup frames, which ARE populated by now (the games
-                        # loop ran before this UI renders). (The old combined_all
-                        # branch was dead; removed to avoid misleading editors.)
-                        # Read from game_context_map (populated during the
-                        # games loop, which has already run).
-                        seen = set()
-                        scored_smashers = []
-                        for _gpk, _ctx in game_context_map.items():
-                            for _side in ("away_matchup", "home_matchup"):
-                                _m = _ctx.get(_side)
-                                if _m is None or _m.empty:
-                                    continue
-                                if "smash_spot" not in _m.columns:
-                                    continue
-                                _smash_rows = _m[
-                                    _m["smash_spot"].fillna("").str.contains(
-                                        "SMASH", na=False
-                                    )
-                                ]
-                                for _, _r in _smash_rows.iterrows():
-                                    _nm = _r.get("player_name")
-                                    if _nm and _nm not in seen:
-                                        seen.add(_nm)
-                                        # Score by smash tier so ELITE
-                                        # shows first
-                                        _label = str(_r.get("smash_spot") or "")
-                                        _tier = 3 if "ELITE" in _label else (
-                                            2 if "STRONG" in _label else 1
-                                        )
-                                        scored_smashers.append((_tier, _nm))
-                        scored_smashers.sort(key=lambda x: -x[0])
-                        smash_names = [nm for _, nm in scored_smashers[:6]]
-                    except Exception:
-                        pass
-                    smash_line = ""
-                    if smash_names:
-                        smash_line = f"\n\n🔥 Smash spots: {', '.join(smash_names)}"
-                    else:
-                        # Honest signal that the format produced an empty
-                        # smash line — owner sees this and knows to either
-                        # pick a different tweet format or wait for the full
-                        # render to complete.
-                        smash_line = (
-                            "\n\n(no smash spots flagged today, or "
-                            "combined_all not yet built — try refreshing)"
-                        )
-                    tweet_body = (
-                        f"🚀 LaunchCast Top 5 — {date_str}\n\n"
-                        f"{picks_block}"
-                        f"{smash_line}\n\n"
-                        f"#MLB #HRprops #DFS"
+        # v45.49 (user: slow format switching): the whole tweet box —
+        # radio AND generation — lives in a fragment, so switching
+        # formats reruns only this block, not the 20k-line script.
+        @_fragment
+        def _render_tweet_box():
+            if owner_mode and top10 is not None and not top10.empty:
+                with st.expander("🐦 Generate Twitter post for Top Picks (owner only)"):
+                    st.caption(
+                        "One-click tweet of tonight's top HR plays. Multiple format "
+                        "options based on character count. Edit before posting."
                     )
-                elif tweet_format == "Top 5 + edge stat":
-                    edge_line = ""
-                    try:
-                        from backtest import rolling_aggregate_hitters
-                        agg = rolling_aggregate_hitters(max_days=14)
-                        if not agg.get("error"):
-                            edge_pp = agg.get("edge_vs_slate_pp", 0)
-                            t10_pct = agg.get("top10_hr_rate_pct", 0)
-                            n_days = agg.get("n_snapshots", 0)
-                            if n_days >= 3 and edge_pp:
-                                edge_line = (
-                                    f"\n\n📊 Last {n_days} days: Top 10 picks hit "
-                                    f"{t10_pct}% vs slate average "
-                                    f"{agg.get('slate_baseline_hr_rate_pct', 0)}% "
-                                    f"({edge_pp:+.1f}pp edge)"
-                                )
-                    except Exception:
-                        pass
-                    tweet_body = (
-                        f"🚀 LaunchCast Top 5 — {date_str}\n\n"
-                        f"{picks_block}"
-                        f"{edge_line}\n\n"
-                        f"#MLB #HRprops #DFS"
+                    tweet_format = st.radio(
+                        "Format:",
+                        options=["Top 5 (short)", "Top 10 (full)",
+                                  "Top 5 + Smash Spots", "Top 5 + edge stat",
+                                  "Yesterday's recap", "Weekly recap (7d)"],
+                        index=0,
+                        key="tweet_format_choice",
+                        horizontal=True,
                     )
-                elif tweet_format == "Yesterday's recap":
-                    # Pull yesterday's auto-eval results from session_state
-                    yest_metrics = st.session_state.get("_auto_eval_metrics")
-                    yest_date_str = st.session_state.get("_auto_eval_date", "")
-                    if not yest_metrics:
-                        tweet_body = (
-                            "💣 No recap data available yet.\n\n"
-                            "Save a snapshot tonight after lineups lock, and "
-                            "tomorrow this format will auto-populate with how "
-                            "the model did.\n\n"
-                            "#MLB #HRprops #DFS"
-                        )
-                    else:
-                        hit_rate = yest_metrics.get("top10_hr_hit_rate", 0)
-                        slate_rate = yest_metrics.get("actual_hr_rate_pct", 0)
-                        edge = hit_rate - slate_rate
-                        actual_hrs = yest_metrics.get("total_actual_hrs", 0)
-                        # Pull the names of picks that homered
-                        preds = yest_metrics.get("top10_hr_predictions", []) or []
-                        # v45.14 (review P2 #8): 'top10_hrs_hit' is only set by the
-                        # ROLLING aggregate, not the per-day eval dict — this read
-                        # was always 0 ("0/10 hit a HR" even on good nights).
-                        # Count from the predictions list instead.
-                        top10_hits = sum(1 for p in preds if p.get("homered"))
-                        winners = [p.get("name") for p in preds if p.get("homered")]
-                        winners_str = ""
-                        if winners:
-                            # Truncate to first 4 to keep under 280 chars
-                            shown = winners[:4]
-                            extra = len(winners) - len(shown)
-                            winners_str = "\nHits: " + ", ".join(shown)
-                            if extra > 0:
-                                winners_str += f" +{extra} more"
-                        # Format the date nicely
+
+                    # Build the tweet body
+                    date_str = selected_date.strftime("%b %-d")
+                    t10_subset = top10.head(5) if "short" in tweet_format.lower() or "+" in tweet_format else top10.head(10)
+
+                    pick_lines = []
+                    for i, (_, r) in enumerate(t10_subset.iterrows(), 1):
+                        name = r.get("player_name", "?")
+                        team = r.get("team", "")
+                        pct = r.get("hr_game_pct", 0)
+                        if pct and not pd.isna(pct):
+                            pick_lines.append(f"{i}. {name} ({team}) — {float(pct):.1f}%")
+                        else:
+                            pick_lines.append(f"{i}. {name} ({team})")
+                    picks_block = "\n".join(pick_lines)
+
+                    if tweet_format == "Top 5 + Smash Spots":
+                        # v43.14 (reviewer-validated, REAL fix for smash tweet):
+                        # Previous v43.4 made the failure honest but still produced
+                        # an empty line because combined_all doesn't exist at
+                        # this point in the render (it's built ~700 lines later).
+                        # The fix: read smash_spot from game_context_map's
+                        # per-game matchup frames, which ARE populated by now
+                        # (the games loop ran before this UI renders).
+                        smash_names = []
                         try:
-                            from datetime import datetime as _dt
-                            yest_dt = _dt.strptime(yest_date_str, "%Y-%m-%d")
-                            yest_pretty = yest_dt.strftime("%b %-d")
+                            # v45.08 (review): combined_all is built ~1000 lines
+                            # below this render, so it's always None here — read
+                            # smash_spot directly from game_context_map's per-game
+                            # matchup frames, which ARE populated by now (the games
+                            # loop ran before this UI renders). (The old combined_all
+                            # branch was dead; removed to avoid misleading editors.)
+                            # Read from game_context_map (populated during the
+                            # games loop, which has already run).
+                            seen = set()
+                            scored_smashers = []
+                            for _gpk, _ctx in game_context_map.items():
+                                for _side in ("away_matchup", "home_matchup"):
+                                    _m = _ctx.get(_side)
+                                    if _m is None or _m.empty:
+                                        continue
+                                    if "smash_spot" not in _m.columns:
+                                        continue
+                                    _smash_rows = _m[
+                                        _m["smash_spot"].fillna("").str.contains(
+                                            "SMASH", na=False
+                                        )
+                                    ]
+                                    for _, _r in _smash_rows.iterrows():
+                                        _nm = _r.get("player_name")
+                                        if _nm and _nm not in seen:
+                                            seen.add(_nm)
+                                            # Score by smash tier so ELITE
+                                            # shows first
+                                            _label = str(_r.get("smash_spot") or "")
+                                            _tier = 3 if "ELITE" in _label else (
+                                                2 if "STRONG" in _label else 1
+                                            )
+                                            scored_smashers.append((_tier, _nm))
+                            scored_smashers.sort(key=lambda x: -x[0])
+                            smash_names = [nm for _, nm in scored_smashers[:6]]
                         except Exception:
-                            yest_pretty = yest_date_str
-                        emoji = "🟢" if edge >= 5 else "🟡" if edge >= 0 else "🔴"
+                            pass
+                        smash_line = ""
+                        if smash_names:
+                            smash_line = f"\n\n🔥 Smash spots: {', '.join(smash_names)}"
+                        else:
+                            # Honest signal that the format produced an empty
+                            # smash line — owner sees this and knows to either
+                            # pick a different tweet format or wait for the full
+                            # render to complete.
+                            smash_line = (
+                                "\n\n(no smash spots flagged today, or "
+                                "combined_all not yet built — try refreshing)"
+                            )
                         tweet_body = (
-                            f"🚀 LaunchCast Recap — {yest_pretty}\n\n"
-                            f"{emoji} Top 10 picks: {top10_hits}/10 hit a HR\n"
-                            f"Hit rate: {hit_rate:.0f}% vs slate avg {slate_rate:.1f}%\n"
-                            f"Edge: {edge:+.1f}pp"
-                            f"{winners_str}\n\n"
+                            f"🚀 LaunchCast Top 5 — {date_str}\n\n"
+                            f"{picks_block}"
+                            f"{smash_line}\n\n"
                             f"#MLB #HRprops #DFS"
                         )
-                elif tweet_format == "Weekly recap (7d)":
-                    # Aggregate the last 7 days of evaluated snapshots
-                    weekly_summary = None
-                    try:
-                        from backtest import rolling_aggregate_hitters
-                        weekly_summary = rolling_aggregate_hitters(max_days=7)
-                    except Exception:
-                        pass
-                    if not weekly_summary or weekly_summary.get("error"):
+                    elif tweet_format == "Top 5 + edge stat":
+                        edge_line = ""
+                        try:
+                            from backtest import rolling_aggregate_hitters
+                            agg = rolling_aggregate_hitters(max_days=14)
+                            if not agg.get("error"):
+                                edge_pp = agg.get("edge_vs_slate_pp", 0)
+                                t10_pct = agg.get("top10_hr_rate_pct", 0)
+                                n_days = agg.get("n_snapshots", 0)
+                                if n_days >= 3 and edge_pp:
+                                    edge_line = (
+                                        f"\n\n📊 Last {n_days} days: Top 10 picks hit "
+                                        f"{t10_pct}% vs slate average "
+                                        f"{agg.get('slate_baseline_hr_rate_pct', 0)}% "
+                                        f"({edge_pp:+.1f}pp edge)"
+                                    )
+                        except Exception:
+                            pass
                         tweet_body = (
-                            "💣 No weekly recap data yet.\n\n"
-                            "Need at least 2 evaluated days to build a "
-                            "weekly recap. Keep the app open daily — "
-                            "snapshots auto-save and auto-evaluate.\n\n"
-                            "#MLB #HRprops #DFS"
+                            f"🚀 LaunchCast Top 5 — {date_str}\n\n"
+                            f"{picks_block}"
+                            f"{edge_line}\n\n"
+                            f"#MLB #HRprops #DFS"
+                        )
+                    elif tweet_format == "Yesterday's recap":
+                        # Pull yesterday's auto-eval results from session_state
+                        yest_metrics = st.session_state.get("_auto_eval_metrics")
+                        yest_date_str = st.session_state.get("_auto_eval_date", "")
+                        if not yest_metrics:
+                            tweet_body = (
+                                "💣 No recap data available yet.\n\n"
+                                "Save a snapshot tonight after lineups lock, and "
+                                "tomorrow this format will auto-populate with how "
+                                "the model did.\n\n"
+                                "#MLB #HRprops #DFS"
+                            )
+                        else:
+                            hit_rate = yest_metrics.get("top10_hr_hit_rate", 0)
+                            slate_rate = yest_metrics.get("actual_hr_rate_pct", 0)
+                            edge = hit_rate - slate_rate
+                            actual_hrs = yest_metrics.get("total_actual_hrs", 0)
+                            # Pull the names of picks that homered
+                            preds = yest_metrics.get("top10_hr_predictions", []) or []
+                            # v45.14 (review P2 #8): 'top10_hrs_hit' is only set by the
+                            # ROLLING aggregate, not the per-day eval dict — this read
+                            # was always 0 ("0/10 hit a HR" even on good nights).
+                            # Count from the predictions list instead.
+                            top10_hits = sum(1 for p in preds if p.get("homered"))
+                            winners = [p.get("name") for p in preds if p.get("homered")]
+                            winners_str = ""
+                            if winners:
+                                # Truncate to first 4 to keep under 280 chars
+                                shown = winners[:4]
+                                extra = len(winners) - len(shown)
+                                winners_str = "\nHits: " + ", ".join(shown)
+                                if extra > 0:
+                                    winners_str += f" +{extra} more"
+                            # Format the date nicely
+                            try:
+                                from datetime import datetime as _dt
+                                yest_dt = _dt.strptime(yest_date_str, "%Y-%m-%d")
+                                yest_pretty = yest_dt.strftime("%b %-d")
+                            except Exception:
+                                yest_pretty = yest_date_str
+                            emoji = "🟢" if edge >= 5 else "🟡" if edge >= 0 else "🔴"
+                            tweet_body = (
+                                f"🚀 LaunchCast Recap — {yest_pretty}\n\n"
+                                f"{emoji} Top 10 picks: {top10_hits}/10 hit a HR\n"
+                                f"Hit rate: {hit_rate:.0f}% vs slate avg {slate_rate:.1f}%\n"
+                                f"Edge: {edge:+.1f}pp"
+                                f"{winners_str}\n\n"
+                                f"#MLB #HRprops #DFS"
+                            )
+                    elif tweet_format == "Weekly recap (7d)":
+                        # Aggregate the last 7 days of evaluated snapshots
+                        weekly_summary = None
+                        try:
+                            from backtest import rolling_aggregate_hitters
+                            weekly_summary = rolling_aggregate_hitters(max_days=7)
+                        except Exception:
+                            pass
+                        if not weekly_summary or weekly_summary.get("error"):
+                            tweet_body = (
+                                "💣 No weekly recap data yet.\n\n"
+                                "Need at least 2 evaluated days to build a "
+                                "weekly recap. Keep the app open daily — "
+                                "snapshots auto-save and auto-evaluate.\n\n"
+                                "#MLB #HRprops #DFS"
+                            )
+                        else:
+                            n_days = weekly_summary.get("n_snapshots", 0)
+                            t10_rate = weekly_summary.get("top10_hr_rate_pct", 0)
+                            slate_rate = weekly_summary.get("slate_baseline_hr_rate_pct", 0)
+                            edge_pp = weekly_summary.get("edge_vs_slate_pp", 0)
+                            any_hit_pct = weekly_summary.get("any_hit_rate_pct", 0)
+                            days_with_hit = weekly_summary.get("days_with_any_top10_hit", 0)
+                            days_total = weekly_summary.get("days_total", 0)
+                            emoji = "🟢" if edge_pp >= 5 else "🟡" if edge_pp >= 0 else "🔴"
+                            # Calculate total HRs hit across the week
+                            t10_hrs = weekly_summary.get("top10_hrs_hit", 0)
+                            t10_picks = weekly_summary.get("top10_picks_total", 0)
+                            tweet_body = (
+                                f"🚀 LaunchCast {n_days}-Day Recap\n\n"
+                                f"{emoji} Top 10 picks: {t10_hrs}/{t10_picks} HRs ({t10_rate:.1f}%)\n"
+                                f"Slate avg: {slate_rate:.1f}%\n"
+                                f"Edge vs slate: {edge_pp:+.1f}pp\n\n"
+                                f"Days with at least 1 Top 10 HR: "
+                                f"{days_with_hit}/{days_total} ({any_hit_pct:.0f}%)\n\n"
+                                f"#MLB #HRprops #DFS"
+                            )
+                    else:  # Top 5 short or Top 10 full
+                        tweet_body = (
+                            f"🚀 LaunchCast Top {len(pick_lines)} — {date_str}\n\n"
+                            f"{picks_block}\n\n"
+                            f"#MLB #HRprops #DFS"
+                        )
+
+                    # Display with character count
+                    st.text_area(
+                        "Tweet preview (copy this):",
+                        value=tweet_body,
+                        height=260,
+                        key=f"top_picks_tweet_{selected_date.isoformat()}",
+                    )
+                    chars = len(tweet_body)
+                    if chars > 280:
+                        st.warning(
+                            f"⚠️ {chars}/280 characters — too long for one tweet. "
+                            f"Either switch to a shorter format above, or post as a "
+                            f"thread (Twitter will auto-split if you paste this directly)."
                         )
                     else:
-                        n_days = weekly_summary.get("n_snapshots", 0)
-                        t10_rate = weekly_summary.get("top10_hr_rate_pct", 0)
-                        slate_rate = weekly_summary.get("slate_baseline_hr_rate_pct", 0)
-                        edge_pp = weekly_summary.get("edge_vs_slate_pp", 0)
-                        any_hit_pct = weekly_summary.get("any_hit_rate_pct", 0)
-                        days_with_hit = weekly_summary.get("days_with_any_top10_hit", 0)
-                        days_total = weekly_summary.get("days_total", 0)
-                        emoji = "🟢" if edge_pp >= 5 else "🟡" if edge_pp >= 0 else "🔴"
-                        # Calculate total HRs hit across the week
-                        t10_hrs = weekly_summary.get("top10_hrs_hit", 0)
-                        t10_picks = weekly_summary.get("top10_picks_total", 0)
-                        tweet_body = (
-                            f"🚀 LaunchCast {n_days}-Day Recap\n\n"
-                            f"{emoji} Top 10 picks: {t10_hrs}/{t10_picks} HRs ({t10_rate:.1f}%)\n"
-                            f"Slate avg: {slate_rate:.1f}%\n"
-                            f"Edge vs slate: {edge_pp:+.1f}pp\n\n"
-                            f"Days with at least 1 Top 10 HR: "
-                            f"{days_with_hit}/{days_total} ({any_hit_pct:.0f}%)\n\n"
-                            f"#MLB #HRprops #DFS"
-                        )
-                else:  # Top 5 short or Top 10 full
-                    tweet_body = (
-                        f"🚀 LaunchCast Top {len(pick_lines)} — {date_str}\n\n"
-                        f"{picks_block}\n\n"
-                        f"#MLB #HRprops #DFS"
-                    )
+                        st.caption(f"✅ {chars}/280 characters — fits one tweet")
 
-                # Display with character count
-                st.text_area(
-                    "Tweet preview (copy this):",
-                    value=tweet_body,
-                    height=260,
-                    key=f"top_picks_tweet_{selected_date.isoformat()}",
-                )
-                chars = len(tweet_body)
-                if chars > 280:
-                    st.warning(
-                        f"⚠️ {chars}/280 characters — too long for one tweet. "
-                        f"Either switch to a shorter format above, or post as a "
-                        f"thread (Twitter will auto-split if you paste this directly)."
-                    )
-                else:
-                    st.caption(f"✅ {chars}/280 characters — fits one tweet")
-
+        _render_tweet_box()
         # ====================================================================
         # BEST MATCHUPS — pure hitter-vs-pitcher quality, decoupled from env
         # ====================================================================
@@ -14267,6 +14328,29 @@ if all_hitters:
     # duplicate columns at the source.
     if combined_all.columns.duplicated().any():
         combined_all = combined_all.loc[:, ~combined_all.columns.duplicated()]
+
+    # v45.49 (user idea): CONTEXT LIFT \u2014 how much better tonight's setup
+    # makes this hitter vs HIS OWN season baseline. hr_game_pct is context-
+    # loaded (pitcher/park/weather/platoon); the baseline is his season
+    # HR/PA turned into a neutral per-game rate (~4.1 PA). Positive =
+    # tonight looks better than his usual self \u2014 the sleeper lens.
+    try:
+        _hr_src = None
+        for _c in ("hr", "home_run", "HR", "homeRuns"):
+            if _c in combined_all.columns:
+                _hr_src = pd.to_numeric(combined_all[_c], errors="coerce")
+                break
+        if (_hr_src is not None and "pa" in combined_all.columns
+                and "hr_game_pct" in combined_all.columns):
+            _pa_n = pd.to_numeric(combined_all["pa"], errors="coerce")
+            _rate = (_hr_src / _pa_n).clip(lower=0, upper=0.2)
+            _base_game = (1.0 - (1.0 - _rate) ** 4.1) * 100.0
+            combined_all["ctx_lift_pp"] = (
+                pd.to_numeric(combined_all["hr_game_pct"], errors="coerce")
+                - _base_game
+            ).round(1)
+    except Exception as _cle:
+        log_swallowed_error("ctx_lift", _cle, surface=False)
 
     # v45.00: schema drift detection. If a required column is missing or present
     # only under a legacy alias (env_mult vs env_boost, barrel_allowed, etc.),
@@ -17717,20 +17801,19 @@ def build_col_config():
             ),
         ),
         "grade": st.column_config.TextColumn(
-            "Prob Grade", width="small",
+            "HR Grade", width="small",
             help=(
-                "**Prob Grade** (probability letter grade) — driven by HR Game%, "
-                "NOT by HR Score:\n"
-                "A+ ≥25% · A 21-25% · B+ 17-21% · B 13-17%\n"
-                "C+ 10-13% · C 7-10% · D 4-7% · F <4% · — : no sample\n"
+                "**HR Grade** — the letter form of HR SCORE (the composite), "
+                "with cap layers — NOT driven by HR Game%:\n"
+                "A+ ≥80 · A ≥70 · B+ ≥60 · B ≥50 · C+ ≥40 · C ≥30 · D ≥20 · "
+                "F <20 · — : under 25 PA\n"
                 "Cap layers can lower it one tier: hostile environment "
                 "(env <0.85), same-side platoon, mechanical fail (pull<35 + EV<88).\n\n"
-                "**Why Grade and HR Score can disagree:** they measure different "
-                "things. Grade = tonight's HR *probability* (banded, capped). "
-                "HR Score = 0-99 *rank* of the full composite vs this slate. "
-                "A hitter can rank higher on the composite (great power+matchup "
-                "profile) while carrying a lower probability grade (or a "
-                "cap) — and vice versa. Agreement between them = conviction."
+                "**The HR family:** HR Game% = probability → HR Score = 0-99 "
+                "slate rank → HR Grade = that score as a letter (with caps, "
+                "plus an absolute power floor on A+/A). Grade usually tracks "
+                "Score; a LOWER letter than the score suggests means a cap "
+                "fired — that gap is information."
             ),
         ),
         "smash_spot": st.column_config.TextColumn(
@@ -18200,7 +18283,7 @@ def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
         "⚡ Power": [
             "player_name", "grade", "hr_game_pct",
             "barrel_pct", "pulled_brl_pct", "iso", "avg_ev", "avg_hr_ev",
-            "hard_hit", "blast_pct", "sweet_spot_pct", "pull_air_pct", "fb_pct", "la", "xwoba", "xwobacon",
+            "hard_hit", "blast_pct", "sweet_spot_pct", "pull_air_pct", "ctx_lift_pp", "fb_pct", "la", "xwoba", "xwobacon",
             "avg_hr_distance", "max_hit_speed", "power_score", "lift_score",
             "smash_spot", "data_completeness",
         ],
@@ -18814,34 +18897,6 @@ if _valid_games:
                 unsafe_allow_html=True,
             )
             _sel_col, _view_col, _all_col = st.columns([3, 2, 1])
-            # v45.42 (user ask): click a player → instant popup card, NO page
-            # reload. The selectbox lives inside the fragment (fragment-scoped
-            # rerun) and opens an st.dialog modal with the full deep-dive.
-            try:
-                _qc_names = ["— pick a player —"]
-                if "player_name" in combined_all.columns:
-                    _qc_pool = combined_all
-                    if "is_bench" in _qc_pool.columns:
-                        _qc_pool = _qc_pool[~_qc_pool["is_bench"].fillna(False)]
-                    _qc_names += sorted(_qc_pool["player_name"].dropna().astype(str).unique())
-                _qc_pick = st.selectbox(
-                    "🔬 Quick player card (popup — no reload):",
-                    options=_qc_names, index=0, key="_quick_card_pick",
-                    help="Opens a full stat card in a popup. To reopen the "
-                         "same player after closing, select '—' then the "
-                         "player again.",
-                )
-                if _qc_pick == "— pick a player —":
-                    st.session_state.pop("_qc_last_opened", None)
-                if (_qc_pick and _qc_pick != "— pick a player —"
-                        and st.session_state.get("_qc_last_opened") != _qc_pick):
-                    st.session_state["_qc_last_opened"] = _qc_pick
-                    _qc_rows = combined_all[
-                        combined_all["player_name"].astype(str) == _qc_pick]
-                    if not _qc_rows.empty:
-                        _quick_card_dialog(_qc_rows.iloc[0])
-            except Exception as _qce:
-                log_swallowed_error("quick_card", _qce, surface=False)
         with _sel_col:
             _selected_game_label = st.selectbox(
                 f"🎮 Select game to view ({_n_games} game"
@@ -18870,6 +18925,50 @@ if _valid_games:
                 help="Render every game at once (slower).",
             )
         _selected_idx = _tab_labels.index(_selected_game_label) if _selected_game_label in _tab_labels else 0
+        # v45.42 (user ask): click a player → instant popup card, NO page
+        # reload. The selectbox lives inside the fragment (fragment-scoped
+        # rerun) and opens an st.dialog modal with the full deep-dive.
+        try:
+            _qc_names = ["— pick a player —"]
+            if "player_name" in combined_all.columns:
+                _qc_pool = combined_all
+                if "is_bench" in _qc_pool.columns:
+                    _qc_pool = _qc_pool[~_qc_pool["is_bench"].fillna(False)]
+            # v45.49 (user ask): scope the dropdown to the SELECTED game's
+            # players (short list = easy typing). 'Show all' widens to slate.
+            try:
+                if not _show_all_games and _valid_games:
+                    _g_sel = _valid_games[_selected_idx][0]
+                    _teams = {str(_g_sel.get(_k, '')).upper() for _k in
+                              ('away_abbr', 'home_abbr', 'away_team_abbr',
+                               'home_team_abbr', 'away', 'home', 'away_team',
+                               'home_team') if _g_sel.get(_k)}
+                    if _teams and 'team' in _qc_pool.columns:
+                        _scoped = _qc_pool[_qc_pool['team'].astype(str)
+                                           .str.upper().isin(_teams)]
+                        if not _scoped.empty:
+                            _qc_pool = _scoped
+            except Exception:
+                pass
+                _qc_names += sorted(_qc_pool["player_name"].dropna().astype(str).unique())
+            _qc_pick = st.selectbox(
+                "🔬 Quick player card (popup — no reload):",
+                options=_qc_names, index=0, key="_quick_card_pick",
+                help="Opens a full stat card in a popup. To reopen the "
+                     "same player after closing, select '—' then the "
+                     "player again.",
+            )
+            if _qc_pick == "— pick a player —":
+                st.session_state.pop("_qc_last_opened", None)
+            if (_qc_pick and _qc_pick != "— pick a player —"
+                    and st.session_state.get("_qc_last_opened") != _qc_pick):
+                st.session_state["_qc_last_opened"] = _qc_pick
+                _qc_rows = combined_all[
+                    combined_all["player_name"].astype(str) == _qc_pick]
+                if not _qc_rows.empty:
+                    _quick_card_dialog(_qc_rows.iloc[0])
+        except Exception as _qce:
+            log_swallowed_error("quick_card", _qce, surface=False)
 
         for _game_idx, (game, ctx) in enumerate(_valid_games):
             # v45.04: skip rendering games that aren't selected (unless "Show all").
