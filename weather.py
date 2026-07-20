@@ -75,6 +75,10 @@ def _sane(key, val):
         v = float(val)
     except (TypeError, ValueError):
         return None
+    # v45.48 (review): NaN/Inf pass every band comparison (all False) and
+    # would flow into the multiplier math — catch explicitly.
+    if math.isnan(v) or math.isinf(v):
+        return None
     span = hi - lo
     if v < lo - 3 * span or v > hi + 3 * span:
         return None  # glitch, not weather
@@ -723,7 +727,9 @@ def hr_multiplier(weather: dict, park: dict, skip_wind: bool = False,
     elif roof == "retractable":
         summary.append("(retractable, status uncertain)")
 
-    # Sanity bounds
+    # Sanity bounds + defense-in-depth against NaN/Inf
+    if math.isnan(mult) or math.isinf(mult):
+        mult = 1.0
     mult = max(0.55, min(1.45, mult))
 
     return round(mult, 3), " · ".join(summary) if summary else "Neutral"
