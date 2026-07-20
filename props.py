@@ -592,7 +592,6 @@ def hr_prob_per_pa(
     # the dominant code path. Now either signal triggers dampening.
     _any_split_applied = (
         split_hr_per_pa is not None
-        or globals().get("_hitter_split_applied", False)  # local lookup
         or _hitter_split_applied
     )
     platoon_mult = 1.0
