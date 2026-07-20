@@ -34,6 +34,7 @@ try:
     import streamlit as st
     _HAVE_ST = True
 except ImportError:
+    st = None  # v45.48 (review): keep the name bound so guards don't NameError
     _HAVE_ST = False
 
 HEADERS = {"User-Agent": "Mozilla/5.0"}
@@ -873,8 +874,6 @@ def save_snapshot(snapshot_date, matchup_df: pd.DataFrame,
                 "ps_form", "ps_sleeper", "ps_lift", "ps_env",
                 "ps_discipline", "ps_bonus_recent_hr", "ps_bonus_platoon",
                 "ps_bonus_lineup", "ps_penalty_il",  # v44.77: all pick_score parts
-                "ps_bonus_lineup", "ps_bonus_platoon",
-                "ps_bonus_recent_hr", "ps_penalty_il",
                 # v43.74: critical for Pattern Analysis to read accumulated
                 # snapshots and surface researcher-framework patterns. Without
                 # these, the analysis section says "no data" even with
