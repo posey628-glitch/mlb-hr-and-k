@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.47-amber-links"
+APP_VERSION = "2026.06.10-v45.48-review-fixes"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -143,8 +143,13 @@ except ImportError:
 # missing module never breaks the app.
 try:
     from schema import assert_schema as _assert_schema, find_column as _find_column
-except Exception:
-    def _assert_schema(*a, **k): return []
+except Exception as _schema_import_err:
+    # v45.48 (review): fail-LOUD — if schema.py can't import, say detection
+    # is off instead of reporting "clean" (the string lands in Pipeline
+    # Health as a warning via the normal _schema_problems path).
+    def _assert_schema(*a, **k):
+        return [f"schema.py unavailable ({type(_schema_import_err).__name__}) — "
+                f"column-drift detection DISABLED this run"]
     def _find_column(df, name):
         return name if (df is not None and name in getattr(df, "columns", [])) else None
 
@@ -2616,7 +2621,7 @@ with st.sidebar:
             url_key = qp.get("owner", "")
             if isinstance(url_key, list):
                 url_key = url_key[0] if url_key else ""
-            if url_key and url_key == OWNER_KEY:
+            if url_key and OWNER_KEY and url_key == OWNER_KEY:
                 owner_mode = True
                 st.session_state["_owner_verified"] = True  # v44.96: sticky
         except Exception:
@@ -2628,7 +2633,7 @@ with st.sidebar:
                     "Owner key", type="password", key="owner_pwd",
                     help="Hidden field — only the app owner needs this.",
                 )
-                if pwd and pwd == OWNER_KEY:
+                if pwd and OWNER_KEY and pwd == OWNER_KEY:
                     owner_mode = True
                     st.session_state["_owner_verified"] = True  # v44.96: sticky
                     st.success("✓ Owner mode active")
@@ -7769,7 +7774,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.47 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.48 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -8664,10 +8669,14 @@ for _, game in slate.iterrows():
     def _apply_day_night(matchup_df):
         if matchup_df is None or matchup_df.empty:
             return
-        def _day_night_flag(row):
-            if game_type not in ("day", "night"):
+        # v45.48: the bind-defaults fix the v43.82 comment prescribed —
+        # values captured at definition, immune to deferred execution.
+        def _day_night_flag(row, _game_type=game_type, _floor=None):
+            if _floor is None:
+                _floor = FLOOR_RATE
+            if _game_type not in ("day", "night"):
                 return ""
-            if game_type == "day":
+            if _game_type == "day":
                 rel_pa = row.get("vs_day_pa")
                 rel_rate = row.get("vs_day_hr_per_pa")
                 other_rate = row.get("vs_night_hr_per_pa")
@@ -8694,7 +8703,7 @@ for _, game in slate.iterrows():
                 oth_f = float(other_rate)
             except (TypeError, ValueError):
                 return ""
-            oth_capped = max(oth_f, FLOOR_RATE)
+            oth_capped = max(oth_f, _floor)
             ratio = rel_f / oth_capped
             if ratio >= 1.40:
                 return f"{label_match} ({rel_f:.1f}% vs {oth_f:.1f}%)"
