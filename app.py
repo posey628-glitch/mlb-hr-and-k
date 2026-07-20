@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.49-truth-and-lift"
+APP_VERSION = "2026.06.10-v45.50-lookup-fragments"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -7805,7 +7805,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.49 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.50 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -18396,219 +18396,222 @@ def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
 # the auto-detection in the game cards below will reflect that automatically
 # without you needing to clear or change anything here.
 # ============================================================================
-with st.expander("🔍 Pitcher Lookup — scout any team's pitcher", expanded=False):
-    st.caption(
-        "Select any team to see all their pitchers (active roster). "
-        "Pick a pitcher to view their full stat line + grade. This is a "
-        "lookup utility — it does not change the auto-detected matchup "
-        "pitcher in the game cards below."
-    )
-    try:
-        # Build team list from the slate (only show teams playing today
-        # so the dropdown is short and relevant)
-        team_options = {}
-        for _, _g in slate.iterrows():
-            for side in ("away", "home"):
-                tid = _g.get(f"{side}_team_id")
-                tname = _g.get(f"{side}_team")
-                if tid is not None and not pd.isna(tid) and tname:
-                    team_options[str(tname)] = int(tid)
-        if not team_options:
-            st.info("No teams available — slate is empty.")
-        else:
-            sorted_team_names = sorted(team_options.keys())
-            sel_team_name = st.selectbox(
-                "Team",
-                options=sorted_team_names,
-                key="pitcher_lookup_team",
-            )
-            sel_team_id = team_options[sel_team_name]
-
-            # Fetch this team's pitcher roster (active + 40-man, includes
-            # AAA stashes). Cached 15min so the dropdown is fast.
-            try:
-                from data_fetcher import get_team_pitchers
-                pitchers_on_team = get_team_pitchers(sel_team_id)
-            except Exception:
-                pitchers_on_team = []
-
-            if not pitchers_on_team:
-                st.warning(
-                    f"No pitchers found on {sel_team_name}'s active roster. "
-                    "Roster fetch may have failed — try again in a moment."
-                )
+@_fragment
+def _render_pitcher_lookup():
+    with st.expander("🔍 Pitcher Lookup — scout any team's pitcher", expanded=False):
+        st.caption(
+            "Select any team to see all their pitchers (active roster). "
+            "Pick a pitcher to view their full stat line + grade. This is a "
+            "lookup utility — it does not change the auto-detected matchup "
+            "pitcher in the game cards below."
+        )
+        try:
+            # Build team list from the slate (only show teams playing today
+            # so the dropdown is short and relevant)
+            team_options = {}
+            for _, _g in slate.iterrows():
+                for side in ("away", "home"):
+                    tid = _g.get(f"{side}_team_id")
+                    tname = _g.get(f"{side}_team")
+                    if tid is not None and not pd.isna(tid) and tname:
+                        team_options[str(tname)] = int(tid)
+            if not team_options:
+                st.info("No teams available — slate is empty.")
             else:
-                # Build display labels: "Last, First (R)"
-                pitcher_label_map = {
-                    p["id"]: f"{p['name']} ({p.get('throws', '?')}HP)"
-                    for p in pitchers_on_team
-                }
-                sorted_pids = sorted(
-                    pitcher_label_map.keys(),
-                    key=lambda x: pitcher_label_map[x],
+                sorted_team_names = sorted(team_options.keys())
+                sel_team_name = st.selectbox(
+                    "Team",
+                    options=sorted_team_names,
+                    key="pitcher_lookup_team",
                 )
-                sel_pid = st.selectbox(
-                    "Pitcher",
-                    options=sorted_pids,
-                    format_func=lambda pid: pitcher_label_map.get(pid, str(pid)),
-                    key="pitcher_lookup_pid",
-                )
+                sel_team_id = team_options[sel_team_name]
 
-                # Pull this pitcher's stat row
-                p_row = pd.DataFrame()
-                if not pitcher_stats.empty and sel_pid in pitcher_stats["player_id"].values:
-                    p_row = pitcher_stats[pitcher_stats["player_id"] == sel_pid]
+                # Fetch this team's pitcher roster (active + 40-man, includes
+                # AAA stashes). Cached 15min so the dropdown is fast.
+                try:
+                    from data_fetcher import get_team_pitchers
+                    pitchers_on_team = get_team_pitchers(sel_team_id)
+                except Exception:
+                    pitchers_on_team = []
 
-                if p_row.empty:
+                if not pitchers_on_team:
                     st.warning(
-                        f"{pitcher_label_map.get(sel_pid)} has no Statcast data this "
-                        "season. They may be a minor-league call-up, recently injured, "
-                        "or haven't made enough appearances. Check MLB Stats API "
-                        "leaderboard for current status."
+                        f"No pitchers found on {sel_team_name}'s active roster. "
+                        "Roster fetch may have failed — try again in a moment."
                     )
                 else:
-                    pr = p_row.iloc[0].to_dict()
-                    # Compact stat row display
-                    c1, c2, c3, c4, c5 = st.columns(5)
-                    with c1:
-                        st.metric("ERA", f"{pr.get('era', 0):.2f}"
-                                  if pd.notna(pr.get('era')) else "—")
-                    with c2:
-                        st.metric("HR/9", f"{pr.get('hr9', 0):.2f}"
-                                  if pd.notna(pr.get('hr9')) else "—")
-                    with c3:
-                        st.metric("K%", f"{pr.get('k_percent', 0):.1f}%"
-                                  if pd.notna(pr.get('k_percent')) else "—")
-                    with c4:
-                        st.metric("Whiff%", f"{pr.get('whiff_percent', 0):.1f}%"
-                                  if pd.notna(pr.get('whiff_percent')) else "—")
-                    with c5:
-                        st.metric(
-                            "Barrel% Allowed",
-                            f"{pr.get('barrel_batted_rate', 0):.1f}%"
-                            if pd.notna(pr.get('barrel_batted_rate')) else "—",
+                    # Build display labels: "Last, First (R)"
+                    pitcher_label_map = {
+                        p["id"]: f"{p['name']} ({p.get('throws', '?')}HP)"
+                        for p in pitchers_on_team
+                    }
+                    sorted_pids = sorted(
+                        pitcher_label_map.keys(),
+                        key=lambda x: pitcher_label_map[x],
+                    )
+                    sel_pid = st.selectbox(
+                        "Pitcher",
+                        options=sorted_pids,
+                        format_func=lambda pid: pitcher_label_map.get(pid, str(pid)),
+                        key="pitcher_lookup_pid",
+                    )
+
+                    # Pull this pitcher's stat row
+                    p_row = pd.DataFrame()
+                    if not pitcher_stats.empty and sel_pid in pitcher_stats["player_id"].values:
+                        p_row = pitcher_stats[pitcher_stats["player_id"] == sel_pid]
+
+                    if p_row.empty:
+                        st.warning(
+                            f"{pitcher_label_map.get(sel_pid)} has no Statcast data this "
+                            "season. They may be a minor-league call-up, recently injured, "
+                            "or haven't made enough appearances. Check MLB Stats API "
+                            "leaderboard for current status."
                         )
-
-                    # Second row: more stats
-                    c1, c2, c3, c4, c5 = st.columns(5)
-                    with c1:
-                        st.metric("IP", f"{pr.get('ip', 0):.1f}"
-                                  if pd.notna(pr.get('ip')) else "—")
-                    with c2:
-                        st.metric("WHIP", f"{pr.get('whip', 0):.2f}"
-                                  if pd.notna(pr.get('whip')) else "—")
-                    with c3:
-                        st.metric(
-                            "Hard Hit% Allowed",
-                            f"{pr.get('hard_hit_percent', 0):.1f}%"
-                            if pd.notna(pr.get('hard_hit_percent')) else "—",
-                        )
-                    with c4:
-                        st.metric("xERA", f"{pr.get('xera', 0):.2f}"
-                                  if pd.notna(pr.get('xera')) else "—")
-                    with c5:
-                        gb_p = pr.get("groundballs_percent")
-                        st.metric("GB%", f"{gb_p:.1f}%"
-                                  if pd.notna(gb_p) else "—")
-
-                    # Show arsenal if available
-                    try:
-                        from data_fetcher import get_pitcher_arsenal_safe as get_pitcher_arsenal
-                        arsenals = get_pitcher_arsenal()
-                        if not arsenals.empty:
-                            p_arsenal = arsenals[arsenals["player_id"] == sel_pid]
-                            if not p_arsenal.empty:
-                                st.markdown("**Arsenal**:")
-                                arsenal_disp = p_arsenal[[
-                                    c for c in [
-                                        "pitch_type", "pitch_name", "pitch_usage",
-                                        "ba", "slg", "woba", "whiff_percent",
-                                    ] if c in p_arsenal.columns
-                                ]].copy()
-                                st.dataframe(
-                                    arsenal_disp,
-                                    hide_index=True,
-                                    use_container_width=True,
-                                )
-                    except Exception:
-                        pass
-
-                    # v43+: Zone tier distribution display
-                    # Uses get_pitcher_zone_distribution which wraps the
-                    # bulk leaderboard fetcher. If the Savant zone fetcher
-                    # failed (caption shows ❌), this section silently shows
-                    # nothing — no crash, just no zone data.
-                    try:
-                        from data_fetcher import get_pitcher_zone_distribution
-                        z_dist = get_pitcher_zone_distribution(sel_pid)
-                        if z_dist:
-                            st.markdown("**Zone Distribution** (Savant tiers):")
-                            zc1, zc2, zc3, zc4 = st.columns(4)
-                            with zc1:
-                                hp = z_dist.get("pitcher_heart_pct")
-                                st.metric(
-                                    "Heart %",
-                                    f"{float(hp):.1f}%" if pd.notna(hp) else "—",
-                                    help="% of pitches over the heart of the plate. "
-                                         "High heart% (>27) = aggressive zone-pounder. "
-                                         "Low heart% (<22) = nibbler.",
-                                )
-                            with zc2:
-                                sp = z_dist.get("pitcher_shadow_pct")
-                                st.metric(
-                                    "Shadow %",
-                                    f"{float(sp):.1f}%" if pd.notna(sp) else "—",
-                                    help="% in the shadow zone (just inside/outside the strike zone).",
-                                )
-                            with zc3:
-                                cp = z_dist.get("pitcher_chase_pct")
-                                st.metric(
-                                    "Chase %",
-                                    f"{float(cp):.1f}%" if pd.notna(cp) else "—",
-                                    help="% in the chase zone (well out of zone, trying to get a swing).",
-                                )
-                            with zc4:
-                                wp = z_dist.get("pitcher_waste_pct")
-                                st.metric(
-                                    "Waste %",
-                                    f"{float(wp):.1f}%" if pd.notna(wp) else "—",
-                                    help="% of wasted pitches (way out of zone, no swing intended).",
-                                )
-
-                            # Interpretation hint
-                            heart_pct_val = z_dist.get("pitcher_heart_pct")
-                            if pd.notna(heart_pct_val):
-                                hpv = float(heart_pct_val)
-                                if hpv >= 28.0:
-                                    st.caption(
-                                        "🎯 **Aggressive zone-pounder** — throws lots of "
-                                        "heart-of-plate pitches. Risk against hitters who "
-                                        "punish heart pitches (look for high hitter_heart_woba)."
-                                    )
-                                elif hpv <= 22.0:
-                                    st.caption(
-                                        "🥷 **Nibbler** — works the edges, low heart%. "
-                                        "Risk against patient/disciplined hitters who "
-                                        "draw walks rather than chase."
-                                    )
-                                else:
-                                    st.caption(
-                                        "⚖️ **Balanced approach** — neither extreme. "
-                                        "Matchup depends more on arsenal × hitter profile."
-                                    )
-                        else:
-                            st.caption(
-                                "_Zone tier data unavailable for this pitcher_ "
-                                "(check the Zone tiers status in the caption at the top — "
-                                "if it shows ❌, the Savant fetcher needs investigation)."
+                    else:
+                        pr = p_row.iloc[0].to_dict()
+                        # Compact stat row display
+                        c1, c2, c3, c4, c5 = st.columns(5)
+                        with c1:
+                            st.metric("ERA", f"{pr.get('era', 0):.2f}"
+                                      if pd.notna(pr.get('era')) else "—")
+                        with c2:
+                            st.metric("HR/9", f"{pr.get('hr9', 0):.2f}"
+                                      if pd.notna(pr.get('hr9')) else "—")
+                        with c3:
+                            st.metric("K%", f"{pr.get('k_percent', 0):.1f}%"
+                                      if pd.notna(pr.get('k_percent')) else "—")
+                        with c4:
+                            st.metric("Whiff%", f"{pr.get('whiff_percent', 0):.1f}%"
+                                      if pd.notna(pr.get('whiff_percent')) else "—")
+                        with c5:
+                            st.metric(
+                                "Barrel% Allowed",
+                                f"{pr.get('barrel_batted_rate', 0):.1f}%"
+                                if pd.notna(pr.get('barrel_batted_rate')) else "—",
                             )
-                    except Exception as _ze:
-                        st.caption(f"_Zone data fetch error: {type(_ze).__name__}_")
-    except Exception as _lookup_err:
-        st.warning(f"Pitcher lookup failed: {type(_lookup_err).__name__}: {_lookup_err}")
+
+                        # Second row: more stats
+                        c1, c2, c3, c4, c5 = st.columns(5)
+                        with c1:
+                            st.metric("IP", f"{pr.get('ip', 0):.1f}"
+                                      if pd.notna(pr.get('ip')) else "—")
+                        with c2:
+                            st.metric("WHIP", f"{pr.get('whip', 0):.2f}"
+                                      if pd.notna(pr.get('whip')) else "—")
+                        with c3:
+                            st.metric(
+                                "Hard Hit% Allowed",
+                                f"{pr.get('hard_hit_percent', 0):.1f}%"
+                                if pd.notna(pr.get('hard_hit_percent')) else "—",
+                            )
+                        with c4:
+                            st.metric("xERA", f"{pr.get('xera', 0):.2f}"
+                                      if pd.notna(pr.get('xera')) else "—")
+                        with c5:
+                            gb_p = pr.get("groundballs_percent")
+                            st.metric("GB%", f"{gb_p:.1f}%"
+                                      if pd.notna(gb_p) else "—")
+
+                        # Show arsenal if available
+                        try:
+                            from data_fetcher import get_pitcher_arsenal_safe as get_pitcher_arsenal
+                            arsenals = get_pitcher_arsenal()
+                            if not arsenals.empty:
+                                p_arsenal = arsenals[arsenals["player_id"] == sel_pid]
+                                if not p_arsenal.empty:
+                                    st.markdown("**Arsenal**:")
+                                    arsenal_disp = p_arsenal[[
+                                        c for c in [
+                                            "pitch_type", "pitch_name", "pitch_usage",
+                                            "ba", "slg", "woba", "whiff_percent",
+                                        ] if c in p_arsenal.columns
+                                    ]].copy()
+                                    st.dataframe(
+                                        arsenal_disp,
+                                        hide_index=True,
+                                        use_container_width=True,
+                                    )
+                        except Exception:
+                            pass
+
+                        # v43+: Zone tier distribution display
+                        # Uses get_pitcher_zone_distribution which wraps the
+                        # bulk leaderboard fetcher. If the Savant zone fetcher
+                        # failed (caption shows ❌), this section silently shows
+                        # nothing — no crash, just no zone data.
+                        try:
+                            from data_fetcher import get_pitcher_zone_distribution
+                            z_dist = get_pitcher_zone_distribution(sel_pid)
+                            if z_dist:
+                                st.markdown("**Zone Distribution** (Savant tiers):")
+                                zc1, zc2, zc3, zc4 = st.columns(4)
+                                with zc1:
+                                    hp = z_dist.get("pitcher_heart_pct")
+                                    st.metric(
+                                        "Heart %",
+                                        f"{float(hp):.1f}%" if pd.notna(hp) else "—",
+                                        help="% of pitches over the heart of the plate. "
+                                             "High heart% (>27) = aggressive zone-pounder. "
+                                             "Low heart% (<22) = nibbler.",
+                                    )
+                                with zc2:
+                                    sp = z_dist.get("pitcher_shadow_pct")
+                                    st.metric(
+                                        "Shadow %",
+                                        f"{float(sp):.1f}%" if pd.notna(sp) else "—",
+                                        help="% in the shadow zone (just inside/outside the strike zone).",
+                                    )
+                                with zc3:
+                                    cp = z_dist.get("pitcher_chase_pct")
+                                    st.metric(
+                                        "Chase %",
+                                        f"{float(cp):.1f}%" if pd.notna(cp) else "—",
+                                        help="% in the chase zone (well out of zone, trying to get a swing).",
+                                    )
+                                with zc4:
+                                    wp = z_dist.get("pitcher_waste_pct")
+                                    st.metric(
+                                        "Waste %",
+                                        f"{float(wp):.1f}%" if pd.notna(wp) else "—",
+                                        help="% of wasted pitches (way out of zone, no swing intended).",
+                                    )
+
+                                # Interpretation hint
+                                heart_pct_val = z_dist.get("pitcher_heart_pct")
+                                if pd.notna(heart_pct_val):
+                                    hpv = float(heart_pct_val)
+                                    if hpv >= 28.0:
+                                        st.caption(
+                                            "🎯 **Aggressive zone-pounder** — throws lots of "
+                                            "heart-of-plate pitches. Risk against hitters who "
+                                            "punish heart pitches (look for high hitter_heart_woba)."
+                                        )
+                                    elif hpv <= 22.0:
+                                        st.caption(
+                                            "🥷 **Nibbler** — works the edges, low heart%. "
+                                            "Risk against patient/disciplined hitters who "
+                                            "draw walks rather than chase."
+                                        )
+                                    else:
+                                        st.caption(
+                                            "⚖️ **Balanced approach** — neither extreme. "
+                                            "Matchup depends more on arsenal × hitter profile."
+                                        )
+                            else:
+                                st.caption(
+                                    "_Zone tier data unavailable for this pitcher_ "
+                                    "(check the Zone tiers status in the caption at the top — "
+                                    "if it shows ❌, the Savant fetcher needs investigation)."
+                                )
+                        except Exception as _ze:
+                            st.caption(f"_Zone data fetch error: {type(_ze).__name__}_")
+        except Exception as _lookup_err:
+            st.warning(f"Pitcher lookup failed: {type(_lookup_err).__name__}: {_lookup_err}")
 
 
-# ============================================================================
+    # ============================================================================
+_render_pitcher_lookup()
 # v43+: HITTER LOOKUP UTILITY (companion to Pitcher Lookup)
 # ----------------------------------------------------------------------------
 # Same idea as Pitcher Lookup: a scouting tool to view any hitter's full
@@ -18616,211 +18619,214 @@ with st.expander("🔍 Pitcher Lookup — scout any team's pitcher", expanded=Fa
 # or checking whether a bench hitter you're considering might start.
 # Does NOT change anything in the matchup flow below.
 # ============================================================================
-with st.expander("🔍 Hitter Lookup — scout any team's hitter", expanded=False):
-    st.caption(
-        "Select any team to see all their hitters (active + 40-man roster). "
-        "Pick a hitter to view their full stat line, recent form, and zone "
-        "performance. Lookup utility only — does not change matchup analysis."
-    )
-    try:
-        # Build same team_options as pitcher lookup
-        team_options_h = {}
-        for _, _g in slate.iterrows():
-            for side in ("away", "home"):
-                tid = _g.get(f"{side}_team_id")
-                tname = _g.get(f"{side}_team")
-                if tid is not None and not pd.isna(tid) and tname:
-                    team_options_h[str(tname)] = int(tid)
-        if not team_options_h:
-            st.info("No teams available — slate is empty.")
-        else:
-            sorted_team_names_h = sorted(team_options_h.keys())
-            sel_team_name_h = st.selectbox(
-                "Team",
-                options=sorted_team_names_h,
-                key="hitter_lookup_team",
-            )
-            sel_team_id_h = team_options_h[sel_team_name_h]
-
-            # Pull hitter roster (excludes pitchers automatically)
-            try:
-                from data_fetcher import get_team_roster
-                team_roster_h = get_team_roster(sel_team_id_h)
-            except Exception:
-                team_roster_h = []
-
-            if not team_roster_h:
-                st.warning(f"No hitters found on {sel_team_name_h}.")
+@_fragment
+def _render_hitter_lookup():
+    with st.expander("🔍 Hitter Lookup — scout any team's hitter", expanded=False):
+        st.caption(
+            "Select any team to see all their hitters (active + 40-man roster). "
+            "Pick a hitter to view their full stat line, recent form, and zone "
+            "performance. Lookup utility only — does not change matchup analysis."
+        )
+        try:
+            # Build same team_options as pitcher lookup
+            team_options_h = {}
+            for _, _g in slate.iterrows():
+                for side in ("away", "home"):
+                    tid = _g.get(f"{side}_team_id")
+                    tname = _g.get(f"{side}_team")
+                    if tid is not None and not pd.isna(tid) and tname:
+                        team_options_h[str(tname)] = int(tid)
+            if not team_options_h:
+                st.info("No teams available — slate is empty.")
             else:
-                hitter_label_map = {
-                    int(h["id"]): (
-                        f"{h['name']} ({h.get('bats', '?')}HB, "
-                        f"{h.get('position', '?')})"
-                    )
-                    for h in team_roster_h
-                    if h.get("id") and h.get("name")
-                }
-                sorted_hids = sorted(
-                    hitter_label_map.keys(),
-                    key=lambda x: hitter_label_map[x],
+                sorted_team_names_h = sorted(team_options_h.keys())
+                sel_team_name_h = st.selectbox(
+                    "Team",
+                    options=sorted_team_names_h,
+                    key="hitter_lookup_team",
                 )
-                sel_hid = st.selectbox(
-                    "Hitter",
-                    options=sorted_hids,
-                    format_func=lambda hid: hitter_label_map.get(hid, str(hid)),
-                    key="hitter_lookup_hid",
-                )
+                sel_team_id_h = team_options_h[sel_team_name_h]
 
-                # Look up hitter row
-                h_row = pd.DataFrame()
-                if not hitter_stats.empty and sel_hid in hitter_stats["player_id"].values:
-                    h_row = hitter_stats[hitter_stats["player_id"] == sel_hid]
+                # Pull hitter roster (excludes pitchers automatically)
+                try:
+                    from data_fetcher import get_team_roster
+                    team_roster_h = get_team_roster(sel_team_id_h)
+                except Exception:
+                    team_roster_h = []
 
-                if h_row.empty:
-                    st.warning(
-                        f"{hitter_label_map.get(sel_hid)} has no Statcast data this "
-                        "season. May be a recent call-up or sample too small."
-                    )
+                if not team_roster_h:
+                    st.warning(f"No hitters found on {sel_team_name_h}.")
                 else:
-                    hr = h_row.iloc[0].to_dict()
-                    # Top row: core power stats
-                    c1, c2, c3, c4, c5 = st.columns(5)
-                    with c1:
-                        st.metric("PA", f"{int(hr.get('pa', 0))}"
-                                  if pd.notna(hr.get('pa')) else "—")
-                    with c2:
-                        st.metric("HR", f"{int(hr.get('home_run', 0))}"
-                                  if pd.notna(hr.get('home_run')) else "—")
-                    with c3:
-                        b = hr.get("barrel_batted_rate")
-                        st.metric("Barrel %", f"{float(b):.1f}%"
-                                  if pd.notna(b) else "—")
-                    with c4:
-                        iso_v = hr.get("iso")
-                        st.metric("ISO", f"{float(iso_v):.3f}"
-                                  if pd.notna(iso_v) else "—")
-                    with c5:
-                        xw = hr.get("xwoba")
-                        st.metric("xwOBA", f"{float(xw):.3f}"
-                                  if pd.notna(xw) else "—")
-
-                    # Second row: contact + discipline
-                    c1, c2, c3, c4, c5 = st.columns(5)
-                    with c1:
-                        hh = hr.get("hard_hit_percent")
-                        st.metric("Hard Hit %", f"{float(hh):.1f}%"
-                                  if pd.notna(hh) else "—")
-                    with c2:
-                        ev = hr.get("launch_speed") or hr.get("avg_best_speed")
-                        st.metric("Avg EV", f"{float(ev):.1f}"
-                                  if pd.notna(ev) else "—")
-                    with c3:
-                        kp = hr.get("k_percent")
-                        st.metric("K %", f"{float(kp):.1f}%"
-                                  if pd.notna(kp) else "—")
-                    with c4:
-                        zs = hr.get("z_swing_percent")
-                        st.metric(
-                            "Z-Swing %", f"{float(zs):.1f}%" if pd.notna(zs) else "—",
-                            help="In-zone swing rate. High = aggressive, low = patient.",
+                    hitter_label_map = {
+                        int(h["id"]): (
+                            f"{h['name']} ({h.get('bats', '?')}HB, "
+                            f"{h.get('position', '?')})"
                         )
-                    with c5:
-                        oz = hr.get("oz_swing_percent")
-                        st.metric(
-                            "Chase %", f"{float(oz):.1f}%" if pd.notna(oz) else "—",
-                            help="Out-of-zone swing rate (chase). Low = disciplined.",
+                        for h in team_roster_h
+                        if h.get("id") and h.get("name")
+                    }
+                    sorted_hids = sorted(
+                        hitter_label_map.keys(),
+                        key=lambda x: hitter_label_map[x],
+                    )
+                    sel_hid = st.selectbox(
+                        "Hitter",
+                        options=sorted_hids,
+                        format_func=lambda hid: hitter_label_map.get(hid, str(hid)),
+                        key="hitter_lookup_hid",
+                    )
+
+                    # Look up hitter row
+                    h_row = pd.DataFrame()
+                    if not hitter_stats.empty and sel_hid in hitter_stats["player_id"].values:
+                        h_row = hitter_stats[hitter_stats["player_id"] == sel_hid]
+
+                    if h_row.empty:
+                        st.warning(
+                            f"{hitter_label_map.get(sel_hid)} has no Statcast data this "
+                            "season. May be a recent call-up or sample too small."
                         )
+                    else:
+                        hr = h_row.iloc[0].to_dict()
+                        # Top row: core power stats
+                        c1, c2, c3, c4, c5 = st.columns(5)
+                        with c1:
+                            st.metric("PA", f"{int(hr.get('pa', 0))}"
+                                      if pd.notna(hr.get('pa')) else "—")
+                        with c2:
+                            st.metric("HR", f"{int(hr.get('home_run', 0))}"
+                                      if pd.notna(hr.get('home_run')) else "—")
+                        with c3:
+                            b = hr.get("barrel_batted_rate")
+                            st.metric("Barrel %", f"{float(b):.1f}%"
+                                      if pd.notna(b) else "—")
+                        with c4:
+                            iso_v = hr.get("iso")
+                            st.metric("ISO", f"{float(iso_v):.3f}"
+                                      if pd.notna(iso_v) else "—")
+                        with c5:
+                            xw = hr.get("xwoba")
+                            st.metric("xwOBA", f"{float(xw):.3f}"
+                                      if pd.notna(xw) else "—")
 
-                    # Recent form row
-                    c1, c2, c3, c4, c5 = st.columns(5)
-                    with c1:
-                        ri5 = hr.get("recent_iso_5")
-                        st.metric("ISO L5", f"{float(ri5):.3f}"
-                                  if pd.notna(ri5) else "—")
-                    with c2:
-                        ri10 = hr.get("recent_iso_10")
-                        st.metric("ISO L10", f"{float(ri10):.3f}"
-                                  if pd.notna(ri10) else "—")
-                    with c3:
-                        hr5 = hr.get("recent_hr_5")
-                        st.metric("HR L5", f"{int(hr5)}"
-                                  if pd.notna(hr5) else "—")
-                    with c4:
-                        hr10 = hr.get("hr_last_10")
-                        st.metric("HR L10", f"{int(hr10)}"
-                                  if pd.notna(hr10) else "—")
-                    with c5:
-                        gs = hr.get("games_since_hr")
-                        st.metric("Games no HR", f"{int(gs)}"
-                                  if pd.notna(gs) else "—")
-
-                    # Zone performance (if available)
-                    try:
-                        from data_fetcher import get_hitter_zone_performance
-                        h_zone = get_hitter_zone_performance(sel_hid)
-                        if h_zone:
-                            st.markdown("**Zone Performance** (Savant tier wOBA):")
-                            zc1, zc2, zc3, zc4 = st.columns(4)
-                            with zc1:
-                                hw = h_zone.get("hitter_heart_woba")
-                                st.metric(
-                                    "Heart wOBA",
-                                    f"{float(hw):.3f}" if pd.notna(hw) else "—",
-                                    help="wOBA on pitches in the heart of the plate. "
-                                         ">.400 = crushes heart pitches.",
-                                )
-                            with zc2:
-                                sw = h_zone.get("hitter_shadow_woba")
-                                st.metric(
-                                    "Shadow wOBA",
-                                    f"{float(sw):.3f}" if pd.notna(sw) else "—",
-                                )
-                            with zc3:
-                                cw = h_zone.get("hitter_chase_woba")
-                                st.metric(
-                                    "Chase wOBA",
-                                    f"{float(cw):.3f}" if pd.notna(cw) else "—",
-                                    help="wOBA on pitches in chase zone. "
-                                         "High here = makes pitchers pay for off-zone misses.",
-                                )
-                            with zc4:
-                                ww = h_zone.get("hitter_waste_woba")
-                                st.metric(
-                                    "Waste wOBA",
-                                    f"{float(ww):.3f}" if pd.notna(ww) else "—",
-                                )
-
-                            # Interpretation
-                            hw_val = h_zone.get("hitter_heart_woba")
-                            if pd.notna(hw_val):
-                                hwv = float(hw_val)
-                                if hwv >= 0.450:
-                                    st.caption(
-                                        "💣 **Crushes heart pitches** — exceptional vs zone-pounders. "
-                                        "Look for them facing aggressive strike-throwers."
-                                    )
-                                elif hwv >= 0.380:
-                                    st.caption(
-                                        "🎯 **Strong vs heart pitches** — above-average punisher of mistakes."
-                                    )
-                                elif hwv <= 0.280:
-                                    st.caption(
-                                        "🛡️ **Struggles in heart of plate** — surprising weakness. "
-                                        "Strike-throwers will dominate them."
-                                    )
-                        else:
-                            st.caption(
-                                "_Zone wOBA data unavailable for this hitter._"
+                        # Second row: contact + discipline
+                        c1, c2, c3, c4, c5 = st.columns(5)
+                        with c1:
+                            hh = hr.get("hard_hit_percent")
+                            st.metric("Hard Hit %", f"{float(hh):.1f}%"
+                                      if pd.notna(hh) else "—")
+                        with c2:
+                            ev = hr.get("launch_speed") or hr.get("avg_best_speed")
+                            st.metric("Avg EV", f"{float(ev):.1f}"
+                                      if pd.notna(ev) else "—")
+                        with c3:
+                            kp = hr.get("k_percent")
+                            st.metric("K %", f"{float(kp):.1f}%"
+                                      if pd.notna(kp) else "—")
+                        with c4:
+                            zs = hr.get("z_swing_percent")
+                            st.metric(
+                                "Z-Swing %", f"{float(zs):.1f}%" if pd.notna(zs) else "—",
+                                help="In-zone swing rate. High = aggressive, low = patient.",
                             )
-                    except Exception as _hze:
-                        st.caption(f"_Zone data fetch error: {type(_hze).__name__}_")
-    except Exception as _hl_err:
-        st.warning(f"Hitter lookup failed: {type(_hl_err).__name__}: {_hl_err}")
+                        with c5:
+                            oz = hr.get("oz_swing_percent")
+                            st.metric(
+                                "Chase %", f"{float(oz):.1f}%" if pd.notna(oz) else "—",
+                                help="Out-of-zone swing rate (chase). Low = disciplined.",
+                            )
+
+                        # Recent form row
+                        c1, c2, c3, c4, c5 = st.columns(5)
+                        with c1:
+                            ri5 = hr.get("recent_iso_5")
+                            st.metric("ISO L5", f"{float(ri5):.3f}"
+                                      if pd.notna(ri5) else "—")
+                        with c2:
+                            ri10 = hr.get("recent_iso_10")
+                            st.metric("ISO L10", f"{float(ri10):.3f}"
+                                      if pd.notna(ri10) else "—")
+                        with c3:
+                            hr5 = hr.get("recent_hr_5")
+                            st.metric("HR L5", f"{int(hr5)}"
+                                      if pd.notna(hr5) else "—")
+                        with c4:
+                            hr10 = hr.get("hr_last_10")
+                            st.metric("HR L10", f"{int(hr10)}"
+                                      if pd.notna(hr10) else "—")
+                        with c5:
+                            gs = hr.get("games_since_hr")
+                            st.metric("Games no HR", f"{int(gs)}"
+                                      if pd.notna(gs) else "—")
+
+                        # Zone performance (if available)
+                        try:
+                            from data_fetcher import get_hitter_zone_performance
+                            h_zone = get_hitter_zone_performance(sel_hid)
+                            if h_zone:
+                                st.markdown("**Zone Performance** (Savant tier wOBA):")
+                                zc1, zc2, zc3, zc4 = st.columns(4)
+                                with zc1:
+                                    hw = h_zone.get("hitter_heart_woba")
+                                    st.metric(
+                                        "Heart wOBA",
+                                        f"{float(hw):.3f}" if pd.notna(hw) else "—",
+                                        help="wOBA on pitches in the heart of the plate. "
+                                             ">.400 = crushes heart pitches.",
+                                    )
+                                with zc2:
+                                    sw = h_zone.get("hitter_shadow_woba")
+                                    st.metric(
+                                        "Shadow wOBA",
+                                        f"{float(sw):.3f}" if pd.notna(sw) else "—",
+                                    )
+                                with zc3:
+                                    cw = h_zone.get("hitter_chase_woba")
+                                    st.metric(
+                                        "Chase wOBA",
+                                        f"{float(cw):.3f}" if pd.notna(cw) else "—",
+                                        help="wOBA on pitches in chase zone. "
+                                             "High here = makes pitchers pay for off-zone misses.",
+                                    )
+                                with zc4:
+                                    ww = h_zone.get("hitter_waste_woba")
+                                    st.metric(
+                                        "Waste wOBA",
+                                        f"{float(ww):.3f}" if pd.notna(ww) else "—",
+                                    )
+
+                                # Interpretation
+                                hw_val = h_zone.get("hitter_heart_woba")
+                                if pd.notna(hw_val):
+                                    hwv = float(hw_val)
+                                    if hwv >= 0.450:
+                                        st.caption(
+                                            "💣 **Crushes heart pitches** — exceptional vs zone-pounders. "
+                                            "Look for them facing aggressive strike-throwers."
+                                        )
+                                    elif hwv >= 0.380:
+                                        st.caption(
+                                            "🎯 **Strong vs heart pitches** — above-average punisher of mistakes."
+                                        )
+                                    elif hwv <= 0.280:
+                                        st.caption(
+                                            "🛡️ **Struggles in heart of plate** — surprising weakness. "
+                                            "Strike-throwers will dominate them."
+                                        )
+                            else:
+                                st.caption(
+                                    "_Zone wOBA data unavailable for this hitter._"
+                                )
+                        except Exception as _hze:
+                            st.caption(f"_Zone data fetch error: {type(_hze).__name__}_")
+        except Exception as _hl_err:
+            st.warning(f"Hitter lookup failed: {type(_hl_err).__name__}: {_hl_err}")
 
 
-# v43.34 (UX): wrap game-by-game render in st.tabs() so users can jump
-# to any game with one click instead of scrolling through 15 games.
-# All compute happens earlier in game_context_map — this is pure layout.
+    # v43.34 (UX): wrap game-by-game render in st.tabs() so users can jump
+    # to any game with one click instead of scrolling through 15 games.
+    # All compute happens earlier in game_context_map — this is pure layout.
+_render_hitter_lookup()
 _valid_games = []
 for _, _g in slate.iterrows():
     _c = game_context_map.get(_g["gamePk"], {})
@@ -18925,43 +18931,40 @@ if _valid_games:
                 help="Render every game at once (slower).",
             )
         _selected_idx = _tab_labels.index(_selected_game_label) if _selected_game_label in _tab_labels else 0
-        # v45.42 (user ask): click a player → instant popup card, NO page
-        # reload. The selectbox lives inside the fragment (fragment-scoped
-        # rerun) and opens an st.dialog modal with the full deep-dive.
+        # v45.50: type-to-search player card. EMPTY by default (no stale
+        # placeholder text to delete), scoped to the selected game unless
+        # "Show all". Lives in the fragment so opening reruns only this
+        # section, never the whole page.
         try:
-            _qc_names = ["— pick a player —"]
-            if "player_name" in combined_all.columns:
-                _qc_pool = combined_all
-                if "is_bench" in _qc_pool.columns:
-                    _qc_pool = _qc_pool[~_qc_pool["is_bench"].fillna(False)]
-            # v45.49 (user ask): scope the dropdown to the SELECTED game's
-            # players (short list = easy typing). 'Show all' widens to slate.
-            try:
-                if not _show_all_games and _valid_games:
-                    _g_sel = _valid_games[_selected_idx][0]
-                    _teams = {str(_g_sel.get(_k, '')).upper() for _k in
-                              ('away_abbr', 'home_abbr', 'away_team_abbr',
-                               'home_team_abbr', 'away', 'home', 'away_team',
-                               'home_team') if _g_sel.get(_k)}
-                    if _teams and 'team' in _qc_pool.columns:
-                        _scoped = _qc_pool[_qc_pool['team'].astype(str)
-                                           .str.upper().isin(_teams)]
-                        if not _scoped.empty:
-                            _qc_pool = _scoped
-            except Exception:
-                pass
-                _qc_names += sorted(_qc_pool["player_name"].dropna().astype(str).unique())
+            _qc_pool = combined_all
+            if "is_bench" in _qc_pool.columns:
+                _qc_pool = _qc_pool[~_qc_pool["is_bench"].fillna(False)]
+            if not _show_all_games and _valid_games:
+                _g_sel = _valid_games[_selected_idx][0]
+                _teams = {str(_g_sel.get(_k, "")).upper() for _k in
+                          ("away_abbr", "home_abbr", "away_team_abbr",
+                           "home_team_abbr", "away", "home", "away_team",
+                           "home_team") if _g_sel.get(_k)}
+                if _teams and "team" in _qc_pool.columns:
+                    _scoped = _qc_pool[_qc_pool["team"].astype(str)
+                                       .str.upper().isin(_teams)]
+                    if not _scoped.empty:
+                        _qc_pool = _scoped
+            _qc_opts = (sorted(_qc_pool["player_name"].dropna().astype(str).unique())
+                        if "player_name" in _qc_pool.columns else [])
             _qc_pick = st.selectbox(
-                "🔬 Quick player card (popup — no reload):",
-                options=_qc_names, index=0, key="_quick_card_pick",
-                help="Opens a full stat card in a popup. To reopen the "
-                     "same player after closing, select '—' then the "
-                     "player again.",
+                "\U0001f52c Player card",
+                options=_qc_opts,
+                index=None,
+                placeholder="Type a player's name\u2026",
+                key="_quick_card_pick",
+                help="Instant popup stat card \u2014 no page reload. Scoped to "
+                     "the selected game; turn on 'Show all' to search the "
+                     "whole slate.",
             )
-            if _qc_pick == "— pick a player —":
+            if not _qc_pick:
                 st.session_state.pop("_qc_last_opened", None)
-            if (_qc_pick and _qc_pick != "— pick a player —"
-                    and st.session_state.get("_qc_last_opened") != _qc_pick):
+            elif st.session_state.get("_qc_last_opened") != _qc_pick:
                 st.session_state["_qc_last_opened"] = _qc_pick
                 _qc_rows = combined_all[
                     combined_all["player_name"].astype(str) == _qc_pick]
