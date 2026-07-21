@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.54-sample-confidence"
+APP_VERSION = "2026.06.10-v45.55-pbrl-format"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -7828,7 +7828,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.54 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.55 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -12540,6 +12540,8 @@ if combined_picks is not None and not combined_picks.empty:
                     "Brl%", format="%.1f%%",
                     help=COLUMN_HELP["barrel_pct"],
                 ),
+                "pulled_brl_pct": st.column_config.NumberColumn(
+                    "PBrl%", format="%.1f", width="small"),
                 "hr_form": st.column_config.NumberColumn(
                     "Form", format="%.0f",
                     help=COLUMN_HELP["hr_form"],
@@ -12976,6 +12978,8 @@ if combined_picks is not None and not combined_picks.empty:
                                 "Dinger", format="%.0f", width="small"),
                             "barrel_pct": st.column_config.NumberColumn(
                                 "Brl%", format="%.1f", width="small"),
+                                "pulled_brl_pct": st.column_config.NumberColumn(
+                                    "PBrl%", format="%.1f", width="small"),
                         },
                     )
             else:
@@ -13099,6 +13103,8 @@ if combined_picks is not None and not combined_picks.empty:
                                         "Pick", format="%.1f", width="small"),
                                     "barrel_pct": st.column_config.NumberColumn(
                                         "Brl%", format="%.1f", width="small"),
+                                        "pulled_brl_pct": st.column_config.NumberColumn(
+                                            "PBrl%", format="%.1f", width="small"),
                                     "avg_ev": st.column_config.NumberColumn(
                                         "EV", format="%.1f", width="small"),
                                 },
@@ -13297,6 +13303,8 @@ if combined_picks is not None and not combined_picks.empty:
                         "Brl%", format="%.1f%%",
                         help=COLUMN_HELP["barrel_pct"],
                     ),
+                    "pulled_brl_pct": st.column_config.NumberColumn(
+                        "PBrl%", format="%.1f", width="small"),
                     "hr_form": st.column_config.NumberColumn(
                         "Form", format="%.0f",
                         help=COLUMN_HELP["hr_form"],
@@ -13644,6 +13652,8 @@ if combined_picks is not None and not combined_picks.empty:
                             "Brl%", format="%.1f%%",
                             help=COLUMN_HELP["barrel_pct"],
                         ),
+                        "pulled_brl_pct": st.column_config.NumberColumn(
+                            "PBrl%", format="%.1f", width="small"),
                         "hr_profile_label": st.column_config.TextColumn("Profile", width="medium", help=COLUMN_HELP.get("hr_profile_label", "")),
                     },
                 )
@@ -14136,6 +14146,8 @@ if combined_picks is not None and not combined_picks.empty:
                                         "HR Game%", format="%.2f%%"),
                                     "barrel_pct": st.column_config.NumberColumn(
                                         "Brl%", format="%.1f%%"),
+                                        "pulled_brl_pct": st.column_config.NumberColumn(
+                                            "PBrl%", format="%.1f%%", width="small"),
                                     "iso": st.column_config.NumberColumn("ISO", format="%.3f", help=COLUMN_HELP.get("iso", "")),
                                     "env_boost": st.column_config.NumberColumn(
                                         "Env×", format="%.3f"),
