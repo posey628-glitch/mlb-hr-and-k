@@ -1,0 +1,19 @@
+# v45.53 (reviewer pro-tip): keep the image lean + secrets out.
+.env
+.env.*
+*.md
+.git/
+.gitignore
+.github/
+.vscode/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.DS_Store
+*.xlsx
+*.csv
+app_review*.py
+_edit_*.py
+DOCKEREOF
+echo "=== Dockerfile ==="; head -20 /mnt/user-data/outputs/Dockerfile | tail -8; echo "=== .dockerignore ==="; cat /mnt/user-data/outputs/.dockerignore | grep -v '^#' | head
