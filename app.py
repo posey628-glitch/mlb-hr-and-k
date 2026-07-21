@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.55-pbrl-format"
+APP_VERSION = "2026.06.10-v45.56-sample-visible"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -1560,15 +1560,17 @@ def _render_deep_dive_card(_dd):
                 _scfrac = float(_scfrac) if _scfrac is not None and not pd.isna(_scfrac) else None
             except (TypeError, ValueError):
                 _scfrac = None
-            if _scf and _scfrac is not None and _scfrac < 0.75:
+            if _scf:
                 _pa_v = _fnum(_dd.get("pa"))
                 _pa_txt = f" (~{_pa_v:.0f} PA this season)" if _pa_v is not None else ""
-                st.markdown(
-                    f"· **Sample**: {_scf} core stats present{_pa_txt} — "
-                    f"⚠️ limited sample; splits/discipline may not be "
-                    f"stabilized, so treat these numbers with caution.")
-            elif _scf:
-                st.markdown(f"· **Sample**: {_scf} core stats present")
+                if _scfrac is not None and _scfrac < 0.75:
+                    st.markdown(
+                        f"· **Sample**: {_scf} core stats present{_pa_txt} — "
+                        f"⚠️ limited sample; splits/discipline may not be "
+                        f"stabilized, so treat these numbers with caution.")
+                else:
+                    st.markdown(
+                        f"· **Sample**: {_scf} core stats present{_pa_txt} ✅")
             if _dc is not None and isinstance(_dc, str) and _dc.strip() and _dc != "nan":
                 st.markdown(f"· **Data**: {_dc}")
             else:
@@ -7828,7 +7830,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.55 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.56 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -18440,21 +18442,21 @@ def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
             "player_name", "lineup_pos", "bats",
             "hr_score_signal", "hr_score", "grade", "hr_game_pct",
             "dinger_score", "smash_spot", "streak_label",
-            "matchup_opp", "data_completeness",
+            "matchup_opp", "data_completeness", "sample_confidence",
         ],
         "⚡ Power": [
             "player_name", "grade", "hr_game_pct",
             "barrel_pct", "pulled_brl_pct", "iso", "avg_ev", "avg_hr_ev",
             "hard_hit", "blast_pct", "sweet_spot_pct", "pull_air_pct", "ctx_lift_pp", "fb_pct", "la", "xwoba", "xwobacon",
             "avg_hr_distance", "max_hit_speed", "power_score", "lift_score",
-            "smash_spot", "data_completeness",
+            "smash_spot", "data_completeness", "sample_confidence",
         ],
         "🎯 Matchup": [
             "player_name", "grade", "hr_game_pct", "hr_score",
             "matchup", "matchup_opp", "pitch_match_score", "pitch_hr_score",
             "best_pitch", "best_pitch_xwoba", "worst_pitch", "mini_arsenal",
             "arsenal_flag", "gb_flag", "day_night_flag", "split_confidence",
-            "smash_spot", "data_completeness",
+            "smash_spot", "data_completeness", "sample_confidence",
         ],
         "🔬 Researcher": [
             "player_name", "grade", "hr_game_pct",
@@ -18462,7 +18464,7 @@ def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
             "nuclear_label", "nuclear_met", "nuclear_grade",
             "near_hr_est", "avg_dist", "barrel_count", "hr_profile_label",
             "hit_alert", "hit_game_pct", "tb_grade", "expected_total_bases",
-            "sleeper_score", "data_completeness",
+            "sleeper_score", "data_completeness", "sample_confidence",
         ],
     }
     _view_mode = st.session_state.get("_table_view_mode", "📋 All columns")
