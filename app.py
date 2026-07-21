@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.53-fixups"
+APP_VERSION = "2026.06.10-v45.54-sample-confidence"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -664,6 +664,7 @@ for _flag in ("_matchup_trace_done",):
 # build_col_config_with_help is the live path for injecting hover help.)
 # ============================================================================
 COLUMN_HELP = {
+    "sample_confidence": "How many core stats have a real value for this hitter (N/M): barrel%, pull-brl%, EV, hard-hit%, ISO, xwOBA, xSLG, blast%, sweet-spot%, and both handedness-PA counts. A low N (common for bench / low-PA players) means several inputs are missing \u2014 the numbers shown may not be stabilized. High N = full, trustworthy sample.",
     "recommendation": "Plain-language verdict combining grade + environment + smash spot: \U0001f525 STRONG (A/A+ in good env), \u2705 BET (top grade + smash), \U0001f7e1 CONSIDER (B/B+), \u26a0\ufe0f PASS (C), \u2796 FADE (low). A creator shorthand for scanning the export \u2014 not a betting instruction.",
     "ctx_lift_pp": "Context lift (pp) \u2014 tonight's HR Game% minus this hitter's "
                    "own season-baseline per-game HR rate (HR/PA \u2192 ~4.1 PA game). "
@@ -1550,6 +1551,24 @@ def _render_deep_dive_card(_dd):
             if _stk and _stk not in ("·", "nan"):
                 st.markdown(f"· **Form**: {_stk}")
             _dc = _dd.get("data_completeness")
+            # v45.54: honest coverage context — a blank stat on a bench /
+            # low-PA hitter means "no stabilized sample yet," not a fetch
+            # failure. Say so, so a missing value reads as expected.
+            _scf = _dd.get("sample_confidence")
+            _scfrac = _dd.get("_sample_conf_frac")
+            try:
+                _scfrac = float(_scfrac) if _scfrac is not None and not pd.isna(_scfrac) else None
+            except (TypeError, ValueError):
+                _scfrac = None
+            if _scf and _scfrac is not None and _scfrac < 0.75:
+                _pa_v = _fnum(_dd.get("pa"))
+                _pa_txt = f" (~{_pa_v:.0f} PA this season)" if _pa_v is not None else ""
+                st.markdown(
+                    f"· **Sample**: {_scf} core stats present{_pa_txt} — "
+                    f"⚠️ limited sample; splits/discipline may not be "
+                    f"stabilized, so treat these numbers with caution.")
+            elif _scf:
+                st.markdown(f"· **Sample**: {_scf} core stats present")
             if _dc is not None and isinstance(_dc, str) and _dc.strip() and _dc != "nan":
                 st.markdown(f"· **Data**: {_dc}")
             else:
@@ -7809,7 +7828,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.53 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.54 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -14358,6 +14377,26 @@ if all_hitters:
     except Exception as _cle:
         log_swallowed_error("ctx_lift", _cle, surface=False)
 
+    # v45.54 (user ask): sample_confidence — how many of the core stats
+    # actually have a real value for this hitter, as "N/M". Makes a thin-
+    # data bench player VISIBLY thin at a glance so a low-sample number is
+    # never mistaken for a stable one. Pure count of present columns —
+    # touches no score, no weight, no ranking.
+    try:
+        _conf_cols = [c for c in ("barrel_pct", "pulled_brl_pct", "avg_ev",
+                                  "hard_hit", "iso", "xwoba", "xslg",
+                                  "blast_pct", "sweet_spot_pct",
+                                  "vs_lhp_pa", "vs_rhp_pa")
+                      if c in combined_all.columns]
+        if _conf_cols:
+            _present = combined_all[_conf_cols].notna().sum(axis=1)
+            _total = len(_conf_cols)
+            combined_all["sample_confidence"] = (
+                _present.astype(int).astype(str) + f"/{_total}")
+            combined_all["_sample_conf_frac"] = _present / float(_total)
+    except Exception as _sce:
+        log_swallowed_error("sample_confidence", _sce, surface=False)
+
     # v45.00: schema drift detection. If a required column is missing or present
     # only under a legacy alias (env_mult vs env_boost, barrel_allowed, etc.),
     # surface it as a diagnostic rather than letting the 'if col in columns'
@@ -18121,6 +18160,7 @@ def build_col_config():
         "avg_hr_ev":       st.column_config.NumberColumn("HR EV", format="%.1f", width="small", help="Average exit velocity (mph) on home runs specifically — how hard this hitter's HRs are struck. Feeds the Laser target alongside overall avg EV."),
         "power_composite": st.column_config.NumberColumn("💥+ Combo", format="%.0f", width="small", help="Composite of HR Score (55%) + Dinger Score (45%) — blends the full matchup-aware model with curated raw power. Highest when both systems agree a hitter is a strong HR play. Runs parallel to the shipped ranking."),
         "barrel_matchup_score": st.column_config.NumberColumn("🎯 Brl Match", format="%.0f", width="small", help="NEW (v44.34): leads with pulled-barrel% — the most RELIABLE HR predictor in our data (Section G reliability 2.69) — plus barrels/hard-hit/EV, then amplifies by tonight's pitcher HR-vulnerability (arsenal HR-tilt + barrels allowed). The thesis: the most reliable power signal aimed at the most vulnerable arm. Graded parallel to the others."),
+        "sample_confidence": st.column_config.TextColumn("Sample", width="small", help=COLUMN_HELP.get("sample_confidence", "")),
         "data_completeness": st.column_config.TextColumn("📊 Data", width="small", help="Data completeness for this hitter's core power inputs (barrel%, pull-barrel%, EV, hard-hit%, ISO) + the handedness split vs tonight's pitcher. ✅ full = all present. ⚠️ partial = some missing (score uses fallbacks). 🚨 thin = mostly missing — treat the rank with caution, it may be inflated/deflated by missing data."),
         "two_way_matchup_score": st.column_config.NumberColumn("⚖️ Two-Way", format="%.0f", width="small", help="NEW (v44.43): scores the matchup from BOTH sides + arsenal, handedness-aware. Three parts: the hitter's power (50%), how much THIS pitcher allows to hitters of that hand (30%: vs-hand HR/PA + SLG, plus barrel%/xwOBA/FB% allowed), and how the batter fares vs THIS pitcher's pitch mix (20%: pitch HR-tilt, arsenal match, best-pitch xwOBA). A masher facing a pitcher who suppresses that side AND has a tough arsenal gets marked down. Switch hitters resolve to their platoon-advantage side."),
         "xslg":            st.column_config.NumberColumn("xSLG", format="%.3f", width="small", help="Expected slugging from quality of contact (Statcast)."),
