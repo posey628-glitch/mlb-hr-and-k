@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.56-sample-visible"
+APP_VERSION = "2026.06.10-v45.57-card-nav-bench"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -7830,7 +7830,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.56 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.57 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -19068,14 +19068,44 @@ if _valid_games:
             )
             _sel_col, _view_col, _all_col = st.columns([3, 2, 1])
         with _sel_col:
-            _selected_game_label = st.selectbox(
-                f"🎮 Select game to view ({_n_games} game"
-                + ("s" if _n_games != 1 else "") + " on this slate):",
-                options=_tab_labels,
-                index=0,
-                key="_game_selector",
-                help="Renders one game at a time for speed. Pick another to switch.",
-            )
+            # v45.57: prev/next arrows + a refresh, so switching games never
+            # needs a full-page reload — and a stuck/idle fragment has an
+            # explicit "↻" escape hatch instead of forcing a browser reload.
+            _nav_prev, _nav_sel, _nav_next = st.columns([1, 6, 1])
+            _cur_i = st.session_state.get("_game_nav_idx", 0)
+            _cur_i = max(0, min(_cur_i, len(_tab_labels) - 1))
+            with _nav_prev:
+                st.markdown("<div style='height:1.9rem'></div>",
+                            unsafe_allow_html=True)
+                if st.button("◀", key="_game_prev", use_container_width=True,
+                             help="Previous game", disabled=_cur_i <= 0):
+                    st.session_state["_game_nav_idx"] = max(0, _cur_i - 1)
+                    st.session_state["_game_selector"] = _tab_labels[
+                        st.session_state["_game_nav_idx"]]
+            with _nav_next:
+                st.markdown("<div style='height:1.9rem'></div>",
+                            unsafe_allow_html=True)
+                if st.button("▶", key="_game_next", use_container_width=True,
+                             help="Next game",
+                             disabled=_cur_i >= len(_tab_labels) - 1):
+                    st.session_state["_game_nav_idx"] = min(
+                        len(_tab_labels) - 1, _cur_i + 1)
+                    st.session_state["_game_selector"] = _tab_labels[
+                        st.session_state["_game_nav_idx"]]
+            with _nav_sel:
+                _selected_game_label = st.selectbox(
+                    f"🎮 Select game ({_n_games} game"
+                    + ("s" if _n_games != 1 else "") + "):",
+                    options=_tab_labels,
+                    index=_cur_i,
+                    key="_game_selector",
+                    help="Pick a game, or use ◀ ▶. One game renders at a time "
+                         "for speed.",
+                )
+                # keep the nav index in sync with a manual dropdown pick
+                if _selected_game_label in _tab_labels:
+                    st.session_state["_game_nav_idx"] = _tab_labels.index(
+                        _selected_game_label)
         with _view_col:
             # v45.22 (review P8): table views — users scan a handful of columns,
             # not 60. Overview = the decision view; the others group the depth.
@@ -19095,13 +19125,20 @@ if _valid_games:
                 help="Render every game at once (slower).",
             )
         _selected_idx = _tab_labels.index(_selected_game_label) if _selected_game_label in _tab_labels else 0
-        # v45.50: type-to-search player card. EMPTY by default (no stale
-        # placeholder text to delete), scoped to the selected game unless
-        # "Show all". Lives in the fragment so opening reruns only this
-        # section, never the whole page.
+        # v45.57: player card — button-triggered (robust to fragment staleness
+        # that made the old "selection changed" guard stick until a hard reload),
+        # and an opt-in to include bench / probable-starter / late-swap candidates
+        # so you CAN look up a David Fry or a returning star before lineups post.
         try:
             _qc_pool = combined_all
-            if "is_bench" in _qc_pool.columns:
+            _inc_bench = st.checkbox(
+                "Include bench / probable / late-swap players",
+                value=False, key="_qc_include_bench",
+                help="Off = confirmed/projected starters in the selected game. "
+                     "On = also bench, probable starters, and IL returnees you "
+                     "want to scout before lineups post (e.g. a star just off the IL).",
+            )
+            if not _inc_bench and "is_bench" in _qc_pool.columns:
                 _qc_pool = _qc_pool[~_qc_pool["is_bench"].fillna(False)]
             if not _show_all_games and _valid_games:
                 _g_sel = _valid_games[_selected_idx][0]
@@ -19114,26 +19151,46 @@ if _valid_games:
                                        .str.upper().isin(_teams)]
                     if not _scoped.empty:
                         _qc_pool = _scoped
-            _qc_opts = (sorted(_qc_pool["player_name"].dropna().astype(str).unique())
-                        if "player_name" in _qc_pool.columns else [])
-            _qc_pick = st.selectbox(
-                "\U0001f52c Player card",
-                options=_qc_opts,
-                index=None,
-                placeholder="Type a player's name\u2026",
-                key="_quick_card_pick",
-                help="Instant popup stat card \u2014 no page reload. Scoped to "
-                     "the selected game; turn on 'Show all' to search the "
-                     "whole slate.",
-            )
-            if not _qc_pick:
-                st.session_state.pop("_qc_last_opened", None)
-            elif st.session_state.get("_qc_last_opened") != _qc_pick:
-                st.session_state["_qc_last_opened"] = _qc_pick
+            # Label bench players in the dropdown so a returnee/probable is obvious.
+            _name_col = "player_name"
+            if _name_col in _qc_pool.columns:
+                def _qc_label(_r):
+                    _nm = str(_r.get("player_name") or "")
+                    if _inc_bench and bool(_r.get("is_bench", False)):
+                        return f"{_nm}  \u2014 bench/probable"
+                    return _nm
+                _qc_pool = _qc_pool.copy()
+                _qc_pool["_qc_label"] = _qc_pool.apply(_qc_label, axis=1)
+                _qc_opts = sorted(_qc_pool["_qc_label"].dropna().astype(str).unique())
+            else:
+                _qc_opts = []
+            _cc1, _cc2 = st.columns([4, 1])
+            with _cc1:
+                _qc_pick = st.selectbox(
+                    "\U0001f52c Player card",
+                    options=_qc_opts,
+                    index=None,
+                    placeholder="Type a player's name\u2026",
+                    key="_quick_card_pick",
+                    help="Pick a name, then press Show. Includes bench/probable "
+                         "players when the box above is checked.",
+                )
+            with _cc2:
+                st.markdown("<div style='height: 1.9rem'></div>",
+                            unsafe_allow_html=True)
+                _qc_go = st.button("Show \U0001f50d", key="_qc_show_btn",
+                                   use_container_width=True,
+                                   help="Open this player's card.")
+            # Button press is an explicit event — fires even after the page has
+            # sat idle (the old auto-on-change guard could get stuck stale).
+            if _qc_go and _qc_pick:
+                _pick_name = _qc_pick.split("  \u2014 ")[0]
                 _qc_rows = combined_all[
-                    combined_all["player_name"].astype(str) == _qc_pick]
+                    combined_all["player_name"].astype(str) == _pick_name]
                 if not _qc_rows.empty:
                     _quick_card_dialog(_qc_rows.iloc[0])
+                else:
+                    st.caption("Couldn't find that player on tonight's slate.")
         except Exception as _qce:
             log_swallowed_error("quick_card", _qce, surface=False)
 
