@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.51-sweep"
+APP_VERSION = "2026.06.10-v45.53-fixups"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -664,6 +664,7 @@ for _flag in ("_matchup_trace_done",):
 # build_col_config_with_help is the live path for injecting hover help.)
 # ============================================================================
 COLUMN_HELP = {
+    "recommendation": "Plain-language verdict combining grade + environment + smash spot: \U0001f525 STRONG (A/A+ in good env), \u2705 BET (top grade + smash), \U0001f7e1 CONSIDER (B/B+), \u26a0\ufe0f PASS (C), \u2796 FADE (low). A creator shorthand for scanning the export \u2014 not a betting instruction.",
     "ctx_lift_pp": "Context lift (pp) \u2014 tonight's HR Game% minus this hitter's "
                    "own season-baseline per-game HR rate (HR/PA \u2192 ~4.1 PA game). "
                    "Positive = tonight's matchup/park/weather setup makes him "
@@ -7808,7 +7809,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.51 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.53 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -13019,6 +13020,7 @@ if combined_picks is not None and not combined_picks.empty:
                             "env_boost": st.column_config.NumberColumn("Env×", format="%.2f", width="small",
                                                                        help=COLUMN_HELP.get("env_boost")),
                             "barrel_pct": st.column_config.NumberColumn("Brl%", format="%.1f%%", help=COLUMN_HELP.get("barrel_pct", "")),
+                            "pulled_brl_pct": st.column_config.NumberColumn("PBrl%", format="%.1f%%", help=COLUMN_HELP.get("pulled_brl_pct", "")),
                         },
                     )
                 else:
@@ -13169,6 +13171,7 @@ if combined_picks is not None and not combined_picks.empty:
                             "hr_game_pct": st.column_config.NumberColumn("HR%", format="%.1f%%", help=COLUMN_HELP.get("hr_game_pct", "")),
                             "pick_score": st.column_config.NumberColumn("Pick", format="%.1f", width="small", help=COLUMN_HELP.get("pick_score", "")),
                             "barrel_pct": st.column_config.NumberColumn("Brl%", format="%.1f%%", help=COLUMN_HELP.get("barrel_pct", "")),
+                            "pulled_brl_pct": st.column_config.NumberColumn("PBrl%", format="%.1f%%", help=COLUMN_HELP.get("pulled_brl_pct", "")),
                             "env_boost": st.column_config.NumberColumn("Env×", format="%.2f", width="small",
                                                                        help=COLUMN_HELP.get("env_boost")),
                         },
@@ -14410,12 +14413,17 @@ if all_hitters:
                 _range_msgs.append(f"hr_game_pct out of [0,100] on {_bad} row(s)")
         if "env_boost" in combined_all.columns:
             _eb = pd.to_numeric(combined_all["env_boost"], errors="coerce")
-            _lo, _hi = CTX_MULT_CAP[0] - 0.02, CTX_MULT_CAP[1] + 0.02
+            # v45.53: env_boost is weather.hr_multiplier's OUTPUT, clamped to
+            # [0.55, 1.45] (Coors + wind-out legitimately reaches ~1.45).
+            # CTX_MULT_CAP [0.65,1.35] is a different quantity (the internal
+            # context cap in props.hr_prob_per_pa) — checking env_boost against
+            # it flagged valid extreme-day values as "broken." Use the true
+            # clamp; only outside THAT is a real anomaly.
+            _lo, _hi = 0.55 - 0.02, 1.45 + 0.02
             _bad = int(((_eb < _lo) | (_eb > _hi)).sum())
             if _bad:
                 _range_msgs.append(
-                    f"env_boost outside caps [{CTX_MULT_CAP[0]},{CTX_MULT_CAP[1]}] "
-                    f"on {_bad} row(s)")
+                    f"env_boost outside clamp [0.55,1.45] on {_bad} row(s)")
         if _range_msgs:
             stash_diagnostic(
                 "pipeline_health",
@@ -15300,6 +15308,7 @@ if all_hitters:
                         "player_name": _player_col("Player"),
                         "pa": st.column_config.NumberColumn("PA", format="%d", help=COLUMN_HELP.get("pa", "")),
                         "barrel_pct": st.column_config.NumberColumn("Brl%", format="%.1f", help=COLUMN_HELP.get("barrel_pct", "")),
+                        "pulled_brl_pct": st.column_config.NumberColumn("PBrl%", format="%.1f", help=COLUMN_HELP.get("pulled_brl_pct", "")),
                         "hard_hit": st.column_config.NumberColumn("HH%", format="%.1f", help=COLUMN_HELP.get("hard_hit", "")),
                         "iso": st.column_config.NumberColumn("ISO", format="%.3f", help=COLUMN_HELP.get("iso", "")),
                         "avg_ev": st.column_config.NumberColumn("EV", format="%.1f", help=COLUMN_HELP.get("avg_ev", "")),
@@ -15427,6 +15436,7 @@ if all_hitters:
                         "lift_score": st.column_config.NumberColumn("Lift", format="%.1f", help=COLUMN_HELP.get("lift_score", "")),
                         "matchup_opp": st.column_config.NumberColumn("Opp", format="%.1f", help=COLUMN_HELP.get("matchup_opp", "")),
                         "barrel_pct": st.column_config.NumberColumn("Brl%", format="%.1f", help=COLUMN_HELP.get("barrel_pct", "")),
+                        "pulled_brl_pct": st.column_config.NumberColumn("PBrl%", format="%.1f", help=COLUMN_HELP.get("pulled_brl_pct", "")),
                         "iso": st.column_config.NumberColumn("ISO", format="%.3f", help=COLUMN_HELP.get("iso", "")),
                         "hard_hit": st.column_config.NumberColumn("HH%", format="%.1f", help=COLUMN_HELP.get("hard_hit", "")),
                         "hr_form": st.column_config.NumberColumn("Form", format="%.0f", help=COLUMN_HELP.get("hr_form", "")),
@@ -15844,11 +15854,100 @@ if all_hitters:
                     except Exception:
                         return df
 
+                # ==== v45.52 (creator tool, reviewer docs 15/17): 3-tier
+                # hitter sheets so the 260-col dump is not the ONLY view.
+                # Quick = daily checklist, Core = deep-dive, Full = raw.
+                # Touches export only — zero scoring / pattern impact.
+                _QUICK_COLS = ["player_name", "team", "game", "opp_pitcher",
+                               "grade", "hr_game_pct", "hr_score", "pick_score",
+                               "smash_spot", "env_boost", "recommendation"]
+                _CORE_EXTRA = ["dinger_score", "power_score", "matchup_opp",
+                               "barrel_pct", "pulled_brl_pct", "hard_hit",
+                               "avg_ev", "iso", "xwoba", "xslg", "blast_pct",
+                               "sweet_spot_pct", "pull_air_pct", "ctx_lift_pp",
+                               "pitch_match_score", "hr_pa_pct", "hit_game_pct",
+                               "tb_pa", "k_percent", "bb_percent",
+                               "sleeper_score", "convergence_count",
+                               "lineup_pos", "bats", "opp_p_throws"]
+                def _recommendation(_r):
+                    """Plain-language verdict from grade + env + smash.
+                    A creator shorthand, not a betting instruction."""
+                    try:
+                        _g = str(_r.get("grade", "") or "")
+                        _e = _r.get("env_boost")
+                        _e = float(_e) if _e is not None and not pd.isna(_e) else 1.0
+                        _sm = str(_r.get("smash_spot", "") or "")
+                        _has_smash = _sm not in ("", "—", "nan")
+                        if _g in ("A+", "A") and _e >= 1.05:
+                            return "\U0001f525 STRONG"
+                        if _g in ("A+", "A", "B+") and _has_smash:
+                            return "\u2705 BET"
+                        if _g in ("A+", "A", "B+", "B"):
+                            return "\U0001f7e1 CONSIDER"
+                        if _g in ("C+", "C"):
+                            return "\u26a0\ufe0f PASS"
+                        return "\u2796 FADE"
+                    except Exception:
+                        return ""
+                _tier_src = None
+                if _export_all is not None and not _export_all.empty:
+                    _tier_src = _export_all.copy()
+                    try:
+                        _tier_src["recommendation"] = _tier_src.apply(
+                            _recommendation, axis=1)
+                    except Exception:
+                        _tier_src["recommendation"] = ""
+                    # Rank the tiers by pick_score (fallback hr_score) so the
+                    # Quick sheet reads top-down like the site.
+                    for _sc in ("pick_score", "hr_score", "hr_game_pct"):
+                        if _sc in _tier_src.columns:
+                            _tier_src = _tier_src.sort_values(
+                                _sc, ascending=False, na_position="last")
+                            break
                 with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
                     sheets_written = 0
                     if _export_all is not None and not _export_all.empty:
                         _export_all.to_excel(writer, sheet_name="Hitters", index=False)
                         sheets_written += 1
+                    # v45.52: tiered hitter views (Quick / Core) + the full
+                    # dump stays as "Hitters". Only columns that exist are
+                    # written, in the intended order.
+                    if _tier_src is not None and not _tier_src.empty:
+                        try:
+                            _qc = [c for c in _QUICK_COLS if c in _tier_src.columns]
+                            if _qc:
+                                _tier_src[_qc].to_excel(
+                                    writer, sheet_name="Quick Picks", index=False)
+                            _cc = [c for c in (_QUICK_COLS + _CORE_EXTRA)
+                                   if c in _tier_src.columns]
+                            if _cc:
+                                _tier_src[_cc].to_excel(
+                                    writer, sheet_name="Core Analysis", index=False)
+                        except Exception:
+                            pass
+                    # Slate summary — the context the UI shows but the export
+                    # never did (reviewer doc 15).
+                    try:
+                        _ss = []
+                        if _tier_src is not None and not _tier_src.empty:
+                            _ss.append(("Hitters in slate", len(_tier_src)))
+                            if "game" in _tier_src.columns:
+                                _ss.append(("Games", int(
+                                    _tier_src["game"].nunique())))
+                            if "smash_spot" in _tier_src.columns:
+                                _ss.append(("Smash spots", int(
+                                    (~_tier_src["smash_spot"].astype(str)
+                                     .isin(["", "—", "nan"])).sum())))
+                            for _g_lbl in ("A+", "A", "B+"):
+                                if "grade" in _tier_src.columns:
+                                    _ss.append((f"Grade {_g_lbl}", int(
+                                        (_tier_src["grade"] == _g_lbl).sum())))
+                        _ss.append(("Slate date", str(selected_date)))
+                        if _ss:
+                            pd.DataFrame(_ss, columns=["Metric", "Value"]).to_excel(
+                                writer, sheet_name="Slate Summary", index=False)
+                    except Exception:
+                        pass
                     if p_slate is not None and not p_slate.empty:
                         p_slate.to_excel(writer, sheet_name="Pitchers", index=False)
                         sheets_written += 1
@@ -15981,6 +16080,7 @@ if all_hitters:
                     #     horizontal scrolling never loses who the row is.
                     try:
                         _desired = [
+                            "Slate Summary", "Quick Picks", "Core Analysis",
                             "Top 10 Picks", "Honorable Mentions", "Smash Spots",
                             "Top 20 HR", "Top 20 Power", "Top 20 Sleepers",
                             "Best Matchups", "Green Hitters", "Green Pitchers",
@@ -16099,6 +16199,7 @@ if all_hitters:
                                  "form, park, weather, and pitcher.",
                         ),
                         "barrel_pct": st.column_config.NumberColumn("Brl%", format="%.1f%%", help=COLUMN_HELP.get("barrel_pct", "")),
+                        "pulled_brl_pct": st.column_config.NumberColumn("PBrl%", format="%.1f%%", help=COLUMN_HELP.get("pulled_brl_pct", "")),
                         "avg_ev": st.column_config.NumberColumn("EV", format="%.1f", help=COLUMN_HELP.get("avg_ev", "")),
                     },
                 )
@@ -16185,6 +16286,7 @@ if all_hitters:
                         ),
                         "hr_game_pct": st.column_config.NumberColumn("HR%", format="%.1f%%", help=COLUMN_HELP.get("hr_game_pct", "")),
                         "barrel_pct": st.column_config.NumberColumn("Brl%", format="%.1f%%", help=COLUMN_HELP.get("barrel_pct", "")),
+                        "pulled_brl_pct": st.column_config.NumberColumn("PBrl%", format="%.1f%%", help=COLUMN_HELP.get("pulled_brl_pct", "")),
                     },
                 )
             else:
@@ -16220,6 +16322,7 @@ if all_hitters:
                     "hr_game_pct": st.column_config.NumberColumn("HR%", format="%.1f%%", help=COLUMN_HELP.get("hr_game_pct", "")),
                     "smash_spot": st.column_config.TextColumn("Smash", width="small", help=COLUMN_HELP.get("smash_spot", "")),
                     "barrel_pct": st.column_config.NumberColumn("Brl%", format="%.1f%%", help=COLUMN_HELP.get("barrel_pct", "")),
+                    "pulled_brl_pct": st.column_config.NumberColumn("PBrl%", format="%.1f%%", help=COLUMN_HELP.get("pulled_brl_pct", "")),
                     "iso": st.column_config.NumberColumn("ISO", format="%.3f", help=COLUMN_HELP.get("iso", "")),
                     "env_boost": st.column_config.NumberColumn("Env×", format="%.2f", help=COLUMN_HELP.get("env_boost", "")),
                 },
@@ -16303,6 +16406,7 @@ if all_hitters:
                         help="Park × weather × wind multiplier.",
                     ),
                     "barrel_pct": st.column_config.NumberColumn("H Brl%", format="%.1f%%", help=COLUMN_HELP.get("barrel_pct", "")),
+                    "pulled_brl_pct": st.column_config.NumberColumn("PBrl%", format="%.1f%%", help=COLUMN_HELP.get("pulled_brl_pct", "")),
                 },
             )
 
@@ -16420,6 +16524,7 @@ if all_hitters:
                         "L15 HR", format="%d", width="small",
                         help="HRs in last 15 games. 0 = cold streak."),
                     "barrel_pct": st.column_config.NumberColumn("Brl%", format="%.1f%%", help=COLUMN_HELP.get("barrel_pct", "")),
+                    "pulled_brl_pct": st.column_config.NumberColumn("PBrl%", format="%.1f%%", help=COLUMN_HELP.get("pulled_brl_pct", "")),
                     "hard_hit": st.column_config.NumberColumn("HH%", format="%.1f%%", help=COLUMN_HELP.get("hard_hit", "")),
                     "xwoba": st.column_config.NumberColumn("xwOBA", format="%.3f", help=COLUMN_HELP.get("xwoba", "")),
                     "xslg": st.column_config.NumberColumn("xSLG", format="%.3f", help=COLUMN_HELP.get("xslg", "")),
@@ -16502,6 +16607,7 @@ if all_hitters:
                 "hr_game_pct": st.column_config.NumberColumn("HR%", format="%.1f%%", help=COLUMN_HELP.get("hr_game_pct", "")),
                 "grade": st.column_config.TextColumn("Grd", width="small", help=COLUMN_HELP.get("grade", "")),
                 "barrel_pct": st.column_config.NumberColumn("Brl%", format="%.1f%%", help=COLUMN_HELP.get("barrel_pct", "")),
+                "pulled_brl_pct": st.column_config.NumberColumn("PBrl%", format="%.1f%%", help=COLUMN_HELP.get("pulled_brl_pct", "")),
                 "env_boost": st.column_config.NumberColumn("Env×", format="%.2f", help=COLUMN_HELP.get("env_boost", "")),
                 "matchup_opp": st.column_config.NumberColumn("Opp", format="%.1f", help=COLUMN_HELP.get("matchup_opp", "")),
             },
@@ -17884,6 +17990,7 @@ def build_col_config():
         ),
         "pa": st.column_config.NumberColumn("PA", format="%d", help=COLUMN_HELP.get("pa", "")),
         "barrel_pct": st.column_config.NumberColumn("Brl%", format="%.1f%%", help=COLUMN_HELP.get("barrel_pct", "")),
+        "pulled_brl_pct": st.column_config.NumberColumn("PBrl%", format="%.1f%%", help=COLUMN_HELP.get("pulled_brl_pct", "")),
         "iso": st.column_config.NumberColumn("ISO", format="%.3f", help=COLUMN_HELP.get("iso", "")),
         "xwoba": st.column_config.NumberColumn("xwOBA", format="%.3f", help=COLUMN_HELP.get("xwoba", "")),
         "xwobacon": st.column_config.NumberColumn("xwOBAcon", format="%.3f", help=COLUMN_HELP.get("xwobacon", "")),
@@ -19676,6 +19783,7 @@ if _valid_games:
                             column_config={
                                 "player_name": _player_col("Hitter"),
                                 "barrel_pct": st.column_config.NumberColumn("Brl%", format="%.1f%%", help=COLUMN_HELP.get("barrel_pct", "")),
+                                "pulled_brl_pct": st.column_config.NumberColumn("PBrl%", format="%.1f%%", help=COLUMN_HELP.get("pulled_brl_pct", "")),
                                 "iso": st.column_config.NumberColumn("ISO", format="%.3f", help=COLUMN_HELP.get("iso", "")),
                                 "xwoba": st.column_config.NumberColumn("xwOBA", format="%.3f", help=COLUMN_HELP.get("xwoba", "")),
                             },
@@ -19711,6 +19819,7 @@ if _valid_games:
                             column_config={
                                 "player_name": _player_col("Hitter"),
                                 "barrel_pct": st.column_config.NumberColumn("Brl%", format="%.1f%%", help=COLUMN_HELP.get("barrel_pct", "")),
+                                "pulled_brl_pct": st.column_config.NumberColumn("PBrl%", format="%.1f%%", help=COLUMN_HELP.get("pulled_brl_pct", "")),
                                 "iso": st.column_config.NumberColumn("ISO", format="%.3f", help=COLUMN_HELP.get("iso", "")),
                                 "xwoba": st.column_config.NumberColumn("xwOBA", format="%.3f", help=COLUMN_HELP.get("xwoba", "")),
                             },
