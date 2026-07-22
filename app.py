@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.58-power-side"
+APP_VERSION = "2026.06.10-v45.59-bench-toggle-fix"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -7884,7 +7884,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.58 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.59 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -19218,6 +19218,13 @@ if _valid_games:
                 _qc_opts = sorted(_qc_pool["_qc_label"].dropna().astype(str).unique())
             else:
                 _qc_opts = []
+            # v45.59: how many players the current toggle exposes — gives the
+            # checkbox visible feedback and confirms bench players appeared.
+            _n_bench_here = int(_qc_pool.get("is_bench", pd.Series(dtype=bool))
+                                .fillna(False).astype(bool).sum()) if not _qc_pool.empty else 0
+            if _inc_bench:
+                st.caption(f"Showing {len(_qc_opts)} players "
+                           f"({_n_bench_here} bench/probable included).")
             _cc1, _cc2 = st.columns([4, 1])
             with _cc1:
                 _qc_pick = st.selectbox(
@@ -19225,7 +19232,11 @@ if _valid_games:
                     options=_qc_opts,
                     index=None,
                     placeholder="Type a player's name\u2026",
-                    key="_quick_card_pick",
+                    # v45.59: key varies with the bench toggle so Streamlit
+                    # REBUILDS the option list when you check the box (a fixed
+                    # key cached the old starters-only list — the toggle looked
+                    # like it did nothing).
+                    key=f"_quick_card_pick_{'all' if _inc_bench else 'starters'}",
                     help="Pick a name, then press Show. Includes bench/probable "
                          "players when the box above is checked.",
                 )
