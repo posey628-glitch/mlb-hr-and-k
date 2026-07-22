@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.59-bench-toggle-fix"
+APP_VERSION = "2026.06.10-v45.60-game-switch-fix"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -7884,7 +7884,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.59 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.60 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -19128,38 +19128,61 @@ if _valid_games:
             _nav_prev, _nav_sel, _nav_next = st.columns([1, 6, 1])
             _cur_i = st.session_state.get("_game_nav_idx", 0)
             _cur_i = max(0, min(_cur_i, len(_tab_labels) - 1))
+
+            def _switch_game(_new_i):
+                # v45.60: write the new index AND force an app-scoped rerun.
+                # A plain fragment rerun can get stuck after the page has sat
+                # idle; st.rerun(scope="app") breaks out of the stale fragment
+                # and re-renders reliably. Falls back to a plain rerun on
+                # older Streamlit.
+                st.session_state["_game_nav_idx"] = max(
+                    0, min(_new_i, len(_tab_labels) - 1))
+                st.session_state["_game_selector"] = _tab_labels[
+                    st.session_state["_game_nav_idx"]]
+                try:
+                    st.rerun(scope="app")
+                except TypeError:
+                    st.rerun()
+                except Exception:
+                    pass
+
             with _nav_prev:
                 st.markdown("<div style='height:1.9rem'></div>",
                             unsafe_allow_html=True)
                 if st.button("◀", key="_game_prev", use_container_width=True,
                              help="Previous game", disabled=_cur_i <= 0):
-                    st.session_state["_game_nav_idx"] = max(0, _cur_i - 1)
-                    st.session_state["_game_selector"] = _tab_labels[
-                        st.session_state["_game_nav_idx"]]
+                    _switch_game(_cur_i - 1)
             with _nav_next:
                 st.markdown("<div style='height:1.9rem'></div>",
                             unsafe_allow_html=True)
                 if st.button("▶", key="_game_next", use_container_width=True,
                              help="Next game",
                              disabled=_cur_i >= len(_tab_labels) - 1):
-                    st.session_state["_game_nav_idx"] = min(
-                        len(_tab_labels) - 1, _cur_i + 1)
-                    st.session_state["_game_selector"] = _tab_labels[
-                        st.session_state["_game_nav_idx"]]
+                    _switch_game(_cur_i + 1)
             with _nav_sel:
+                # The selectbox is driven purely by its session key — no index=
+                # arg (which fought the key and could pin the old value after
+                # an idle stall). Its on_change forces the same app rerun.
+                if "_game_selector" not in st.session_state:
+                    st.session_state["_game_selector"] = _tab_labels[_cur_i]
+                elif st.session_state["_game_selector"] not in _tab_labels:
+                    st.session_state["_game_selector"] = _tab_labels[_cur_i]
+
+                def _on_game_pick():
+                    _lbl = st.session_state.get("_game_selector")
+                    if _lbl in _tab_labels:
+                        st.session_state["_game_nav_idx"] = _tab_labels.index(_lbl)
+
                 _selected_game_label = st.selectbox(
                     f"🎮 Select game ({_n_games} game"
                     + ("s" if _n_games != 1 else "") + "):",
                     options=_tab_labels,
-                    index=_cur_i,
                     key="_game_selector",
+                    on_change=_on_game_pick,
                     help="Pick a game, or use ◀ ▶. One game renders at a time "
-                         "for speed.",
+                         "for speed. If a pick ever seems stuck, the arrows "
+                         "force a refresh.",
                 )
-                # keep the nav index in sync with a manual dropdown pick
-                if _selected_game_label in _tab_labels:
-                    st.session_state["_game_nav_idx"] = _tab_labels.index(
-                        _selected_game_label)
         with _view_col:
             # v45.22 (review P8): table views — users scan a handful of columns,
             # not 60. Overview = the decision view; the others group the depth.
