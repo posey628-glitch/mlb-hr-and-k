@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.57-card-nav-bench"
+APP_VERSION = "2026.06.10-v45.58-power-side"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -1605,6 +1605,60 @@ def _render_deep_dive_card(_dd):
             )
             if _any_split:
                 st.markdown("**⚔️ Splits — vs LHP / vs RHP**")
+                # v45.58 (user ask): POWER-SIDE VERDICT — answer the actual
+                # question ("which hand does he do more damage against?")
+                # before showing the table. Uses the real power stats
+                # (ISO, barrel%, pulled-brl%) blended, sample-gated, and for
+                # switch hitters framed as which batter's box.
+                try:
+                    _bats_v = str(_dd.get("bats") or "").upper()[:1]
+                    _pow_cols = [("iso", 1.0), ("barrel_pct", 1.0),
+                                 ("pulled_brl_pct", 1.0)]
+                    def _pow_index(side):
+                        # normalize each power stat to its own L/R pair so the
+                        # blend isn't dominated by whichever has bigger units.
+                        vals = []
+                        for _c, _w in _pow_cols:
+                            _l = _sv(f"vs_lhp_{_c}")
+                            _r = _sv(f"vs_rhp_{_c}")
+                            _this = _l if side == "L" else _r
+                            if _this is None or _l is None or _r is None:
+                                continue
+                            _mx = max(_l, _r)
+                            if _mx and _mx > 0:
+                                vals.append((_this / _mx) * _w)
+                        return sum(vals) / len(vals) if vals else None
+                    _lpa2 = _sv("vs_lhp_pa") or 0
+                    _rpa2 = _sv("vs_rhp_pa") or 0
+                    _pl, _pr = _pow_index("L"), _pow_index("R")
+                    _liso, _riso = _sv("vs_lhp_iso"), _sv("vs_rhp_iso")
+                    if (_pl is not None and _pr is not None
+                            and _lpa2 >= 30 and _rpa2 >= 30):
+                        _gap = abs(_pl - _pr)
+                        if _gap < 0.06:
+                            _verdict = ("hits for **similar power vs both "
+                                        "hands** — no strong platoon split")
+                        else:
+                            _better = "LHP" if _pl > _pr else "RHP"
+                            _iso_txt = ""
+                            if _liso is not None and _riso is not None:
+                                _hi = _liso if _better == "LHP" else _riso
+                                _lo = _riso if _better == "LHP" else _liso
+                                _iso_txt = f" (ISO {_hi:.3f} vs {_lo:.3f})"
+                            if _bats_v == "S":
+                                # switch: more power vs LHP = bats RIGHT; vs RHP = bats LEFT
+                                _box = "right-handed box" if _better == "LHP" else "left-handed box"
+                                _verdict = (f"switch hitter — **more power from the "
+                                            f"{_box}** (vs {_better}){_iso_txt}")
+                            else:
+                                _verdict = (f"**more power vs {_better}**"
+                                            f"{_iso_txt}")
+                        st.markdown(f"💥 Power side: {_verdict}")
+                    elif _lpa2 < 30 or _rpa2 < 30:
+                        st.caption("💥 Power side: not enough PA on one side "
+                                   "to call a power split yet.")
+                except Exception as _pse:
+                    log_swallowed_error("power_side_verdict", _pse, surface=False)
                 _tbl_rows = []
                 for _lab, _c, _fmt, _suf in _split_rows:
                     _lv, _rv = _sv(f"vs_lhp_{_c}"), _sv(f"vs_rhp_{_c}")
@@ -7830,7 +7884,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.57 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.58 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
