@@ -1068,6 +1068,11 @@ HR_CANDIDATE_FEATURES = [
     "avg_dist",
     "near_hr_est",
     "bvp_adjust",
+    # v45.74 (NFL lesson): raw counterparts of processed features, so the
+    # loop can answer "is our transformation helping?" empirically.
+    #   hr_score_raw = pre-slate-rescale composite (vs hr_score)
+    #   recent_hr    = plain 15-day HR count (vs recent_hr_weighted_rate)
+    "hr_score_raw",
 ]
 
 # v45.33 STRUCTURAL FIX: the snapshot-merge projection whitelist is now
@@ -1104,6 +1109,7 @@ def _snapshot_merge_cols():
 # (the 9/10-overlap symptom), and the public card shows the model citing
 # itself as evidence.
 MODEL_OUTPUT_FEATURES = {
+    "hr_score_raw",  # v45.74: pre-rescale composite — tracked, never a predictor
     "hit_pa_pct",  # v45.70: prop output, never a predictor
     "ctx_lift_pp",  # v45.49: derived from hr_game_pct — tracked, never a predictor
     "hr_score", "hr_game_pct", "hr_pa_pct", "adaptive_score",
