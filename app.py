@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.62-mypicks-baretweet"
+APP_VERSION = "2026.06.10-v45.63-ctxlift-visible"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -7884,7 +7884,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.62 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.63 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -9505,6 +9505,26 @@ for _, game in slate.iterrows():
 
         matchup_df["hr_pa_pct"] = hr_pa
         matchup_df["hr_game_pct"] = hr_game
+        # v45.63 (user: "never seen this column"): compute CONTEXT LIFT here,
+        # at the per-game level, not just on combined_all. The game-browser
+        # tables render these per-game frames — a column that only existed on
+        # combined_all was silently filtered out of every one of them.
+        # ctx_lift = tonight's context-loaded HR Game% minus this hitter's own
+        # season baseline (HR/PA expressed as a neutral ~4.1-PA game rate).
+        try:
+            if "home_run" in matchup_df.columns and "pa" in matchup_df.columns:
+                _cl_hr = pd.to_numeric(matchup_df["home_run"], errors="coerce")
+                _cl_pa = pd.to_numeric(matchup_df["pa"], errors="coerce")
+                _cl_rate = (_cl_hr / _cl_pa).clip(lower=0, upper=0.2)
+                _cl_base = (1.0 - (1.0 - _cl_rate) ** 4.1) * 100.0
+                _cl = (pd.to_numeric(matchup_df["hr_game_pct"], errors="coerce")
+                       - _cl_base).round(1)
+                # A thin sample makes the baseline meaningless (0 HR in 20 PA
+                # gives a 0% baseline, so ANY tonight% looks like a huge
+                # "lift"). Require a real season sample before claiming one.
+                matchup_df["ctx_lift_pp"] = _cl.where(_cl_pa >= 80)
+        except Exception:
+            pass
         # v43.27: hit signal columns alongside HR signal
         matchup_df["hit_pa_pct"] = hit_pa_list
         matchup_df["hit_game_pct"] = hit_game_list
@@ -18422,6 +18442,7 @@ def build_col_config():
         "power_composite": st.column_config.NumberColumn("💥+ Combo", format="%.0f", width="small", help="Composite of HR Score (55%) + Dinger Score (45%) — blends the full matchup-aware model with curated raw power. Highest when both systems agree a hitter is a strong HR play. Runs parallel to the shipped ranking."),
         "barrel_matchup_score": st.column_config.NumberColumn("🎯 Brl Match", format="%.0f", width="small", help="NEW (v44.34): leads with pulled-barrel% — the most RELIABLE HR predictor in our data (Section G reliability 2.69) — plus barrels/hard-hit/EV, then amplifies by tonight's pitcher HR-vulnerability (arsenal HR-tilt + barrels allowed). The thesis: the most reliable power signal aimed at the most vulnerable arm. Graded parallel to the others."),
         "sample_confidence": st.column_config.TextColumn("Sample", width="small", help=COLUMN_HELP.get("sample_confidence", "")),
+        "ctx_lift_pp": st.column_config.NumberColumn("Tonight vs usual", format="%+.1f", width="small", help=COLUMN_HELP.get("ctx_lift_pp", "")),
         "data_completeness": st.column_config.TextColumn("📊 Data", width="small", help="Data completeness for this hitter's core power inputs (barrel%, pull-barrel%, EV, hard-hit%, ISO) + the handedness split vs tonight's pitcher. ✅ full = all present. ⚠️ partial = some missing (score uses fallbacks). 🚨 thin = mostly missing — treat the rank with caution, it may be inflated/deflated by missing data."),
         "two_way_matchup_score": st.column_config.NumberColumn("⚖️ Two-Way", format="%.0f", width="small", help="NEW (v44.43): scores the matchup from BOTH sides + arsenal, handedness-aware. Three parts: the hitter's power (50%), how much THIS pitcher allows to hitters of that hand (30%: vs-hand HR/PA + SLG, plus barrel%/xwOBA/FB% allowed), and how the batter fares vs THIS pitcher's pitch mix (20%: pitch HR-tilt, arsenal match, best-pitch xwOBA). A masher facing a pitcher who suppresses that side AND has a tough arsenal gets marked down. Switch hitters resolve to their platoon-advantage side."),
         "xslg":            st.column_config.NumberColumn("xSLG", format="%.3f", width="small", help="Expected slugging from quality of contact (Statcast)."),
@@ -18689,6 +18710,7 @@ def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
             "player_name", "lineup_pos", "bats",
             "hr_score_signal", "hr_score", "grade", "hr_game_pct",
             "dinger_score", "smash_spot", "streak_label",
+            "ctx_lift_pp",
             "matchup_opp", "data_completeness", "sample_confidence",
         ],
         "⚡ Power": [
