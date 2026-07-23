@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.65-mypicks-nojump"
+APP_VERSION = "2026.06.10-v45.66-clickcard-sweep"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -7885,7 +7885,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.65 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.66 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -18814,11 +18814,48 @@ def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
                         "they're likely the best HR pick from this lineup."
                     )
 
-        st.dataframe(
-            _style_matchup_df(qualified[cols_to_show]),
-            hide_index=True, use_container_width=True,
-            column_config=build_col_config_with_help(cols_to_show),
-        )
+        # v45.66 (user ask): click a row → that player's card pops up. The
+        # table lives inside the game-browser fragment, so the selection
+        # rerun is fragment-scoped — no full-page reload. Feature-detected:
+        # on_select needs Streamlit >= 1.35; older versions just render the
+        # table as before.
+        _mt_key = f"_mtbl_sel_{team_label}"
+        _sel_supported = True
+        try:
+            _mt_event = st.dataframe(
+                _style_matchup_df(qualified[cols_to_show]),
+                hide_index=True, use_container_width=True,
+                column_config=build_col_config_with_help(cols_to_show),
+                on_select="rerun", selection_mode="single-row", key=_mt_key,
+            )
+        except TypeError:
+            _sel_supported = False
+            _mt_event = None
+            st.dataframe(
+                _style_matchup_df(qualified[cols_to_show]),
+                hide_index=True, use_container_width=True,
+                column_config=build_col_config_with_help(cols_to_show),
+            )
+        if _sel_supported:
+            st.caption("💡 Click any row to open that player's card.")
+            try:
+                _rows = list(getattr(getattr(_mt_event, "selection", None),
+                                     "rows", []) or [])
+                if _rows:
+                    _pos = int(_rows[0])
+                    if 0 <= _pos < len(qualified):
+                        _prow = qualified.iloc[_pos]
+                        _pnm = str(_prow.get("player_name") or "")
+                        # Only open once per distinct selection.
+                        if _pnm and st.session_state.get(f"{_mt_key}_last") != _pnm:
+                            st.session_state[f"{_mt_key}_last"] = _pnm
+                            _quick_card_dialog(_prow)
+                    else:
+                        st.session_state.pop(f"{_mt_key}_last", None)
+                else:
+                    st.session_state.pop(f"{_mt_key}_last", None)
+            except Exception as _mte:
+                log_swallowed_error("matchup_row_card", _mte, surface=False)
 
     if not insufficient.empty:
         with st.expander(f"⚠️ {team_label} — Insufficient Sample ({len(insufficient)} hitters below {INSUFFICIENT_PA_THRESHOLD} PA)"):
@@ -18845,7 +18882,11 @@ def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
 # ============================================================================
 @_fragment
 def _render_pitcher_lookup():
-    with st.expander("🔍 Pitcher Lookup — scout any team's pitcher", expanded=False):
+    _lk_open = bool(st.session_state.get("_pitlk_open", False))
+    with st.expander("🔍 Pitcher Lookup — scout any team's pitcher", expanded=_lk_open):
+        # v45.66 sweep: keep open across fragment reruns — expanded=False
+        # snapped it shut on every team/player pick.
+        st.session_state["_pitlk_open"] = True
         st.caption(
             "Select any team to see all their pitchers (active roster). "
             "Pick a pitcher to view their full stat line + grade. This is a "
@@ -18900,7 +18941,10 @@ def _render_pitcher_lookup():
                         "Pitcher",
                         options=sorted_pids,
                         format_func=lambda pid: pitcher_label_map.get(pid, str(pid)),
-                        key="pitcher_lookup_pid",
+                        # v45.66 sweep: key varies with the selected team so the
+                        # option list REBUILDS on team change (a static key
+                        # cached the previous team's pitchers).
+                        key=f"pitcher_lookup_pid_{sel_team_name}",
                     )
 
                     # Pull this pitcher's stat row
@@ -19068,7 +19112,11 @@ _render_pitcher_lookup()
 # ============================================================================
 @_fragment
 def _render_hitter_lookup():
-    with st.expander("🔍 Hitter Lookup — scout any team's hitter", expanded=False):
+    _lk_open = bool(st.session_state.get("_hitlk_open", False))
+    with st.expander("🔍 Hitter Lookup — scout any team's hitter", expanded=_lk_open):
+        # v45.66 sweep: keep open across fragment reruns — expanded=False
+        # snapped it shut on every team/player pick.
+        st.session_state["_hitlk_open"] = True
         st.caption(
             "Select any team to see all their hitters (active + 40-man roster). "
             "Pick a hitter to view their full stat line, recent form, and zone "
@@ -19120,7 +19168,9 @@ def _render_hitter_lookup():
                         "Hitter",
                         options=sorted_hids,
                         format_func=lambda hid: hitter_label_map.get(hid, str(hid)),
-                        key="hitter_lookup_hid",
+                        # v45.66 sweep: key varies with the selected team so the
+                        # option list REBUILDS on team change.
+                        key=f"hitter_lookup_hid_{sel_team_name_h}",
                     )
 
                     # Look up hitter row
