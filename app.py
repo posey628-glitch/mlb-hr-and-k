@@ -6,6 +6,7 @@ LaunchCast dashboard - Streamlit main entry.
 
 from __future__ import annotations
 
+import calendar
 import io
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
@@ -20,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.63-ctxlift-visible"
+APP_VERSION = "2026.06.10-v45.64-review-nits"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -92,7 +93,8 @@ def pick_score_weight_text(top_n=None):
     PICK_SCORE_WEIGHTS, sorted high→low. top_n limits to the biggest N. Used by
     every pick_score help/caption so they never drift from the constant."""
     items = sorted(PICK_SCORE_WEIGHTS.items(), key=lambda kv: kv[1], reverse=True)
-    if top_n:
+    # v45.64 (review): `if top_n:` treated 0 as "no limit"; be explicit.
+    if top_n is not None:
         items = items[:top_n]
     return ", ".join(
         f"{_PICK_SCORE_LABELS.get(k, k)} ({v*100:.0f}%)" for k, v in items
@@ -272,7 +274,6 @@ def _et_utc_offset_hours(dt_utc):
     fallback used 'month 3-11' which was off by an hour in early March / early
     Nov. Only a fallback; pytz is used when available.
     """
-    import calendar
     y = dt_utc.year
     # 2nd Sunday of March
     march_sundays = [d for d in range(1, 15)
@@ -7884,7 +7885,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.63 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.64 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
