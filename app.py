@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.64-review-nits"
+APP_VERSION = "2026.06.10-v45.65-mypicks-nojump"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -7885,7 +7885,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.64 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.65 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -17650,12 +17650,24 @@ def _save_owner_picks(_date_iso, _picks):
 @_fragment
 def _render_owner_picks():
     _date_iso = selected_date.isoformat()
-    _pub = _load_owner_picks(_date_iso)
+    # v45.65: cache the published list per-date in session_state. The fragment
+    # reruns on every selectbox click; re-reading the Gist dict each time made
+    # the section feel like a page reload.
+    _pub_key = f"_owner_picks_cache_{_date_iso}"
+    if _pub_key not in st.session_state:
+        st.session_state[_pub_key] = _load_owner_picks(_date_iso)
+    _pub = st.session_state.get(_pub_key) or {}
 
     # ---- Owner-only selection UI ----
     if owner_mode and combined_all is not None and not combined_all.empty \
             and "game" in combined_all.columns:
-        with st.expander("🎯 My Picks (owner only) — one per game", expanded=False):
+        _mp_open = bool(st.session_state.get("_mypicks_open", False))
+        with st.expander("🎯 My Picks (owner only) — one per game",
+                         expanded=_mp_open):
+            # Once you interact, keep it open across fragment reruns —
+            # expanded=False made it snap shut on every pick (felt like a
+            # full page reload).
+            st.session_state["_mypicks_open"] = True
             st.caption("Pick your favorite homer candidate in each game, then "
                        "Publish. Viewers see the published list below with "
                        "each player's key HR stats.")
@@ -17711,6 +17723,7 @@ def _render_owner_picks():
                         }
                     if _save_owner_picks(_date_iso, _payload):
                         st.success(f"✅ Published {len(_payload)} pick(s).")
+                        st.session_state[_pub_key] = _payload
                         _pub = _payload
                     else:
                         st.error("Couldn't publish — see Pipeline Health.")
