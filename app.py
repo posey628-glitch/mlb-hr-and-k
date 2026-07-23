@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.74-brier-benchmark"
+APP_VERSION = "2026.06.10-v45.75-hotfix-scope"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -4631,16 +4631,14 @@ if _eval_metrics and _eval_date:
             # the day inside a try/except — if that ever falls back silently,
             # the report looked identical. A label that can drift from what it
             # describes is worse than no label.
+            # v45.75 FIX: _eval_target is local to the auto-eval block above and
+            # is NOT in scope here — v45.73 crashed with NameError. The value is
+            # persisted to session_state at selection time; read it from there.
             try:
-                _snap_games = 0
-                if _snapshot:
-                    from backtest import snapshot_hitters as _sh
-                    _snap_games = len({r.get("game") for r in (_sh(_snapshot) or [])
-                                       if r.get("game")})
-                _report.append(f"Graded snapshot: {_eval_target} "
-                               f"({_snap_games} game(s) captured)")
+                _snap_key = st.session_state.get("_auto_eval_date") or _eval_date
+                _report.append(f"Graded snapshot: {_snap_key}")
             except Exception:
-                _report.append(f"Graded snapshot: {_eval_target}")
+                pass
             _report.append(f"Slate: {_actual_hrs} HRs across "
                            f"{_eval_metrics.get('hitters_who_played', 0)} hitters "
                            f"| avg HR rate {_slate_rate:.1f}% "
@@ -7986,7 +7984,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.74 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.75 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
