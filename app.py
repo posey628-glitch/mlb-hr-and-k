@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.71-sweep-fix"
+APP_VERSION = "2026.06.10-v45.72-gate-clarity"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -5897,9 +5897,13 @@ if show_pattern_analysis:
                                 )
                                 if n_days_history >= 15:
                                     _readiness_tail = (
-                                        "Rankings are stable — Proposed Weights below are "
-                                        "**actionable**. This is the reweight signal you've "
-                                        "been accumulating toward."
+                                        "Rankings are stable. **Note:** this badge counts "
+                                        "banked slate-days; the Proposed Weights panel "
+                                        "below runs a stricter gate (each *evidence* "
+                                        "feature needs 15+ days of its own), so it can "
+                                        "still read 'directional' for a day or two after "
+                                        "this turns green. Trust the panel's own badge for "
+                                        "the reweight decision."
                                     )
                                 else:
                                     _readiness_tail = (
@@ -6518,6 +6522,12 @@ if show_pattern_analysis:
                                 f"D/E. FULL FEATURE SWEEP ({len(_feats)} features "
                                 f"— every dropdown combination, not just the "
                                 f"one on screen)")
+                            _pa_report.append(
+                                "  ⚠️ READ WITH CARE: 'best cut' is the HIGHEST-lift "
+                                "threshold out of many tried, so it is selection-biased "
+                                "upward — on a small number of graded slates most of "
+                                "these lifts are noise. Treat as hypotheses to watch "
+                                "across many slates, NOT as thresholds to adopt.")
                             _sw_rows = []
                             for _f in _feats:
                                 try:
@@ -7944,7 +7954,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.71 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.72 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
