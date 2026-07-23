@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.72-gate-clarity"
+APP_VERSION = "2026.06.10-v45.73-snapshot-label"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -4626,6 +4626,21 @@ if _eval_metrics and _eval_date:
 
             _report = []
             _report.append(f"YESTERDAY'S RESULTS — {_eval_date}")
+            # v45.73 (NFL lesson): say WHICH snapshot was graded and how much
+            # of the slate it covered. v45.49 picks the "fullest" snapshot of
+            # the day inside a try/except — if that ever falls back silently,
+            # the report looked identical. A label that can drift from what it
+            # describes is worse than no label.
+            try:
+                _snap_games = 0
+                if _snapshot:
+                    from backtest import snapshot_hitters as _sh
+                    _snap_games = len({r.get("game") for r in (_sh(_snapshot) or [])
+                                       if r.get("game")})
+                _report.append(f"Graded snapshot: {_eval_target} "
+                               f"({_snap_games} game(s) captured)")
+            except Exception:
+                _report.append(f"Graded snapshot: {_eval_target}")
             _report.append(f"Slate: {_actual_hrs} HRs across "
                            f"{_eval_metrics.get('hitters_who_played', 0)} hitters "
                            f"| avg HR rate {_slate_rate:.1f}% "
@@ -7954,7 +7969,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.72 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.73 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
