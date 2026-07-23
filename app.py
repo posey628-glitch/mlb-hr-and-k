@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.68-onepicks-closed"
+APP_VERSION = "2026.06.10-v45.69-ctxlift-board"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -7885,7 +7885,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.68 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.69 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -17619,6 +17619,87 @@ def _render_owner_picks():
                    "these are personal calls informed by the model.")
 
 
+# ====================================================================
+# v45.69 (user ask): TONIGHT vs USUAL — the biggest context swings on the
+# slate. Who does tonight's park/weather/pitcher setup help (or hurt) most
+# relative to their OWN season norm? This is the sleeper/longshot lens.
+# Guarded hard against thin-sample skew: a real season sample (150+ PA),
+# starters only, both sides of the comparison present, and an outlier clamp
+# so a fluke number can't top the board.
+# ====================================================================
+@_fragment
+def _render_ctx_lift_board():
+    if combined_all is None or combined_all.empty:
+        return
+    if "ctx_lift_pp" not in combined_all.columns:
+        return
+    _cl = combined_all.copy()
+    if "is_bench" in _cl.columns:
+        _cl = _cl[~_cl["is_bench"].fillna(False)]
+    _need = [c for c in ("ctx_lift_pp", "hr_game_pct", "pa") if c in _cl.columns]
+    if len(_need) < 3:
+        return
+    _cl = _cl.dropna(subset=["ctx_lift_pp", "hr_game_pct"])
+    # A real season sample. ctx_lift already gates at 80 PA; a *leaderboard*
+    # deserves a stricter bar so a 90-PA rate spike can't headline it.
+    _cl = _cl[pd.to_numeric(_cl["pa"], errors="coerce") >= 150]
+    # Outlier clamp: anything beyond ±25pp is almost certainly a data
+    # artifact, not a matchup effect. Drop rather than display.
+    _cl = _cl[pd.to_numeric(_cl["ctx_lift_pp"], errors="coerce").abs() <= 25]
+    if _cl.empty:
+        return
+    _cols = [c for c in ["player_name", "team", "game", "opp_pitcher",
+                         "ctx_lift_pp", "hr_game_pct", "grade", "hr_score",
+                         "env_boost", "pa"] if c in _cl.columns]
+    _up = _cl.nlargest(10, "ctx_lift_pp")[_cols]
+    _dn = _cl.nsmallest(5, "ctx_lift_pp")[_cols]
+
+    st.markdown("<div id='sec-ctxlift'></div>", unsafe_allow_html=True)
+    _section_banner("📈 Tonight vs Usual",
+                    "Who tonight's matchup, park &amp; weather help most "
+                    "vs their own season norm")
+    st.caption(
+        "**Context lift** = tonight's HR Game% minus this hitter's own "
+        "season-baseline per-game HR rate. A big positive means the setup "
+        "(pitcher, park, weather, platoon) makes him look better than usual "
+        "— the sleeper lens. Filtered to 150+ PA starters with sane values, "
+        "so thin splits and data flukes can't headline the board."
+    )
+    _cfg = {
+        "player_name": _player_col("Hitter"),
+        "team": st.column_config.TextColumn("Tm", width="small"),
+        "game": st.column_config.TextColumn("Game", width="medium"),
+        "opp_pitcher": st.column_config.TextColumn("vs Pitcher", width="medium"),
+        "ctx_lift_pp": st.column_config.NumberColumn(
+            "Tonight vs usual", format="%+.1f",
+            help=COLUMN_HELP.get("ctx_lift_pp", "")),
+        "hr_game_pct": st.column_config.NumberColumn(
+            "HR Game%", format="%.1f", help=COLUMN_HELP.get("hr_game_pct", "")),
+        "grade": st.column_config.TextColumn(
+            "Grade", width="small", help=COLUMN_HELP.get("grade", "")),
+        "hr_score": st.column_config.NumberColumn(
+            "HR Score", format="%.0f", help=COLUMN_HELP.get("hr_score", "")),
+        "env_boost": st.column_config.NumberColumn(
+            "Env", format="%.2f", help=COLUMN_HELP.get("env_boost", "")),
+        "pa": st.column_config.NumberColumn(
+            "PA", format="%.0f", help=COLUMN_HELP.get("pa", "")),
+    }
+    st.markdown("**⬆️ Biggest boosts tonight**")
+    st.dataframe(_up, hide_index=True, use_container_width=True,
+                 column_config=_cfg)
+    with st.expander("⬇️ Toughest spots tonight (biggest drags)", expanded=False):
+        st.dataframe(_dn, hide_index=True, use_container_width=True,
+                     column_config=_cfg)
+        st.caption("These hitters face a setup that suppresses them relative "
+                   "to their own norm — useful for fades and for knowing when "
+                   "a big name is in a bad spot.")
+
+
+try:
+    _render_ctx_lift_board()
+except Exception as _clb:
+    log_swallowed_error("ctx_lift_board", _clb, surface=False)
+
 try:
     _render_owner_picks()
 except Exception as _opr:
@@ -18686,6 +18767,16 @@ def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
                         if _pnm and st.session_state.get(f"{_mt_key}_last") != _pnm:
                             st.session_state[f"{_mt_key}_last"] = _pnm
                             _quick_card_dialog(_prow)
+                            # v45.69 (user ask): once the card has been shown,
+                            # release the row so its checkbox doesn't stay
+                            # ticked and the SAME row can be clicked again.
+                            try:
+                                _s = st.session_state.get(_mt_key)
+                                if isinstance(_s, dict) and "selection" in _s:
+                                    _s["selection"]["rows"] = []
+                            except Exception:
+                                pass
+                            st.session_state.pop(f"{_mt_key}_last", None)
                     else:
                         st.session_state.pop(f"{_mt_key}_last", None)
                 else:
