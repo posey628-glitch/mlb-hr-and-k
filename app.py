@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.60-game-switch-fix"
+APP_VERSION = "2026.06.10-v45.61-bench-visible"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -7884,7 +7884,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.60 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.61 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -19241,13 +19241,23 @@ if _valid_games:
                 _qc_opts = sorted(_qc_pool["_qc_label"].dropna().astype(str).unique())
             else:
                 _qc_opts = []
-            # v45.59: how many players the current toggle exposes — gives the
-            # checkbox visible feedback and confirms bench players appeared.
+            # v45.61: show the count in BOTH states so the checkbox has a
+            # visible before/after. Previously the caption only rendered when
+            # checked, so toggling looked like it did nothing.
             _n_bench_here = int(_qc_pool.get("is_bench", pd.Series(dtype=bool))
                                 .fillna(False).astype(bool).sum()) if not _qc_pool.empty else 0
             if _inc_bench:
-                st.caption(f"Showing {len(_qc_opts)} players "
-                           f"({_n_bench_here} bench/probable included).")
+                if _n_bench_here:
+                    st.caption(f"✅ **{len(_qc_opts)} players** — including "
+                               f"**{_n_bench_here} bench/probable** (marked "
+                               f"“— bench/probable” in the list).")
+                else:
+                    st.caption(f"{len(_qc_opts)} players — no bench/probable "
+                               f"players found for this game yet (they appear "
+                               f"once rosters post).")
+            else:
+                st.caption(f"{len(_qc_opts)} starters. Check the box above to "
+                           f"add bench / probable / late-swap players.")
             _cc1, _cc2 = st.columns([4, 1])
             with _cc1:
                 _qc_pick = st.selectbox(
