@@ -20,7 +20,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.61-bench-visible"
+APP_VERSION = "2026.06.10-v45.62-mypicks-baretweet"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -7884,7 +7884,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.61 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.62 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -13390,6 +13390,7 @@ if combined_picks is not None and not combined_picks.empty:
                     tweet_format = st.radio(
                         "Format:",
                         options=["Top 5 (short)", "Top 10 (full)",
+                                  "Top 10 (bare — fits 280)",
                                   "Top 5 + Smash Spots", "Top 5 + edge stat",
                                   "Yesterday's recap", "Weekly recap (7d)"],
                         index=0,
@@ -13400,6 +13401,11 @@ if combined_picks is not None and not combined_picks.empty:
                     # Build the tweet body
                     date_str = selected_date.strftime("%b %-d")
                     t10_subset = top10.head(5) if "short" in tweet_format.lower() or "+" in tweet_format else top10.head(10)
+                    # v45.62 (user ask): a stripped Top-10 that actually fits a
+                    # single 280-char tweet — last name only, no dashes, no
+                    # hashtags, minimal header. Auto-trims if a slate of long
+                    # names still overflows.
+                    _bare_mode = "bare" in tweet_format.lower()
 
                     pick_lines = []
                     for i, (_, r) in enumerate(t10_subset.iterrows(), 1):
@@ -13501,6 +13507,32 @@ if combined_picks is not None and not combined_picks.empty:
                             f"{edge_line}\n\n"
                             f"#MLB #HRprops #DFS"
                         )
+                    elif _bare_mode:
+                        # Compact: "1. Schwarber PHI 28.1%" — last name only.
+                        _bare_lines = []
+                        for _i, (_, _r) in enumerate(top10.head(10).iterrows(), 1):
+                            _nm = str(_r.get("player_name", "?") or "?")
+                            _last = _nm.split()[-1] if _nm.split() else _nm
+                            _tm = str(_r.get("team", "") or "")
+                            _pc = _r.get("hr_game_pct")
+                            if _pc is not None and not pd.isna(_pc):
+                                _bare_lines.append(f"{_i}. {_last} {_tm} {float(_pc):.1f}%")
+                            else:
+                                _bare_lines.append(f"{_i}. {_last} {_tm}")
+                        _hdr = f"🚀 LaunchCast Top 10 — {date_str}\n"
+                        tweet_body = _hdr + "\n".join(_bare_lines)
+                        # If long names still push past 280, drop the % column,
+                        # then trim from the bottom — never ship an over-limit
+                        # body when a fitting one is possible.
+                        if len(tweet_body) > 280:
+                            _bare_lines = [
+                                f"{_i}. {str(_r.get('player_name','?') or '?').split()[-1]} "
+                                f"{str(_r.get('team','') or '')}".strip()
+                                for _i, (_, _r) in enumerate(top10.head(10).iterrows(), 1)]
+                            tweet_body = _hdr + "\n".join(_bare_lines)
+                        while len(tweet_body) > 280 and len(_bare_lines) > 1:
+                            _bare_lines.pop()
+                            tweet_body = _hdr + "\n".join(_bare_lines)
                     elif tweet_format == "Yesterday's recap":
                         # Pull yesterday's auto-eval results from session_state
                         yest_metrics = st.session_state.get("_auto_eval_metrics")
@@ -17561,6 +17593,167 @@ st.divider()
 # ============================================================================
 # GAME-BY-GAME MATCHUPS
 # ============================================================================
+# ====================================================================
+# v45.62 (user ask): MY PICKS — owner selects one favorite HR candidate
+# per game; everyone else SEES the published list with key stats.
+# Storage: the Gist, under the "_owner_picks" key. Keys starting with "_"
+# are protected from snapshot pruning (backtest._prune), so picks persist
+# and are visible to every viewer, not just the owner's own browser.
+# ====================================================================
+def _load_owner_picks(_date_iso):
+    """Read the published picks for a date. Never raises."""
+    try:
+        from backtest import _gist_read_all
+        _all = _gist_read_all() or {}
+        return (_all.get("_owner_picks") or {}).get(_date_iso, {}) or {}
+    except Exception:
+        return {}
+
+
+def _save_owner_picks(_date_iso, _picks):
+    """Publish picks for a date. Keeps the last 14 days. Returns bool."""
+    try:
+        from backtest import _gist_read_all, _gist_write_all
+        _all = _gist_read_all() or {}
+        _op = dict(_all.get("_owner_picks") or {})
+        _op[_date_iso] = _picks
+        for _old in sorted(_op.keys())[:-14]:
+            _op.pop(_old, None)
+        _all["_owner_picks"] = _op
+        return bool(_gist_write_all(_all))
+    except Exception as _ope:
+        log_swallowed_error("owner_picks_save", _ope, surface=True)
+        return False
+
+
+@_fragment
+def _render_owner_picks():
+    _date_iso = selected_date.isoformat()
+    _pub = _load_owner_picks(_date_iso)
+
+    # ---- Owner-only selection UI ----
+    if owner_mode and combined_all is not None and not combined_all.empty \
+            and "game" in combined_all.columns:
+        with st.expander("🎯 My Picks (owner only) — one per game", expanded=False):
+            st.caption("Pick your favorite homer candidate in each game, then "
+                       "Publish. Viewers see the published list below with "
+                       "each player's key HR stats.")
+            _games = [g for g in combined_all["game"].dropna().astype(str).unique()]
+            _sel = {}
+            for _g in sorted(_games):
+                _pool = combined_all[combined_all["game"].astype(str) == _g]
+                if "is_bench" in _pool.columns:
+                    _pool = _pool[~_pool["is_bench"].fillna(False)]
+                _names = sorted(_pool["player_name"].dropna().astype(str).unique()) \
+                    if "player_name" in _pool.columns else []
+                if not _names:
+                    continue
+                _prev = (_pub.get(_g) or {}).get("player_name")
+                _idx = _names.index(_prev) if _prev in _names else None
+                _sel[_g] = st.selectbox(
+                    _g, options=_names, index=_idx,
+                    placeholder="— no pick —",
+                    key=f"_ownerpick_{_date_iso}_{_g}",
+                )
+            _pc1, _pc2 = st.columns([1, 3])
+            with _pc1:
+                if st.button("📣 Publish picks", key="_publish_owner_picks",
+                             use_container_width=True):
+                    _payload = {}
+                    for _g, _nm in _sel.items():
+                        if not _nm:
+                            continue
+                        _row = combined_all[
+                            (combined_all["game"].astype(str) == _g)
+                            & (combined_all["player_name"].astype(str) == _nm)]
+                        if _row.empty:
+                            continue
+                        _r = _row.iloc[0]
+                        def _num(_c):
+                            _v = _r.get(_c)
+                            try:
+                                return None if _v is None or pd.isna(_v) else round(float(_v), 2)
+                            except (TypeError, ValueError):
+                                return None
+                        _payload[_g] = {
+                            "player_name": _nm,
+                            "team": str(_r.get("team") or ""),
+                            "opp_pitcher": str(_r.get("opp_pitcher") or ""),
+                            "grade": str(_r.get("grade") or ""),
+                            "hr_game_pct": _num("hr_game_pct"),
+                            "hr_score": _num("hr_score"),
+                            "barrel_pct": _num("barrel_pct"),
+                            "avg_ev": _num("avg_ev"),
+                            "iso": _num("iso"),
+                            "env_boost": _num("env_boost"),
+                            "ctx_lift_pp": _num("ctx_lift_pp"),
+                        }
+                    if _save_owner_picks(_date_iso, _payload):
+                        st.success(f"✅ Published {len(_payload)} pick(s).")
+                        _pub = _payload
+                    else:
+                        st.error("Couldn't publish — see Pipeline Health.")
+            with _pc2:
+                st.caption("Published picks are stored durably and shown to "
+                           "everyone. Re-publish any time to update.")
+
+    # ---- Public display (everyone) ----
+    if _pub:
+        st.markdown("<div id='sec-mypicks'></div>", unsafe_allow_html=True)
+        _section_banner("🎯 My Picks Tonight",
+                        "One favorite homer candidate per game &mdash; hand-picked")
+        _rows = []
+        for _g, _p in sorted(_pub.items()):
+            _rows.append({
+                "game": _g,
+                "player_name": _p.get("player_name", ""),
+                "team": _p.get("team", ""),
+                "opp_pitcher": _p.get("opp_pitcher", ""),
+                "grade": _p.get("grade", ""),
+                "hr_game_pct": _p.get("hr_game_pct"),
+                "hr_score": _p.get("hr_score"),
+                "barrel_pct": _p.get("barrel_pct"),
+                "avg_ev": _p.get("avg_ev"),
+                "iso": _p.get("iso"),
+                "env_boost": _p.get("env_boost"),
+                "ctx_lift_pp": _p.get("ctx_lift_pp"),
+            })
+        _pdf = pd.DataFrame(_rows)
+        st.dataframe(
+            _pdf, hide_index=True, use_container_width=True,
+            column_config={
+                "game": st.column_config.TextColumn("Game", width="medium"),
+                "player_name": st.column_config.TextColumn("Pick", width="medium"),
+                "team": st.column_config.TextColumn("Tm", width="small"),
+                "opp_pitcher": st.column_config.TextColumn("vs Pitcher", width="medium"),
+                "grade": st.column_config.TextColumn("Grade", width="small",
+                                                     help=COLUMN_HELP.get("grade", "")),
+                "hr_game_pct": st.column_config.NumberColumn(
+                    "HR Game%", format="%.1f", help=COLUMN_HELP.get("hr_game_pct", "")),
+                "hr_score": st.column_config.NumberColumn(
+                    "HR Score", format="%.0f", help=COLUMN_HELP.get("hr_score", "")),
+                "barrel_pct": st.column_config.NumberColumn(
+                    "Brl%", format="%.1f", help=COLUMN_HELP.get("barrel_pct", "")),
+                "avg_ev": st.column_config.NumberColumn(
+                    "EV", format="%.1f", help=COLUMN_HELP.get("avg_ev", "")),
+                "iso": st.column_config.NumberColumn(
+                    "ISO", format="%.3f", help=COLUMN_HELP.get("iso", "")),
+                "env_boost": st.column_config.NumberColumn(
+                    "Env", format="%.2f", help=COLUMN_HELP.get("env_boost", "")),
+                "ctx_lift_pp": st.column_config.NumberColumn(
+                    "Tonight vs usual", format="%+.1f",
+                    help=COLUMN_HELP.get("ctx_lift_pp", "")),
+            },
+        )
+        st.caption("Hand-picked by the owner — one per game. Not auto-generated: "
+                   "these are personal calls informed by the model.")
+
+
+try:
+    _render_owner_picks()
+except Exception as _opr:
+    log_swallowed_error("owner_picks_render", _opr, surface=False)
+
 st.markdown("<div id='sec-games'></div>", unsafe_allow_html=True)
 _section_banner("🎮 Game-by-Game Breakdown", "Pick a game below — full matchup tables, both lineups, park &amp; weather")
 st.caption("Real data only. Empty cells = data not available for that player.")
