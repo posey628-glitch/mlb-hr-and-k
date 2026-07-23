@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.70-tracking-truth"
+APP_VERSION = "2026.06.10-v45.71-sweep-fix"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -6506,7 +6506,11 @@ if show_pattern_analysis:
                         from pattern_analysis import (threshold_sweep as _tsw,
                                                       cohort_analysis as _coh,
                                                       HR_CANDIDATE_FEATURES as _hcf2)
-                        _md = merged_df if "merged_df" in dir() else None
+                        # v45.71 FIX: the frame in this scope is `merged`
+                        # (v45.70 referenced a non-existent `merged_df`, so the
+                        # dir() guard silently skipped the whole sweep and the
+                        # copy text still omitted D/E).
+                        _md = merged
                         if _md is not None and not _md.empty:
                             _feats = [c for c in _hcf2 if c in _md.columns]
                             _pa_report.append("")
@@ -7940,7 +7944,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.70 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.71 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
