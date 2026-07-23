@@ -1056,6 +1056,18 @@ HR_CANDIDATE_FEATURES = [
     "moonshot_score", "laser_score",  # v44.78: slate-wide power-type composites
     "opp_pitcher_xwoba", "must_have_total", "nuclear_total",
     "ctx_lift_pp",
+    # v45.70: previously-computed-but-untracked numeric predictors. The
+    # snapshot whitelist now DERIVES from this list, so adding here is all
+    # that is needed for a feature to be stored AND correlated nightly.
+    "xhr_neutral",
+    "hr_luck_gap",
+    "hr_conv_ratio",
+    "pull_wind_mult",
+    "best_pitch_xwoba",
+    "pitch_volatility",
+    "avg_dist",
+    "near_hr_est",
+    "bvp_adjust",
 ]
 
 # v45.33 STRUCTURAL FIX: the snapshot-merge projection whitelist is now
@@ -1092,6 +1104,7 @@ def _snapshot_merge_cols():
 # (the 9/10-overlap symptom), and the public card shows the model citing
 # itself as evidence.
 MODEL_OUTPUT_FEATURES = {
+    "hit_pa_pct",  # v45.70: prop output, never a predictor
     "ctx_lift_pp",  # v45.49: derived from hr_game_pct — tracked, never a predictor
     "hr_score", "hr_game_pct", "hr_pa_pct", "adaptive_score",
     "dinger_score", "power_composite", "pick_score",
