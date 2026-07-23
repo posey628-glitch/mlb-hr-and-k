@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.69-ctxlift-board"
+APP_VERSION = "2026.06.10-v45.70-tracking-truth"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -3313,7 +3313,7 @@ if slate.empty:
         )
 
         # --- Backtest (history-based, self-contained) ---
-        with st.expander("📈 Backtest — projection accuracy vs past outcomes", expanded=True):
+        with st.expander("📈 Backtest — projection accuracy vs past outcomes", expanded=False):
             try:
                 from backtest import (
                     list_snapshots, load_snapshot,
@@ -3364,7 +3364,7 @@ if slate.empty:
                 st.error(f"Off-day backtest error: {type(_od_e).__name__}: {_od_e}")
 
         # --- Pattern discovery (history-based) ---
-        with st.expander("🔬 Pattern Analysis — run on accumulated history", expanded=True):
+        with st.expander("🔬 Pattern Analysis — run on accumulated history", expanded=False):
             st.caption(
                 "Runs the correlation/pattern discovery over all banked "
                 "snapshot+outcome pairings and refreshes the learning history."
@@ -4784,7 +4784,7 @@ else:
     _recently_moved_ids = set()
 
 if show_backtest:
-    with st.expander("📈 Backtest — projection accuracy vs actual outcomes", expanded=True):
+    with st.expander("📈 Backtest — projection accuracy vs actual outcomes", expanded=False):
         try:
             from backtest import (
                 list_snapshots, load_snapshot,
@@ -5208,7 +5208,7 @@ if show_backtest:
 if show_pattern_analysis:
     with st.expander(
         "🔬 Pattern Analysis — what accumulated data tells us about the model",
-        expanded=True  # v43.71: auto-expand so users can SEE the section
+        expanded=False,  # v45.70 (user ask): start closed; open it when you want it
     ):
         try:
             from backtest import (
@@ -6496,6 +6496,61 @@ if show_pattern_analysis:
                                 )
                     except Exception:
                         pass
+
+                    # v45.70 (user ask): sections D and E are selector-driven —
+                    # only ONE feature/threshold combination is on screen at a
+                    # time, so the copy text was silently omitting them. Sweep
+                    # EVERY tracked feature here so the pasted report is
+                    # complete and nothing hides behind a dropdown.
+                    try:
+                        from pattern_analysis import (threshold_sweep as _tsw,
+                                                      cohort_analysis as _coh,
+                                                      HR_CANDIDATE_FEATURES as _hcf2)
+                        _md = merged_df if "merged_df" in dir() else None
+                        if _md is not None and not _md.empty:
+                            _feats = [c for c in _hcf2 if c in _md.columns]
+                            _pa_report.append("")
+                            _pa_report.append(
+                                f"D/E. FULL FEATURE SWEEP ({len(_feats)} features "
+                                f"— every dropdown combination, not just the "
+                                f"one on screen)")
+                            _sw_rows = []
+                            for _f in _feats:
+                                try:
+                                    _r = _tsw(_md, _f, outcome_col="homered")
+                                except Exception:
+                                    continue
+                                # threshold_sweep returns a DataFrame:
+                                # threshold / n_pass / pass_rate / fail_rate / lift
+                                if _r is None or getattr(_r, "empty", True):
+                                    continue
+                                try:
+                                    _ok = _r[(_r["n_pass"] >= 20) & _r["lift"].notna()]
+                                    if _ok.empty:
+                                        continue
+                                    _b = _ok.loc[_ok["lift"].idxmax()]
+                                    _sw_rows.append((_f, _b))
+                                except Exception:
+                                    continue
+                            _sw_rows.sort(key=lambda t: float(t[1].get("lift") or 0),
+                                          reverse=True)
+                            for _f, _b in _sw_rows[:30]:
+                                try:
+                                    _pa_report.append(
+                                        f"  {str(_f):<24} best cut "
+                                        f"{float(_b['threshold']):>9.3f}"
+                                        f"  lift {float(_b['lift']):>5.2f}x"
+                                        f"  pass {float(_b['pass_rate'])*100:>5.1f}%"
+                                        f" vs fail {float(_b['fail_rate'])*100:>5.1f}%"
+                                        f"  (n={int(_b['n_pass'])})")
+                                except Exception:
+                                    continue
+                            if not _sw_rows:
+                                _pa_report.append("  (not enough graded data yet "
+                                                  "for a stable sweep)")
+                    except Exception as _swe:
+                        _pa_report.append(f"  (sweep unavailable: "
+                                          f"{type(_swe).__name__})")
 
                     if len(_pa_report) > 2:
                         with st.expander("📋 Copy pattern analysis as text (tables paste intact)", expanded=False):
@@ -7885,7 +7940,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.69 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.70 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -14306,28 +14361,12 @@ if all_hitters:
     if combined_all.columns.duplicated().any():
         combined_all = combined_all.loc[:, ~combined_all.columns.duplicated()]
 
-    # v45.49 (user idea): CONTEXT LIFT \u2014 how much better tonight's setup
-    # makes this hitter vs HIS OWN season baseline. hr_game_pct is context-
-    # loaded (pitcher/park/weather/platoon); the baseline is his season
-    # HR/PA turned into a neutral per-game rate (~4.1 PA). Positive =
-    # tonight looks better than his usual self \u2014 the sleeper lens.
-    try:
-        _hr_src = None
-        for _c in ("hr", "home_run", "HR", "homeRuns"):
-            if _c in combined_all.columns:
-                _hr_src = pd.to_numeric(combined_all[_c], errors="coerce")
-                break
-        if (_hr_src is not None and "pa" in combined_all.columns
-                and "hr_game_pct" in combined_all.columns):
-            _pa_n = pd.to_numeric(combined_all["pa"], errors="coerce")
-            _rate = (_hr_src / _pa_n).clip(lower=0, upper=0.2)
-            _base_game = (1.0 - (1.0 - _rate) ** 4.1) * 100.0
-            combined_all["ctx_lift_pp"] = (
-                pd.to_numeric(combined_all["hr_game_pct"], errors="coerce")
-                - _base_game
-            ).round(1)
-    except Exception as _cle:
-        log_swallowed_error("ctx_lift", _cle, surface=False)
+    # v45.70: ctx_lift_pp is computed ONCE, per-game (see the block beside
+    # hr_game_pct). combined_all is a concat of those frames so it inherits
+    # the values. A second compute here (v45.49) used a different HR-column
+    # priority and no PA gate, silently OVERWRITING the gated per-game
+    # numbers — that is why the same player could show two different
+    # "tonight vs usual" values in different sections.
 
     # v45.54 (user ask): sample_confidence — how many of the core stats
     # actually have a real value for this hitter, as "N/M". Makes a thin-
@@ -17572,22 +17611,49 @@ def _render_owner_picks():
         st.markdown("<div id='sec-mypicks'></div>", unsafe_allow_html=True)
         _section_banner("🎯 My Picks Tonight",
                         "One favorite homer candidate per game &mdash; hand-picked")
+        # v45.70 (user: two different "tonight vs usual" values): read the
+        # stats LIVE from combined_all instead of the values frozen at publish
+        # time. A pick published at noon carried noon's numbers, which then
+        # disagreed with every other section once pitcher data firmed up. The
+        # published record now supplies only WHO was picked; the numbers are
+        # always the same ones the rest of the app is showing. (Stored values
+        # remain as a fallback if the player has left the slate.)
         _rows = []
+        _stat_cols = ("opp_pitcher", "grade", "hr_game_pct", "hr_score",
+                      "barrel_pct", "avg_ev", "iso", "env_boost", "ctx_lift_pp")
         for _g, _p in sorted(_pub.items()):
-            _rows.append({
-                "game": _g,
-                "player_name": _p.get("player_name", ""),
-                "team": _p.get("team", ""),
-                "opp_pitcher": _p.get("opp_pitcher", ""),
-                "grade": _p.get("grade", ""),
-                "hr_game_pct": _p.get("hr_game_pct"),
-                "hr_score": _p.get("hr_score"),
-                "barrel_pct": _p.get("barrel_pct"),
-                "avg_ev": _p.get("avg_ev"),
-                "iso": _p.get("iso"),
-                "env_boost": _p.get("env_boost"),
-                "ctx_lift_pp": _p.get("ctx_lift_pp"),
-            })
+            _nm = _p.get("player_name", "")
+            _live = None
+            try:
+                if (combined_all is not None and not combined_all.empty
+                        and "player_name" in combined_all.columns):
+                    _lk = combined_all[
+                        combined_all["player_name"].astype(str) == str(_nm)]
+                    if "game" in _lk.columns:
+                        _lk_g = _lk[_lk["game"].astype(str) == str(_g)]
+                        if not _lk_g.empty:
+                            _lk = _lk_g
+                    if not _lk.empty:
+                        _live = _lk.iloc[0]
+            except Exception:
+                _live = None
+
+            def _val(_c):
+                if _live is not None:
+                    _v = _live.get(_c)
+                    try:
+                        if _v is not None and not pd.isna(_v):
+                            return _v
+                    except (TypeError, ValueError):
+                        if _v is not None:
+                            return _v
+                return _p.get(_c)
+
+            _row = {"game": _g, "player_name": _nm,
+                    "team": _p.get("team", "")}
+            for _c in _stat_cols:
+                _row[_c] = _val(_c)
+            _rows.append(_row)
         _pdf = pd.DataFrame(_rows)
         st.dataframe(
             _pdf, hide_index=True, use_container_width=True,
