@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.66-clickcard-sweep"
+APP_VERSION = "2026.06.10-v45.68-onepicks-closed"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -7885,7 +7885,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.66 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.68 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -14074,7 +14074,7 @@ if combined_picks is not None and not combined_picks.empty:
                     "you wager on more parlays (more cost) but only need SOME to cash. "
                     "If 1 of your 5 misses, you still hit ~6 of the smaller parlays.\n\n"
                     "Default uses the top picks already shown above. Toggle Owner-mode "
-                    "and use the My Picks editor below to round-robin YOUR personal list."
+                    "and use \U0001f3af My Picks (further down) to publish YOUR pick per game."
                 )
 
                 # Pool: top N from the parlay candidates
@@ -14178,175 +14178,6 @@ if combined_picks is not None and not combined_picks.empty:
                 else:
                     st.caption("Need at least 3 picks with HR projections.")
 
-            # ====================================================================
-            # MY PICKS — OWNER-ONLY editable personal pick list
-            # ====================================================================
-            if owner_mode:
-                with st.expander("📝 My Picks — your personal HR picks for today (owner only)"):
-                    st.caption(
-                        "Build your own daily pick list by selecting hitters from "
-                        "the slate. Picks save during your session and can be exported. "
-                        "Use this to track YOUR plays separately from the model's suggestions."
-                    )
-
-                    # Initialize session state for picks
-                    picks_key = f"my_picks_{selected_date.isoformat()}"
-                    if picks_key not in st.session_state:
-                        st.session_state[picks_key] = []
-
-                    # Build hitter selection from current slate.
-                    # combined_picks is the all-hitters pool built earlier in this
-                    # section (around line 2547). combined_all isn't built until much
-                    # later, so we can't use it here.
-                    if combined_picks is not None and not combined_picks.empty:
-                        # v42r reviewer-validated: use player_id for selection
-                        # logic, labels only for display. Label-based selection
-                        # broke if HR% changed mid-session (label changes → state
-                        # cleared) or if two players had identical formatted
-                        # labels (duplicate names). player_id is immutable.
-                        selector_df = combined_picks[
-                            combined_picks["hr_game_pct"].notna()
-                            & combined_picks["player_id"].notna()
-                        ].sort_values("hr_game_pct", ascending=False).copy()
-                        # Map player_id → formatted display label
-                        label_map = {
-                            int(r["player_id"]): (
-                                f"{r['player_name']} ({r.get('team','')}) — "
-                                f"{r.get('hr_game_pct', 0):.1f}% / {r.get('grade','—')}"
-                            )
-                            for _, r in selector_df.iterrows()
-                            if pd.notna(r["player_id"])
-                        }
-                        all_pids = list(label_map.keys())
-
-                        # Migrate any legacy session_state values that might
-                        # have stored labels instead of player_ids
-                        existing = st.session_state.get(picks_key, [])
-                        existing_pids = [
-                            p for p in existing
-                            if isinstance(p, (int, np.integer)) and int(p) in label_map
-                        ]
-
-                        chosen = st.multiselect(
-                            "Add hitters to your pick list:",
-                            options=all_pids,
-                            default=existing_pids,
-                            format_func=lambda pid: label_map.get(pid, str(pid)),
-                            help="Type to filter by name. Select as many as you want.",
-                            key=f"picks_selector_{selected_date.isoformat()}",
-                        )
-                        st.session_state[picks_key] = chosen
-
-                        if chosen:
-                            # Filter to chosen player_ids
-                            my_picks_df = selector_df[
-                                selector_df["player_id"].isin(chosen)
-                            ].copy()
-                            display_cols = [c for c in [
-                                "player_name", "team", "game", "opp_pitcher",
-                                "bats", "hr_game_pct", "grade", "smash_spot",
-                                "barrel_pct", "iso", "matchup_opp", "env_boost",
-                            ] if c in my_picks_df.columns]
-                            st.dataframe(
-                                my_picks_df[display_cols],
-                                hide_index=True, use_container_width=True,
-                                column_config={
-                                    "hr_game_pct": st.column_config.NumberColumn(
-                                        "HR Game%", format="%.2f%%"),
-                                    "barrel_pct": st.column_config.NumberColumn(
-                                        "Brl%", format="%.1f%%"),
-                                        "pulled_brl_pct": st.column_config.NumberColumn(
-                                            "PBrl%", format="%.1f%%", width="small"),
-                                    "iso": st.column_config.NumberColumn("ISO", format="%.3f", help=COLUMN_HELP.get("iso", "")),
-                                    "env_boost": st.column_config.NumberColumn(
-                                        "Env×", format="%.3f"),
-                                },
-                            )
-
-                            # Stats summary
-                            # v42r reviewer-validated improvements:
-                            #  1) Show "Expected HRs" (sum of probabilities)
-                            #     instead of "Avg HR%". A user picking 5×10%
-                            #     plays has expected 0.5 HRs in the slate;
-                            #     a user picking 2×25% plays also has 0.5.
-                            #     Mean is misleading; sum is meaningful.
-                            #  2) Apply correlation penalty to parlay joint
-                            #     probability. Even cross-game picks aren't
-                            #     truly independent (league-wide HR weather,
-                            #     shared slate variance). 0.92^(n-1) is a
-                            #     conservative correction.
-                            #  3) Fix decimal-odds → american-odds conversion.
-                            #     The old formula `1 / joint_prob * 100 - 100`
-                            #     gave wrong rounding at small probs.
-                            expected_hrs = my_picks_df["hr_game_pct"].dropna().sum() / 100.0
-                            n_picks = len(my_picks_df)
-                            if n_picks >= 2 and n_picks <= 10:
-                                # Joint probability with correlation penalty
-                                joint_prob = 1.0
-                                for p in my_picks_df["hr_game_pct"].dropna():
-                                    joint_prob *= (p / 100)
-                                if n_picks >= 3:
-                                    joint_prob *= 0.92 ** (n_picks - 1)
-                                else:
-                                    joint_prob *= 0.95
-                                summary_cols = st.columns(3)
-                                with summary_cols[0]:
-                                    st.metric("My picks", f"{n_picks}")
-                                with summary_cols[1]:
-                                    st.metric(
-                                        "Expected HRs",
-                                        f"{expected_hrs:.2f}",
-                                        help=(
-                                            "Sum of individual HR probabilities — "
-                                            "the number of HRs you'd expect from "
-                                            "your picks if you bet them all separately."
-                                        ),
-                                    )
-                                with summary_cols[2]:
-                                    if joint_prob > 0:
-                                        decimal_odds = 1 / joint_prob
-                                        american_odds = int(round((decimal_odds - 1) * 100))
-                                        st.metric(
-                                            "As a parlay",
-                                            f"{joint_prob*100:.3f}%",
-                                            help=(
-                                                f"Fair odds: +{american_odds}. "
-                                                f"Includes correlation penalty "
-                                                f"(0.92×) for cross-game variance "
-                                                f"that pure-independence math misses."
-                                            ),
-                                        )
-
-                            # Tweet-ready My Picks post
-                            st.markdown("**My Picks tweet:**")
-                            picks_lines = "\n".join(
-                                f"{i+1}. {r['player_name']} ({r['team']})"
-                                for i, (_, r) in enumerate(my_picks_df.iterrows())
-                            )
-                            mypicks_tweet = (
-                                f"⚾ My HR Picks — {selected_date.strftime('%b %-d')}\n\n"
-                                f"{picks_lines}\n\n"
-                                f"#MLB #DFS #HRprops"
-                            )
-                            st.text_area(
-                                "Copy My Picks for Twitter:",
-                                value=mypicks_tweet, height=160,
-                                key=f"mypicks_tweet_{selected_date.isoformat()}",
-                            )
-                            chars = len(mypicks_tweet)
-                            if chars > 280:
-                                st.warning(f"⚠️ {chars}/280 — too long, trim picks")
-                            else:
-                                st.caption(f"✅ {chars}/280 characters")
-
-                            # Clear button
-                            if st.button("🗑️ Clear my picks", key=f"clear_picks_{selected_date.isoformat()}"):
-                                st.session_state[picks_key] = []
-                                st.rerun()
-                        else:
-                            st.caption("No picks selected yet. Use the dropdown above.")
-                    else:
-                        st.caption("Slate data not loaded yet.")
             if owner_mode:
                 with st.expander("🐦 Twitter-ready daily post — copy + paste (owner only)"):
                     date_str = selected_date.strftime("%b %-d")
@@ -17661,37 +17492,42 @@ def _render_owner_picks():
     # ---- Owner-only selection UI ----
     if owner_mode and combined_all is not None and not combined_all.empty \
             and "game" in combined_all.columns:
-        _mp_open = bool(st.session_state.get("_mypicks_open", False))
+        # v45.68: starts CLOSED. Safe now because the picks live in a form —
+        # selections cause no rerun, so it can't collapse while you work.
         with st.expander("🎯 My Picks (owner only) — one per game",
-                         expanded=_mp_open):
-            # Once you interact, keep it open across fragment reruns —
-            # expanded=False made it snap shut on every pick (felt like a
-            # full page reload).
-            st.session_state["_mypicks_open"] = True
+                         expanded=False):
             st.caption("Pick your favorite homer candidate in each game, then "
                        "Publish. Viewers see the published list below with "
                        "each player's key HR stats.")
             _games = [g for g in combined_all["game"].dropna().astype(str).unique()]
             _sel = {}
-            for _g in sorted(_games):
-                _pool = combined_all[combined_all["game"].astype(str) == _g]
-                if "is_bench" in _pool.columns:
-                    _pool = _pool[~_pool["is_bench"].fillna(False)]
-                _names = sorted(_pool["player_name"].dropna().astype(str).unique()) \
-                    if "player_name" in _pool.columns else []
-                if not _names:
-                    continue
-                _prev = (_pub.get(_g) or {}).get("player_name")
-                _idx = _names.index(_prev) if _prev in _names else None
-                _sel[_g] = st.selectbox(
-                    _g, options=_names, index=_idx,
-                    placeholder="— no pick —",
-                    key=f"_ownerpick_{_date_iso}_{_g}",
-                )
+            # v45.67 (user: page reloads on every pick): wrap the whole
+            # selection set in st.form. Inside a form, changing a widget does
+            # NOT trigger a rerun at all — nothing happens until you press
+            # Publish. That removes the per-pick rerun entirely (a fragment
+            # still reruns per widget; a form does not), so you can work down
+            # every game in one pass with zero page motion.
+            with st.form(key=f"_mypicks_form_{_date_iso}", clear_on_submit=False):
+                for _g in sorted(_games):
+                    _pool = combined_all[combined_all["game"].astype(str) == _g]
+                    if "is_bench" in _pool.columns:
+                        _pool = _pool[~_pool["is_bench"].fillna(False)]
+                    _names = sorted(_pool["player_name"].dropna().astype(str).unique()) \
+                        if "player_name" in _pool.columns else []
+                    if not _names:
+                        continue
+                    _prev = (_pub.get(_g) or {}).get("player_name")
+                    _idx = _names.index(_prev) if _prev in _names else None
+                    _sel[_g] = st.selectbox(
+                        _g, options=_names, index=_idx,
+                        placeholder="— no pick —",
+                        key=f"_ownerpick_{_date_iso}_{_g}",
+                    )
+                _submitted = st.form_submit_button(
+                    "📣 Publish picks", use_container_width=False)
             _pc1, _pc2 = st.columns([1, 3])
             with _pc1:
-                if st.button("📣 Publish picks", key="_publish_owner_picks",
-                             use_container_width=True):
+                if _submitted:
                     _payload = {}
                     for _g, _nm in _sel.items():
                         if not _nm:
@@ -18882,11 +18718,12 @@ def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
 # ============================================================================
 @_fragment
 def _render_pitcher_lookup():
+    def _keep_lk_open():
+        st.session_state["_pitlk_open"] = True
     _lk_open = bool(st.session_state.get("_pitlk_open", False))
     with st.expander("🔍 Pitcher Lookup — scout any team's pitcher", expanded=_lk_open):
-        # v45.66 sweep: keep open across fragment reruns — expanded=False
-        # snapped it shut on every team/player pick.
-        st.session_state["_pitlk_open"] = True
+        # v45.68: starts CLOSED; stays open only after a real selection
+        # (on_change fires on user action, not on first render).
         st.caption(
             "Select any team to see all their pitchers (active roster). "
             "Pick a pitcher to view their full stat line + grade. This is a "
@@ -18911,6 +18748,7 @@ def _render_pitcher_lookup():
                     "Team",
                     options=sorted_team_names,
                     key="pitcher_lookup_team",
+                    on_change=_keep_lk_open,
                 )
                 sel_team_id = team_options[sel_team_name]
 
@@ -19112,11 +18950,12 @@ _render_pitcher_lookup()
 # ============================================================================
 @_fragment
 def _render_hitter_lookup():
+    def _keep_lk_open():
+        st.session_state["_hitlk_open"] = True
     _lk_open = bool(st.session_state.get("_hitlk_open", False))
     with st.expander("🔍 Hitter Lookup — scout any team's hitter", expanded=_lk_open):
-        # v45.66 sweep: keep open across fragment reruns — expanded=False
-        # snapped it shut on every team/player pick.
-        st.session_state["_hitlk_open"] = True
+        # v45.68: starts CLOSED; stays open only after a real selection
+        # (on_change fires on user action, not on first render).
         st.caption(
             "Select any team to see all their hitters (active + 40-man roster). "
             "Pick a hitter to view their full stat line, recent form, and zone "
@@ -19139,6 +18978,7 @@ def _render_hitter_lookup():
                     "Team",
                     options=sorted_team_names_h,
                     key="hitter_lookup_team",
+                    on_change=_keep_lk_open,
                 )
                 sel_team_id_h = team_options_h[sel_team_name_h]
 
