@@ -914,6 +914,20 @@ def save_snapshot(snapshot_date, matchup_df: pd.DataFrame,
                 "is_moonshot_target", "is_laser_target",  # v44.18: grade power targets
                 "moonshot_score", "laser_score",  # v44.78: slate-wide power-type scores
             ] if c in matchup_df.columns]
+            # v45.70 (CRITICAL, structural): DERIVE the tail of the
+            # whitelist from HR_CANDIDATE_FEATURES. A feature can be added
+            # to the tracked-candidates list and still be silently stripped
+            # here — that is exactly what happened to ctx_lift_pp (tracked
+            # since v45.49, never snapshotted, so it could never appear in
+            # Section G). Deriving means any future tracked feature is
+            # snapshotted automatically and this class of bug cannot recur.
+            try:
+                from pattern_analysis import HR_CANDIDATE_FEATURES as _hcf
+                for _c in _hcf:
+                    if _c not in keep_cols and _c in matchup_df.columns:
+                        keep_cols.append(_c)
+            except Exception:
+                pass
             # Build compact column-oriented storage with rounded values
             _sub = _df[keep_cols].where(_df[keep_cols].notna(), None)
             hitters_compact = {
