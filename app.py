@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.73-snapshot-label"
+APP_VERSION = "2026.06.10-v45.74-brier-benchmark"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -4645,6 +4645,23 @@ if _eval_metrics and _eval_date:
                            f"{_eval_metrics.get('hitters_who_played', 0)} hitters "
                            f"| avg HR rate {_slate_rate:.1f}% "
                            f"| Brier {_eval_metrics.get('brier_score', 0):.4f}")
+            # v45.74 (NFL lesson): Brier alone can't tell skill from calibration.
+            # A predictor that guesses the slate rate for EVERY hitter scores
+            # base*(1-base). Printing that reference stops a good-looking Brier
+            # from implying more than it proves — the EDGE line below is what
+            # actually measures whether the picks beat guessing.
+            try:
+                _b_actual = float(_eval_metrics.get("brier_score", 0) or 0)
+                _b_flat = (_slate_rate / 100.0) * (1 - _slate_rate / 100.0)
+                _b_gain = _b_flat - _b_actual
+                _report.append(
+                    f"  Brier reference: flat-guess ({_slate_rate:.1f}% for "
+                    f"everyone) = {_b_flat:.4f} | ours = {_b_actual:.4f} | "
+                    f"gain {_b_gain:+.4f}"
+                    + ("  (Brier mostly measures calibration; see EDGE below "
+                       "for ranking skill)" if _b_gain < 0.01 else ""))
+            except Exception:
+                pass
             # v45.26 (user's skew concern): on a 1-2 game slate the "top 10"
             # is mostly one game's lineup — picks share the same pitchers,
             # park, and weather, so hit rates are CORRELATED noise, not
@@ -7969,7 +7986,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.73 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.74 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -10474,6 +10491,14 @@ if all_hitters_for_picks:
         # making everyone look like B/C. After rescale, the best play of
         # the slate reads ~95 and users can immediately differentiate.
         _hr_score = rescale_composite_to_slate(_composite_raw)
+        # v45.74 (NFL lesson): persist the PRE-rescale composite so the
+        # learning loop can measure whether slate-rescaling helps or hurts.
+        # NFL found its shrinkage was destroying 25% of a feature's signal —
+        # a question MLB has never asked of its own transformations.
+        try:
+            combined_picks["hr_score_raw"] = _composite_raw
+        except Exception:
+            pass
         combined_picks["grade_composite"] = _composite_raw  # raw, for audit
         combined_picks["hr_score"] = _hr_score              # PRIMARY display number
         # v44.16 (user-requested: insufficient-sample rows showed only a letter
