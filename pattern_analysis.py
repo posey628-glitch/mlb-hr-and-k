@@ -1325,6 +1325,11 @@ def propose_dinger_weights(importance_df: pd.DataFrame,
     # EVIDENCE features only — a brand-new thin feature (kept at current
     # weight, contributing nothing to the proposal) must not block the badge.
     _min_days_seen = 999
+    # v45.77: the gate used to fail invisibly — you could see "early/directional"
+    # with no way to tell WHICH feature was short. These record the evidence
+    # day-count per feature and which one is holding the gate closed.
+    _gate_blocker = None
+    _gate_days = {}
     for feat, cur_w in current_weights.items():
         if feat in imp.index:
             row = imp.loc[feat]
@@ -1332,7 +1337,10 @@ def propose_dinger_weights(importance_df: pd.DataFrame,
             _reliab = float(row.get("reliability", 1.0))
             _days = int(row.get("n_days", 0))
             if _days >= min_days and abs(float(row.get("avg_corr", 0.0))) >= 0.03:
-                _min_days_seen = min(_min_days_seen, _days)
+                if _days < _min_days_seen:
+                    _min_days_seen = _days
+                    _gate_blocker = feat          # v45.77: name the laggard
+            _gate_days[feat] = _days              # v45.77: per-feature audit
             if _days >= min_days and _corr >= 0.03:
                 # reliability modulates but doesn't dominate (0.5–1.5 band)
                 _reliab_mult = 0.5 + min(max(_reliab, 0.0), 3.0) / 3.0
@@ -1382,6 +1390,11 @@ def propose_dinger_weights(importance_df: pd.DataFrame,
     # reliable only if every evidence feature has enough days
     result["reliable"] = (_min_days_seen >= REWEIGHT_MIN_DAYS
                           and len(_evidence_feats) >= 3)
+    result["gate_days"] = dict(_gate_days)
+    result["gate_min_days"] = (None if _min_days_seen == 999 else _min_days_seen)
+    result["gate_blocker"] = _gate_blocker
+    result["gate_required"] = REWEIGHT_MIN_DAYS
+    result["gate_evidence_count"] = len(_evidence_feats)
     result["note"] = (
         f"Proposed from {len(_evidence_feats)} evidence-backed feature(s); "
         f"{len(_kept_feats)} kept at current (thin data). "
