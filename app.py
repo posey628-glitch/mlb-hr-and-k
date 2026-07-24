@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.75-hotfix-scope"
+APP_VERSION = "2026.06.10-v45.76-gate-reachable"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -5910,7 +5910,7 @@ if show_pattern_analysis:
                                 "your next slate's outcomes attach."
                             )
                         else:
-                            importance_df = rolling_feature_importance(_history, lookback_days=14)
+                            importance_df = rolling_feature_importance(_history)
                             if importance_df.empty:
                                 st.info(
                                     f"History has {n_days_history} day(s) but "
@@ -6200,7 +6200,7 @@ if show_pattern_analysis:
                         _phist = load_prop_pattern_history(_pk)
                         if not _phist:
                             continue
-                        _pimp = rolling_feature_importance(_phist, lookback_days=14)
+                        _pimp = rolling_feature_importance(_phist)
                         if _pimp is None or _pimp.empty:
                             continue
                         _any_prop = True
@@ -7984,7 +7984,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.75 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.76 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
