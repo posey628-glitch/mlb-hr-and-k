@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.79-window-copy"
+APP_VERSION = "2026.06.10-v45.80-weather-throttle"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -7979,8 +7979,35 @@ try:
         gdt = _g.get("gameTime")
         weather_batch_coords.append((lat, lon, gdt))
     if weather_batch_coords:
-        _batch_result = prefetch_weather_batch(weather_batch_coords)
-        st.session_state["_weather_batch_result"] = _batch_result
+        # v45.80: THROTTLE. This call sat at module scope with no guard, so it
+        # fired on EVERY script rerun — which is what earned the Open-Meteo 429
+        # ("rate limited on batch prefetch") and then pushed the wttr.in
+        # fallback into a 12s timeout as well. Both providers failing at once
+        # was self-inflicted load, not two independent outages.
+        #
+        # Re-fetch only when the slate/coords change, or after a cooling
+        # period: 20 min on success, 5 min after a failure (so a genuine
+        # outage still recovers quickly without hammering).
+        import time as _t
+        _wx_sig = f"{selected_date}|{len(weather_batch_coords)}|" \
+                  f"{round(weather_batch_coords[0][0], 2)}"
+        _wx_prev = st.session_state.get("_weather_batch_result") or {}
+        _wx_last = float(st.session_state.get("_weather_batch_at", 0) or 0)
+        _wx_sig_prev = st.session_state.get("_weather_batch_sig")
+        _wx_ok = bool(_wx_prev.get("n_success", 0)) and not _wx_prev.get("error")
+        _wx_age = _t.time() - _wx_last
+        _wx_cool = 1200 if _wx_ok else 300      # 20 min ok / 5 min after failure
+
+        if (_wx_sig != _wx_sig_prev) or (_wx_age > _wx_cool) or not _wx_prev:
+            _batch_result = prefetch_weather_batch(weather_batch_coords)
+            st.session_state["_weather_batch_result"] = _batch_result
+            st.session_state["_weather_batch_at"] = _t.time()
+            st.session_state["_weather_batch_sig"] = _wx_sig
+        else:
+            _batch_result = _wx_prev
+            _batch_result["note"] = (
+                str(_batch_result.get("note", "")).split(" · throttled")[0]
+                + f" · throttled (reusing fetch from {_wx_age/60:.0f} min ago)")
 except Exception as _e:
     st.session_state["_weather_batch_result"] = {
         "error": f"prefetch failed: {type(_e).__name__}: {str(_e)[:100]}"
@@ -8047,7 +8074,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.79 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.80 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
