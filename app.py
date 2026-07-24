@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.76-gate-reachable"
+APP_VERSION = "2026.06.10-v45.77-gate-diagnostic"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -6012,6 +6012,32 @@ if show_pattern_analysis:
                                                       if _prop.get("reliable")
                                                       else "🟡 still early — directional only")
                                         st.markdown(f"**{_rel_badge}** · {_prop.get('note','')}")
+                                        # v45.77: when the gate is closed, SAY WHY.
+                                        # Previously it read "early/directional" with
+                                        # no way to see which feature was short —
+                                        # indistinguishable from an unreachable gate.
+                                        if not _prop.get("reliable"):
+                                            _blk = _prop.get("gate_blocker")
+                                            _md = _prop.get("gate_min_days")
+                                            _req = _prop.get("gate_required", 15)
+                                            _nev = _prop.get("gate_evidence_count", 0)
+                                            if _nev < 3:
+                                                st.caption(
+                                                    f"⛔ Gate: only {_nev} evidence-backed "
+                                                    f"feature(s); needs 3+.")
+                                            elif _blk and _md is not None:
+                                                st.caption(
+                                                    f"⛔ Gate: **{_blk}** has {_md} of the "
+                                                    f"{_req} evidence days required — it is "
+                                                    f"holding the badge closed. "
+                                                    f"{_req - _md} more graded slate(s) "
+                                                    f"with that feature present.")
+                                            _gd = _prop.get("gate_days") or {}
+                                            if _gd:
+                                                st.caption("Evidence days per feature: "
+                                                           + " · ".join(f"{k} {v}d" for k, v
+                                                                        in sorted(_gd.items(),
+                                                                                  key=lambda kv: kv[1])))
                                         _prop_rows = []
                                         for _f, _d in _prop["features"].items():
                                             _ev = _d.get("evidence", {})
@@ -7984,7 +8010,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.76 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.77 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
