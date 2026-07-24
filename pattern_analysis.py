@@ -1172,8 +1172,18 @@ def compute_daily_correlations(merged_df: pd.DataFrame,
     return result
 
 
+# v45.76 CRITICAL: the rolling window must be LARGER than the reweight gate,
+# or n_days is capped below the threshold and the gate can never fire.
+# It was window=14 vs gate>=15 — mathematically unreachable. These two numbers
+# must be changed together; the assertion below enforces that.
+REWEIGHT_MIN_DAYS = 15          # evidence days required for a 🟢 proposal
+DEFAULT_LOOKBACK_DAYS = 30      # rolling window for Section G
+assert DEFAULT_LOOKBACK_DAYS > REWEIGHT_MIN_DAYS, (
+    "rolling window must exceed the reweight gate or the gate is unreachable")
+
+
 def rolling_feature_importance(correlation_history: list,
-                                lookback_days: int = 14) -> pd.DataFrame:
+                                lookback_days: int = DEFAULT_LOOKBACK_DAYS) -> pd.DataFrame:
     """Roll up the last N days of correlations into a feature-importance table.
 
     Shows: which features are consistently predictive (high avg corr, low std),
@@ -1370,7 +1380,8 @@ def propose_dinger_weights(importance_df: pd.DataFrame,
         }
 
     # reliable only if every evidence feature has enough days
-    result["reliable"] = (_min_days_seen >= 15 and len(_evidence_feats) >= 3)
+    result["reliable"] = (_min_days_seen >= REWEIGHT_MIN_DAYS
+                          and len(_evidence_feats) >= 3)
     result["note"] = (
         f"Proposed from {len(_evidence_feats)} evidence-backed feature(s); "
         f"{len(_kept_feats)} kept at current (thin data). "
