@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.78-gate-in-copytext"
+APP_VERSION = "2026.06.10-v45.79-window-copy"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -330,6 +330,14 @@ try:
     from data_fetcher import get_pitcher_arsenal_safe as get_pitcher_arsenal
 except ImportError:
     def get_pitcher_arsenal(*a, **k): return pd.DataFrame()
+
+# v45.79: the rolling window is defined ONCE in pattern_analysis. User-facing
+# copy must read it rather than hardcode a number — when the window went 14->30
+# in v45.76, two public captions kept claiming "last 14 graded slates".
+try:
+    from pattern_analysis import DEFAULT_LOOKBACK_DAYS as _PA_LOOKBACK
+except Exception:
+    _PA_LOOKBACK = 30
 
 # v43.18 (reviewer-validated): hoist apply_handedness_overrides to module
 # scope so it's not re-imported 3x inside the matchup loop. Defensive
@@ -5889,7 +5897,7 @@ if show_pattern_analysis:
                         "**This is the 'model learns what predicts HRs' system.** "
                         "Every day the app runs, it computes each feature's "
                         "correlation with actual HR outcomes and appends it to "
-                        "history. This table shows the last 14 days rolled up: "
+                        f"history. This table shows the last {_PA_LOOKBACK} days rolled up: "
                         "which features are consistently predictive (high avg_corr, "
                         "low std), which are decaying (negative trend), which are "
                         "noisy (high std). **Reliability** = |avg_corr| / std — "
@@ -8039,7 +8047,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.78 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.79 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -10241,7 +10249,8 @@ try:
                     st.markdown("  \n".join(_pub_lines))
                     st.caption(
                         f"Ranked by how strongly each signal has lined up with "
-                        f"actual home runs over our last {min(len(_pub_hist), 14)} "
+                        f"actual home runs over our last "
+                        f"{min(len(_pub_hist), _PA_LOOKBACK)} "
                         f"graded slates. Updates daily as results come in — "
                         f"the order shifts as the season evolves."
                     )
