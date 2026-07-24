@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.77-gate-diagnostic"
+APP_VERSION = "2026.06.10-v45.78-gate-in-copytext"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -6536,6 +6536,35 @@ if show_pattern_analysis:
                                         f"proposed {_d['proposed']:>4.2f} "
                                         f"Δ {_d['delta']:>+5.2f}"
                                     )
+                                # v45.78: the gate diagnostic was added to the UI
+                                # only, so the COPY TEXT — the thing actually
+                                # pasted for review — still couldn't explain why
+                                # the badge was closed. Put it in both.
+                                if not _pr.get("reliable"):
+                                    _blk = _pr.get("gate_blocker")
+                                    _md = _pr.get("gate_min_days")
+                                    _req = _pr.get("gate_required", 15)
+                                    _nev = _pr.get("gate_evidence_count", 0)
+                                    if _nev < 3:
+                                        _pa_report.append(
+                                            f"  GATE CLOSED: only {_nev} evidence-backed "
+                                            f"feature(s), needs 3+")
+                                    elif _blk and _md is not None:
+                                        _pa_report.append(
+                                            f"  GATE CLOSED: '{_blk}' has {_md}/{_req} "
+                                            f"evidence days — needs {_req - _md} more "
+                                            f"graded slate(s) with that feature present")
+                                    _gd = _pr.get("gate_days") or {}
+                                    if _gd:
+                                        _pa_report.append(
+                                            "  evidence days: "
+                                            + " · ".join(f"{k} {v}d" for k, v in
+                                                         sorted(_gd.items(),
+                                                                key=lambda kv: kv[1])))
+                                else:
+                                    _pa_report.append(
+                                        "  GATE OPEN — apply the ½-step column "
+                                        "and ship as a reweight version")
                     except Exception:
                         pass
 
@@ -8010,7 +8039,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.77 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.78 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
