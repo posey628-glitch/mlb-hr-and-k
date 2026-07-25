@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.81-picks-notes"
+APP_VERSION = "2026.06.10-v45.82-reweight-01"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -116,6 +116,10 @@ def _calibration_snapshot() -> dict:
         # 15-slate milestone), snapshots must say which weights produced them —
         # otherwise pre/post-reweight slates are indistinguishable when grading.
         "dinger_weights": dict(DINGER_BASE_WEIGHTS),
+        # v45.82: name the reweight generation so graded slates can be bucketed
+        # pre/post each reweight when judging whether a change helped. Bump this
+        # string every time DINGER_BASE_WEIGHTS changes.
+        "dinger_reweight": "reweight-01-2026-07-25",
         "smash_thresholds": {
             "elite_score": SMASH_ELITE_SCORE,
             "strong_score": SMASH_STRONG_SCORE,
@@ -1882,13 +1886,31 @@ def log_swallowed_error(where: str, exc: Exception, surface: bool = True) -> Non
 # the only Dinger input with a positive trend — so it's bumped to co-lead
 # with avg_ev. avg_ev/iso reliability softened, so iso eases slightly. Small
 # nudges, not a rebuild; the ceiling stays avg_ev-anchored raw power.
+# v45.82 — FIRST EVIDENCE-BASED REWEIGHT (reweight-01). Applied 2026-07-25
+# once the 🟢 reliable gate opened (all 6 features at 15+ evidence days,
+# 17 slate-days banked). These are a ½-step from the prior weights toward the
+# evidence-derived proposal (|corr|×reliability, normalized): new = current +
+# 0.5×(proposed − current), then renormalized to sum to exactly 10.000.
+#
+#   feature          prior  proposed  ½-step(shipped)   evidence corr / reliab
+#   pulled_brl_pct   2.00     1.53       1.758           +0.079 / 0.97
+#   avg_ev           2.00     2.12       2.058           +0.103 / 1.14  (top)
+#   barrel_pct       1.90     1.59       1.748           +0.082 / 0.97
+#   hard_hit         1.50     1.73       1.618           +0.085 / 1.10
+#   iso              1.40     1.65       1.529           +0.085 / 0.97
+#   blast_pct        1.20     1.38       1.289           +0.075 / 0.84  (weakest,
+#                                        31% imputed — watch this one closest)
+#
+# Direction (stable 7+ windows): contact quality UP (avg_ev, hard_hit, iso),
+# barrel metrics DOWN (pulled_brl, barrel). JUDGE THIS BY EDGE + Section G
+# correlations over ~15 graded days, NOT by Brier (which sits at flat-guess).
 DINGER_BASE_WEIGHTS = {
-    "pulled_brl_pct": 2.0,  # reliab 2.69 (highest, rising) + only + trend
-    "avg_ev": 2.0,          # still top-tier corr; reliab softened 1.85→1.45
-    "barrel_pct": 1.9,      # strong & stable (reliab 1.80)
-    "hard_hit": 1.5,        # contact quality, stable (1.58)
-    "iso": 1.4,             # corr strong but steep neg trend (-0.111), eased
-    "blast_pct": 1.2,       # elite contact, lower reliability (1.27)
+    "pulled_brl_pct": 1.758,  # was 2.00 — barrel metric eased down
+    "avg_ev": 2.058,          # was 2.00 — now the top evidence weight
+    "barrel_pct": 1.748,      # was 1.90 — eased down
+    "hard_hit": 1.618,        # was 1.50 — contact quality up
+    "iso": 1.529,             # was 1.40 — contact quality up
+    "blast_pct": 1.289,       # was 1.20 — up, but least-observed (31% imputed)
 }
 # Context multipliers: each maps a per-slate signal to a gentle multiplier
 # on the base. Kept modest (max ~±20% each) so context TILTS the power
@@ -8074,7 +8096,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.81 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.82 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
