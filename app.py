@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.80-weather-throttle"
+APP_VERSION = "2026.06.10-v45.81-picks-notes"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -8074,7 +8074,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.80 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.81 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -17705,6 +17705,18 @@ def _render_owner_picks():
                         placeholder="— no pick —",
                         key=f"_ownerpick_{_date_iso}_{_g}",
                     )
+                # v45.81 (user request): a free-text note published with the
+                # picks. Covers the cases the per-game dropdowns can't — a
+                # player not in any list, a "these three are basically a
+                # coin-flip" caveat, a stack idea, weather thoughts, etc.
+                st.markdown("**📝 Notes (optional, shown publicly)**")
+                _note_prev = str((_pub.get("_note") or "")) if isinstance(_pub, dict) else ""
+                _pick_note = st.text_area(
+                    "Notes", value=_note_prev, height=90,
+                    max_chars=600, label_visibility="collapsed",
+                    placeholder="e.g. Also love Soto tonight (not listed) · "
+                                "top 3 are a coin-flip · fading Coors overs",
+                    key=f"_ownerpick_note_{_date_iso}")
                 _submitted = st.form_submit_button(
                     "📣 Publish picks", use_container_width=False)
             _pc1, _pc2 = st.columns([1, 3])
@@ -17739,8 +17751,13 @@ def _render_owner_picks():
                             "env_boost": _num("env_boost"),
                             "ctx_lift_pp": _num("ctx_lift_pp"),
                         }
+                    # reserved key — the display loop skips keys starting "_"
+                    if _pick_note and _pick_note.strip():
+                        _payload["_note"] = _pick_note.strip()[:600]
                     if _save_owner_picks(_date_iso, _payload):
-                        st.success(f"✅ Published {len(_payload)} pick(s).")
+                        _npicks = len([k for k in _payload if not k.startswith("_")])
+                        st.success(f"✅ Published {_npicks} pick(s)"
+                                   + (" + note." if "_note" in _payload else "."))
                         st.session_state[_pub_key] = _payload
                         _pub = _payload
                     else:
@@ -17754,6 +17771,10 @@ def _render_owner_picks():
         st.markdown("<div id='sec-mypicks'></div>", unsafe_allow_html=True)
         _section_banner("🎯 My Picks Tonight",
                         "One favorite homer candidate per game &mdash; hand-picked")
+        # v45.81: show the owner's published note to everyone
+        _mp_note = str(_pub.get("_note") or "").strip() if isinstance(_pub, dict) else ""
+        if _mp_note:
+            st.info(f"📝 **Note from the owner:** {_mp_note}")
         # v45.70 (user: two different "tonight vs usual" values): read the
         # stats LIVE from combined_all instead of the values frozen at publish
         # time. A pick published at noon carried noon's numbers, which then
@@ -17765,6 +17786,8 @@ def _render_owner_picks():
         _stat_cols = ("opp_pitcher", "grade", "hr_game_pct", "hr_score",
                       "barrel_pct", "avg_ev", "iso", "env_boost", "ctx_lift_pp")
         for _g, _p in sorted(_pub.items()):
+            if _g.startswith("_") or not isinstance(_p, dict):
+                continue  # v45.81: reserved keys (e.g. _note) aren't games
             _nm = _p.get("player_name", "")
             _live = None
             try:
