@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.89-arsenal-honest-combined"
+APP_VERSION = "2026.06.10-v45.90-hitter-split-check"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -3692,7 +3692,43 @@ try:
         if "vs_rhp_barrel_pct" in hitter_hand_statcast.columns:
             _r_count = hitter_hand_statcast["vs_rhp_barrel_pct"].notna().sum()
         if _l_count > 0 and _r_count > 0:
-            _hand_statcast_status = f"✅ working ({_l_count} LHP, {_r_count} RHP)"
+            # v45.90: DON'T trust "both populated" as proof of a real split —
+            # that's exactly what fooled us on the pitcher arsenal (identical
+            # L/R data with L/R labels). Verify vs-LHP actually DIFFERS from
+            # vs-RHP for the same hitters. If they're identical, the split is
+            # fake (one side copied to the other) even though both look "full".
+            _split_is_real = None
+            try:
+                _pair_cols = [
+                    ("vs_lhp_barrel_pct", "vs_rhp_barrel_pct"),
+                    ("vs_lhp_xwoba", "vs_rhp_xwoba"),
+                    ("vs_lhp_hard_hit", "vs_rhp_hard_hit"),
+                ]
+                _have = [(l, r) for l, r in _pair_cols
+                         if l in hitter_hand_statcast.columns
+                         and r in hitter_hand_statcast.columns]
+                if _have:
+                    _diff_frac = 0.0
+                    for _lc, _rc in _have:
+                        _both = hitter_hand_statcast[[_lc, _rc]].dropna()
+                        if len(_both) > 0:
+                            _d = (_both[_lc] != _both[_rc]).mean()
+                            _diff_frac = max(_diff_frac, float(_d))
+                    _split_is_real = _diff_frac > 0.10  # >10% of hitters differ
+                    _pct = _diff_frac * 100.0
+            except Exception:
+                _split_is_real = None
+
+            if _split_is_real is True:
+                _hand_statcast_status = (
+                    f"✅ real split ({_l_count} LHP, {_r_count} RHP; "
+                    f"{_pct:.0f}% of hitters differ L vs R)")
+            elif _split_is_real is False:
+                _hand_statcast_status = (
+                    f"❌ BROKEN — vs-LHP and vs-RHP IDENTICAL "
+                    f"({_l_count}/{_r_count} rows but not a real split)")
+            else:
+                _hand_statcast_status = f"✅ working ({_l_count} LHP, {_r_count} RHP)"
         elif _l_count > 0 or _r_count > 0:
             _hand_statcast_status = f"⚠️ partial ({_l_count} LHP, {_r_count} RHP)"
         else:
@@ -8161,7 +8197,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.89 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.90 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
