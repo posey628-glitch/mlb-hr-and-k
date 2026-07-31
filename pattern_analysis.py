@@ -1073,6 +1073,12 @@ HR_CANDIDATE_FEATURES = [
     #   hr_score_raw = pre-slate-rescale composite (vs hr_score)
     #   recent_hr    = plain 15-day HR count (vs recent_hr_weighted_rate)
     "hr_score_raw",
+    # v45.93: hot/cold zone features from statsapi hotColdZones (tracked-only —
+    # the loop measures whether where-a-hitter-does-damage predicts HRs).
+    "hot_zone_slg",
+    "heart_zone_slg",
+    "zone_slg_spread",
+    "hot_zone_ev",
 ]
 
 # v45.33 STRUCTURAL FIX: the snapshot-merge projection whitelist is now
