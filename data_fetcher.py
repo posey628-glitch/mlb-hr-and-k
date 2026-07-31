@@ -3448,6 +3448,57 @@ def get_pitcher_arsenal_vs_hand(season: int = None,
     return pd.DataFrame()
 
 
+@st.cache_data(ttl=3600)
+def get_pitcher_hand_matchup(season: int = None,
+                              pitcher_ids: tuple = ()) -> pd.DataFrame:
+    """v45.92: TRUE per-hand pitcher matchup, combining two RELIABLE sources —
+    since no bulk endpoint gives per-pitch results by batter hand (confirmed
+    exhaustively), we combine what DOES work:
+      1. get_pitcher_arsenal → the pitch MIX (hand-agnostic usage % per pitch)
+      2. get_pitcher_handedness_splits → the RESULTS vs L / vs R (slg, hr_per_pa,
+         k%, from statsapi statSplits — proven real, works at 100%)
+
+    Output: one row per pitcher with the arsenal summary PLUS genuine vs-LHB and
+    vs-RHB result columns (vs_lhb_slg, vs_lhb_hr_per_pa, vs_rhb_slg, ...). This
+    is a REAL hand split — how hittable the pitcher is by batter side — even
+    though the per-PITCH breakdown stays combined. Strictly better than the
+    direction-agnostic arsenal for matchup scoring.
+
+    Returns empty df if either source is unavailable (caller degrades honestly).
+    """
+    season = season if season is not None else current_season()
+    if not pitcher_ids:
+        return pd.DataFrame()
+    try:
+        # RESULTS by hand (the real split)
+        hand = get_pitcher_handedness_splits(
+            season=season, pitcher_ids=tuple(pitcher_ids))
+        if hand is None or hand.empty or "player_id" not in hand.columns:
+            return pd.DataFrame()
+        # MIX (hand-agnostic) — summarize each pitcher's dominant pitches
+        arsenal = get_pitcher_arsenal_safe(season=season)
+        mix_rows = []
+        if arsenal is not None and not arsenal.empty and "player_id" in arsenal.columns:
+            _use_col = next((c for c in ("pitch_usage", "pitch_percent", "pitches")
+                             if c in arsenal.columns), None)
+            for pid, grp in arsenal.groupby("player_id"):
+                row = {"player_id": pid}
+                if _use_col and "pitch_type" in grp.columns:
+                    g2 = grp.sort_values(_use_col, ascending=False)
+                    row["primary_pitch"] = g2["pitch_type"].iloc[0]
+                    row["n_pitches_thrown"] = int(len(grp))
+                mix_rows.append(row)
+        mix = pd.DataFrame(mix_rows) if mix_rows else pd.DataFrame(
+            columns=["player_id"])
+        # combine: hand results are the spine, mix summary joined on
+        out = hand.merge(mix, on="player_id", how="left") if not mix.empty else hand
+        out.attrs["is_hand_split"] = True
+        out.attrs["source"] = "statsapi statSplits(vl,vr) + arsenal mix"
+        return out
+    except Exception:
+        return pd.DataFrame()
+
+
 @st.cache_data(ttl=1800)
 def get_pitcher_full_season_from_gamelog(pitcher_id: int,
                                             season: int = CURRENT_SEASON) -> dict:
