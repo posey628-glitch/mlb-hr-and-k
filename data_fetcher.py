@@ -3420,35 +3420,48 @@ def get_pitcher_arsenal_vs_hand(season: int = None,
     season = season if season is not None else current_season()  # v44.62
     if batter_hand not in ("L", "R"):
         return pd.DataFrame()
-    # Savant's pitch-arsenal-stats endpoint accepts &stand=L or &stand=R to
-    # filter by batter side. (This is the SAME endpoint as get_pitcher_arsenal,
-    # just with the stand param set.)
-    url = (
-        # v45.83 FIX: on the pitch-arsenal-stats endpoint, the BATTER side is
-        # the `hand` param — NOT `stand`. The old URL left hand= empty and set
-        # stand=, which this endpoint ignores, so BOTH "vs L" and "vs R" fetches
-        # returned the identical UNSPLIT season line (only the post-hoc label
-        # differed). Putting batter_hand into hand= actually filters the split.
-        "https://baseballsavant.mlb.com/leaderboard/pitch-arsenal-stats"
-        f"?type=pitcher&pitchType=&year={season}&team=&min=10"
-        f"&hand={batter_hand}&csv=true"
-    )
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=30)
-        r.raise_for_status()
-        df = pd.read_csv(io.StringIO(r.text))
-        if df.empty:
+    # v45.85: the single-param approach was guessed twice (stand=, then hand=)
+    # and BOTH served identical unsplit data to L and R — confirmed by the
+    # data-health duplicate check. Mirror the PROVEN hitter-statcast pattern:
+    # try several documented Savant split-parameter formats, accept the first
+    # that returns usable data. Which param Savant honors can't be known without
+    # hitting it live, so the app discovers it at runtime. The duplicate-check
+    # in the caller will confirm whether the chosen format actually splits.
+    base = "https://baseballsavant.mlb.com/leaderboard/pitch-arsenal-stats"
+    candidate_urls = [
+        # A) hand= as batter-side filter (documented behavior per code notes)
+        f"{base}?type=pitcher&pitchType=&year={season}&team=&min=10"
+        f"&hand={batter_hand}&csv=true",
+        # B) batter-side via 'stands' (Savant's newer param name on some endpoints)
+        f"{base}?type=pitcher&pitchType=&year={season}&team=&min=10"
+        f"&stands={batter_hand}&csv=true",
+        # C) explicit batter_stands
+        f"{base}?type=pitcher&pitchType=&year={season}&team=&min=10"
+        f"&batter_stands={batter_hand}&csv=true",
+        # D) custom leaderboard with a vs-hand split selection
+        f"https://baseballsavant.mlb.com/leaderboard/custom"
+        f"?year={season}&type=pitcher&filter=&min=10&stands={batter_hand}"
+        f"&selections=player_id,player_name,pitch_type,pitch_name,ba,slg,woba,"
+        f"hard_hit_percent,whiff_percent&csv=true",
+    ]
+    for url in candidate_urls:
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=30)
+            r.raise_for_status()
+            df = pd.read_csv(io.StringIO(r.text))
+            if df is None or df.empty or len(df.columns) < 3:
+                continue
+            if "last_name, first_name" in df.columns:
+                df["player_name"] = df["last_name, first_name"].apply(
+                    lambda s: " ".join(reversed([p.strip() for p in str(s).split(",")]))
+                    if isinstance(s, str) and "," in s else s
+                )
+            df["vs_batter_hand"] = batter_hand
+            df.attrs["arsenal_split_url"] = url
             return df
-        if "last_name, first_name" in df.columns:
-            df["player_name"] = df["last_name, first_name"].apply(
-                lambda s: " ".join(reversed([p.strip() for p in str(s).split(",")]))
-                if isinstance(s, str) and "," in s else s
-            )
-        # Tag rows so we know which hand split they're from when merging
-        df["vs_batter_hand"] = batter_hand
-        return df
-    except Exception:
-        return pd.DataFrame()
+        except Exception:
+            continue
+    return pd.DataFrame()
 
 
 @st.cache_data(ttl=1800)
