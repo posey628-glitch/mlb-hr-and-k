@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.91-hitter-split-fix"
+APP_VERSION = "2026.06.10-v45.92-health-warning-system"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -1795,6 +1795,84 @@ def safe_str(val) -> str:
         # Some non-numeric values throw on pd.isna — treat as string
         pass
     return str(val)
+
+
+def _verify_split(df, left_cols, right_cols, min_diff_frac: float = 0.10):
+    """v45.92: reusable split-realness check. The recurring bug this session
+    (pitcher arsenal AND hitter split both silently served identical L/R data)
+    shares one root cause: code trusted "both sides returned rows" as proof of
+    a real split. This helper PROVES it — returns (is_real, pct_differ):
+      True  -> >min_diff_frac of rows differ between L and R (real split)
+      False -> L and R identical (fake split — the bug)
+      None  -> can't tell (missing columns / no overlapping data)
+    """
+    try:
+        pairs = list(zip(left_cols, right_cols))
+        have = [(l, r) for l, r in pairs
+                if df is not None and not df.empty
+                and l in df.columns and r in df.columns]
+        if not have:
+            return (None, 0.0)
+        max_diff = 0.0
+        saw_data = False
+        for lc, rc in have:
+            both = df[[lc, rc]].dropna()
+            if len(both) > 0:
+                saw_data = True
+                max_diff = max(max_diff, float((both[lc] != both[rc]).mean()))
+        if not saw_data:
+            return (None, 0.0)
+        return (max_diff > min_diff_frac, max_diff * 100.0)
+    except Exception:
+        return (None, 0.0)
+
+
+# v45.92: central registry — classifies each source SCORING-critical (breakage
+# corrupts rankings, banner loudly) vs DISPLAY (cosmetic, degrade quietly).
+_HEALTH_SOURCE_TIERS = {
+    "_hitter_api_split_status_display":  ("Hitter L/R split",       "scoring"),
+    "_arsenal_split_status":             ("Pitcher arsenal split",  "scoring"),
+    "_hand_statcast_status_display":     ("Hitter statcast split",  "scoring"),
+    "_bat_tracking_status_display":      ("Bat tracking",           "scoring"),
+    "_weather_status_display":           ("Weather",                "display"),
+    "_zone_fetch_status_display":        ("Zone/plate-discipline",  "display"),
+}
+
+
+def _health_is_broken(status_str: str) -> bool:
+    """BROKEN if the status contains a failure keyword. Mirrors the Data Health
+    Summary icon logic so the banner and summary always agree."""
+    s = str(status_str).lower()
+    return ("broken" in s or "unavailable" in s or "error" in s
+            or "failed" in s or "dead" in s or "identical" in s
+            or "❌" in str(status_str))
+
+
+def _render_top_health_banner() -> None:
+    """v45.92: PROACTIVE top-of-app warning. If any SCORING-critical source is
+    broken, banner it immediately — not buried in Pipeline Health at the bottom.
+    The system that would have surfaced tonight's split bugs on day one."""
+    try:
+        broken_scoring, broken_display = [], []
+        for key, (label, tier) in _HEALTH_SOURCE_TIERS.items():
+            status = st.session_state.get(key)
+            if status is None:
+                continue
+            if _health_is_broken(status):
+                (broken_scoring if tier == "scoring"
+                 else broken_display).append((label, status))
+        if broken_scoring:
+            _lines = "\n".join(f"- **{lbl}:** {s}" for lbl, s in broken_scoring)
+            st.error(
+                f"🔴 **{len(broken_scoring)} scoring-critical data source(s) "
+                f"BROKEN** — rankings may be affected:\n\n{_lines}\n\n"
+                f"See Pipeline Health (bottom) for detail.")
+        elif broken_display:
+            st.warning(
+                f"⚠️ {len(broken_display)} display-only source(s) degraded "
+                f"(cosmetic — rankings unaffected). See Pipeline Health.")
+    except Exception:
+        pass
 
 
 def stash_diagnostic(category: str, message: str, level: str = "caption") -> None:
@@ -4331,6 +4409,11 @@ if use_sprint_speed:
 # ============================================================================
 # HEADER + DATA AVAILABILITY
 # ============================================================================
+
+# v45.92: proactive health banner — if any SCORING-critical data source is
+# broken, surface it HERE at the top, not buried in Pipeline Health. All the
+# status vars are set by now (data assembly complete above).
+_render_top_health_banner()
 
 st.markdown(
     f"""
@@ -8258,7 +8341,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.91 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.92 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
