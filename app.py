@@ -20692,9 +20692,36 @@ def _build_diag_copy_text(items, header):
         _lines.append(f"· {_prefix}{_m}")
     return "\n".join(_lines)
 
+
+def _data_health_summary_lines():
+    """v45.85: single source for the Data Health Summary, used by BOTH the
+    on-screen panel AND the copy text — so copy can never omit it again (the
+    user had to hand-copy it last time). Each line = a source the model depends
+    on; failure keywords are checked FIRST so 'BROKEN' never shows a ✅."""
+    _sources = [
+        ("Pitcher arsenal L/R split", st.session_state.get("_arsenal_split_status", "unknown")),
+        ("Hitter handedness statcast", st.session_state.get("_hand_statcast_status_display", "unknown")),
+        ("Zone/plate-discipline", st.session_state.get("_zone_fetch_status_display", "unknown")),
+        ("Bat tracking (blast/swing)", st.session_state.get("_bat_tracking_status_display", "unknown")),
+        ("Weather", st.session_state.get("_weather_status_display", "unknown")),
+    ]
+    _out = ["**📊 Data Health Summary** — sources the model depends on:"]
+    for _label, _stat in _sources:
+        _s = str(_stat); _sl = _s.lower()
+        _icon = ("❌" if ("broken" in _sl or "unavailable" in _sl or "error" in _sl
+                          or "❌" in _s or "failed" in _sl or "dead" in _sl)
+                 else "⚠️" if ("degraded" in _sl or "partial" in _sl or "fallback" in _sl
+                               or "imputed" in _sl or "⚠️" in _s or "unknown" in _sl)
+                 else "✅")
+        _out.append(f"- {_icon} **{_label}:** {_s}")
+    return _out
+
 if _diag.get("pipeline_health"):
-    st.session_state["_durable_pipe_copy"] = _build_diag_copy_text(
-        _diag.get("pipeline_health", []), "🔧 Pipeline Health")
+    # v45.85: prepend the Data Health Summary so the COPY TEXT carries it too.
+    st.session_state["_durable_pipe_copy"] = (
+        "\n".join(_data_health_summary_lines()) + "\n\n"
+        + _build_diag_copy_text(
+            _diag.get("pipeline_health", []), "🔧 Pipeline Health"))
 if _diag.get("slate_audit"):
     st.session_state["_durable_slate_copy"] = _build_diag_copy_text(
         _diag.get("slate_audit", []), "📊 Slate Audit")
@@ -20781,27 +20808,10 @@ if owner_mode:
             "column-coverage assertions, silent scoring errors. "
             "⚠️ icon = at least one issue this run."
         )
-        # v45.84: consolidated DATA HEALTH SUMMARY — every external fetch's
-        # status in one glance, so a silent degradation (like the pitcher
-        # arsenal serving identical L/R data for weeks) can't hide. Each line
-        # is a data source the model depends on; ✅ = verified working,
-        # ⚠️/❌ = degraded or using a fallback (which means less accurate).
-        _health_sources = [
-            ("Pitcher arsenal L/R split", st.session_state.get("_arsenal_split_status", "unknown")),
-            ("Hitter handedness statcast", st.session_state.get("_hand_statcast_status_display", "unknown")),
-            ("Zone/plate-discipline", st.session_state.get("_zone_fetch_status_display", "unknown")),
-            ("Bat tracking (blast/swing)", st.session_state.get("_bat_tracking_status_display", "unknown")),
-            ("Weather", st.session_state.get("_weather_status_display", "unknown")),
-        ]
-        _summary_lines = ["**📊 Data Health Summary** — sources the model depends on:"]
-        for _label, _stat in _health_sources:
-            _s = str(_stat)
-            _icon = ("✅" if "✅" in _s or "working" in _s or "real split" in _s
-                     else "❌" if ("❌" in _s or "BROKEN" in _s or "unavailable" in _s
-                                   or "error" in _s.lower())
-                     else "⚠️")
-            _summary_lines.append(f"- {_icon} **{_label}:** {_s}")
-        st.markdown("\n".join(_summary_lines))
+        # v45.85: use the shared helper so the on-screen panel and the copy
+        # text are always identical (they were computed separately before, and
+        # the copy text omitted this whole block).
+        st.markdown("\n".join(_data_health_summary_lines()))
         st.divider()
         _render_diag_list(
             _pipe_health,
