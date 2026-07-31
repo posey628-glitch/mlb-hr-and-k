@@ -3424,9 +3424,14 @@ def get_pitcher_arsenal_vs_hand(season: int = None,
     # filter by batter side. (This is the SAME endpoint as get_pitcher_arsenal,
     # just with the stand param set.)
     url = (
+        # v45.83 FIX: on the pitch-arsenal-stats endpoint, the BATTER side is
+        # the `hand` param — NOT `stand`. The old URL left hand= empty and set
+        # stand=, which this endpoint ignores, so BOTH "vs L" and "vs R" fetches
+        # returned the identical UNSPLIT season line (only the post-hoc label
+        # differed). Putting batter_hand into hand= actually filters the split.
         "https://baseballsavant.mlb.com/leaderboard/pitch-arsenal-stats"
-        f"?type=pitcher&pitchType=&year={season}&team=&min=10&hand="
-        f"&stand={batter_hand}&csv=true"
+        f"?type=pitcher&pitchType=&year={season}&team=&min=10"
+        f"&hand={batter_hand}&csv=true"
     )
     try:
         r = requests.get(url, headers=HEADERS, timeout=30)
