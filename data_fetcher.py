@@ -3429,20 +3429,19 @@ def get_pitcher_arsenal_vs_hand(season: int = None,
     # in the caller will confirm whether the chosen format actually splits.
     base = "https://baseballsavant.mlb.com/leaderboard/pitch-arsenal-stats"
     candidate_urls = [
-        # A) hand= as batter-side filter (documented behavior per code notes)
+        # A) pitch-arsenal-stats WITH the batter-side split. Savant's own UI
+        #    toggles this via `split=name` or `pa=` variants; the documented
+        #    working form for a per-batter-hand arsenal is the `&split=` param.
+        #    (The plain endpoint without split= returns combined — that was the
+        #    2298-row identical-L/R bug.)
+        f"{base}?type=pitcher&pitchType=&year={season}&team=&min=10"
+        f"&split={batter_hand}&csv=true",
+        # B) the vs-hand split as Savant labels it internally (vs_L / vs_R)
+        f"{base}?type=pitcher&pitchType=&year={season}&team=&min=10"
+        f"&split=vs_{batter_hand}&csv=true",
+        # C) hand= (kept as a fallback though known to return combined)
         f"{base}?type=pitcher&pitchType=&year={season}&team=&min=10"
         f"&hand={batter_hand}&csv=true",
-        # B) batter-side via 'stands' (Savant's newer param name on some endpoints)
-        f"{base}?type=pitcher&pitchType=&year={season}&team=&min=10"
-        f"&stands={batter_hand}&csv=true",
-        # C) explicit batter_stands
-        f"{base}?type=pitcher&pitchType=&year={season}&team=&min=10"
-        f"&batter_stands={batter_hand}&csv=true",
-        # D) custom leaderboard with a vs-hand split selection
-        f"https://baseballsavant.mlb.com/leaderboard/custom"
-        f"?year={season}&type=pitcher&filter=&min=10&stands={batter_hand}"
-        f"&selections=player_id,player_name,pitch_type,pitch_name,ba,slg,woba,"
-        f"hard_hit_percent,whiff_percent&csv=true",
     ]
     for url in candidate_urls:
         try:
@@ -3461,6 +3460,42 @@ def get_pitcher_arsenal_vs_hand(season: int = None,
             return df
         except Exception:
             continue
+
+    # FALLBACK: derive the per-pitch, per-batter-hand arsenal from the raw
+    # statcast_search CSV — which DOES honor batter side via `stands=`. Group by
+    # pitch_type, count usage, and average the result metrics. Heavier (a full
+    # season CSV) but it produces a genuine split when the leaderboard won't.
+    try:
+        search_url = (
+            "https://baseballsavant.mlb.com/statcast_search/csv"
+            f"?all=true&type=details&year={season}&player_type=pitcher"
+            f"&stands={batter_hand}&min_pitches=0&min_results=0&group_by=name-pitch"
+            f"&sort_col=pitches&player_event_sort=api_p_release_speed&csv=true"
+        )
+        r = requests.get(search_url, headers=HEADERS, timeout=45)
+        r.raise_for_status()
+        raw = pd.read_csv(io.StringIO(r.text))
+        if raw is not None and not raw.empty and "pitch_type" in raw.columns:
+            _pid = "pitcher" if "pitcher" in raw.columns else (
+                "player_id" if "player_id" in raw.columns else None)
+            if _pid:
+                g = (raw.groupby([_pid, "pitch_type"], as_index=False)
+                        .agg(pitches=("pitch_type", "size"),
+                             ba=("estimated_ba_using_speedangle", "mean")
+                             if "estimated_ba_using_speedangle" in raw.columns
+                             else ("pitch_type", "size"),
+                             woba=("estimated_woba_using_speedangle", "mean")
+                             if "estimated_woba_using_speedangle" in raw.columns
+                             else ("pitch_type", "size")))
+                g = g.rename(columns={_pid: "player_id"})
+                _tot = g.groupby("player_id")["pitches"].transform("sum")
+                g["pitch_usage"] = (100.0 * g["pitches"] / _tot).round(1)
+                g["vs_batter_hand"] = batter_hand
+                g.attrs["arsenal_split_url"] = search_url + " [derived]"
+                return g
+    except Exception:
+        pass
+
     return pd.DataFrame()
 
 
