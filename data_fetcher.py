@@ -3449,6 +3449,71 @@ def get_pitcher_arsenal_vs_hand(season: int = None,
 
 
 @st.cache_data(ttl=3600)
+def get_hitter_hot_zones(season: int = None, hitter_ids: tuple = ()) -> pd.DataFrame:
+    """v45.93: per-zone hitter performance from the RELIABLE statsapi
+    hotColdZones endpoint — replaces the broken Savant zone fetch AND adds new
+    signal. Returns derived per-hitter summary features:
+      hot_zone_slg   — best (max) zone SLG (where the hitter does most damage)
+      heart_zone_slg — avg SLG in middle zones (04,05,06 — meatball zones)
+      chase_zone_slg — avg SLG in shadow zones (11-14 — expanded/chase)
+      zone_slg_spread — max-min zone SLG (how zone-dependent the hitter is)
+      hot_zone_ev    — best zone exit velocity
+    JSON shape (verified w/ Judge 592450): stats[0].splits[] one per stat name;
+    each .zones[] has zone/temp/value. Reliable statsapi source. NOTE: derived
+    features start TRACKED-ONLY — not wired to scoring until the pattern loop
+    proves they predict HRs.
+    """
+    season = season if season is not None else current_season()
+    if not hitter_ids:
+        return pd.DataFrame()
+    HEART = {"04", "05", "06"}
+    CHASE = {"11", "12", "13", "14"}
+    rows = []
+    for hid in hitter_ids:
+        try:
+            url = (
+                f"https://statsapi.mlb.com/api/v1/people/{int(hid)}/stats"
+                f"?stats=hotColdZones&group=hitting&season={season}"
+            )
+            r = requests.get(url, headers=HEADERS, timeout=15)
+            if r.status_code != 200:
+                continue
+            data = r.json()
+            slg_by_zone = {}
+            ev_by_zone = {}
+            for stat_group in data.get("stats", []):
+                for split in stat_group.get("splits", []):
+                    stat = split.get("stat", {})
+                    name = stat.get("name", "")
+                    for z in stat.get("zones", []):
+                        zc = z.get("zone", "")
+                        try:
+                            val = float(z.get("value"))
+                        except (TypeError, ValueError):
+                            continue
+                        if name == "sluggingPercentage":
+                            slg_by_zone[zc] = val
+                        elif name == "exitVelocity":
+                            ev_by_zone[zc] = val
+            if not slg_by_zone:
+                continue
+            _all = list(slg_by_zone.values())
+            _heart = [slg_by_zone[z] for z in HEART if z in slg_by_zone]
+            _chase = [slg_by_zone[z] for z in CHASE if z in slg_by_zone]
+            rows.append({
+                "player_id": int(hid),
+                "hot_zone_slg": round(max(_all), 3) if _all else None,
+                "heart_zone_slg": round(sum(_heart) / len(_heart), 3) if _heart else None,
+                "chase_zone_slg": round(sum(_chase) / len(_chase), 3) if _chase else None,
+                "zone_slg_spread": round(max(_all) - min(_all), 3) if _all else None,
+                "hot_zone_ev": round(max(ev_by_zone.values()), 1) if ev_by_zone else None,
+            })
+        except Exception:
+            continue
+    return pd.DataFrame(rows) if rows else pd.DataFrame()
+
+
+@st.cache_data(ttl=3600)
 def get_pitcher_hand_matchup(season: int = None,
                               pitcher_ids: tuple = ()) -> pd.DataFrame:
     """v45.92: TRUE per-hand pitcher matchup, combining two RELIABLE sources —
