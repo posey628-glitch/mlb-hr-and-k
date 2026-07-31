@@ -3420,75 +3420,31 @@ def get_pitcher_arsenal_vs_hand(season: int = None,
     season = season if season is not None else current_season()  # v44.62
     if batter_hand not in ("L", "R"):
         return pd.DataFrame()
-    # v45.88: the leaderboard endpoint was PROVEN to ignore every batter-side
-    # param (2298 identical L/R rows). So we no longer lead with it. The raw
-    # statcast_search CSV honors `stands=L|R` (same source the WORKING hitter
-    # split uses), so derive the per-pitch arsenal from THAT first. Only if it
-    # fails do we fall back to the leaderboard (which will at least return
-    # combined data rather than nothing, and the caller's dup-check will flag
-    # it as not-a-real-split so we're never fooled again).
+    # v45.89: HONEST FALLBACK. After extensive testing, Savant's bulk
+    # pitch-arsenal-stats leaderboard does NOT expose a batter-side split — the
+    # split only exists on per-player pages (savant-player/{id}?stats=
+    # statcast-{r|l}-pitching), which have no bulk CSV. Rather than keep
+    # guessing parameters that return combined data mislabeled as a split, we
+    # now RETURN THE COMBINED ARSENAL EXPLICITLY and mark it as such. The
+    # combined arsenal is REAL, correct data (usage + per-pitch results across
+    # all batters) — it's simply not hand-specific. pitch_match_score can use
+    # it for a direction-agnostic matchup, and the data-health panel reports
+    # "combined (not hand-split)" so nobody mistakes it for a true platoon
+    # split. This is the "announce, don't hide" principle: a slightly-less-
+    # precise number, clearly labeled, beats a fake split or an empty frame.
     #
-    # PRIMARY: statcast_search grouped by pitcher + pitch_type, filtered to the
-    # batter side. Produces genuine splits because it filters pitch-level rows.
+    # TODO (queued): true per-hand arsenal via per-player pages (one fetch per
+    # slate pitcher, hand token in stats=). Verified by the dup-check.
     try:
-        search_url = (
-            "https://baseballsavant.mlb.com/statcast_search/csv"
-            f"?all=true&type=details&year={season}&player_type=pitcher"
-            f"&stands={batter_hand}&min_pitches=0&min_results=0&group_by=name-pitch"
-            f"&sort_col=pitches&player_event_sort=api_p_release_speed&csv=true"
-        )
-        r = requests.get(search_url, headers=HEADERS, timeout=45)
-        r.raise_for_status()
-        raw = pd.read_csv(io.StringIO(r.text))
-        if raw is not None and not raw.empty and "pitch_type" in raw.columns:
-            _pid = "pitcher" if "pitcher" in raw.columns else (
-                "player_id" if "player_id" in raw.columns else None)
-            if _pid:
-                _agg = {"pitches": ("pitch_type", "size")}
-                if "estimated_ba_using_speedangle" in raw.columns:
-                    _agg["ba"] = ("estimated_ba_using_speedangle", "mean")
-                if "estimated_woba_using_speedangle" in raw.columns:
-                    _agg["woba"] = ("estimated_woba_using_speedangle", "mean")
-                if "estimated_slg_using_speedangle" in raw.columns:
-                    _agg["slg"] = ("estimated_slg_using_speedangle", "mean")
-                g = raw.groupby([_pid, "pitch_type"], as_index=False).agg(**_agg)
-                g = g.rename(columns={_pid: "player_id"})
-                _tot = g.groupby("player_id")["pitches"].transform("sum")
-                g["pitch_usage"] = (100.0 * g["pitches"] / _tot).round(1)
-                g["vs_batter_hand"] = batter_hand
-                g.attrs["arsenal_split_url"] = "statcast_search[stands] (derived)"
-                if len(g) >= 5:          # sanity: a real league arsenal is big
-                    return g
+        combined = get_pitcher_arsenal(season=season)
+        if combined is not None and not combined.empty:
+            df = combined.copy()
+            df["vs_batter_hand"] = batter_hand
+            df.attrs["arsenal_split_url"] = "combined-arsenal (NOT hand-split)"
+            df.attrs["is_hand_split"] = False
+            return df
     except Exception:
         pass
-
-    # LAST RESORT: the leaderboard. Known to return COMBINED data (the dup-check
-    # will label it BROKEN), but better than an empty frame — pitch_match_score
-    # degrades gracefully rather than vanishing.
-    base = "https://baseballsavant.mlb.com/leaderboard/pitch-arsenal-stats"
-    for url in (
-        f"{base}?type=pitcher&pitchType=&year={season}&team=&min=10"
-        f"&split={batter_hand}&csv=true",
-        f"{base}?type=pitcher&pitchType=&year={season}&team=&min=10"
-        f"&hand={batter_hand}&csv=true",
-    ):
-        try:
-            r = requests.get(url, headers=HEADERS, timeout=30)
-            r.raise_for_status()
-            df = pd.read_csv(io.StringIO(r.text))
-            if df is None or df.empty or len(df.columns) < 3:
-                continue
-            if "last_name, first_name" in df.columns:
-                df["player_name"] = df["last_name, first_name"].apply(
-                    lambda s: " ".join(reversed([p.strip() for p in str(s).split(",")]))
-                    if isinstance(s, str) and "," in s else s
-                )
-            df["vs_batter_hand"] = batter_hand
-            df.attrs["arsenal_split_url"] = url + " [leaderboard-combined]"
-            return df
-        except Exception:
-            continue
-
     return pd.DataFrame()
 
 
