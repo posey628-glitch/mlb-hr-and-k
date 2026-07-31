@@ -3854,6 +3854,14 @@ try:
                      if c in (pitcher_arsenal_vs_L.columns if not pitcher_arsenal_vs_L.empty else [])]
         if pitcher_arsenal_vs_L.empty or pitcher_arsenal_vs_R.empty:
             _arsenal_split_status = "unavailable"
+        elif pitcher_arsenal_vs_L.attrs.get("is_hand_split") is False:
+            # v45.89: the fetch is deliberately returning the COMBINED arsenal,
+            # explicitly labeled. This is real, usable data — just not hand-
+            # split. Report it as an informational ⚠️, NOT a ❌ bug, so the
+            # panel is honest: the matchup works, it's just direction-agnostic.
+            _arsenal_split_status = (
+                "⚠️ combined arsenal (not hand-split) — real per-pitch data, "
+                "but direction-agnostic; true L/R split pending per-player fetch")
         elif len(_cmp_cols) >= 3:
             _l = pitcher_arsenal_vs_L[_cmp_cols].sort_values(_cmp_cols[:2]).reset_index(drop=True)
             _r = pitcher_arsenal_vs_R[_cmp_cols].sort_values(_cmp_cols[:2]).reset_index(drop=True)
