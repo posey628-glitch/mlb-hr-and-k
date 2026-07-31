@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.90-hitter-split-check"
+APP_VERSION = "2026.06.10-v45.91-hitter-split-fix"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -3433,7 +3433,9 @@ if slate.empty:
 # games and their lineup data.
 hide_started = st.sidebar.checkbox(
     "Hide games already started/final (bet-oriented view)",
-    value=True,
+    value=False,  # v45.91: default UNCHECKED — keep started games visible so
+                  # snapshots capture the full slate. User ticks it only when
+                  # they explicitly want the bet-oriented (started-removed) view.
     help=(
         "BET MODE (checked): Removes games whose first pitch was before 'now'. "
         "Use when you're picking plays for tonight.\n\n"
@@ -3752,6 +3754,65 @@ if not hitter_hand_statcast.empty and "player_id" in hitter_stats.columns:
                  if c.endswith("_hs") and c[:-3] in hitter_stats.columns]
     if _hs_dupes:
         hitter_stats = hitter_stats.drop(columns=_hs_dupes)
+
+# v45.91: THE REAL HITTER SPLIT. The Savant statcast split above returns
+# IDENTICAL vs-LHP/vs-RHP data (confirmed broken by the dup-check) — it's the
+# same unreliable-Savant-split problem the pitcher arsenal had. But a WORKING
+# per-hand hitter split already exists via the MLB Stats API
+# (get_hitter_handedness_splits: statSplits&sitCodes=vl,vr&group=hitting),
+# proven to return genuinely different L/R data (Judge vs L .246/.421/.526 vs
+# R .248/.355/.535). It gives TRADITIONAL stats (avg/obp/slg/iso/hr_per_pa)
+# rather than statcast (barrel/xwOBA), but real traditional splits beat fake-
+# identical statcast every time. Merge these as the source of truth for the
+# hand split; apply_handedness_overrides already blends vs_lhp_iso etc.
+_hitter_api_split_status = "not attempted"
+try:
+    from data_fetcher import get_hitter_handedness_splits
+    _slate_hitter_ids = tuple(
+        int(x) for x in hitter_stats["player_id"].dropna().unique()
+    ) if "player_id" in hitter_stats.columns else ()
+    hitter_hand_api = (
+        get_hitter_handedness_splits(hitter_ids=_slate_hitter_ids)
+        if _slate_hitter_ids else pd.DataFrame()
+    )
+    if not hitter_hand_api.empty and "player_id" in hitter_hand_api.columns:
+        # verify THIS source is a real split too (defense in depth)
+        _api_real = None
+        for _lc, _rc in (("vs_lhp_slg", "vs_rhp_slg"),
+                         ("vs_lhp_iso", "vs_rhp_iso"),
+                         ("vs_lhp_avg", "vs_rhp_avg")):
+            if _lc in hitter_hand_api.columns and _rc in hitter_hand_api.columns:
+                _b = hitter_hand_api[[_lc, _rc]].dropna()
+                if len(_b) > 0:
+                    _api_real = float((_b[_lc] != _b[_rc]).mean()) > 0.10
+                    break
+        # merge the API split columns, overwriting the broken statcast ones
+        _api_cols = [c for c in hitter_hand_api.columns
+                     if c.startswith(("vs_lhp_", "vs_rhp_"))]
+        _overwrite = [c for c in _api_cols if c in hitter_stats.columns]
+        if _overwrite:
+            hitter_stats = hitter_stats.drop(columns=_overwrite)
+        hitter_stats = hitter_stats.merge(
+            hitter_hand_api[["player_id"] + _api_cols],
+            on="player_id", how="left")
+        _n_api = hitter_hand_api["player_id"].nunique()
+        if _api_real is True:
+            _hitter_api_split_status = (
+                f"✅ real split via MLB Stats API ({_n_api} hitters, "
+                f"traditional stats: avg/obp/slg/iso by hand)")
+            # this is now the authoritative split — reflect it in the summary
+            _hand_statcast_status = _hitter_api_split_status
+        elif _api_real is False:
+            _hitter_api_split_status = (
+                f"❌ MLB API split also identical ({_n_api} hitters) — investigate")
+        else:
+            _hitter_api_split_status = (
+                f"⚠️ MLB API split merged ({_n_api} hitters) — realness unverified")
+    else:
+        _hitter_api_split_status = "unavailable (no API split returned)"
+except Exception as _has_err:
+    _hitter_api_split_status = f"error: {type(_has_err).__name__}"
+st.session_state["_hitter_api_split_status_display"] = _hitter_api_split_status
 
 # v43.17 (user-requested): Bat tracking / Blast % — OPT-IN.
 # Fetches Statcast bat tracking only if the sidebar toggle is enabled.
@@ -8197,7 +8258,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.90 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.91 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -20757,6 +20818,7 @@ def _data_health_summary_lines():
     _sources = [
         ("Pitcher arsenal L/R split", st.session_state.get("_arsenal_split_status", "unknown")),
         ("Hitter handedness statcast", st.session_state.get("_hand_statcast_status_display", "unknown")),
+        ("Hitter split (MLB API)", st.session_state.get("_hitter_api_split_status_display", "unknown")),
         ("Zone/plate-discipline", st.session_state.get("_zone_fetch_status_display", "unknown")),
         ("Bat tracking (blast/swing)", st.session_state.get("_bat_tracking_status_display", "unknown")),
         ("Weather", st.session_state.get("_weather_status_display", "unknown")),
