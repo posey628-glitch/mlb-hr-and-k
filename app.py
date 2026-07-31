@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.93-hotcold-zones"
+APP_VERSION = "2026.06.10-v45.94-supersession-aware"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -1832,7 +1832,7 @@ def _verify_split(df, left_cols, right_cols, min_diff_frac: float = 0.10):
 _HEALTH_SOURCE_TIERS = {
     "_hitter_api_split_status_display":  ("Hitter L/R split",       "scoring"),
     "_arsenal_split_status":             ("Pitcher arsenal split",  "scoring"),
-    "_hand_statcast_status_display":     ("Hitter statcast split",  "scoring"),
+    "_hand_statcast_status_display":     ("Hitter statcast split (legacy)", "display"),
     "_bat_tracking_status_display":      ("Bat tracking",           "scoring"),
     "_weather_status_display":           ("Weather",                "display"),
     "_zone_fetch_status_display":        ("Zone/plate-discipline",  "display"),
@@ -1852,16 +1852,35 @@ def _health_is_broken(status_str: str) -> bool:
 def _render_top_health_banner() -> None:
     """v45.92: PROACTIVE top-of-app warning. If any SCORING-critical source is
     broken, banner it immediately — not buried in Pipeline Health at the bottom.
-    The system that would have surfaced tonight's split bugs on day one."""
+    The system that would have surfaced tonight's split bugs on day one.
+
+    v45.94: SUPERSESSION-aware. The old Savant hitter statcast split is broken,
+    but the MLB API split (get_hitter_handedness_splits) overwrites its columns
+    and IS the real scoring input now. So when the API split is healthy, the
+    broken statcast fetch is redundant — don't red-alarm rankings over a source
+    that's been superseded. Only alarm if the REPLACEMENT is also broken."""
     try:
-        broken_scoring, broken_display = [], []
+        # supersession map: {broken_source_key: replacement_key} — if the
+        # replacement is healthy, the broken original is not scoring-critical.
+        _superseded_by = {
+            "_hand_statcast_status_display": "_hitter_api_split_status_display",
+        }
+        broken_scoring, broken_display, superseded = [], [], []
         for key, (label, tier) in _HEALTH_SOURCE_TIERS.items():
             status = st.session_state.get(key)
             if status is None:
                 continue
-            if _health_is_broken(status):
-                (broken_scoring if tier == "scoring"
-                 else broken_display).append((label, status))
+            if not _health_is_broken(status):
+                continue
+            # is this broken source superseded by a healthy replacement?
+            _repl = _superseded_by.get(key)
+            if _repl is not None:
+                _repl_status = st.session_state.get(_repl)
+                if _repl_status is not None and not _health_is_broken(_repl_status):
+                    superseded.append((label, _repl))
+                    continue  # replacement healthy → not an alarm
+            (broken_scoring if tier == "scoring"
+             else broken_display).append((label, status))
         if broken_scoring:
             _lines = "\n".join(f"- **{lbl}:** {s}" for lbl, s in broken_scoring)
             st.error(
@@ -8371,7 +8390,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.93 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.94 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
