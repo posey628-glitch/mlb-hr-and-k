@@ -3858,7 +3858,19 @@ try:
             _l = pitcher_arsenal_vs_L[_cmp_cols].sort_values(_cmp_cols[:2]).reset_index(drop=True)
             _r = pitcher_arsenal_vs_R[_cmp_cols].sort_values(_cmp_cols[:2]).reset_index(drop=True)
             if _l.equals(_r):
-                _arsenal_split_status = "BROKEN — L and R identical (not a real split)"
+                # v45.86: say WHY it's broken — which URL Savant honored, and
+                # whether both hands hit the SAME url (= param ignored) or
+                # different urls that still returned identical data (= endpoint
+                # genuinely doesn't split). This is the difference between "try
+                # another param" and "this endpoint can't do it, change source".
+                _url_l = str(pitcher_arsenal_vs_L.attrs.get("arsenal_split_url", "?"))
+                _url_r = str(pitcher_arsenal_vs_R.attrs.get("arsenal_split_url", "?"))
+                _same_url = "&hand=" in _url_l and _url_l.replace("hand=L", "hand=X") == _url_r.replace("hand=R", "hand=X")
+                _which = _url_l.split("?")[0].split("/")[-1] if "?" in _url_l else "?"
+                _arsenal_split_status = (
+                    f"BROKEN — L and R identical (not a real split) "
+                    f"[endpoint={_which}, {len(_l)} pitch-rows; the split param "
+                    f"is being ignored by Savant — needs a different data source]")
             else:
                 # how many rows actually differ? a real split differs on most
                 _merged = _l.merge(_r, on=_cmp_cols[:2], suffixes=("_l", "_r"))
