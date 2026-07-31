@@ -3420,51 +3420,16 @@ def get_pitcher_arsenal_vs_hand(season: int = None,
     season = season if season is not None else current_season()  # v44.62
     if batter_hand not in ("L", "R"):
         return pd.DataFrame()
-    # v45.85: the single-param approach was guessed twice (stand=, then hand=)
-    # and BOTH served identical unsplit data to L and R — confirmed by the
-    # data-health duplicate check. Mirror the PROVEN hitter-statcast pattern:
-    # try several documented Savant split-parameter formats, accept the first
-    # that returns usable data. Which param Savant honors can't be known without
-    # hitting it live, so the app discovers it at runtime. The duplicate-check
-    # in the caller will confirm whether the chosen format actually splits.
-    base = "https://baseballsavant.mlb.com/leaderboard/pitch-arsenal-stats"
-    candidate_urls = [
-        # A) pitch-arsenal-stats WITH the batter-side split. Savant's own UI
-        #    toggles this via `split=name` or `pa=` variants; the documented
-        #    working form for a per-batter-hand arsenal is the `&split=` param.
-        #    (The plain endpoint without split= returns combined — that was the
-        #    2298-row identical-L/R bug.)
-        f"{base}?type=pitcher&pitchType=&year={season}&team=&min=10"
-        f"&split={batter_hand}&csv=true",
-        # B) the vs-hand split as Savant labels it internally (vs_L / vs_R)
-        f"{base}?type=pitcher&pitchType=&year={season}&team=&min=10"
-        f"&split=vs_{batter_hand}&csv=true",
-        # C) hand= (kept as a fallback though known to return combined)
-        f"{base}?type=pitcher&pitchType=&year={season}&team=&min=10"
-        f"&hand={batter_hand}&csv=true",
-    ]
-    for url in candidate_urls:
-        try:
-            r = requests.get(url, headers=HEADERS, timeout=30)
-            r.raise_for_status()
-            df = pd.read_csv(io.StringIO(r.text))
-            if df is None or df.empty or len(df.columns) < 3:
-                continue
-            if "last_name, first_name" in df.columns:
-                df["player_name"] = df["last_name, first_name"].apply(
-                    lambda s: " ".join(reversed([p.strip() for p in str(s).split(",")]))
-                    if isinstance(s, str) and "," in s else s
-                )
-            df["vs_batter_hand"] = batter_hand
-            df.attrs["arsenal_split_url"] = url
-            return df
-        except Exception:
-            continue
-
-    # FALLBACK: derive the per-pitch, per-batter-hand arsenal from the raw
-    # statcast_search CSV — which DOES honor batter side via `stands=`. Group by
-    # pitch_type, count usage, and average the result metrics. Heavier (a full
-    # season CSV) but it produces a genuine split when the leaderboard won't.
+    # v45.88: the leaderboard endpoint was PROVEN to ignore every batter-side
+    # param (2298 identical L/R rows). So we no longer lead with it. The raw
+    # statcast_search CSV honors `stands=L|R` (same source the WORKING hitter
+    # split uses), so derive the per-pitch arsenal from THAT first. Only if it
+    # fails do we fall back to the leaderboard (which will at least return
+    # combined data rather than nothing, and the caller's dup-check will flag
+    # it as not-a-real-split so we're never fooled again).
+    #
+    # PRIMARY: statcast_search grouped by pitcher + pitch_type, filtered to the
+    # batter side. Produces genuine splits because it filters pitch-level rows.
     try:
         search_url = (
             "https://baseballsavant.mlb.com/statcast_search/csv"
@@ -3479,22 +3444,50 @@ def get_pitcher_arsenal_vs_hand(season: int = None,
             _pid = "pitcher" if "pitcher" in raw.columns else (
                 "player_id" if "player_id" in raw.columns else None)
             if _pid:
-                g = (raw.groupby([_pid, "pitch_type"], as_index=False)
-                        .agg(pitches=("pitch_type", "size"),
-                             ba=("estimated_ba_using_speedangle", "mean")
-                             if "estimated_ba_using_speedangle" in raw.columns
-                             else ("pitch_type", "size"),
-                             woba=("estimated_woba_using_speedangle", "mean")
-                             if "estimated_woba_using_speedangle" in raw.columns
-                             else ("pitch_type", "size")))
+                _agg = {"pitches": ("pitch_type", "size")}
+                if "estimated_ba_using_speedangle" in raw.columns:
+                    _agg["ba"] = ("estimated_ba_using_speedangle", "mean")
+                if "estimated_woba_using_speedangle" in raw.columns:
+                    _agg["woba"] = ("estimated_woba_using_speedangle", "mean")
+                if "estimated_slg_using_speedangle" in raw.columns:
+                    _agg["slg"] = ("estimated_slg_using_speedangle", "mean")
+                g = raw.groupby([_pid, "pitch_type"], as_index=False).agg(**_agg)
                 g = g.rename(columns={_pid: "player_id"})
                 _tot = g.groupby("player_id")["pitches"].transform("sum")
                 g["pitch_usage"] = (100.0 * g["pitches"] / _tot).round(1)
                 g["vs_batter_hand"] = batter_hand
-                g.attrs["arsenal_split_url"] = search_url + " [derived]"
-                return g
+                g.attrs["arsenal_split_url"] = "statcast_search[stands] (derived)"
+                if len(g) >= 5:          # sanity: a real league arsenal is big
+                    return g
     except Exception:
         pass
+
+    # LAST RESORT: the leaderboard. Known to return COMBINED data (the dup-check
+    # will label it BROKEN), but better than an empty frame — pitch_match_score
+    # degrades gracefully rather than vanishing.
+    base = "https://baseballsavant.mlb.com/leaderboard/pitch-arsenal-stats"
+    for url in (
+        f"{base}?type=pitcher&pitchType=&year={season}&team=&min=10"
+        f"&split={batter_hand}&csv=true",
+        f"{base}?type=pitcher&pitchType=&year={season}&team=&min=10"
+        f"&hand={batter_hand}&csv=true",
+    ):
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=30)
+            r.raise_for_status()
+            df = pd.read_csv(io.StringIO(r.text))
+            if df is None or df.empty or len(df.columns) < 3:
+                continue
+            if "last_name, first_name" in df.columns:
+                df["player_name"] = df["last_name, first_name"].apply(
+                    lambda s: " ".join(reversed([p.strip() for p in str(s).split(",")]))
+                    if isinstance(s, str) and "," in s else s
+                )
+            df["vs_batter_hand"] = batter_hand
+            df.attrs["arsenal_split_url"] = url + " [leaderboard-combined]"
+            return df
+        except Exception:
+            continue
 
     return pd.DataFrame()
 
