@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.92-health-warning-system"
+APP_VERSION = "2026.06.10-v45.93-hotcold-zones"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -1836,6 +1836,7 @@ _HEALTH_SOURCE_TIERS = {
     "_bat_tracking_status_display":      ("Bat tracking",           "scoring"),
     "_weather_status_display":           ("Weather",                "display"),
     "_zone_fetch_status_display":        ("Zone/plate-discipline",  "display"),
+    "_hot_zone_status_display":          ("Hot/cold zones (statsapi)", "display"),
 }
 
 
@@ -3891,6 +3892,35 @@ try:
 except Exception as _has_err:
     _hitter_api_split_status = f"error: {type(_has_err).__name__}"
 st.session_state["_hitter_api_split_status_display"] = _hitter_api_split_status
+
+# v45.93: HOT/COLD ZONES from the reliable statsapi hotColdZones endpoint —
+# per-zone SLG/EV → derived hot_zone_slg / heart_zone_slg / chase_zone_slg /
+# zone_slg_spread / hot_zone_ev. TRACKED-ONLY: merged so the pattern loop can
+# measure whether these predict HRs, but NOT wired into any score until proven.
+# This also gives us a RELIABLE zone source (the old Savant zone fetch that
+# fed the display was broken/unavailable).
+_hot_zone_status = "not attempted"
+try:
+    from data_fetcher import get_hitter_hot_zones
+    _hz = (get_hitter_hot_zones(hitter_ids=_slate_hitter_ids)
+           if _slate_hitter_ids else pd.DataFrame())
+    if not _hz.empty and "player_id" in _hz.columns:
+        _hz_cols = [c for c in _hz.columns if c != "player_id"]
+        _hz_overwrite = [c for c in _hz_cols if c in hitter_stats.columns]
+        if _hz_overwrite:
+            hitter_stats = hitter_stats.drop(columns=_hz_overwrite)
+        hitter_stats = hitter_stats.merge(
+            _hz[["player_id"] + _hz_cols], on="player_id", how="left")
+        _n_hz = _hz["player_id"].nunique()
+        _hz_real = hitter_stats["hot_zone_slg"].notna().sum() if "hot_zone_slg" in hitter_stats.columns else 0
+        _hot_zone_status = (
+            f"✅ working ({_n_hz} hitters, tracked-only: hot/heart/chase zone "
+            f"SLG + zone EV) — reliable statsapi hotColdZones")
+    else:
+        _hot_zone_status = "unavailable (no zone data returned)"
+except Exception as _hz_err:
+    _hot_zone_status = f"error: {type(_hz_err).__name__}"
+st.session_state["_hot_zone_status_display"] = _hot_zone_status
 
 # v43.17 (user-requested): Bat tracking / Blast % — OPT-IN.
 # Fetches Statcast bat tracking only if the sidebar toggle is enabled.
@@ -8341,7 +8371,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.92 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.93 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -20903,6 +20933,7 @@ def _data_health_summary_lines():
         ("Hitter handedness statcast", st.session_state.get("_hand_statcast_status_display", "unknown")),
         ("Hitter split (MLB API)", st.session_state.get("_hitter_api_split_status_display", "unknown")),
         ("Zone/plate-discipline", st.session_state.get("_zone_fetch_status_display", "unknown")),
+        ("Hot/cold zones (statsapi)", st.session_state.get("_hot_zone_status_display", "unknown")),
         ("Bat tracking (blast/swing)", st.session_state.get("_bat_tracking_status_display", "unknown")),
         ("Weather", st.session_state.get("_weather_status_display", "unknown")),
     ]
