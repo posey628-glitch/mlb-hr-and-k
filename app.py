@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.83-arsenal-handsplit"
+APP_VERSION = "2026.06.10-v45.84-data-health"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -3640,6 +3640,7 @@ except Exception as _zone_err:
     pitcher_zone_tiers = pd.DataFrame()
     hitter_zone_tiers = pd.DataFrame()
     _zone_fetch_status = f"❌ error: {type(_zone_err).__name__}"
+st.session_state["_zone_fetch_status_display"] = _zone_fetch_status
 
 # Merge zone tier data into hitter_stats and pitcher_stats if available
 if not pitcher_zone_tiers.empty and "player_id" in pitcher_stats.columns:
@@ -3699,6 +3700,7 @@ try:
 except Exception as _hsc_err:
     hitter_hand_statcast = pd.DataFrame()
     _hand_statcast_status = f"❌ error: {type(_hsc_err).__name__}"
+st.session_state["_hand_statcast_status_display"] = _hand_statcast_status
 
 # Merge into hitter_stats so the vs_lhp_* / vs_rhp_* columns are available
 # to apply_handedness_overrides per-game.
@@ -3805,6 +3807,7 @@ if use_bat_tracking:
                 pass
     except Exception as _bt_err:
         _bat_tracking_status = f"❌ error: {type(_bt_err).__name__}"
+st.session_state["_bat_tracking_status_display"] = _bat_tracking_status
 
 # v43.56: stash bat tracking outcome to Pipeline Health so the user can see
 # fetch result alongside the ALWAYS_EXPECTED_COLUMNS warning. Without this,
@@ -3839,9 +3842,50 @@ try:
     from data_fetcher import get_pitcher_arsenal_vs_hand
     pitcher_arsenal_vs_L = get_pitcher_arsenal_vs_hand(batter_hand="L") if not slate.empty else pd.DataFrame()
     pitcher_arsenal_vs_R = get_pitcher_arsenal_vs_hand(batter_hand="R") if not slate.empty else pd.DataFrame()
+    # v45.84 (user caught this): VERIFY the hand split is real. If the L and R
+    # frames come back byte-identical, the endpoint isn't actually splitting
+    # (a URL-param bug served the same unsplit season line to both hands for a
+    # long time before anyone noticed). Rather than silently present duplicate
+    # numbers AS IF they were splits, detect it and record the health status so
+    # the UI can say "combined data, not a real split".
+    _arsenal_split_status = "unknown"
+    try:
+        _cmp_cols = [c for c in ("player_id", "pitch_type", "ba", "slg", "woba")
+                     if c in (pitcher_arsenal_vs_L.columns if not pitcher_arsenal_vs_L.empty else [])]
+        if pitcher_arsenal_vs_L.empty or pitcher_arsenal_vs_R.empty:
+            _arsenal_split_status = "unavailable"
+        elif len(_cmp_cols) >= 3:
+            _l = pitcher_arsenal_vs_L[_cmp_cols].sort_values(_cmp_cols[:2]).reset_index(drop=True)
+            _r = pitcher_arsenal_vs_R[_cmp_cols].sort_values(_cmp_cols[:2]).reset_index(drop=True)
+            if _l.equals(_r):
+                _arsenal_split_status = "BROKEN — L and R identical (not a real split)"
+            else:
+                # how many rows actually differ? a real split differs on most
+                _merged = _l.merge(_r, on=_cmp_cols[:2], suffixes=("_l", "_r"))
+                _val = [c for c in ("ba", "slg", "woba") if f"{c}_l" in _merged.columns]
+                if _val:
+                    _diff = (_merged[[f"{c}_l" for c in _val]].values
+                             != _merged[[f"{c}_r" for c in _val]].values).any(axis=1)
+                    _pct = 100.0 * _diff.mean() if len(_diff) else 0.0
+                    _arsenal_split_status = (f"✅ real split ({_pct:.0f}% of pitch-rows "
+                                             f"differ L vs R)")
+                else:
+                    _arsenal_split_status = "✅ frames differ"
+    except Exception as _asc:
+        _arsenal_split_status = f"check failed ({type(_asc).__name__})"
+    st.session_state["_arsenal_split_status"] = _arsenal_split_status
+    if "BROKEN" in _arsenal_split_status or "unavailable" in _arsenal_split_status:
+        stash_diagnostic("pipeline_health",
+                         f"**Pitcher arsenal L/R split:** `{_arsenal_split_status}` "
+                         f"— per-pitch platoon matchup may be degraded.",
+                         level="warning")
+    else:
+        stash_diagnostic("pipeline_health",
+                         f"**Pitcher arsenal L/R split:** `{_arsenal_split_status}`")
 except Exception:
     pitcher_arsenal_vs_L = pd.DataFrame()
     pitcher_arsenal_vs_R = pd.DataFrame()
+    st.session_state["_arsenal_split_status"] = "unavailable (fetch error)"
 
 # Pitcher handedness splits (vs LHB / vs RHB)
 # Use MLB Stats API statSplits which IS documented and works on Streamlit Cloud.
@@ -8076,6 +8120,7 @@ elif _wbr_n_s > 0 and _wbr_n_l > 0:
 elif _wbr_n_l == 0:
     _wx_status_emoji = "⚪"
     _wx_status_label = "No games on slate (no batch attempted)"
+st.session_state["_weather_status_display"] = f"{_wx_status_emoji} {_wx_status_label}"
 
 # Always show a small caption confirming weather status + version. Lets user
 # see at a glance: (1) which version is loaded, (2) whether weather is on.
@@ -8096,7 +8141,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.83 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.84 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -20736,6 +20781,28 @@ if owner_mode:
             "column-coverage assertions, silent scoring errors. "
             "⚠️ icon = at least one issue this run."
         )
+        # v45.84: consolidated DATA HEALTH SUMMARY — every external fetch's
+        # status in one glance, so a silent degradation (like the pitcher
+        # arsenal serving identical L/R data for weeks) can't hide. Each line
+        # is a data source the model depends on; ✅ = verified working,
+        # ⚠️/❌ = degraded or using a fallback (which means less accurate).
+        _health_sources = [
+            ("Pitcher arsenal L/R split", st.session_state.get("_arsenal_split_status", "unknown")),
+            ("Hitter handedness statcast", st.session_state.get("_hand_statcast_status_display", "unknown")),
+            ("Zone/plate-discipline", st.session_state.get("_zone_fetch_status_display", "unknown")),
+            ("Bat tracking (blast/swing)", st.session_state.get("_bat_tracking_status_display", "unknown")),
+            ("Weather", st.session_state.get("_weather_status_display", "unknown")),
+        ]
+        _summary_lines = ["**📊 Data Health Summary** — sources the model depends on:"]
+        for _label, _stat in _health_sources:
+            _s = str(_stat)
+            _icon = ("✅" if "✅" in _s or "working" in _s or "real split" in _s
+                     else "❌" if ("❌" in _s or "BROKEN" in _s or "unavailable" in _s
+                                   or "error" in _s.lower())
+                     else "⚠️")
+            _summary_lines.append(f"- {_icon} **{_label}:** {_s}")
+        st.markdown("\n".join(_summary_lines))
+        st.divider()
         _render_diag_list(
             _pipe_health,
             "No pipeline-health data yet — run a slate to populate."
