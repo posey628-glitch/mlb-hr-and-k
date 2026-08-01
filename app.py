@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v46.02-wrcplus-xstats"
+APP_VERSION = "2026.06.10-v46.03-spray-pitcher-xstats"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -1854,6 +1854,8 @@ _HEALTH_SOURCE_TIERS = {
     "_zone_fetch_status_display":        ("Zone/plate-discipline",  "display"),
     "_hot_zone_status_display":          ("Hot/cold zones (statsapi)", "display"),
     "_saber_status_display":             ("wRC+ / expected stats (statsapi)", "display"),
+    "_spray_status_display":             ("Spray pull-side (statsapi)", "display"),
+    "_p_xstats_status_display":          ("Pitcher xSLG-allowed (statsapi)", "display"),
 }
 
 
@@ -3999,6 +4001,30 @@ except Exception as _sm_err:
     _saber_status = f"error: {type(_sm_err).__name__}"
 st.session_state["_saber_status_display"] = _saber_status
 
+# v46.03: spray-chart pull tendency (statsapi, tracked-only). left_side_pct /
+# right_side_pct — caller can orient to pull by bat hand downstream. Cross-check
+# for pull_air_pct. Verified vs Judge (79% left-side = pull for RHB).
+_spray_status = "not attempted"
+try:
+    from data_fetcher import get_hitter_spray
+    _spray = (get_hitter_spray(hitter_ids=_slate_hitter_ids)
+              if _slate_hitter_ids else pd.DataFrame())
+    if _spray is not None and not _spray.empty and "player_id" in _spray.columns:
+        _sp_cols = [c for c in _spray.columns if c != "player_id"]
+        _sp_ov = [c for c in _sp_cols if c in hitter_stats.columns]
+        if _sp_ov:
+            hitter_stats = hitter_stats.drop(columns=_sp_ov)
+        hitter_stats = hitter_stats.merge(
+            _spray[["player_id"] + _sp_cols], on="player_id", how="left")
+        _spray_status = (
+            f"✅ working ({_spray['player_id'].nunique()} hitters, tracked-only: "
+            f"pull-side spray) — reliable statsapi")
+    else:
+        _spray_status = "unavailable (no spray data returned)"
+except Exception as _sp_err:
+    _spray_status = f"error: {type(_sp_err).__name__}"
+st.session_state["_spray_status_display"] = _spray_status
+
 # v43.17 (user-requested): Bat tracking / Blast % — OPT-IN.
 # Fetches Statcast bat tracking only if the sidebar toggle is enabled.
 # Status caption shows the live result so user can SEE if Savant's
@@ -4217,6 +4243,26 @@ try:
 except Exception:
     # Don't block app if MLB Stats API splits fetch fails
     pass
+
+# v46.03: pitcher expected-contact-allowed (xSLG/xwOBA against) — statsapi,
+# tracked-only. How hard a pitcher is REALLY hit, luck-stripped. Verified vs
+# Misiorowski (.240 xSLG allowed). Feeds matchup context once proven.
+_p_xstats_status = "not attempted"
+try:
+    from data_fetcher import get_pitcher_expected_stats
+    _pxs = (get_pitcher_expected_stats(pitcher_ids=slate_pitcher_ids)
+            if slate_pitcher_ids else pd.DataFrame())
+    if (_pxs is not None and not _pxs.empty and "player_id" in _pxs.columns
+            and "player_id" in pitcher_stats.columns):
+        pitcher_stats = merge_on_player_id(pitcher_stats, _pxs)
+        _p_xstats_status = (
+            f"✅ working ({_pxs['player_id'].nunique()} pitchers, tracked-only: "
+            f"xSLG/xwOBA allowed) — reliable statsapi")
+    else:
+        _p_xstats_status = "unavailable (no pitcher expected data)"
+except Exception as _pxs_err:
+    _p_xstats_status = f"error: {type(_pxs_err).__name__}"
+st.session_state["_p_xstats_status_display"] = _p_xstats_status
 
 # HITTER vs-LHP/vs-RHP splits — biggest accuracy gap closed (June 2026).
 # Without these, a hitter's overall season barrel% gets used for ALL matchups,
@@ -8480,7 +8526,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v46.02 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v46.03 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -21086,6 +21132,8 @@ def _data_health_summary_lines():
         ("Zone/plate-discipline", st.session_state.get("_zone_fetch_status_display", "unknown")),
         ("Hot/cold zones (statsapi)", st.session_state.get("_hot_zone_status_display", "unknown")),
         ("wRC+ / expected stats", st.session_state.get("_saber_status_display", "unknown")),
+        ("Spray pull-side", st.session_state.get("_spray_status_display", "unknown")),
+        ("Pitcher xSLG-allowed", st.session_state.get("_p_xstats_status_display", "unknown")),
         ("Bat tracking (blast/swing)", st.session_state.get("_bat_tracking_status_display", "unknown")),
         ("Weather", st.session_state.get("_weather_status_display", "unknown")),
     ]
