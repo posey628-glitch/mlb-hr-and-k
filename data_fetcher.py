@@ -3459,6 +3459,85 @@ def get_pitcher_arsenal_vs_hand(season: int = None,
 
 
 @st.cache_data(ttl=3600)
+def get_pitcher_expected_stats(season: int = None, pitcher_ids: tuple = ()) -> pd.DataFrame:
+    """v46.03: pitcher expected-contact-quality-ALLOWED (xSLG/xwOBA against) from
+    RELIABLE statsapi expectedStatistics&group=pitching. Luck-stripped measure of
+    how hard a pitcher is really hit. Verified vs Misiorowski 694819 (xSLG .240,
+    xwOBA .217 allowed). TRACKED-ONLY. JSON: stats[0].splits[].stat.{slg,woba,wobaCon}
+    """
+    season = season if season is not None else current_season()
+    if not pitcher_ids:
+        return pd.DataFrame()
+    rows = []
+    for pid in pitcher_ids:
+        try:
+            url = (f"https://statsapi.mlb.com/api/v1/people/{int(pid)}/stats"
+                   f"?stats=expectedStatistics&group=pitching&season={season}")
+            r = requests.get(url, headers=HEADERS, timeout=15)
+            if r.status_code != 200:
+                continue
+            for sg in r.json().get("stats", []):
+                for sp in sg.get("splits", []):
+                    stat = sp.get("stat", {})
+                    _xslg = _saber_to_float(stat.get("slg"))
+                    if _xslg is not None:
+                        rows.append({
+                            "player_id": int(pid),
+                            "p_x_slg_allowed": _xslg,
+                            "p_x_woba_allowed": _saber_to_float(stat.get("woba")),
+                        })
+                        break
+        except Exception:
+            continue
+    return pd.DataFrame(rows) if rows else pd.DataFrame()
+
+
+@st.cache_data(ttl=3600)
+def get_hitter_spray(season: int = None, hitter_ids: tuple = ()) -> pd.DataFrame:
+    """v46.03: spray-chart pull tendency from RELIABLE statsapi sprayChart. Returns
+    a pull_pct_spray = share of batted balls to the PULL side. NOTE: pull side
+    depends on handedness — for RHB pull=LF+LCF, for LHB pull=RF+RCF. Verified vs
+    Judge (RHB): LF 36 + LCF 43 of 100 = heavy pull. Needs bat side to orient, so
+    caller passes hitter_bats. TRACKED-ONLY.
+    JSON: stats[0].splits[].stat.{leftField,leftCenterField,centerField,
+    rightCenterField,rightField}
+    """
+    season = season if season is not None else current_season()
+    if not hitter_ids:
+        return pd.DataFrame()
+    rows = []
+    for hid in hitter_ids:
+        try:
+            url = (f"https://statsapi.mlb.com/api/v1/people/{int(hid)}/stats"
+                   f"?stats=sprayChart&group=hitting&season={season}")
+            r = requests.get(url, headers=HEADERS, timeout=15)
+            if r.status_code != 200:
+                continue
+            for sg in r.json().get("stats", []):
+                for sp in sg.get("splits", []):
+                    stat = sp.get("stat", {})
+                    _lf = _saber_to_float(stat.get("leftField")) or 0.0
+                    _lcf = _saber_to_float(stat.get("leftCenterField")) or 0.0
+                    _cf = _saber_to_float(stat.get("centerField")) or 0.0
+                    _rcf = _saber_to_float(stat.get("rightCenterField")) or 0.0
+                    _rf = _saber_to_float(stat.get("rightField")) or 0.0
+                    _tot = _lf + _lcf + _cf + _rcf + _rf
+                    if _tot > 0:
+                        # store raw side shares; caller orients by bat hand.
+                        # "left_side_pct" = LF+LCF share (pull for RHB, oppo LHB)
+                        rows.append({
+                            "player_id": int(hid),
+                            "left_side_pct": round(100.0 * (_lf + _lcf) / _tot, 1),
+                            "right_side_pct": round(100.0 * (_rcf + _rf) / _tot, 1),
+                            "center_pct": round(100.0 * _cf / _tot, 1),
+                        })
+                        break
+        except Exception:
+            continue
+    return pd.DataFrame(rows) if rows else pd.DataFrame()
+
+
+@st.cache_data(ttl=3600)
 def get_hitter_sabermetrics(season: int = None, hitter_ids: tuple = ()) -> pd.DataFrame:
     """v46.02: wRC+ and advanced offensive rate stats from RELIABLE statsapi
     sabermetrics endpoint. wRC+ = gold-standard park/league-adjusted offense
