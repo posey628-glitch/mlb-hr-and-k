@@ -3459,6 +3459,51 @@ def get_pitcher_arsenal_vs_hand(season: int = None,
 
 
 @st.cache_data(ttl=3600)
+def get_hitter_statcast_metrics(season: int = None, hitter_ids: tuple = (),
+                                 metrics: str = "launchSpeed,launchAngle") -> pd.DataFrame:
+    """v46.04: statcast METRIC AVERAGES from the RELIABLE statsapi metricAverages
+    endpoint. REQUIRES the metrics= param (errors without it — that's why it
+    looked unavailable before). Verified vs Judge: launchSpeed 94.1 MPH (avg exit
+    velo), launchAngle 15.0 DEG over 143 batted-ball events.
+
+    Extensible: pass any comma-sep metric names (launchSpeed, launchAngle, and —
+    if MLB exposes them — batSpeed, swingLength). Unknown names are simply
+    omitted from the response, so it degrades gracefully. TRACKED-ONLY.
+    JSON: stats[0].splits[].stat.metric.{name, averageValue, unit} + numOccurrences
+    Returns per-hitter columns named sc_<metricName> (e.g. sc_launchSpeed).
+    """
+    season = season if season is not None else current_season()
+    if not hitter_ids:
+        return pd.DataFrame()
+    rows = []
+    for hid in hitter_ids:
+        try:
+            url = (f"https://statsapi.mlb.com/api/v1/people/{int(hid)}/stats"
+                   f"?stats=metricAverages&metrics={metrics}"
+                   f"&group=hitting&season={season}")
+            r = requests.get(url, headers=HEADERS, timeout=15)
+            if r.status_code != 200:
+                continue
+            row = {"player_id": int(hid)}
+            _bbe = None
+            for sg in r.json().get("stats", []):
+                for sp in sg.get("splits", []):
+                    m = sp.get("stat", {}).get("metric", {})
+                    _name = m.get("name")
+                    _val = _saber_to_float(m.get("averageValue"))
+                    if _name and _val is not None:
+                        row[f"sc_{_name}"] = _val
+                    _bbe = sp.get("numOccurrences", _bbe)
+            if _bbe is not None:
+                row["sc_bbe"] = _bbe  # batted-ball-event sample size
+            if len(row) > 1:  # got at least one metric
+                rows.append(row)
+        except Exception:
+            continue
+    return pd.DataFrame(rows) if rows else pd.DataFrame()
+
+
+@st.cache_data(ttl=3600)
 def get_pitcher_expected_stats(season: int = None, pitcher_ids: tuple = ()) -> pd.DataFrame:
     """v46.03: pitcher expected-contact-quality-ALLOWED (xSLG/xwOBA against) from
     RELIABLE statsapi expectedStatistics&group=pitching. Luck-stripped measure of
