@@ -1088,6 +1088,8 @@ HR_CANDIDATE_FEATURES = [
     # v46.04: statsapi-native statcast metrics (tracked-only)
     "sc_launchSpeed",
     "sc_launchAngle",
+    "sc_distance",
+    "sc_hrDistance",
     # v45.93: hot/cold zone features from statsapi hotColdZones (tracked-only —
     # the loop measures whether where-a-hitter-does-damage predicts HRs).
     "hot_zone_slg",
