@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v46.01-env-ablation"
+APP_VERSION = "2026.06.10-v46.02-wrcplus-xstats"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -1853,6 +1853,7 @@ _HEALTH_SOURCE_TIERS = {
     "_weather_status_display":           ("Weather",                "display"),
     "_zone_fetch_status_display":        ("Zone/plate-discipline",  "display"),
     "_hot_zone_status_display":          ("Hot/cold zones (statsapi)", "display"),
+    "_saber_status_display":             ("wRC+ / expected stats (statsapi)", "display"),
 }
 
 
@@ -3967,6 +3968,36 @@ try:
 except Exception as _hz_err:
     _hot_zone_status = f"error: {type(_hz_err).__name__}"
 st.session_state["_hot_zone_status_display"] = _hot_zone_status
+
+# v46.02: wRC+ + expected stats (xSLG/xwOBAcon) from reliable statsapi.
+# TRACKED-ONLY — merged so the pattern loop can measure them; NOT in scoring
+# until proven. wRC+ is a gold-standard offense rate; xwOBAcon is pure contact
+# quality. Both verified against real Judge responses.
+_saber_status = "not attempted"
+try:
+    from data_fetcher import get_hitter_sabermetrics, get_hitter_expected_stats
+    _sm = (get_hitter_sabermetrics(hitter_ids=_slate_hitter_ids)
+           if _slate_hitter_ids else pd.DataFrame())
+    _xs = (get_hitter_expected_stats(hitter_ids=_slate_hitter_ids)
+           if _slate_hitter_ids else pd.DataFrame())
+    _merged_n = 0
+    for _df in (_sm, _xs):
+        if _df is not None and not _df.empty and "player_id" in _df.columns:
+            _cols = [c for c in _df.columns if c != "player_id"]
+            _ov = [c for c in _cols if c in hitter_stats.columns]
+            if _ov:
+                hitter_stats = hitter_stats.drop(columns=_ov)
+            hitter_stats = hitter_stats.merge(
+                _df[["player_id"] + _cols], on="player_id", how="left")
+            _merged_n += _df["player_id"].nunique()
+    if _merged_n > 0:
+        _saber_status = (
+            f"✅ working (wRC+ + xSLG/xwOBAcon, tracked-only) — reliable statsapi")
+    else:
+        _saber_status = "unavailable (no saber/expected data returned)"
+except Exception as _sm_err:
+    _saber_status = f"error: {type(_sm_err).__name__}"
+st.session_state["_saber_status_display"] = _saber_status
 
 # v43.17 (user-requested): Bat tracking / Blast % — OPT-IN.
 # Fetches Statcast bat tracking only if the sidebar toggle is enabled.
@@ -8449,7 +8480,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v46.01 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v46.02 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -21054,6 +21085,7 @@ def _data_health_summary_lines():
         ("Hitter split (MLB API)", st.session_state.get("_hitter_api_split_status_display", "unknown")),
         ("Zone/plate-discipline", st.session_state.get("_zone_fetch_status_display", "unknown")),
         ("Hot/cold zones (statsapi)", st.session_state.get("_hot_zone_status_display", "unknown")),
+        ("wRC+ / expected stats", st.session_state.get("_saber_status_display", "unknown")),
         ("Bat tracking (blast/swing)", st.session_state.get("_bat_tracking_status_display", "unknown")),
         ("Weather", st.session_state.get("_weather_status_display", "unknown")),
     ]
