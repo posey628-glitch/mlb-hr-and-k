@@ -61,6 +61,16 @@ HEADERS = {
     "Accept": "application/json, text/csv, */*",
 }
 
+def _saber_to_float(v):
+    """v46.02: module-level safe float parse for the new statsapi fetches
+    (sabermetrics/expectedStats/etc.). The existing _to_float is nested inside
+    another function and not importable at module scope."""
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
 def current_season() -> int:
     """v44.62: resolve the season dynamically at CALL time.
 
@@ -3446,6 +3456,74 @@ def get_pitcher_arsenal_vs_hand(season: int = None,
     except Exception:
         pass
     return pd.DataFrame()
+
+
+@st.cache_data(ttl=3600)
+def get_hitter_sabermetrics(season: int = None, hitter_ids: tuple = ()) -> pd.DataFrame:
+    """v46.02: wRC+ and advanced offensive rate stats from RELIABLE statsapi
+    sabermetrics endpoint. wRC+ = gold-standard park/league-adjusted offense
+    (100 avg, 150 = 50% better). Verified vs Judge 592450 (wRcPlus 150.8).
+    TRACKED-ONLY. JSON: stats[0].splits[].stat.{wRcPlus, woba, wRaa}
+    """
+    season = season if season is not None else current_season()
+    if not hitter_ids:
+        return pd.DataFrame()
+    rows = []
+    for hid in hitter_ids:
+        try:
+            url = (f"https://statsapi.mlb.com/api/v1/people/{int(hid)}/stats"
+                   f"?stats=sabermetrics&group=hitting&season={season}")
+            r = requests.get(url, headers=HEADERS, timeout=15)
+            if r.status_code != 200:
+                continue
+            for sg in r.json().get("stats", []):
+                for sp in sg.get("splits", []):
+                    stat = sp.get("stat", {})
+                    if "wRcPlus" in stat:
+                        rows.append({
+                            "player_id": int(hid),
+                            "wrc_plus": _saber_to_float(stat.get("wRcPlus")),
+                            "woba_saber": _saber_to_float(stat.get("woba")),
+                            "wraa": _saber_to_float(stat.get("wRaa")),
+                        })
+                        break
+        except Exception:
+            continue
+    return pd.DataFrame(rows) if rows else pd.DataFrame()
+
+
+@st.cache_data(ttl=3600)
+def get_hitter_expected_stats(season: int = None, hitter_ids: tuple = ()) -> pd.DataFrame:
+    """v46.02: expected stats (xSLG, xwOBA, xwOBA-on-contact) from RELIABLE
+    statsapi expectedStatistics. wobaCon (wOBA on contact) strips walks/Ks =
+    pure contact quality (newest signal). Verified vs Judge (xSLG .600, wobaCon
+    .546). TRACKED-ONLY. JSON: stats[0].splits[].stat.{slg,woba,wobaCon}
+    """
+    season = season if season is not None else current_season()
+    if not hitter_ids:
+        return pd.DataFrame()
+    rows = []
+    for hid in hitter_ids:
+        try:
+            url = (f"https://statsapi.mlb.com/api/v1/people/{int(hid)}/stats"
+                   f"?stats=expectedStatistics&group=hitting&season={season}")
+            r = requests.get(url, headers=HEADERS, timeout=15)
+            if r.status_code != 200:
+                continue
+            for sg in r.json().get("stats", []):
+                for sp in sg.get("splits", []):
+                    stat = sp.get("stat", {})
+                    _xslg = _saber_to_float(stat.get("slg"))
+                    if _xslg is not None:
+                        rows.append({
+                            "player_id": int(hid),
+                            "x_slg_saber": _xslg,
+                            "x_woba_con": _saber_to_float(stat.get("wobaCon")),
+                        })
+                        break
+        except Exception:
+            continue
+    return pd.DataFrame(rows) if rows else pd.DataFrame()
 
 
 @st.cache_data(ttl=3600)
