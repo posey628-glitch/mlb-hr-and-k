@@ -3460,17 +3460,20 @@ def get_pitcher_arsenal_vs_hand(season: int = None,
 
 @st.cache_data(ttl=3600)
 def get_hitter_statcast_metrics(season: int = None, hitter_ids: tuple = (),
-                                 metrics: str = "launchSpeed,launchAngle") -> pd.DataFrame:
-    """v46.04: statcast METRIC AVERAGES from the RELIABLE statsapi metricAverages
-    endpoint. REQUIRES the metrics= param (errors without it — that's why it
-    looked unavailable before). Verified vs Judge: launchSpeed 94.1 MPH (avg exit
-    velo), launchAngle 15.0 DEG over 143 batted-ball events.
-
-    Extensible: pass any comma-sep metric names (launchSpeed, launchAngle, and —
-    if MLB exposes them — batSpeed, swingLength). Unknown names are simply
-    omitted from the response, so it degrades gracefully. TRACKED-ONLY.
-    JSON: stats[0].splits[].stat.metric.{name, averageValue, unit} + numOccurrences
-    Returns per-hitter columns named sc_<metricName> (e.g. sc_launchSpeed).
+                                 metrics: str = "launchSpeed,launchAngle,hitDistance,homeRunDistance") -> pd.DataFrame:
+    """v46.05: statcast METRIC AVERAGES from the RELIABLE statsapi metricAverages
+    endpoint. REQUIRES the metrics= param (errors without it). CONFIRMED-VALID
+    public metric names (verified against real Judge responses):
+      launchSpeed      → response 'launchSpeed'  (avg exit velo, 94.1 MPH)
+      launchAngle      → response 'launchAngle'  (15.0 deg)
+      hitDistance      → response 'distance'     (all-BBE avg, 195 ft)
+      homeRunDistance  → response 'hrDistance'   (avg HR distance, 404 ft!)
+    NOTE: request name != response name for the distance metrics — the parser
+    keys on the RESPONSE m['name'], so columns are sc_launchSpeed, sc_launchAngle,
+    sc_distance, sc_hrDistance.
+    GATED (NOT available — permission-denied): batSpeed, swingLength (premium
+    bat-tracking tier, requires MLB auth). Don't add them — they error the call.
+    TRACKED-ONLY. JSON: stats[0].splits[].stat.metric.{name,averageValue} + numOccurrences
     """
     season = season if season is not None else current_season()
     if not hitter_ids:
