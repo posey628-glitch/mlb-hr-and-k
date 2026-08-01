@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.99-copy-everything"
+APP_VERSION = "2026.06.10-v46.00-overhaul-marker"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -120,6 +120,16 @@ def _calibration_snapshot() -> dict:
         # pre/post each reweight when judging whether a change helped. Bump this
         # string every time DINGER_BASE_WEIGHTS changes.
         "dinger_reweight": "reweight-01-2026-07-25",
+        # v45.99: DATA-LAYER version marker. The 2026-07-31 overhaul fixed the
+        # hitter L/R split (was identical → real MLB API), made two_way hand-
+        # aware, retired the dead statcast fetch, and added hotColdZones. Slates
+        # graded BEFORE this date ran on partly-broken split data; slates AFTER
+        # ran on the corrected layer. Bucket by this when judging the env
+        # ablation / reweight-02 (which must be evaluated on post-overhaul data).
+        # This is the honest "restart" — a boundary marker, NOT a history wipe:
+        # the raw skills that drive the reweight (barrel/iso/ev) were unchanged,
+        # so their history stays valid; only split-dependent evaluation resets.
+        "data_layer_version": "overhaul-2026-07-31",
         "smash_thresholds": {
             "elite_score": SMASH_ELITE_SCORE,
             "strong_score": SMASH_STRONG_SCORE,
@@ -6249,6 +6259,14 @@ if show_pattern_analysis:
                     # ====== Section G: Rolling feature importance (v43.83) ======
                     st.markdown("---")
                     st.markdown("### G. Rolling feature importance — the daily learning loop")
+                    st.info(
+                        "🔧 **Data-layer overhaul: 2026-07-31.** The hitter L/R "
+                        "split was fixed (was identical → real), two_way made "
+                        "hand-aware, and hotColdZones added. Raw-skill history "
+                        "(barrel/iso/EV) stays valid across this date, but any "
+                        "split-dependent or context evaluation (env ablation, "
+                        "reweight-02) should judge **post-overhaul slates only**. "
+                        "Slates before 2026-07-31 ran on partly-broken splits.")
                     st.caption(
                         "**This is the 'model learns what predicts HRs' system.** "
                         "Every day the app runs, it computes each feature's "
@@ -8431,7 +8449,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.99 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v46.00 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
