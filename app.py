@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v46.04-statcast-metrics"
+APP_VERSION = "2026.06.10-v46.05-hr-distance"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -8552,7 +8552,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v46.04 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v46.05 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
