@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v46.00-overhaul-marker"
+APP_VERSION = "2026.06.10-v46.01-env-ablation"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -8449,7 +8449,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v46.00 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v46.01 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -12508,6 +12508,29 @@ if combined_picks is not None and not combined_picks.empty:
             parts_filled = parts_df.fillna(0).values
             weighted_sum = parts_filled @ weights_arr
             q["pick_score"] = weighted_sum / safe_totals
+
+            # v46.01: ENV ABLATION HARNESS (audit Finding #2). Env drives ~52%
+            # of pick_score via 4 components but has been predicting BELOW random
+            # (favorable-env HR lift 0.56x). To TEST whether env is over-weighted
+            # WITHOUT touching the shipped ranking, compute a SHADOW score with
+            # the standalone ps_env component removed (weight zeroed). This grades
+            # alongside pick_score in the pattern loop; if pick_score_no_env has a
+            # BETTER edge over live post-overhaul slates, env is over-weighted and
+            # ps_env should be cut further. Tracked-only — does NOT affect picks.
+            try:
+                _env_idx = [i for i, m in enumerate(component_meta)
+                            if m[0] == "ps_env"]
+                if _env_idx:
+                    _wa_noenv = weights_arr.copy()
+                    for _ei in _env_idx:
+                        _wa_noenv[_ei] = 0.0
+                    _row_tot_noenv = present_mask @ _wa_noenv
+                    _safe_noenv = np.where(_row_tot_noenv > 0, _row_tot_noenv, np.nan)
+                    q["pick_score_no_env"] = (parts_filled @ _wa_noenv) / _safe_noenv
+                else:
+                    q["pick_score_no_env"] = q["pick_score"]
+            except Exception:
+                q["pick_score_no_env"] = q["pick_score"]
             # Where NO components were present, pick_score is NaN — the
             # correct signal that we have nothing to rank on. Downstream
             # fillna(0) still applies for the strong-play threshold.
@@ -12651,7 +12674,7 @@ if combined_picks is not None and not combined_picks.empty:
 
         # Stash per-player audit so combined_all (Hitters export) carries it.
         _ps_cols = [c for c in (
-            "player_id", "pick_score",
+            "player_id", "pick_score", "pick_score_no_env",  # v46.01: env ablation shadow
             "ps_hr_game", "ps_matchup_opp", "ps_power", "ps_pitch_hr",
             "ps_form", "ps_sleeper", "ps_lift", "ps_env",
             "ps_discipline",  # v43.23: plate discipline component
