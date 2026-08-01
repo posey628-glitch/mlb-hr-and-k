@@ -481,11 +481,22 @@ def researcher_framework_backtest(merged_df: pd.DataFrame) -> dict:
         seg = merged_df.dropna(subset=[col, "homered"]).copy()
         if seg.empty:
             return None
-        # coerce to boolean-ish
-        _truthy = seg[col].apply(
-            lambda v: True if v in (True, "True", "true", 1, "1") else
-            (False if v in (False, "False", "false", 0, "0") else None)
-        )
+        # coerce to boolean-ish. v46.10 (review): guard pd.isna FIRST — a bare
+        # `v in (...)` raises "boolean value of NA is ambiguous" if a pd.NA
+        # survives the dropna (mixed-object columns can slip through), which
+        # would crash the entire framework backtest.
+        def _to_bool(v):
+            try:
+                if pd.isna(v):
+                    return None
+            except (TypeError, ValueError):
+                pass
+            if v in (True, "True", "true", 1, "1"):
+                return True
+            if v in (False, "False", "false", 0, "0"):
+                return False
+            return None
+        _truthy = seg[col].apply(_to_bool)
         seg = seg[_truthy.notna()]
         if seg.empty:
             return None
@@ -1084,7 +1095,7 @@ HR_CANDIDATE_FEATURES = [
     # v46.03: spray pull-side + pitcher expected-allowed (tracked-only)
     "left_side_pct",
     "right_side_pct",
-    "p_x_slg_allowed",
+    "opp_pitcher_p_x_slg_allowed",  # v46.06: pitcher xSLG-allowed, mapped to hitter row
     # v46.04: statsapi-native statcast metrics (tracked-only)
     "sc_launchSpeed",
     "sc_launchAngle",
