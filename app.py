@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v46.08-review-fixes-2"
+APP_VERSION = "2026.06.10-v46.09-schema-validator"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -1913,6 +1913,47 @@ def _render_top_health_banner() -> None:
                 f"(cosmetic — rankings unaffected). See Pipeline Health.")
     except Exception:
         pass
+
+
+def validate_slate_schema(df, tracked_cols=None) -> list:
+    """v46.09 (review-suggested): sanity-check the final combined slate before
+    snapshot, catching the SILENT failure classes we keep hitting:
+      - critical columns missing (broken merge/rename)
+      - a tracked column present but ALL-NaN (fetch worked, join dropped it —
+        the 'high in fetch, 0% in combined' bug that stranded p_x_slg_allowed)
+      - impossible values (barrel>60, EV out of range) = a parse/unit bug tell
+        (exactly how the IP notation bug would surface)
+    Returns a list of issue strings (empty=clean). Non-fatal — surfaced to
+    Pipeline Health so problems are VISIBLE, not silently corrupting rankings.
+    """
+    issues = []
+    if df is None or not hasattr(df, "columns"):
+        return ["combined slate is None or not a DataFrame"]
+    if df.empty:
+        return ["combined slate is EMPTY (0 rows)"]
+    for col in ("player_id", "pick_score", "hr_score"):
+        if col not in df.columns:
+            issues.append(f"MISSING critical column: {col}")
+    if "player_id" in df.columns:
+        _pid_null = int(df["player_id"].isna().sum())
+        if _pid_null > 0:
+            issues.append(f"{_pid_null} row(s) with NULL player_id")
+    _range_checks = {
+        "barrel_pct": (0, 60), "hard_hit": (0, 100), "avg_ev": (50, 130),
+        "iso": (0, 1.0), "hr_game_pct": (0, 100), "pick_score": (0, 120),
+        "hr9": (0, 10), "era": (0, 30),
+    }
+    for col, (lo, hi) in _range_checks.items():
+        if col in df.columns:
+            _num = pd.to_numeric(df[col], errors="coerce")
+            _bad = int(((_num < lo) | (_num > hi)).sum())
+            if _bad > 0:
+                issues.append(f"{col}: {_bad} value(s) outside [{lo},{hi}] (max={_num.max()})")
+    if tracked_cols:
+        for col in tracked_cols:
+            if col in df.columns and df[col].notna().sum() == 0:
+                issues.append(f"{col}: present but ALL-NaN (join likely dropped it)")
+    return issues
 
 
 def stash_diagnostic(category: str, message: str, level: str = "caption") -> None:
@@ -8558,7 +8599,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v46.08 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v46.09 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -15052,6 +15093,15 @@ if all_hitters:
         )
         for _sp in _schema_problems:
             stash_diagnostic("pipeline_health", f"⚠️ Schema: {_sp}", level="warning")
+        # v46.09: deeper checks — value ranges (parse/unit-bug tell) + tracked
+        # columns that are present-but-all-NaN (silent join drop). Surfaces the
+        # exact bug classes we've fixed (IP notation, stranded pitcher metric).
+        try:
+            from pattern_analysis import HR_CANDIDATE_FEATURES as _hcf
+        except Exception:
+            _hcf = None
+        for _vp in validate_slate_schema(combined_all, tracked_cols=_hcf):
+            stash_diagnostic("pipeline_health", f"🔬 Data check: {_vp}", level="warning")
     except Exception as _sce:
         log_swallowed_error("schema_assert", _sce, surface=False)
 
