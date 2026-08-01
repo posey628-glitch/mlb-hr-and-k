@@ -1073,6 +1073,10 @@ HR_CANDIDATE_FEATURES = [
     #   hr_score_raw = pre-slate-rescale composite (vs hr_score)
     #   recent_hr    = plain 15-day HR count (vs recent_hr_weighted_rate)
     "hr_score_raw",
+    # v46.01: env-ablation shadow — graded alongside pick_score to test if env
+    # is over-weighted. In MODEL_OUTPUT_FEATURES so it's tracked/graded but never
+    # counted as a raw predictor.
+    "pick_score_no_env",
     # v45.93: hot/cold zone features from statsapi hotColdZones (tracked-only —
     # the loop measures whether where-a-hitter-does-damage predicts HRs).
     "hot_zone_slg",
@@ -1116,6 +1120,7 @@ def _snapshot_merge_cols():
 # itself as evidence.
 MODEL_OUTPUT_FEATURES = {
     "hr_score_raw",  # v45.74: pre-rescale composite — tracked, never a predictor
+    "pick_score_no_env",  # v46.01: env-ablation shadow score — graded, not a predictor
     "hit_pa_pct",  # v45.70: prop output, never a predictor
     "ctx_lift_pp",  # v45.49: derived from hr_game_pct — tracked, never a predictor
     "hr_score", "hr_game_pct", "hr_pa_pct", "adaptive_score",
