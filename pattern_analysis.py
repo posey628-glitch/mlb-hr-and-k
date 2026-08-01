@@ -1077,6 +1077,10 @@ HR_CANDIDATE_FEATURES = [
     # is over-weighted. In MODEL_OUTPUT_FEATURES so it's tracked/graded but never
     # counted as a raw predictor.
     "pick_score_no_env",
+    # v46.02: wRC+ + expected contact quality (statsapi, tracked-only)
+    "wrc_plus",
+    "x_woba_con",
+    "x_slg_saber",
     # v45.93: hot/cold zone features from statsapi hotColdZones (tracked-only —
     # the loop measures whether where-a-hitter-does-damage predicts HRs).
     "hot_zone_slg",
