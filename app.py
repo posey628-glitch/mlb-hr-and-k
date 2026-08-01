@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.96-retire-dead-statcast"
+APP_VERSION = "2026.06.10-v45.99-copy-everything"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -1523,6 +1523,12 @@ def _render_deep_dive_card(_dd):
                 _fmt_metric("ISO", "iso", "{:.3f}"),
                 _fmt_metric("xSLG", "xslg", "{:.3f}"),
                 _fmt_metric("xwOBA", "xwoba", "{:.3f}"),
+                # v45.97: hotColdZones (reliable statsapi) — where the hitter
+                # does damage. hot=best zone, heart=middle-middle, spread=how
+                # zone-dependent. Display-only for now (tracked in pattern loop).
+                _fmt_metric("Heart-zone SLG", "heart_zone_slg", "{:.3f}"),
+                _fmt_metric("Hot-zone SLG", "hot_zone_slg", "{:.3f}"),
+                _fmt_metric("Zone spread", "zone_slg_spread", "{:.3f}"),
                 _fmt_metric("Blast%", "blast_pct", "{:.1f}", "%"),
                 _fmt_metric("SweetSpot%", "sweet_spot_pct", "{:.1f}", "%"),
             ]):
@@ -5038,6 +5044,30 @@ if _eval_metrics and _eval_date:
             with st.expander("📋 Copy results as text (tables paste intact)", expanded=False):
                 st.caption("Click the copy icon in the top-right of the box below.")
                 st.code("\n".join(_report), language="text")
+
+            # v45.99: COPY EVERYTHING master button. Gathers this main report
+            # PLUS every other copy-text block stashed in session_state (backtest,
+            # rolling-aggregate, pattern-discovery, data-health) into ONE block,
+            # so you can grab the whole slate's analysis in a single copy instead
+            # of hunting for each expander.
+            with st.expander("📋📋 Copy EVERYTHING (all sections at once)", expanded=False):
+                _all_parts = ["═══ MAIN RESULTS ═══", "\n".join(_report)]
+                _extra_keys = [
+                    ("_data_health_copy_text", "DATA HEALTH"),
+                    ("_backtest_copy_text", "BACKTEST"),
+                    ("_rolling_agg_copy_text", "ROLLING AGGREGATE"),
+                    ("_pattern_copy_text", "PATTERN ANALYSIS"),
+                    ("_durable_pipe_copy", "PIPELINE / DIAGNOSTICS"),
+                ]
+                for _k, _lbl in _extra_keys:
+                    _v = st.session_state.get(_k)
+                    if _v:
+                        _all_parts.append(f"\n═══ {_lbl} ═══")
+                        _all_parts.append(str(_v))
+                st.caption(
+                    f"Everything below in one block ({len(_all_parts)//2} "
+                    f"section(s)). Click the copy icon top-right.")
+                st.code("\n".join(_all_parts), language="text")
         else:
             # Either pre-v43.4 snapshot (no pick_score metric) or
             # equivalent — just show what we have
@@ -8401,7 +8431,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.96 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.99 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -21093,6 +21123,9 @@ if owner_mode:
         # text are always identical (they were computed separately before, and
         # the copy text omitted this whole block).
         st.markdown("\n".join(_data_health_summary_lines()))
+        # v45.99: stash for the Copy-EVERYTHING master button
+        st.session_state["_data_health_copy_text"] = "\n".join(
+            _data_health_summary_lines())
         st.divider()
         _render_diag_list(
             _pipe_health,
