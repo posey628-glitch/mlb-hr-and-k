@@ -1289,9 +1289,17 @@ def rolling_feature_importance(correlation_history: list,
             "feature", "avg_corr", "recent_corr", "older_corr",
             "trend", "trend_valid", "std", "n_days", "reliability",
         ])
-    return pd.DataFrame(rows).sort_values(
-        "avg_corr", key=abs, ascending=False
-    )
+    # v45.98: sort by |avg_corr| but use reliability (|corr|/std) as a TIEBREAK.
+    # Two features with near-identical avg_corr: the one whose signal is more
+    # STABLE across slates (higher reliability) should rank higher — it's less
+    # likely to be a lucky spike. Primary sort unchanged (still |avg_corr|) so
+    # the reweight reading isn't disrupted; reliability only breaks near-ties.
+    _imp = pd.DataFrame(rows)
+    _imp["_abs_corr"] = _imp["avg_corr"].abs()
+    _imp = _imp.sort_values(
+        ["_abs_corr", "reliability"], ascending=[False, False]
+    ).drop(columns=["_abs_corr"])
+    return _imp
 
 
 def propose_dinger_weights(importance_df: pd.DataFrame,
