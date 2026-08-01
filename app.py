@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v46.10-pdna-roof-fixes"
+APP_VERSION = "2026.06.10-v46.11-distance-join-fix"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -8599,7 +8599,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v46.10 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v46.11 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -15052,6 +15052,45 @@ if all_hitters:
     if combined_all.columns.duplicated().any():
         combined_all = combined_all.loc[:, ~combined_all.columns.duplicated()]
 
+    # v46.11 (schema-validator-caught): combined_all is a SEPARATE concat from
+    # combined_picks, so the v44.42 avg_dist coalesce (which fixed combined_picks)
+    # never reached it — avg_dist/near_hr_est came out all-NaN here because the
+    # concat aligned inconsistently-present columns to NaN. Re-map from
+    # hitter_stats (which HAS the data: coverage showed avg_dist=248) and
+    # coalesce from avg_hr_distance, same as the proven combined_picks fix.
+    try:
+        if ("player_id" in combined_all.columns and hitter_stats is not None
+                and not hitter_stats.empty and "player_id" in hitter_stats.columns):
+            _hsk = pd.to_numeric(hitter_stats["player_id"], errors="coerce")
+            _cak = pd.to_numeric(combined_all["player_id"], errors="coerce")
+            for _col in ("avg_hr_distance", "avg_dist", "barrel_count"):
+                if _col in hitter_stats.columns:
+                    _m = dict(zip(_hsk, pd.to_numeric(hitter_stats[_col], errors="coerce")))
+                    _mapped = _cak.map(_m)
+                    if _col in combined_all.columns:
+                        combined_all[_col] = pd.to_numeric(
+                            combined_all[_col], errors="coerce").fillna(_mapped)
+                    else:
+                        combined_all[_col] = _mapped
+            if "avg_hr_distance" in combined_all.columns:
+                _ahd = pd.to_numeric(combined_all["avg_hr_distance"], errors="coerce")
+                if "avg_dist" in combined_all.columns:
+                    combined_all["avg_dist"] = pd.to_numeric(
+                        combined_all["avg_dist"], errors="coerce").fillna(_ahd)
+                else:
+                    combined_all["avg_dist"] = _ahd
+            if "barrel_count" in combined_all.columns:
+                _bc = pd.to_numeric(combined_all["barrel_count"], errors="coerce")
+                _hr = pd.to_numeric(combined_all.get("home_run", 0), errors="coerce").fillna(0)
+                _near = (_bc - _hr).clip(lower=0)
+                if "near_hr_est" in combined_all.columns:
+                    combined_all["near_hr_est"] = pd.to_numeric(
+                        combined_all["near_hr_est"], errors="coerce").fillna(_near)
+                else:
+                    combined_all["near_hr_est"] = _near
+    except Exception as _cae:
+        log_swallowed_error("combined_all_distance_coalesce", _cae, surface=False)
+
     # v45.70: ctx_lift_pp is computed ONCE, per-game (see the block beside
     # hr_game_pct). combined_all is a concat of those frames so it inherits
     # the values. A second compute here (v45.49) used a different HR-column
@@ -15093,15 +15132,6 @@ if all_hitters:
         )
         for _sp in _schema_problems:
             stash_diagnostic("pipeline_health", f"⚠️ Schema: {_sp}", level="warning")
-        # v46.09: deeper checks — value ranges (parse/unit-bug tell) + tracked
-        # columns that are present-but-all-NaN (silent join drop). Surfaces the
-        # exact bug classes we've fixed (IP notation, stranded pitcher metric).
-        try:
-            from pattern_analysis import HR_CANDIDATE_FEATURES as _hcf
-        except Exception:
-            _hcf = None
-        for _vp in validate_slate_schema(combined_all, tracked_cols=_hcf):
-            stash_diagnostic("pipeline_health", f"🔬 Data check: {_vp}", level="warning")
     except Exception as _sce:
         log_swallowed_error("schema_assert", _sce, surface=False)
 
@@ -15755,6 +15785,18 @@ if all_hitters:
         except Exception:
             # If merge fails, don't break the export — ps_* columns just won't appear
             pass
+
+    # v46.11: DEEP schema validation runs HERE — after pick_audit merges
+    # pick_score onto combined_all (it arrives ~650 lines after the early
+    # _assert_schema check, so validating pick_score earlier false-alarmed).
+    # Checks value ranges (parse/unit-bug tell) + tracked columns present-but-
+    # all-NaN (the silent join-drop class: avg_dist, stranded pitcher metric).
+    try:
+        from pattern_analysis import HR_CANDIDATE_FEATURES as _hcf
+        for _vp in validate_slate_schema(combined_all, tracked_cols=_hcf):
+            stash_diagnostic("pipeline_health", f"🔬 Data check: {_vp}", level="warning")
+    except Exception as _vse:
+        log_swallowed_error("deep_schema_validate", _vse, surface=False)
 
     # v43.45 (reviewer-validated deletion): the v43.25 slate-wide hr_form
     # recompute was removed. The block ran AFTER pick_score had already
