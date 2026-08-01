@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v45.94-supersession-aware"
+APP_VERSION = "2026.06.10-v45.96-retire-dead-statcast"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -3776,13 +3776,24 @@ if not hitter_zone_tiers.empty and "player_id" in hitter_stats.columns:
 # before power_score/hr_form compute (so they "see" tonight's effective
 # values without code changes inside those functions).
 try:
-    from data_fetcher import get_hitter_handedness_statcast
-    hitter_hand_statcast = (
-        get_hitter_handedness_statcast(stats_day=_stats_day_key())
-        if not slate.empty else pd.DataFrame()
-    )
+    # v45.96: RETIRED. The Savant hitter-handedness statcast fetch returned
+    # IDENTICAL vs-LHP/vs-RHP data (broken split, confirmed by dup-check) and is
+    # now fully SUPERSEDED by the MLB Stats API split (get_hitter_handedness_
+    # splits, real avg/obp/slg/iso by hand) merged below. As of v45.95 the
+    # two_way blend no longer reads the statcast barrel/ev/hard_hit split cols
+    # either. So we stop calling the broken fetch entirely — no more scary ❌
+    # line, no wasted request. Kept as an empty frame so downstream merges are
+    # harmless no-ops.
+    hitter_hand_statcast = pd.DataFrame()
+    _hand_statcast_status = "retired (superseded by MLB API split)"
+    if False:  # dead branch preserved for reference; never executes
+        from data_fetcher import get_hitter_handedness_statcast
+        hitter_hand_statcast = (
+            get_hitter_handedness_statcast(stats_day=_stats_day_key())
+            if not slate.empty else pd.DataFrame()
+        )
     if hitter_hand_statcast.empty:
-        _hand_statcast_status = "❌ unavailable (using season-overall)"
+        pass  # expected — fetch retired
     else:
         # Count how many hitters have either side populated as a quality signal
         _l_count = 0
@@ -8390,7 +8401,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v45.94 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v45.96 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -15048,15 +15059,33 @@ if all_hitters:
 
         _hp = None
         _hp_n = 0
+        _hp_hand_aware = 0  # v45.95: count REAL hand-split inputs
+        # v45.95 (audit Finding #1): the old blend listed vs_lhp_barrel_pct /
+        # _avg_ev / _hard_hit — but those statcast splits came from the broken
+        # Savant fetch and silently fell back to season-overall, so "two-way"
+        # was mostly NOT hand-aware. Use the columns that ACTUALLY split by hand
+        # (iso, slg, hr_per_pa — working MLB Stats API) for the hand dimension,
+        # and use barrel/avg_ev/hard_hit as honest OVERALL power (not fake
+        # per-hand). Net: the hand dimension now comes from real data.
         for _ov, _lc, _rc in [
-            ("pulled_brl_pct", None, None),  # no split available — overall
-            ("barrel_pct", "vs_lhp_barrel_pct", "vs_rhp_barrel_pct"),
-            ("avg_ev", "vs_lhp_avg_ev", "vs_rhp_avg_ev"),
-            ("hard_hit", "vs_lhp_hard_hit", "vs_rhp_hard_hit"),
             ("iso", "vs_lhp_iso", "vs_rhp_iso"),
+            ("slg", "vs_lhp_slg", "vs_rhp_slg"),
+            ("hr_per_pa", "vs_lhp_hr_per_pa", "vs_rhp_hr_per_pa"),
+            ("pulled_brl_pct", None, None),
+            ("barrel_pct", None, None),
+            ("avg_ev", None, None),
+            ("hard_hit", None, None),
         ]:
-            if _lc and _rc:
-                _s = _side_power(_ov, _lc, _rc)
+            if _lc and _rc and _lc in combined_all.columns and _rc in combined_all.columns:
+                _has_split = (pd.to_numeric(combined_all[_lc], errors="coerce").notna().any()
+                              and pd.to_numeric(combined_all[_rc], errors="coerce").notna().any())
+                if _has_split:
+                    _s = _side_power(_ov, _lc, _rc)
+                    _hp_hand_aware += 1
+                elif _ov in combined_all.columns:
+                    _s = pd.to_numeric(combined_all[_ov], errors="coerce")
+                else:
+                    continue
             elif _ov in combined_all.columns:
                 _s = pd.to_numeric(combined_all[_ov], errors="coerce")
             else:
@@ -15067,6 +15096,7 @@ if all_hitters:
                 _hp_n += 1
         if _hp is not None:
             _hp = (_hp / max(1, _hp_n)).clip(0, 100)
+        st.session_state["_two_way_hand_aware_n"] = _hp_hand_aware
 
         # v44.44: map pitcher-allowed stats directly from p_slate by opp_pitcher
         # name. Previously this read bare column names off combined_all that
