@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v46.03-spray-pitcher-xstats"
+APP_VERSION = "2026.06.10-v46.04-statcast-metrics"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -1856,6 +1856,7 @@ _HEALTH_SOURCE_TIERS = {
     "_saber_status_display":             ("wRC+ / expected stats (statsapi)", "display"),
     "_spray_status_display":             ("Spray pull-side (statsapi)", "display"),
     "_p_xstats_status_display":          ("Pitcher xSLG-allowed (statsapi)", "display"),
+    "_scmetric_status_display":          ("Statcast metrics EV/LA (statsapi)", "display"),
 }
 
 
@@ -4024,6 +4025,31 @@ try:
 except Exception as _sp_err:
     _spray_status = f"error: {type(_sp_err).__name__}"
 st.session_state["_spray_status_display"] = _spray_status
+
+# v46.04: statsapi-native statcast metrics (avg exit velo, launch angle) via
+# metricAverages. Reliable-source EV — cross-checks the Savant avg_ev. The
+# fetch is extensible (pass more metric names as MLB exposes them, e.g. bat
+# speed). TRACKED-ONLY. Verified vs Judge (94.1 MPH EV, 15.0 LA).
+_scmetric_status = "not attempted"
+try:
+    from data_fetcher import get_hitter_statcast_metrics
+    _scm = (get_hitter_statcast_metrics(hitter_ids=_slate_hitter_ids)
+            if _slate_hitter_ids else pd.DataFrame())
+    if _scm is not None and not _scm.empty and "player_id" in _scm.columns:
+        _scm_cols = [c for c in _scm.columns if c != "player_id"]
+        _scm_ov = [c for c in _scm_cols if c in hitter_stats.columns]
+        if _scm_ov:
+            hitter_stats = hitter_stats.drop(columns=_scm_ov)
+        hitter_stats = hitter_stats.merge(
+            _scm[["player_id"] + _scm_cols], on="player_id", how="left")
+        _scmetric_status = (
+            f"✅ working ({_scm['player_id'].nunique()} hitters, tracked-only: "
+            f"EV/launch-angle) — reliable statsapi metricAverages")
+    else:
+        _scmetric_status = "unavailable (no metric data returned)"
+except Exception as _scm_err:
+    _scmetric_status = f"error: {type(_scm_err).__name__}"
+st.session_state["_scmetric_status_display"] = _scmetric_status
 
 # v43.17 (user-requested): Bat tracking / Blast % — OPT-IN.
 # Fetches Statcast bat tracking only if the sidebar toggle is enabled.
@@ -8526,7 +8552,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v46.03 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v46.04 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -21134,6 +21160,7 @@ def _data_health_summary_lines():
         ("wRC+ / expected stats", st.session_state.get("_saber_status_display", "unknown")),
         ("Spray pull-side", st.session_state.get("_spray_status_display", "unknown")),
         ("Pitcher xSLG-allowed", st.session_state.get("_p_xstats_status_display", "unknown")),
+        ("Statcast metrics EV/LA", st.session_state.get("_scmetric_status_display", "unknown")),
         ("Bat tracking (blast/swing)", st.session_state.get("_bat_tracking_status_display", "unknown")),
         ("Weather", st.session_state.get("_weather_status_display", "unknown")),
     ]
