@@ -1391,6 +1391,23 @@ def _safe_float(val):
         return None
 
 
+def _safe_ip(val):
+    """v46.07: Convert MLB innings-pitched notation to a real decimal.
+    MLB returns IP where the fraction counts THIRDS: '5.1'=5+1/3, '5.2'=5+2/3.
+    _safe_float treats '5.1' as 5.1 (WRONG), skewing ERA/WHIP/K9/BB9/HR9.
+    Convert PER GAME then sum — never convert an already-summed base-10 total."""
+    v = _safe_float(val)
+    if v is None:
+        return None
+    whole = int(v)
+    frac = round(v - whole, 1)
+    if frac == 0.1:
+        return whole + 1.0 / 3.0
+    if frac == 0.2:
+        return whole + 2.0 / 3.0
+    return v
+
+
 def _safe_int(val):
     """Convert API value to int; return None for '-.--', '', or invalid."""
     if val is None:
@@ -3803,7 +3820,7 @@ def get_pitcher_full_season_from_gamelog(pitcher_id: int,
     gp_sum = 0
     for s in splits:
         st_ = s.get("stat", {}) or {}
-        ip_sum += _safe_float(st_.get("inningsPitched")) or 0
+        ip_sum += _safe_ip(st_.get("inningsPitched")) or 0  # v46.07: thirds-aware
         er_sum += _safe_int(st_.get("earnedRuns")) or 0
         k_sum += _safe_int(st_.get("strikeOuts")) or 0
         bb_sum += _safe_int(st_.get("baseOnBalls")) or 0
@@ -3856,7 +3873,7 @@ def get_pitcher_recent_form(pitcher_id: int, season: int = CURRENT_SEASON,
         ip_sum, er_sum, k_sum, bb_sum, hr_sum = 0.0, 0, 0, 0, 0
         for s in recent:
             st_ = s.get("stat", {})
-            ip_sum += float(st_.get("inningsPitched", 0) or 0)
+            ip_sum += _safe_ip(st_.get("inningsPitched", 0)) or 0  # v46.07: thirds-aware
             er_sum += int(st_.get("earnedRuns", 0) or 0)
             k_sum += int(st_.get("strikeOuts", 0) or 0)
             bb_sum += int(st_.get("baseOnBalls", 0) or 0)
@@ -4034,7 +4051,10 @@ def get_hitter_recent_form_trad(player_id: int, season: int = CURRENT_SEASON,
             "recent_avg": round(h / ab, 3),
             "recent_iso": round((d + 2 * t + 3 * hr) / ab, 3) if ab else 0.0,
             "recent_k_pct": round(k / (ab + bb) * 100, 1) if (ab + bb) else 0.0,
-            "recent_ops_proxy": round((h + bb) / (ab + bb), 3) if (ab + bb) else 0.0,
+            # v46.07 (review): this is (H+BB)/(AB+BB) — a pseudo-OBP, NOT OPS
+            # (no SLG term). Renamed to reflect what it measures. Unused
+            # downstream, so the rename is safe.
+            "recent_obp_proxy": round((h + bb) / (ab + bb), 3) if (ab + bb) else 0.0,
             "hr_streak_games": consec_hr_games,
             "recent_hr_weighted_rate": recent_hr_weighted_rate,
             "games_since_hr": games_since_hr,
@@ -4918,7 +4938,7 @@ def get_team_bullpen_hr9(team_id: int, season: int = CURRENT_SEASON) -> float | 
             if starts / games >= 0.5:
                 continue  # Classified as a starter
             hr = _safe_int(stat.get("homeRuns")) or 0
-            ip = _safe_float(stat.get("inningsPitched")) or 0.0
+            ip = _safe_ip(stat.get("inningsPitched")) or 0.0  # v46.07: thirds-aware (summed for rate)
             total_hr += hr
             total_ip += ip
         except Exception:
@@ -5153,7 +5173,7 @@ def get_pitcher_primary_positions(pitcher_ids: tuple) -> dict:
     if not pitcher_ids:
         return {}
     # MLB Stats API people endpoint supports comma-separated IDs (up to ~100)
-    ids_str = ",".join(str(int(pid)) for pid in pitcher_ids if pid)
+    ids_str = ",".join(str(int(float(pid))) for pid in pitcher_ids if pd.notna(pid) and str(pid).strip() not in ("", "None"))
     url = f"https://statsapi.mlb.com/api/v1/people?personIds={ids_str}"
     out = {}
     try:
