@@ -21,6 +21,7 @@ from typing import Optional
 
 import pandas as pd
 import requests
+import re
 import streamlit as st
 
 
@@ -1164,8 +1165,7 @@ def get_bat_tracking(season: int | None = None, stats_day: str | None = None) ->
         # the status message reveals which qualifier actually succeeded (min=10
         # vs the min=q fallback). Tells us if coverage is capped by the filter
         # or by Savant's data availability.
-        import re as _re
-        _mm = _re.search(r'min=([^&]+)', url)
+        _mm = re.search(r'min=([^&]+)', url)
         _url_min = _mm.group(1) if _mm else "?"
         try:
             r = requests.get(url, headers=HEADERS, timeout=25)
@@ -5066,7 +5066,8 @@ def get_game_roof_status(game_pk: int) -> dict:
             out["temp"] = None
         # Decide roof state from condition string
         cond_lower = condition.lower()
-        if "roof closed" in cond_lower or "dome" in cond_lower:
+        if any(kw in cond_lower for kw in
+               ("roof closed", "closed roof", "dome", "indoor")):
             out["roof_closed"] = True
         elif "roof open" in cond_lower:
             out["roof_closed"] = False
