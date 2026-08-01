@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v46.05-hr-distance"
+APP_VERSION = "2026.06.10-v46.08-review-fixes-2"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -1935,7 +1935,11 @@ def stash_diagnostic(category: str, message: str, level: str = "caption") -> Non
         bucket = st.session_state.setdefault("_diagnostics", {})
         cat_list = bucket.setdefault(category, [])
         # Dedupe — same message in same category gets stashed once per run
-        if not any(d.get("message") == message for d in cat_list):
+        # v46.07 (review): dedup on (message, level) — same text at a HIGHER
+        # severity (caption→warning) was being silently dropped, hiding
+        # escalating issues.
+        if not any(d.get("message") == message and d.get("level") == level
+                   for d in cat_list):
             cat_list.append({"message": message, "level": level})
     except Exception:
         pass
@@ -2157,10 +2161,12 @@ def tag_power_targets(df: "pd.DataFrame") -> "pd.DataFrame":
     target actually produced the outcome. The per-game display reads these
     columns instead of recomputing. Mirrors the v44.05 blend + shrinkage.
     """
+    # v46.07 (review): guard BEFORE assignment — df["..."]=0 on a None df
+    # crashes with TypeError. Check first, then assign.
+    if df is None or getattr(df, "empty", True) or "game" not in getattr(df, "columns", []):
+        return df
     df["is_moonshot_target"] = 0
     df["is_laser_target"] = 0
-    if df is None or df.empty or "game" not in df.columns:
-        return df
 
     def _pick_for_game(g: "pd.DataFrame", components, min_hr=5.0):
         _g = g
@@ -3899,7 +3905,7 @@ try:
     from data_fetcher import get_hitter_handedness_splits
     _slate_hitter_ids = tuple(
         int(x) for x in hitter_stats["player_id"].dropna().unique()
-    ) if "player_id" in hitter_stats.columns else ()
+    ) if (hitter_stats is not None and "player_id" in hitter_stats.columns) else ()
     hitter_hand_api = (
         get_hitter_handedness_splits(hitter_ids=_slate_hitter_ids)
         if _slate_hitter_ids else pd.DataFrame()
@@ -8552,7 +8558,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v46.05 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v46.08 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -16037,7 +16043,12 @@ if all_hitters:
                         )
             # v44.44: also surface overall pitcher-allowed contact-quality
             # signals on each hitter row so the Two-Way metric can read them.
-            for _psrc in ("fb_allowed", "xwoba_allowed"):
+            # v46.06: added p_x_slg_allowed / p_x_woba_allowed (statsapi expected-
+            # contact-allowed) — they were merged into pitcher_stats but NEVER
+            # mapped onto hitter rows, so they were stranded (not in snapshot).
+            # This closes that gap so the pattern loop can actually grade them.
+            for _psrc in ("fb_allowed", "xwoba_allowed",
+                          "p_x_slg_allowed", "p_x_woba_allowed"):
                 if _psrc in p_slate.columns:
                     _m = p_slate.set_index("pitcher_name")[_psrc].to_dict()
                     combined_all[f"opp_pitcher_{_psrc}"] = combined_all["opp_pitcher"].map(_m)
