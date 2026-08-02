@@ -203,6 +203,25 @@ def cohort_analysis(
     out_rate = out_cohort[outcome_col].mean() if len(out_cohort) else 0.0
     lift = in_rate / out_rate if out_rate > 0 else float("inf")
 
+    # v46.17 (stats rigor, cohort analog of the FDR fix): a lift of "2.1x (n=12)"
+    # can be pure small-sample noise. Compute a Wilson 95% score interval on the
+    # in-cohort HR rate — it's reliable for small n and rates near 0/1 (unlike
+    # the normal approximation). If the interval's LOWER bound still exceeds the
+    # out-cohort rate, the cohort is genuinely better (not just noise).
+    def _wilson_ci(k, n, z=1.96):
+        if n == 0:
+            return (None, None)
+        p = k / n
+        denom = 1 + z * z / n
+        center = (p + z * z / (2 * n)) / denom
+        half = (z * ((p * (1 - p) / n + z * z / (4 * n * n)) ** 0.5)) / denom
+        return (max(0.0, center - half), min(1.0, center + half))
+
+    _in_k = int(in_cohort[outcome_col].sum()) if len(in_cohort) else 0
+    _lo, _hi = _wilson_ci(_in_k, len(in_cohort))
+    # the cohort's edge is REAL if the CI lower bound clears the baseline rate
+    _edge_real = (_lo is not None and out_rate > 0 and _lo > out_rate)
+
     return {
         "threshold_col": threshold_col,
         "threshold_value": threshold_value,
@@ -214,6 +233,10 @@ def cohort_analysis(
         "in_rate": float(in_rate),
         "out_rate": float(out_rate),
         "lift": float(lift) if lift != float("inf") else None,
+        # v46.17: Wilson 95% CI on the in-cohort rate + whether the edge is real
+        "in_rate_ci_low": round(_lo, 4) if _lo is not None else None,
+        "in_rate_ci_high": round(_hi, 4) if _hi is not None else None,
+        "edge_real": bool(_edge_real),
         # Sample size signal
         "reliable": len(in_cohort) >= 50 and len(out_cohort) >= 50,
     }
