@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v46.13-drift-guard-protection"
+APP_VERSION = "2026.06.10-v46.15-sweep-dir-batside-log"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -6297,8 +6297,25 @@ if show_pattern_analysis:
                         disp = corr_df.copy()
                         disp["corr"] = disp["corr"].apply(lambda v: f"{v:+.4f}")
                         disp["abs_corr"] = disp["abs_corr"].apply(lambda v: f"{v:.4f}")
+                        # v46.14: show FDR-survival — a ✅ means the correlation
+                        # is real even after correcting for testing ~80 features;
+                        # blank means it could be multiple-comparison noise.
+                        _cols = ["feature", "corr", "n_pairs", "abs_corr"]
+                        if "survives_fdr" in disp.columns:
+                            disp["real?"] = disp["survives_fdr"].apply(
+                                lambda v: "✅" if v else "")
+                            _cols.append("real?")
+                        if "p_value" in disp.columns:
+                            disp["p"] = disp["p_value"].apply(
+                                lambda v: f"{v:.3f}" if pd.notna(v) else "")
+                            _cols.append("p")
+                        st.caption(
+                            "**real?** = ✅ survives Benjamini-Hochberg FDR "
+                            "correction (significant even after ~80 features "
+                            "tested). Blank = could be chance. Don't promote a "
+                            "feature to scoring on |corr| alone — check real? first.")
                         st.dataframe(
-                            disp[["feature", "corr", "n_pairs", "abs_corr"]],
+                            disp[_cols],
                             hide_index=True, use_container_width=True,
                         )
                     else:
@@ -8609,7 +8626,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v46.13 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v46.15 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -21308,6 +21325,7 @@ def _data_health_summary_lines():
         ("Pitcher xSLG-allowed", st.session_state.get("_p_xstats_status_display", "unknown")),
         ("Statcast metrics EV/LA", st.session_state.get("_scmetric_status_display", "unknown")),
         ("Savant column drift", st.session_state.get("_savant_drift_status", "unknown")),
+        ("Bat-side handedness fetch", st.session_state.get("_bat_side_fetch_status", "unknown")),
         ("Bat tracking (blast/swing)", st.session_state.get("_bat_tracking_status_display", "unknown")),
         ("Weather", st.session_state.get("_weather_status_display", "unknown")),
     ]
