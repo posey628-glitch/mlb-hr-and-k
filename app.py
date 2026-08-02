@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v46.16-pitcher-factor-grading"
+APP_VERSION = "2026.06.10-v46.17-wilson-ci-cohorts"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -6372,11 +6372,23 @@ if show_pattern_analysis:
                             lift = result.get("lift")
                             lift_str = f"{lift:.2f}×" if lift else "∞"
                             reliable = "✅" if result["reliable"] else "⚠️ small sample"
+                            # v46.17: show the Wilson CI + whether the edge is
+                            # real (CI lower bound clears the baseline rate), so
+                            # a big lift on a tiny sample doesn't mislead.
+                            _ci_lo = result.get("in_rate_ci_low")
+                            _ci_hi = result.get("in_rate_ci_high")
+                            _edge_real = result.get("edge_real")
+                            _ci_str = ""
+                            if _ci_lo is not None and _ci_hi is not None:
+                                _verdict = ("✅ real edge" if _edge_real
+                                            else "❓ not distinguishable from baseline")
+                                _ci_str = (f" · 95% CI [{_ci_lo:.1%}–{_ci_hi:.1%}] "
+                                           f"{_verdict}")
                             st.markdown(
                                 f"**Above {feat} ≥ {thresh}:** "
                                 f"{outc} rate **{in_r:.1%}** (n={in_n}) "
                                 f"vs below threshold **{out_r:.1%}** (n={out_n}) "
-                                f"→ **lift {lift_str}** {reliable}"
+                                f"→ **lift {lift_str}** {reliable}{_ci_str}"
                             )
 
                     # ====== Section E: Threshold sweep ======
@@ -8626,7 +8638,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v46.16 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v46.17 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
