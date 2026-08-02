@@ -951,6 +951,9 @@ def save_snapshot(snapshot_date, matchup_df: pd.DataFrame,
                 "grade", "barrel_allowed", "xwoba_allowed", "fb_allowed",
                 "hard_hit_allowed", "hr_per_9", "slg_allowed",
                 "whiff_pct", "k_pct", "csw_pct",
+                # v46.16: the statsapi expected-contact-allowed metric added this
+                # session — grade whether it predicts HRs the pitcher allows.
+                "p_x_slg_allowed", "p_x_woba_allowed",
             ] if c in pitcher_slate_df.columns]
             _psub = pitcher_slate_df[keep_cols].where(
                 pitcher_slate_df[keep_cols].notna(), None
