@@ -4366,6 +4366,7 @@ def fill_hitter_bats(lineups: list, ids: set | None = None) -> dict:
     # safe; a single chunk failing only loses that chunk, not all of it.
     out = {}
     _id_list = list(ids)
+    _failed_chunks = []
     for _i in range(0, len(_id_list), 100):
         _chunk = _id_list[_i:_i + 100]
         try:
@@ -4378,8 +4379,27 @@ def fill_hitter_bats(lineups: list, ids: set | None = None) -> dict:
                 side = (person.get("batSide") or {}).get("code")
                 if pid and side:
                     out[pid] = side
-        except Exception:
+        except Exception as _fhb_e:
+            # v46.14: was a bare `continue` — a failed chunk silently lost ~100
+            # hitters' bat-side (→ they fall back to a default hand, quietly
+            # skewing platoon matchups). Log which chunk + surface to health.
+            _failed_chunks.append((len(_chunk), type(_fhb_e).__name__))
             continue  # lose only this chunk, keep the rest
+    if _failed_chunks:
+        try:
+            import streamlit as _stx
+            _n_lost = sum(c for c, _ in _failed_chunks)
+            _stx.session_state["_bat_side_fetch_status"] = (
+                f"⚠️ bat-side fetch: {len(_failed_chunks)} chunk(s) failed, "
+                f"~{_n_lost} hitters missing handedness (default-hand fallback)")
+        except Exception:
+            pass
+    else:
+        try:
+            import streamlit as _stx
+            _stx.session_state["_bat_side_fetch_status"] = "✅ bat-side complete"
+        except Exception:
+            pass
     return out
 
 
