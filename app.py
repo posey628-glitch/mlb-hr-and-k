@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v46.18-metric-stranding-fix"
+APP_VERSION = "2026.06.10-v46.19-convergence-stranding-fix"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -8638,7 +8638,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v46.18 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v46.19 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -13005,6 +13005,16 @@ if combined_picks is not None and not combined_picks.empty:
 
             q["convergence_count"] = q["player_id"].apply(_convergence_count)
             q["convergence_label"] = q["convergence_count"].apply(_convergence_label)
+            # v46.19: q is a COPY of combined_picks, so convergence_count set here
+            # never reached combined_all → the snapshot (the pattern loop could
+            # never grade it, despite it being a tracked candidate feature). Stash
+            # the per-player_id mapping so it can be applied to combined_all after
+            # that frame is built. (Same class as the v46.18 mass-stranding.)
+            try:
+                st.session_state["_convergence_count_map"] = dict(
+                    zip(q["player_id"], q["convergence_count"]))
+            except Exception:
+                pass
         except Exception:
             q["convergence_count"] = 0
             q["convergence_label"] = ""
@@ -15091,7 +15101,16 @@ if all_hitters:
     if combined_all.columns.duplicated().any():
         combined_all = combined_all.loc[:, ~combined_all.columns.duplicated()]
 
-    # v46.11 (schema-validator-caught): combined_all is a SEPARATE concat from
+    # v46.19: apply the stranded convergence_count (computed on the q/picks copy)
+    # onto combined_all by player_id so it reaches the snapshot and can be graded.
+    try:
+        _cc_map = st.session_state.get("_convergence_count_map")
+        if _cc_map and "player_id" in combined_all.columns:
+            _cc = combined_all["player_id"].map(_cc_map)
+            if _cc.notna().any():
+                combined_all["convergence_count"] = _cc.fillna(0)
+    except Exception as _cce:
+        log_swallowed_error("convergence_count_map", _cce, surface=False)
     # combined_picks, so the v44.42 avg_dist coalesce (which fixed combined_picks)
     # never reached it — avg_dist/near_hr_est came out all-NaN here because the
     # concat aligned inconsistently-present columns to NaN. Re-map from
