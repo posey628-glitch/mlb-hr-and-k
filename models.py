@@ -1120,6 +1120,17 @@ def build_matchup_table(
         "lift_score",
         # Today's HR projection
         "likely_hr_pct",
+        # v46.18 (CRITICAL — mass-stranding fix): every metric added this session
+        # lived only on hitter_stats and was DROPPED by this whitelist before
+        # reaching combined_all / the snapshot — so the pattern loop could never
+        # grade them despite the health panel showing them "working". Add them
+        # here so they actually survive into the graded frame.
+        "wrc_plus", "woba_saber", "wraa",
+        "x_slg_saber", "x_woba_con",
+        "hot_zone_slg", "heart_zone_slg", "chase_zone_slg",
+        "zone_slg_spread", "hot_zone_ev",
+        "left_side_pct", "right_side_pct", "center_pct",
+        "sc_launchSpeed", "sc_launchAngle", "sc_distance", "sc_hrDistance", "sc_bbe",
     ]
     keep = [c for c in display_cols if c in df.columns]
 
@@ -2493,6 +2504,9 @@ def build_pitcher_slate(
                         k.startswith("vs_lhb_") or k.startswith("vs_rhb_")
                         or k.startswith("vs_day_") or k.startswith("vs_night_")
                         or k in ("on_il", "days_since_return", "il_count_this_season")
+                        # v46.06: pitcher expected-contact-allowed (statsapi) — must
+                        # be copied or it's dropped before reaching hitter rows.
+                        or k in ("p_x_slg_allowed", "p_x_woba_allowed")
                     ):
                         base[k] = v
             if pitcher_recent and pid in pitcher_recent:
