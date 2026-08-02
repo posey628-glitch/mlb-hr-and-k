@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v46.12-moonshot-fix"
+APP_VERSION = "2026.06.10-v46.13-drift-guard-protection"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -1857,6 +1857,7 @@ _HEALTH_SOURCE_TIERS = {
     "_spray_status_display":             ("Spray pull-side (statsapi)", "display"),
     "_p_xstats_status_display":          ("Pitcher xSLG-allowed (statsapi)", "display"),
     "_scmetric_status_display":          ("Statcast metrics EV/LA (statsapi)", "display"),
+    "_savant_drift_status":              ("Savant column drift (Savant)", "scoring"),
 }
 
 
@@ -8608,7 +8609,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v46.12 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v46.13 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -15516,6 +15517,39 @@ if all_hitters:
     # snapshot at ~line 11900) so the picks get snapshotted and the learning
     # loop can grade whether the target actually produced the outcome. The
     # per-game display reads these columns instead of recomputing.
+    # v46.13: LINEUP PROTECTION SCORE (tracked-only, new signal). For each
+    # hitter, average the xwOBA of the surrounding batters (2 before + 2 after)
+    # in the SAME team+game lineup (wrapping 1-9). Strong protection = pitchers
+    # throw more strikes (can't pitch around them) + more men on base. Percentile
+    # 0-100, tracked-only; the pattern loop proves whether it predicts HRs.
+    try:
+        if all(c in combined_all.columns for c in ("team", "lineup_pos", "xwoba")):
+            _prot = pd.Series(np.nan, index=combined_all.index)
+            _grp_keys = ["team"] + (["game"] if "game" in combined_all.columns else [])
+            for _k, _grp in combined_all.groupby(_grp_keys):
+                _lp = pd.to_numeric(_grp["lineup_pos"], errors="coerce")
+                _xw = pd.to_numeric(_grp["xwoba"], errors="coerce")
+                _by_pos = {}
+                for _idx, _p in _lp.items():
+                    if pd.notna(_p):
+                        _by_pos[int(_p)] = _xw.get(_idx, np.nan)
+                for _idx, _p in _lp.items():
+                    if pd.isna(_p):
+                        continue
+                    _p = int(_p)
+                    _neigh = []
+                    for _off in (-2, -1, 1, 2):
+                        _np = ((_p - 1 + _off) % 9) + 1
+                        _v = _by_pos.get(_np)
+                        if _v is not None and pd.notna(_v):
+                            _neigh.append(_v)
+                    if _neigh:
+                        _prot.loc[_idx] = sum(_neigh) / len(_neigh)
+            if _prot.notna().any():
+                combined_all["lineup_protection"] = (
+                    _prot.rank(pct=True) * 100.0).round(1)
+    except Exception as _lpe:
+        log_swallowed_error("lineup_protection", _lpe, surface=False)
     try:
         combined_all = tag_power_targets(combined_all)
         # v44.53 (code review #4): tag_power_targets runs AFTER the main
@@ -21273,6 +21307,7 @@ def _data_health_summary_lines():
         ("Spray pull-side", st.session_state.get("_spray_status_display", "unknown")),
         ("Pitcher xSLG-allowed", st.session_state.get("_p_xstats_status_display", "unknown")),
         ("Statcast metrics EV/LA", st.session_state.get("_scmetric_status_display", "unknown")),
+        ("Savant column drift", st.session_state.get("_savant_drift_status", "unknown")),
         ("Bat tracking (blast/swing)", st.session_state.get("_bat_tracking_status_display", "unknown")),
         ("Weather", st.session_state.get("_weather_status_display", "unknown")),
     ]
