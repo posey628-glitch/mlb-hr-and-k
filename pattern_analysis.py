@@ -265,6 +265,44 @@ def feature_correlation(
             "abs_corr": abs(corr),
         })
     out = pd.DataFrame(rows).sort_values("abs_corr", ascending=False)
+    if out.empty:
+        return out
+    # v46.14 (stats rigor): with ~80 features tested against the same outcome,
+    # ~4 will look "significant" at p<0.05 by CHANCE. Compute a p-value per
+    # correlation (point-biserial → t-stat) and apply Benjamini-Hochberg FDR
+    # correction so we can tell REAL predictors from multiple-comparison noise
+    # BEFORE promoting anything to scoring. survives_fdr=True means the feature
+    # is significant even after accounting for all the tests we ran.
+    import math
+
+    def _corr_pvalue(r, n):
+        if n is None or n < 3 or r is None:
+            return None
+        r = max(-0.999999, min(0.999999, float(r)))
+        try:
+            t = r * math.sqrt((n - 2) / (1 - r * r))
+        except (ValueError, ZeroDivisionError):
+            return None
+        # two-sided p from t via a normal approximation (n is large here, 20+)
+        # survival of standard normal: erfc(|z|/sqrt2)
+        z = abs(t)
+        return math.erfc(z / math.sqrt(2.0))
+
+    out = out.copy()
+    out["p_value"] = out.apply(
+        lambda row: _corr_pvalue(row["corr"], row["n_pairs"]), axis=1)
+    # Benjamini-Hochberg: sort by p asc, threshold p<=(rank/m)*alpha
+    _alpha = 0.05
+    _valid_p = out[out["p_value"].notna()].sort_values("p_value")
+    _m = len(_valid_p)
+    out["survives_fdr"] = False
+    if _m > 0:
+        _bh_cut = 0.0
+        for _rank, (_i, _r) in enumerate(_valid_p.iterrows(), start=1):
+            if _r["p_value"] <= (_rank / _m) * _alpha:
+                _bh_cut = _r["p_value"]  # largest p that passes
+        if _bh_cut > 0:
+            out.loc[out["p_value"] <= _bh_cut, "survives_fdr"] = True
     return out
 
 
@@ -968,10 +1006,16 @@ def threshold_sweep(
     feature_col: str,
     outcome_col: str = "homered",
     candidate_values: Optional[list] = None,
+    direction: str = "ge",
 ) -> pd.DataFrame:
     """Sweep candidate threshold values to find the one with the best lift.
 
     Useful for "should the Must-Have barrel% threshold be 12, 15, or 18?"
+
+    v46.14: `direction` controls the comparison — "ge" (default) for high-is-good
+    features (barrel%, ISO: pass = feature >= threshold), or "le" for low-is-good
+    features (K%, chase%, whiff%: pass = feature <= threshold). Sweeping a
+    low-is-good feature with the default >= would invert the lift and mislead.
     Shows the predicted-outcome lift at each candidate level.
 
     Args:
@@ -1000,7 +1044,7 @@ def threshold_sweep(
         ]
     rows = []
     for val in candidate_values:
-        in_c = df[df[feature_col] >= val]
+        in_c = df[df[feature_col] >= val] if direction == "ge" else df[df[feature_col] <= val]
         out_c = df[df[feature_col] < val]
         if len(in_c) < 20 or len(out_c) < 20:
             continue
