@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v46.11-distance-join-fix"
+APP_VERSION = "2026.06.10-v46.12-moonshot-fix"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -2294,10 +2294,19 @@ def tag_power_targets(df: "pd.DataFrame") -> "pd.DataFrame":
                    ("barrel_pct", 1.0),
                    ("matchup_opp", 1.0), ("pitch_hr_score", 1.0),
                    ("env_boost", 0.75), ("recent_hr_weighted_rate", 0.5)]
-    _moon_comp = ([("avg_hr_distance", 2.5)] if _has_dist else
-                  [("barrel_pct", 1.5), ("pull_air_pct", 1.5),
-                   ("pulled_brl_pct", 1.25), ("blast_pct", 1.0),
-                   ("iso", 1.0), ("fb_pct", 0.5), ("avg_ev", 0.5)]) + \
+    # v46.12 (live-data-caught: moonshot lift 0.61x — INVERTED): the old logic
+    # weighted avg_hr_distance at 2.5 (the DOMINANT term) whenever distance was
+    # present, and DROPPED the frequency drivers (barrel/pull_air/iso). But
+    # avg_hr_distance measures how FAR a hitter's HRs travel, NOT how OFTEN they
+    # homer — so it over-picked rare-but-mighty hitters (3 HRs at 430ft ranked
+    # above 30 HRs at 400ft), which don't homer on a given night. Fix: keep the
+    # frequency drivers as PRIMARY and use distance as a supporting signal (0.75)
+    # — a moonshot pick should be a likely-HR hitter who ALSO hits them far,
+    # not a distance outlier who rarely connects.
+    _moon_comp = [("barrel_pct", 1.5), ("pull_air_pct", 1.5),
+                  ("pulled_brl_pct", 1.25), ("blast_pct", 1.0),
+                  ("iso", 1.0), ("fb_pct", 0.5), ("avg_ev", 0.5)] + \
+                 ([("avg_hr_distance", 0.75)] if _has_dist else []) + \
                  [("matchup_opp", 1.0), ("pitch_hr_score", 1.0),
                   ("env_boost", 0.75), ("recent_hr_weighted_rate", 0.5)]
     try:
@@ -8599,7 +8608,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v46.11 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v46.12 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
