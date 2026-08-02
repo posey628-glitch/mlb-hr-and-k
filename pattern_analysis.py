@@ -836,6 +836,8 @@ def pitcher_hr_allowed_analysis(pitcher_merged_df: "pd.DataFrame") -> dict:
         "barrel_allowed", "xwoba_allowed", "fb_allowed", "hard_hit_allowed",
         "hr_per_9", "slg_allowed", "hr_suppress", "test_score",
         "whiff_pct", "k_pct", "csw_pct", "proj_k",
+        # v46.16: statsapi expected-contact-allowed (added this session)
+        "p_x_slg_allowed", "p_x_woba_allowed",
     ]
     _y = pd.to_numeric(df[_outcome], errors="coerce")
     rows = []
