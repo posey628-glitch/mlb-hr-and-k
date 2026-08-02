@@ -1101,6 +1101,8 @@ HR_CANDIDATE_FEATURES = [
     "sc_launchAngle",
     "sc_distance",
     "sc_hrDistance",
+    # v46.13: lineup protection (surrounding-hitter xwOBA, tracked-only)
+    "lineup_protection",
     # v45.93: hot/cold zone features from statsapi hotColdZones (tracked-only —
     # the loop measures whether where-a-hitter-does-damage predicts HRs).
     "hot_zone_slg",
