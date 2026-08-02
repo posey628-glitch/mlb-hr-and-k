@@ -2538,6 +2538,28 @@ def get_hitter_stats(season: int = None, stats_day: str = "") -> pd.DataFrame:
         "k_percent", "bb_percent", "avg_best_speed",
     ])
     df = clip_outliers(df)
+    # v46.13: SAVANT COLUMN-DRIFT GUARD. Savant occasionally renames leaderboard
+    # columns; the fetch still succeeds but the derived stat silently goes NaN
+    # (the #1 silent-data-loss class). Check CRITICAL scoring columns are present
+    # with real values; stash drift to session_state for Pipeline Health.
+    try:
+        import streamlit as _stx
+        _critical = ["barrel_batted_rate", "hard_hit_percent", "iso", "xwoba",
+                     "xslg", "launch_speed", "k_percent", "bb_percent"]
+        _missing = [c for c in _critical if c not in df.columns]
+        _empty = [c for c in _critical if c in df.columns
+                  and pd.to_numeric(df[c], errors="coerce").notna().sum() == 0]
+        if _missing or _empty:
+            _mp = []
+            if _missing: _mp.append(f"MISSING: {', '.join(_missing)}")
+            if _empty: _mp.append(f"ALL-EMPTY: {', '.join(_empty)}")
+            _stx.session_state["_savant_drift_status"] = (
+                "\u26a0\ufe0f Savant column drift (BROKEN) \u2014 " + " | ".join(_mp)
+                + " (a rename likely broke a derived stat)")
+        else:
+            _stx.session_state["_savant_drift_status"] = "\u2705 all critical Savant columns present"
+    except Exception:
+        pass
     return df
 
 
