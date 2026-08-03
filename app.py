@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v46.22-game-dropdown-fix"
+APP_VERSION = "2026.06.10-v46.23-batside-status-benign"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -8646,7 +8646,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v46.22 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v46.23 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -21381,7 +21381,7 @@ def _data_health_summary_lines():
         ("Pitcher xSLG-allowed", st.session_state.get("_p_xstats_status_display", "unknown")),
         ("Statcast metrics EV/LA", st.session_state.get("_scmetric_status_display", "unknown")),
         ("Savant column drift", st.session_state.get("_savant_drift_status", "unknown")),
-        ("Bat-side handedness fetch", st.session_state.get("_bat_side_fetch_status", "unknown")),
+        ("Bat-side handedness fetch", st.session_state.get("_bat_side_fetch_status", "✅ not needed (bat-side already present)")),
         ("Bat tracking (blast/swing)", st.session_state.get("_bat_tracking_status_display", "unknown")),
         ("Weather", st.session_state.get("_weather_status_display", "unknown")),
     ]
