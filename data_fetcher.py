@@ -2544,15 +2544,30 @@ def get_hitter_stats(season: int = None, stats_day: str = "") -> pd.DataFrame:
     # with real values; stash drift to session_state for Pipeline Health.
     try:
         import streamlit as _stx
+        # v46.20: check the columns SCORING actually depends on. For exit velo,
+        # build_matchup_table picks the best-populated of {avg_best_speed,
+        # exit_velocity_avg, launch_speed} → avg_ev, so checking the single
+        # "launch_speed" false-alarmed (BROKEN) when Savant served EV under
+        # avg_best_speed instead — avg_ev downstream was 100%. Treat EV as
+        # present if ANY of its source columns has data.
         _critical = ["barrel_batted_rate", "hard_hit_percent", "iso", "xwoba",
-                     "xslg", "launch_speed", "k_percent", "bb_percent"]
+                     "xslg", "k_percent", "bb_percent"]
+        _ev_sources = ["launch_speed", "avg_best_speed", "exit_velocity_avg", "avg_ev"]
         _missing = [c for c in _critical if c not in df.columns]
         _empty = [c for c in _critical if c in df.columns
                   and pd.to_numeric(df[c], errors="coerce").notna().sum() == 0]
+        # EV is broken only if EVERY source is missing/empty
+        _ev_ok = any(
+            c in df.columns and pd.to_numeric(df[c], errors="coerce").notna().sum() > 0
+            for c in _ev_sources)
+        if not _ev_ok:
+            _empty.append("exit-velo (all sources empty)")
         if _missing or _empty:
             _mp = []
-            if _missing: _mp.append(f"MISSING: {', '.join(_missing)}")
-            if _empty: _mp.append(f"ALL-EMPTY: {', '.join(_empty)}")
+            if _missing:
+                _mp.append(f"MISSING: {', '.join(_missing)}")
+            if _empty:
+                _mp.append(f"ALL-EMPTY: {', '.join(_empty)}")
             _stx.session_state["_savant_drift_status"] = (
                 "\u26a0\ufe0f Savant column drift (BROKEN) \u2014 " + " | ".join(_mp)
                 + " (a rename likely broke a derived stat)")
