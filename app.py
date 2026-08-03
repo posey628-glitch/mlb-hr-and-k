@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v46.25-predictor-caption-sync"
+APP_VERSION = "2026.06.10-v46.26-trade-deadline-aware"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -8648,7 +8648,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v46.25 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v46.26 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -15986,6 +15986,24 @@ if all_hitters:
                 teams_loaded += 1
 
         teams_total = len(team_active_ids)
+        # v46.26 (trade-deadline): build a set of recently-TRADED player_ids so
+        # the roster flag can tell a traded player apart from an IL/optioned one.
+        # Fetched independently of the (toggleable) transactions display block so
+        # it's ALWAYS available on deadline day.
+        _traded_pids: set = set()
+        try:
+            from data_fetcher import get_recent_transactions as _grt
+            _txn = _grt(days_back=2, stats_day=_stats_day_key())
+            if _txn is not None and not _txn.empty and "type_code" in _txn.columns:
+                _tr = _txn[_txn["type_code"] == "TR"]
+                for _v in _tr.get("player_id", pd.Series(dtype=object)).tolist():
+                    try:
+                        if pd.notna(_v):
+                            _traded_pids.add(int(_v))
+                    except (TypeError, ValueError):
+                        continue
+        except Exception:
+            _traded_pids = set()
         # Per-team IL flag: only fires when we successfully loaded that team's roster
         def _il_flag_v2(row):
             team_abbr = row.get("team")
@@ -16001,6 +16019,14 @@ if all_hitters:
             if pd.isna(pid):
                 return ""
             if pid_i not in abbr_active[team_abbr]:
+                # v46.26 (trade-deadline): distinguish a TRADED player from an
+                # IL/optioned one. If this player_id appears in a recent TRADE
+                # transaction, they're not injured — they changed teams, and our
+                # slate still has their OLD team (stale until the lineup feed
+                # catches up). Label it clearly so deadline-day users aren't told
+                # a healthy, just-traded hitter is "inactive".
+                if pid_i in _traded_pids:
+                    return "🔁 recently traded — team may be stale"
                 return "🏥 not on active roster"
             return ""
 
