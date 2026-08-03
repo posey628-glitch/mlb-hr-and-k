@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v46.24-adaptive-predictor-list"
+APP_VERSION = "2026.06.10-v46.25-predictor-caption-sync"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -6653,8 +6653,10 @@ if show_pattern_analysis:
                                 st.markdown("---")
                                 st.markdown("### H. Adaptive Score — data-driven composite from top predictors")
                                 st.caption(
-                                    "A **data-driven ranking** that weights the top-5 "
-                                    "reliable features by their rolling correlation "
+                                    "A **data-driven ranking** that weights the "
+                                    "empirically-best predictors (an adaptive set — "
+                                    "every signal within 55% of the top correlation, "
+                                    "not a fixed count) by their rolling correlation "
                                     "strength — the opposite of the fixed-weights "
                                     "hr_score. As correlations shift over time, so does "
                                     "the weighting. Runs in parallel with hr_score so you "
@@ -8646,7 +8648,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v46.24 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v46.25 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -10775,7 +10777,8 @@ st.divider()
 # TOP 5 PICKS OF THE DAY — combined HR signal across all factors
 # ============================================================================
 # ============================================================
-# v45.16: PUBLIC "what's predicting homers" — top 5 signals, names only.
+# v45.16 / v46.24: PUBLIC "what's predicting homers" — the adaptive set of
+# signals (relative band, not a fixed 5), names only.
 # Reuses the exact Section G aggregation (rolling_feature_importance) so this
 # public list and the owner-side Pattern Analysis can never disagree. No
 # numbers by design — just the ranked names, readable by anyone. Hidden
@@ -13474,12 +13477,14 @@ if combined_picks is not None and not combined_picks.empty:
         # =====================================================================
         # ==== v45.23: Pattern-Based Top 10 (experimental challenger) ====
         # The user-facing extension of the "What's predicting homers best"
-        # card: rank tonight's starters PURELY by the top-5 empirically-best
-        # predictors, weighted by their measured correlation strength
-        # (compute_adaptive_score — same engine as owner-side Pattern
-        # Analysis). This challenger feeds NOTHING in main scoring; it is
-        # displayed for contrast and its score is snapshotted + correlation-
-        # tracked nightly so the data decides whether it beats the champion.
+        # card: rank tonight's starters PURELY by the empirically-best
+        # predictors (v46.24: the adaptive band — every signal within 55% of
+        # the top correlation, not a fixed 5), weighted by their measured
+        # correlation strength (compute_adaptive_score — same engine as owner-
+        # side Pattern Analysis). This challenger feeds NOTHING in main scoring;
+        # it is displayed for contrast and its score is snapshotted +
+        # correlation-tracked nightly so the data decides whether it beats the
+        # champion.
         try:
             _imp_for_adaptive = st.session_state.get("_pub_importance_df")
             if _imp_for_adaptive is None:
@@ -13506,13 +13511,15 @@ if combined_picks is not None and not combined_picks.empty:
                             expanded=False):
                         st.caption(
                             "A challenger list: tonight's starters ranked purely "
-                            "by the top-5 predictors from the card above, each "
-                            "weighted by its measured correlation with real HRs "
-                            "over our graded slates. Compare it against the main "
-                            "Top 10 — where they agree, conviction is highest. "
-                            "This score is tracked nightly against outcomes, so "
-                            "the data itself will tell us if it starts beating "
-                            "the main model."
+                            "by the signals currently predicting HRs best (from "
+                            "the card above), each weighted by its measured "
+                            "correlation with real HRs over our graded slates. "
+                            "The number of signals isn't fixed — it flexes to "
+                            "however many are genuinely working right now. Compare "
+                            "it against the main Top 10 — where they agree, "
+                            "conviction is highest. This score is tracked nightly "
+                            "against outcomes, so the data itself will tell us if "
+                            "it starts beating the main model."
                         )
                         _acols = [c for c in [
                             "player_name", "team", "game", "adaptive_score",
@@ -13527,7 +13534,8 @@ if combined_picks is not None and not combined_picks.empty:
                                 "adaptive_score": st.column_config.NumberColumn(
                                     "Pattern Score", format="%.1f",
                                     help="0-100 percentile of the reliability-"
-                                         "weighted top-5-predictor blend."),
+                                         "weighted adaptive-predictor blend "
+                                         "(signals within 55% of the top corr)."),
                                 "hr_score": st.column_config.NumberColumn(
                                     "HR Score (main)", format="%.1f"),
                                 "hr_game_pct": st.column_config.NumberColumn(
