@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v46.28-grade-5-more-signals"
+APP_VERSION = "2026.06.10-v46.29-complete-copy-export"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -6339,6 +6339,23 @@ if show_pattern_analysis:
                             disp[_cols],
                             hide_index=True, use_container_width=True,
                         )
+                        # v46.29: also stash a TEXT version for the copyable
+                        # pattern report — this FDR-guarded correlation table is
+                        # the core pattern-analysis output, previously st.dataframe-
+                        # only. Stashed to session_state (not _pa_report, which is
+                        # built LATER at ~L6946) and merged in when the report
+                        # assembles.
+                        try:
+                            _corr_txt = ["", "D. FEATURE CORRELATION vs HR (FDR-guarded)",
+                                         "feature | corr | n | real? | p"]
+                            for _, _r in disp.iterrows():
+                                _corr_txt.append(
+                                    f"{_r['feature']} | {_r['corr']} | "
+                                    f"{_r.get('n_pairs','')} | "
+                                    f"{_r.get('real?','')} | {_r.get('p','')}")
+                            st.session_state["_corr_table_copy_text"] = "\n".join(_corr_txt)
+                        except Exception:
+                            pass
                     else:
                         st.info("Not enough data for feature correlation yet.")
 
@@ -7246,6 +7263,12 @@ if show_pattern_analysis:
                                           f"{type(_swe).__name__})")
 
                     if len(_pa_report) > 2:
+                        # v46.29: fold in the Section D correlation table (stashed
+                        # earlier — it renders before this report is built).
+                        _ctc = st.session_state.get("_corr_table_copy_text")
+                        if _ctc:
+                            _pa_report.append(_ctc)
+                        st.session_state["_pattern_copy_text"] = "\n".join(_pa_report)
                         with st.expander("📋 Copy pattern analysis as text (tables paste intact)", expanded=False):
                             st.caption("Click the copy icon in the top-right of the box below.")
                             st.code("\n".join(_pa_report), language="text")
@@ -8661,7 +8684,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v46.28 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v46.29 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
