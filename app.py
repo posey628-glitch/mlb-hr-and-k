@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v46.20-drift-guard-ev-fallback"
+APP_VERSION = "2026.06.10-v46.21-drift-status-cache-fix"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -3727,6 +3727,14 @@ if slate.empty:
 # Statcast pulls — wrap with try/except so transient timeouts don't crash app
 try:
     hitter_stats = get_hitter_stats(stats_day=_stats_day_key()) if not slate.empty else pd.DataFrame()
+    # v46.21: run the drift check here too — get_hitter_stats is @st.cache_data,
+    # so on a cache hit its internal check is skipped and the status would read
+    # "unknown". Calling it at the (uncached) call site keeps the status fresh.
+    try:
+        from data_fetcher import check_savant_drift as _csd
+        _csd(hitter_stats)
+    except Exception:
+        pass
     # v45.14 (review P1 #3): normalize player_id dtype ONCE at the source.
     # Several downstream merges (zone tiers, hand statcast, bat tracking,
     # sprint) use raw .merge — if the fetcher ever returns object/float ids,
@@ -8638,7 +8646,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v46.20 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v46.21 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
