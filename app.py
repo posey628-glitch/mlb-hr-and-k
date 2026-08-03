@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v46.21-drift-status-cache-fix"
+APP_VERSION = "2026.06.10-v46.22-game-dropdown-fix"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -8646,7 +8646,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v46.21 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v46.22 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -20336,6 +20336,16 @@ if _valid_games:
                     _lbl = st.session_state.get("_game_selector")
                     if _lbl in _tab_labels:
                         st.session_state["_game_nav_idx"] = _tab_labels.index(_lbl)
+                    # v46.22: the dropdown updated the index but — unlike the ◀▶
+                    # arrows (which call st.rerun(scope="app")) — never forced a
+                    # rerun, so a stale fragment kept showing the OLD game after a
+                    # dropdown pick. Force the same app-scoped rerun the arrows use.
+                    try:
+                        st.rerun(scope="app")
+                    except TypeError:
+                        st.rerun()
+                    except Exception:
+                        pass
 
                 _selected_game_label = st.selectbox(
                     f"🎮 Select game ({_n_games} game"
@@ -20365,7 +20375,14 @@ if _valid_games:
                 "Show all", value=False, key="_show_all_games",
                 help="Render every game at once (slower).",
             )
-        _selected_idx = _tab_labels.index(_selected_game_label) if _selected_game_label in _tab_labels else 0
+        # v46.22: derive the rendered game from the selectbox label, but if that's
+        # ever stale/missing fall back to _game_nav_idx (set by both the dropdown's
+        # on_change and the arrows) rather than snapping back to game 0.
+        if _selected_game_label in _tab_labels:
+            _selected_idx = _tab_labels.index(_selected_game_label)
+        else:
+            _selected_idx = max(0, min(
+                st.session_state.get("_game_nav_idx", 0), len(_tab_labels) - 1))
         # v45.57: player card — button-triggered (robust to fragment staleness
         # that made the old "selection changed" guard stick until a hard reload),
         # and an opt-in to include bench / probable-starter / late-swap candidates
