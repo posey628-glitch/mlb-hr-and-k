@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v46.23-batside-status-benign"
+APP_VERSION = "2026.06.10-v46.24-adaptive-predictor-list"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -8646,7 +8646,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v46.23 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v46.24 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -10831,27 +10831,45 @@ try:
             # Positive predictors with >=5 graded days — same consistency
             # floor the owner-side Proposed Weights use.
             from pattern_analysis import MODEL_OUTPUT_FEATURES as _MOF
-            _q_pub = _imp_pub[
+            _q_all = _imp_pub[
                 (_imp_pub["n_days"] >= 5) & (_imp_pub["avg_corr"] > 0)
                 # v45.26 (user's catch): raw measurable skills only — never
                 # our own outputs (hr_game_pct etc.) citing themselves
                 & (~_imp_pub["feature"].isin(_MOF))
-            ].sort_values("avg_corr", ascending=False).head(5)
+            ].sort_values("avg_corr", ascending=False)
+            # v46.24 (user's catch): a hard head(5) is arbitrary — it cuts a
+            # genuinely-strong #6/#7 and pads the list when only 3 are good.
+            # Instead keep every predictor that (a) clears a meaningful
+            # correlation floor AND (b) is within a relative band of the BEST
+            # one, so the natural cluster of good signals shows — 3 or 9. Cap 12.
+            _top_corr = float(_q_all["avg_corr"].iloc[0]) if not _q_all.empty else 0.0
+            if not _q_all.empty:
+                _band = max(0.05, _top_corr * 0.55)  # abs floor 0.05, rel 55% of #1
+                _q_pub = _q_all[_q_all["avg_corr"] >= _band].head(12)
+                if len(_q_pub) < 3:
+                    _q_pub = _q_all.head(3)  # never empty on a flat day
+            else:
+                _q_pub = _q_all
             if len(_q_pub) >= 3:
                 with st.container(border=True):
                     st.markdown("#### 🔮 What's predicting homers best right now")
                     _pub_lines = []
-                    for _rank, _feat in enumerate(_q_pub["feature"].tolist(), start=1):
+                    for _rank, (_feat, _corr) in enumerate(
+                            zip(_q_pub["feature"].tolist(),
+                                _q_pub["avg_corr"].tolist()), start=1):
                         _nm = _FRIENDLY_METRIC_NAMES.get(
                             str(_feat), str(_feat).replace("_", " ").title())
-                        _pub_lines.append(f"**{_rank}.** {_nm}")
+                        _ratio = (_corr / _top_corr) if _top_corr > 0 else 0
+                        _tier = "🔥" if _ratio >= 0.80 else ("💪" if _ratio >= 0.65 else "•")
+                        _pub_lines.append(f"**{_rank}.** {_tier} {_nm}")
                     st.markdown("  \n".join(_pub_lines))
                     st.caption(
-                        f"Ranked by how strongly each signal has lined up with "
-                        f"actual home runs over our last "
+                        f"🔥 strongest · 💪 strong · • solid. Shows every signal "
+                        f"predicting HRs meaningfully right now — not a fixed "
+                        f"count, so the list grows or shrinks with how many are "
+                        f"genuinely working. Ranked over our last "
                         f"{min(len(_pub_hist), _PA_LOOKBACK)} "
-                        f"graded slates. Updates daily as results come in — "
-                        f"the order shifts as the season evolves."
+                        f"graded slates. Updates daily as results come in."
                     )
 except Exception as _pub_e:
     log_swallowed_error("public_top5_predictors", _pub_e, surface=False)
