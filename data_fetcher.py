@@ -2538,25 +2538,32 @@ def get_hitter_stats(season: int = None, stats_day: str = "") -> pd.DataFrame:
         "k_percent", "bb_percent", "avg_best_speed",
     ])
     df = clip_outliers(df)
-    # v46.13: SAVANT COLUMN-DRIFT GUARD. Savant occasionally renames leaderboard
-    # columns; the fetch still succeeds but the derived stat silently goes NaN
-    # (the #1 silent-data-loss class). Check CRITICAL scoring columns are present
-    # with real values; stash drift to session_state for Pipeline Health.
+    # v46.13/46.21: SAVANT COLUMN-DRIFT GUARD moved to a standalone function
+    # (check_savant_drift) so it can ALSO run at the call site — @st.cache_data
+    # skips this function body on a cache hit, which left the status "unknown".
+    check_savant_drift(df)
+    return df
+
+
+def check_savant_drift(df) -> str:
+    """v46.21: verify the CRITICAL scoring columns are present with real values,
+    and stash the result to session_state for Pipeline Health. Runs both inside
+    get_hitter_stats AND at the app call site (so a cache hit doesn't leave the
+    status 'unknown'). Returns the status string.
+    EV note: build_matchup_table picks the best-populated of {avg_best_speed,
+    exit_velocity_avg, launch_speed} → avg_ev, so EV is OK if ANY source has
+    data — checking the single 'launch_speed' false-alarmed."""
     try:
         import streamlit as _stx
-        # v46.20: check the columns SCORING actually depends on. For exit velo,
-        # build_matchup_table picks the best-populated of {avg_best_speed,
-        # exit_velocity_avg, launch_speed} → avg_ev, so checking the single
-        # "launch_speed" false-alarmed (BROKEN) when Savant served EV under
-        # avg_best_speed instead — avg_ev downstream was 100%. Treat EV as
-        # present if ANY of its source columns has data.
+        if df is None or not hasattr(df, "columns") or df.empty:
+            _stx.session_state["_savant_drift_status"] = "unknown (no hitter data this run)"
+            return "unknown"
         _critical = ["barrel_batted_rate", "hard_hit_percent", "iso", "xwoba",
                      "xslg", "k_percent", "bb_percent"]
         _ev_sources = ["launch_speed", "avg_best_speed", "exit_velocity_avg", "avg_ev"]
         _missing = [c for c in _critical if c not in df.columns]
         _empty = [c for c in _critical if c in df.columns
                   and pd.to_numeric(df[c], errors="coerce").notna().sum() == 0]
-        # EV is broken only if EVERY source is missing/empty
         _ev_ok = any(
             c in df.columns and pd.to_numeric(df[c], errors="coerce").notna().sum() > 0
             for c in _ev_sources)
@@ -2568,14 +2575,14 @@ def get_hitter_stats(season: int = None, stats_day: str = "") -> pd.DataFrame:
                 _mp.append(f"MISSING: {', '.join(_missing)}")
             if _empty:
                 _mp.append(f"ALL-EMPTY: {', '.join(_empty)}")
-            _stx.session_state["_savant_drift_status"] = (
-                "\u26a0\ufe0f Savant column drift (BROKEN) \u2014 " + " | ".join(_mp)
-                + " (a rename likely broke a derived stat)")
+            _status = ("\u26a0\ufe0f Savant column drift (BROKEN) \u2014 "
+                       + " | ".join(_mp) + " (a rename likely broke a derived stat)")
         else:
-            _stx.session_state["_savant_drift_status"] = "\u2705 all critical Savant columns present"
+            _status = "\u2705 all critical Savant columns present"
+        _stx.session_state["_savant_drift_status"] = _status
+        return _status
     except Exception:
-        pass
-    return df
+        return "unknown"
 
 
 # ----------------------------------------------------------------------------
