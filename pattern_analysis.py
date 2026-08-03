@@ -1692,19 +1692,35 @@ def probability_calibration_table(merged_df: pd.DataFrame,
 
 def adaptive_selected_features(importance_df: pd.DataFrame,
                                 top_n: int = 5) -> pd.DataFrame:
-    """v45.40: THE single source of truth for which features the adaptive
-    challenger uses — raw skills only (MODEL_OUTPUT_FEATURES excluded),
+    """v45.40 / v46.24: THE single source of truth for which features the
+    adaptive challenger uses — raw skills only (MODEL_OUTPUT_FEATURES excluded),
     |corr| ≥ 0.05, ≥5 days. compute_adaptive_score and every display of
-    "drivers" MUST both use this, so what's shown is always what's used
-    (a raw importance head(5) in the owner report previously listed excluded
-    outputs as drivers — display and reality can no longer diverge)."""
+    "drivers" MUST both use this, so what's shown is always what's used.
+
+    v46.24 (user's catch): a hard head(top_n) cutoff is arbitrary — it drops a
+    genuinely-strong #6/#7 and includes a weak #5 just to reach the count.
+    Instead keep every qualifying feature within a RELATIVE band of the best
+    one (>=55% of the top |corr|), so the weighting reflects the true cluster of
+    working signals — 3 or 9 — not a fixed number. `top_n` becomes an upper CAP
+    (default raised to 10) rather than a hard target, for readability/stability.
+    """
     if importance_df is None or importance_df.empty:
         return pd.DataFrame()
-    return importance_df[
+    _q = importance_df[
         (importance_df["avg_corr"].abs() >= 0.05)
         & (importance_df["n_days"] >= 5)
         & (~importance_df["feature"].isin(MODEL_OUTPUT_FEATURES))
-    ].head(top_n)
+    ].copy()
+    if _q.empty:
+        return _q
+    _q = _q.reindex(_q["avg_corr"].abs().sort_values(ascending=False).index)
+    _top = float(_q["avg_corr"].abs().iloc[0])
+    _band = max(0.05, _top * 0.55)
+    _kept = _q[_q["avg_corr"].abs() >= _band]
+    # never fewer than 3 (if they cleared the base filter); cap for stability
+    if len(_kept) < 3:
+        _kept = _q.head(3)
+    return _kept.head(max(top_n, 10))
 
 
 def compute_adaptive_score(current_slate: pd.DataFrame,
