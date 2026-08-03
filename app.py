@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v46.29-complete-copy-export"
+APP_VERSION = "2026.06.10-v46.30-peripheral-qualify"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -2381,9 +2381,13 @@ def pa_threshold_for_date(d: date) -> int:
     # phase string from a future schema), not redundant safety nets.
     return {
         "early": 40, "may": 80, "june": 120,
-        "july": 160, "august": 200,
-        "september": 250, "october": 280, "offseason": 200,
-    }.get(phase, 200)
+        # v46.30: Aug/Sep lowered (200→170, 250→210). Even everyday regulars vary,
+        # and post-deadline rosters churn heavily — the old floors were a touch
+        # high. The peripheral-qualify path (in the pick pool) is the main fix;
+        # this just relaxes the primary floor to match a real league's PA spread.
+        "july": 160, "august": 170,
+        "september": 210, "october": 280, "offseason": 200,
+    }.get(phase, 170)
 
 
 def hr_verdict(hr_game_pct, sample_size=None, pa_threshold=80):
@@ -3030,9 +3034,12 @@ with st.sidebar:
         index=0,
         help=(
             "Auto scales with time of season: Apr 40 / May 80 / Jun 120 / "
-            "Jul 160 / Aug+ 200. Hitters below threshold show in 'Insufficient "
-            "Sample' section. Use Custom to include more players (call-ups, "
-            "platoon guys) you want to project HRs for."
+            "Jul 160 / Aug 170 / Sep 210. Hitters below threshold show in "
+            "'Insufficient Sample' — BUT a hitter under the floor can still "
+            "make the Top 10 if they have a meaningful sample AND elite contact "
+            "quality (barrel/ISO/EV/hard-hit stabilize faster than HR rate), so "
+            "hot call-ups and post-deadline bats aren't wrongly cut. Use Custom "
+            "to set your own floor."
         ),
     )
     if pa_mode == "Custom":
@@ -8684,7 +8691,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v46.29 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v46.30 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -12591,11 +12598,49 @@ if combined_picks is not None and not combined_picks.empty:
         pass
 
     if "pa" in combined_picks.columns and "hr_game_pct" in combined_picks.columns:
+        # v46.30 (user's catch — PA gate too aggressive in Aug/Sep, esp. post-
+        # deadline): a hard PA floor cuts legit HR threats whose HR-RATE sample
+        # is thin but whose CONTACT QUALITY is already proven. Barrel%/ISO/EV/
+        # hard-hit stabilize MUCH faster than HR-per-game, so a hitter can be a
+        # real power threat at 150 PA even if his HR rate is still noisy.
+        # MIX: qualify if EITHER (a) clears the PA floor [HR-rate reliable], OR
+        # (b) has a MEANINGFUL sample (>= peripheral floor, so not pure noise)
+        # AND elite contact quality on 2+ of the fast-stabilizing metrics.
+        _pa = pd.to_numeric(combined_picks["pa"], errors="coerce")
+        _pa_ok = _pa >= INSUFFICIENT_PA_THRESHOLD
+        # secondary floor: 60% of the main floor (or 100 PA, whichever lower) —
+        # enough that barrel%/EV are meaningful, low enough to admit call-ups /
+        # post-deadline everyday bats getting real ABs.
+        _periph_floor = min(100, int(INSUFFICIENT_PA_THRESHOLD * 0.6))
+        _periph_pa_ok = _pa >= _periph_floor
+        # count elite peripherals (fast-stabilizing power signals)
+        def _num(col):
+            return (pd.to_numeric(combined_picks[col], errors="coerce")
+                    if col in combined_picks.columns
+                    else pd.Series(float("nan"), index=combined_picks.index))
+        _elite = (
+            (_num("barrel_pct") >= 12.0).astype(int)     # strong (not just elite 18)
+            + (_num("iso") >= 0.230).astype(int)          # strong ISO
+            + (_num("avg_ev") >= 91.0).astype(int)        # strong exit velo
+            + (_num("hard_hit") >= 45.0).astype(int)      # strong hard-hit
+        )
+        _periph_qualify = _periph_pa_ok & (_elite >= 2)
         q = combined_picks[
             combined_picks["pa"].notna()
-            & (combined_picks["pa"] >= INSUFFICIENT_PA_THRESHOLD)
+            & (_pa_ok | _periph_qualify)
             & combined_picks["hr_game_pct"].notna()
         ].copy()
+        # tag HOW each hitter qualified so the UI can show it
+        if not q.empty:
+            _q_pa = pd.to_numeric(q["pa"], errors="coerce")
+            q["_qualify_via"] = np.where(
+                _q_pa >= INSUFFICIENT_PA_THRESHOLD, "pa",
+                "peripherals")
+        _n_periph = int(_periph_qualify.sum()) if len(combined_picks) else 0
+        _n_periph_added = int((_periph_qualify & ~_pa_ok).sum()) if len(combined_picks) else 0
+        if _n_periph_added > 0:
+            st.session_state["_periph_qualify_count"] = _n_periph_added
+            st.session_state["_periph_qualify_floor"] = _periph_floor
     else:
         q = combined_picks.copy()
     if q is None or q.empty:
@@ -12623,6 +12668,17 @@ if combined_picks is not None and not combined_picks.empty:
                 "pipeline_health",
                 f"Pick pool: excluded {_n_bench_dropped} bench player(s) from "
                 f"Top 10 eligibility (v44.99 — starters only in published picks).",
+            )
+        # v46.30: surface when the peripheral-qualify path admitted low-PA hitters
+        _npq = st.session_state.get("_periph_qualify_count", 0)
+        if _npq > 0:
+            _pf = st.session_state.get("_periph_qualify_floor", 0)
+            stash_diagnostic(
+                "pipeline_health",
+                f"Pick pool: {_npq} hitter(s) under the PA floor qualified on "
+                f"elite contact quality (barrel/ISO/EV/hard-hit, ≥{_pf} PA) — "
+                f"proven power with a still-thin HR-rate sample (v46.30).",
+                level="caption",
             )
 
     if not q.empty:
