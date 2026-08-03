@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v46.26-trade-deadline-aware"
+APP_VERSION = "2026.06.10-v46.27-bat-tracking-off-warning"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -3653,6 +3653,19 @@ use_bat_tracking = st.sidebar.checkbox(
         "the status caption goes ❌ and the features above gracefully turn off."
     ),
 )
+# v46.27: this season is focused on ACCUMULATING pattern data, so a silently-
+# off bat-tracking toggle is a real hazard — it drops blast_pct_real (a graded
+# candidate feature) out of the pattern loop for that slate, creating gaps in
+# the dataset. Keep the toggle (a genuine fallback if Savant field names drift),
+# but make an OFF state impossible to forget.
+if not use_bat_tracking:
+    st.sidebar.warning(
+        "⚠️ Bat-tracking is OFF — blast% / IAA are **not being fetched or "
+        "accumulated** this slate. HR Criteria #4 will be blank and the pattern "
+        "loop can't grade swing-quality tonight. Turn it back on unless the "
+        "Savant fetch is actively broken.",
+        icon="📡",
+    )
 if hide_started and selected_date == _today_et():  # v44.97: ET-aware
     try:
         # v43.43 (reviewer-validated bias fix): the snapshot payload records
@@ -8648,7 +8661,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v46.26 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v46.27 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
