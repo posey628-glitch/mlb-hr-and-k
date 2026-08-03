@@ -1172,6 +1172,13 @@ HR_CANDIDATE_FEATURES = [
     "sc_hrDistance",
     # v46.13: lineup protection (surrounding-hitter xwOBA, tracked-only)
     "lineup_protection",
+    # v46.28 (accumulation-gap audit): these already reach the snapshot but
+    # weren't being graded — real distinct signals, now tracked:
+    "ideal_attack_angle_pct",  # IAA — swing-quality (HR Criteria #4)
+    "center_pct",              # spray center% (completes left/right/center)
+    "chase_zone_slg",          # chase-zone SLG (plate discipline)
+    "max_hit_speed",           # PEAK exit velo (distinct from avg_ev)
+    "opp_pitcher_p_x_woba_allowed",  # pitcher xwOBA-allowed (sibling of p_x_slg)
     # v45.93: hot/cold zone features from statsapi hotColdZones (tracked-only —
     # the loop measures whether where-a-hitter-does-damage predicts HRs).
     "hot_zone_slg",
