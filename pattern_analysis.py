@@ -1172,6 +1172,10 @@ HR_CANDIDATE_FEATURES = [
     "sc_hrDistance",
     # v46.13: lineup protection (surrounding-hitter xwOBA, tracked-only)
     "lineup_protection",
+    # v46.36 (historical priors — tracked-only, must prove itself before scoring):
+    "hist_power_backing",  # 0-1: how strongly 3-yr history says the power is real
+    "hist_iso",            # 3-yr avg ISO
+    "hist_xwoba",          # 3-yr avg xwOBA
     # v46.28 (accumulation-gap audit): these already reach the snapshot but
     # weren't being graded — real distinct signals, now tracked:
     "ideal_attack_angle_pct",  # IAA — swing-quality (HR Criteria #4)
