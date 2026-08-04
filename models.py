@@ -1130,6 +1130,10 @@ def build_matchup_table(
         # v46.36: 3-yr historical priors (tracked-only)
         "hist_power_backing", "hist_iso", "hist_xslg", "hist_xwoba", "hist_ev",
         "hist_seasons",
+        # v46.38: 3-yr historical splits (tracked-only)
+        "hist_vs_lhp_iso", "hist_vs_rhp_iso", "hist_platoon_gap",
+        "hist_day_iso", "hist_night_iso", "hist_daynight_gap",
+        "hist_month_iso", "hist_month_hr_rate", "hist_month_sample",
         "hot_zone_slg", "heart_zone_slg", "chase_zone_slg",
         "zone_slg_spread", "hot_zone_ev",
         "left_side_pct", "right_side_pct", "center_pct",
