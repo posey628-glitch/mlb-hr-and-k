@@ -3720,6 +3720,51 @@ def get_hitter_expected_stats(season: int = None, hitter_ids: tuple = ()) -> pd.
     return pd.DataFrame(rows) if rows else pd.DataFrame()
 
 
+# v46.38: precomputed historical data lives in this file (built once per season
+# by build_historical_data.py). Loading from it is INSTANT — no API calls at
+# render. The live get_hitter_historical_* fetchers below are FALLBACKS only.
+import json as _json
+import os as _os
+
+_HISTORICAL_FILE = _os.path.join(
+    _os.path.dirname(_os.path.abspath(__file__)), "historical_data.json")
+
+
+@st.cache_data(ttl=86400)
+def load_precomputed_historical() -> dict:
+    """Load the precomputed historical data file (priors + splits per player_id).
+    Returns {} if the file is missing (app then runs without historical context,
+    or the user can enable the slow live-fetch fallback). INSTANT — reads one
+    local file, no network."""
+    try:
+        if _os.path.exists(_HISTORICAL_FILE):
+            with open(_HISTORICAL_FILE, "r") as f:
+                data = _json.load(f)
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        pass
+    return {}
+
+
+def historical_frame_for(hitter_ids: tuple, kind: str = "priors") -> pd.DataFrame:
+    """Build a DataFrame of precomputed historical `kind` ('priors' or 'splits')
+    for the given hitter_ids, from the local file. INSTANT. Empty if no file."""
+    data = load_precomputed_historical()
+    if not data:
+        return pd.DataFrame()
+    section = data.get(kind, {})
+    if not section:
+        return pd.DataFrame()
+    rows = []
+    for hid in hitter_ids:
+        rec = section.get(str(int(hid))) if str(hid).lstrip("-").isdigit() else None
+        if rec:
+            row = {"player_id": int(hid)}
+            row.update(rec)
+            rows.append(row)
+    return pd.DataFrame(rows) if rows else pd.DataFrame()
+
+
 @st.cache_data(ttl=86400)  # 24h — prior-SEASON data is static, cache hard
 def get_hitter_historical_priors(hitter_ids: tuple = (),
                                  current_year: int = None,
