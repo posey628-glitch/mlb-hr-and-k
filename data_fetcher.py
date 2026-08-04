@@ -3886,6 +3886,127 @@ def get_hitter_historical_priors(hitter_ids: tuple = (),
     return pd.DataFrame(rows) if rows else pd.DataFrame()
 
 
+def _split_power(stat: dict) -> dict:
+    """Extract power stats (ISO, SLG, HR-rate, PA) from a statSplits stat block.
+    ISO = slg - avg. Returns {} if no usable data."""
+    out = {}
+    _slg = _saber_to_float(stat.get("slg"))
+    _avg = _saber_to_float(stat.get("avg"))
+    _pa = _saber_to_float(stat.get("plateAppearances"))
+    _hr = _saber_to_float(stat.get("homeRuns"))
+    if _slg is not None and _avg is not None:
+        out["iso"] = round(_slg - _avg, 3)
+    if _slg is not None:
+        out["slg"] = _slg
+    if _pa is not None:
+        out["pa"] = _pa
+    if _hr is not None and _pa and _pa > 0:
+        out["hr_rate"] = round(_hr / _pa, 4)
+    return out
+
+
+@st.cache_data(ttl=86400)  # 24h — prior-season split data is static
+def get_hitter_historical_splits(hitter_ids: tuple = (),
+                                 current_year: int = None,
+                                 years_back: int = 3,
+                                 current_month: int = None) -> pd.DataFrame:
+    """v46.38: 3-year HISTORICAL SPLIT priors — platoon (vs LHP/RHP), day/night,
+    and current-month — built ONLY where the sample stays large enough to be
+    signal not noise. All tracked-only, hist_-prefixed, never blended into
+    current-season signal.
+
+    Coarse buckets on purpose (every slice shrinks the sample):
+      - PLATOON (vl/vr): 2 buckets, big samples → predictive. Verified endpoint.
+      - DAY/NIGHT (d/n): 2 buckets, moderate sample.
+      - CURRENT MONTH: 1 bucket = how this hitter historically hit in tonight's
+        calendar month (slow-starter / late-bloomer signal), not 12 thin months.
+    Platoon is established signal; day/night + month are tracked so the FDR loop
+    can judge honestly. Sample-gated (platoon>=150 PA, day/night>=100, month>=60)
+    so a thin slice is dropped, not trusted."""
+    if not hitter_ids:
+        return pd.DataFrame()
+    cy = current_year if current_year is not None else current_season()
+    mo = current_month if current_month is not None else datetime.now().month
+    seasons = [cy - k for k in range(1, years_back + 1)]
+
+    rows = []
+    for hid in hitter_ids:
+        try:
+            _hid = int(hid)
+        except (TypeError, ValueError):
+            continue
+        acc = {"vl": [], "vr": [], "d": [], "n": [], "month": []}
+        for yr in seasons:
+            for sit, keys in (("vl,vr", ("vl", "vr")), ("d,n", ("d", "n"))):
+                try:
+                    u = (f"https://statsapi.mlb.com/api/v1/people/{_hid}/stats"
+                         f"?stats=statSplits&sitCodes={sit}&group=hitting&season={yr}")
+                    r = requests.get(u, headers=HEADERS, timeout=15)
+                    if r.status_code != 200:
+                        continue
+                    for sg in r.json().get("stats", []):
+                        for sp in sg.get("splits", []):
+                            code = sp.get("split", {}).get("code", "")
+                            if code in keys:
+                                p = _split_power(sp.get("stat", {}))
+                                if p:
+                                    acc[code].append(p)
+                except Exception:
+                    continue
+            try:
+                u2 = (f"https://statsapi.mlb.com/api/v1/people/{_hid}/stats"
+                      f"?stats=byMonth&group=hitting&season={yr}")
+                r2 = requests.get(u2, headers=HEADERS, timeout=15)
+                if r2.status_code == 200:
+                    for sg in r2.json().get("stats", []):
+                        for sp in sg.get("splits", []):
+                            _m = (sp.get("month")
+                                  or sp.get("split", {}).get("month")
+                                  or sp.get("stat", {}).get("month"))
+                            if _m is not None and int(_m) == mo:
+                                p = _split_power(sp.get("stat", {}))
+                                if p:
+                                    acc["month"].append(p)
+            except Exception:
+                pass
+
+        def _pa_weighted(bucket, key, min_pa):
+            recs = [x for x in acc[bucket] if x.get(key) is not None and x.get("pa")]
+            tot_pa = sum(x["pa"] for x in recs)
+            if tot_pa < min_pa or not recs:
+                return None, tot_pa
+            val = sum(x[key] * x["pa"] for x in recs) / tot_pa
+            return round(val, 3), tot_pa
+
+        row = {"player_id": _hid}
+        vl_iso, _ = _pa_weighted("vl", "iso", 150)
+        vr_iso, _ = _pa_weighted("vr", "iso", 150)
+        d_iso, _ = _pa_weighted("d", "iso", 100)
+        n_iso, _ = _pa_weighted("n", "iso", 100)
+        m_iso, m_pa = _pa_weighted("month", "iso", 60)
+        m_hr, _ = _pa_weighted("month", "hr_rate", 60)
+        if vl_iso is not None:
+            row["hist_vs_lhp_iso"] = vl_iso
+        if vr_iso is not None:
+            row["hist_vs_rhp_iso"] = vr_iso
+        if vl_iso is not None and vr_iso is not None:
+            row["hist_platoon_gap"] = round(vl_iso - vr_iso, 3)
+        if d_iso is not None:
+            row["hist_day_iso"] = d_iso
+        if n_iso is not None:
+            row["hist_night_iso"] = n_iso
+        if d_iso is not None and n_iso is not None:
+            row["hist_daynight_gap"] = round(d_iso - n_iso, 3)
+        if m_iso is not None:
+            row["hist_month_iso"] = m_iso
+            row["hist_month_sample"] = int(m_pa)
+        if m_hr is not None:
+            row["hist_month_hr_rate"] = m_hr
+        if len(row) > 1:
+            rows.append(row)
+    return pd.DataFrame(rows) if rows else pd.DataFrame()
+
+
 @st.cache_data(ttl=3600)
 def get_hitter_hot_zones(season: int = None, hitter_ids: tuple = ()) -> pd.DataFrame:
     """v45.93: per-zone hitter performance from the RELIABLE statsapi
