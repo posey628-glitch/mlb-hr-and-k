@@ -1127,6 +1127,9 @@ def build_matchup_table(
         # here so they actually survive into the graded frame.
         "wrc_plus", "woba_saber", "wraa",
         "x_slg_saber", "x_woba_con",
+        # v46.36: 3-yr historical priors (tracked-only)
+        "hist_power_backing", "hist_iso", "hist_xslg", "hist_xwoba", "hist_ev",
+        "hist_seasons",
         "hot_zone_slg", "heart_zone_slg", "chase_zone_slg",
         "zone_slg_spread", "hot_zone_ev",
         "left_side_pct", "right_side_pct", "center_pct",
