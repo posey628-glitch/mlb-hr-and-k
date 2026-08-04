@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v46.34-reweight-02-iso-up"
+APP_VERSION = "2026.06.10-v46.35-ui-smash-clarity"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -8750,7 +8750,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v46.34 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v46.35 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -10253,6 +10253,18 @@ for _, game in slate.iterrows():
                 elif (lineup_truly_confirmed and game_pct_ok and pitcher_exploitable):
                     # Decent matchup but env not favorable — base SMASH tier
                     smash_label = "🔥 SMASH"
+                elif not lineup_truly_confirmed:
+                    # v46.35 (user): a blank cell was ambiguous — "not a smash
+                    # spot" and "lineup/pitcher not locked yet" looked identical.
+                    # Mark the pending case distinctly so a blank always means
+                    # "confirmed, but not a smash spot" (a real evaluation).
+                    if pitcher_is_tbd:
+                        smash_label = "⏳ pitcher TBD"
+                    else:
+                        smash_label = "⏳ lineup pending"
+                else:
+                    # confirmed + evaluated, just doesn't clear the bar
+                    smash_label = "—"
             except Exception:
                 smash_label = ""
             smash_spots.append(smash_label)
@@ -19942,7 +19954,7 @@ def render_matchup_section(matchup_df: pd.DataFrame, team_label: str):
                 log_swallowed_error("matchup_row_card", _mte, surface=False)
 
     if not insufficient.empty:
-        with st.expander(f"⚠️ {team_label} — Insufficient Sample ({len(insufficient)} hitters below {INSUFFICIENT_PA_THRESHOLD} PA)"):
+        with st.expander(f"⚠️ {team_label} — Insufficient Sample ({len(insufficient)} hitters below {INSUFFICIENT_PA_THRESHOLD} PA)", expanded=True):
             st.dataframe(
                 _style_matchup_df(insufficient[cols_to_show]),
                 hide_index=True, use_container_width=True,
