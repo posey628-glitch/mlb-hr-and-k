@@ -1176,6 +1176,11 @@ HR_CANDIDATE_FEATURES = [
     "hist_power_backing",  # 0-1: how strongly 3-yr history says the power is real
     "hist_iso",            # 3-yr avg ISO
     "hist_xwoba",          # 3-yr avg xwOBA
+    # v46.38 (historical splits — tracked-only; platoon is strong signal,
+    # day/night + month tracked so the FDR loop can judge honestly):
+    "hist_vs_lhp_iso", "hist_vs_rhp_iso", "hist_platoon_gap",
+    "hist_day_iso", "hist_night_iso", "hist_daynight_gap",
+    "hist_month_iso", "hist_month_hr_rate",
     # v46.28 (accumulation-gap audit): these already reach the snapshot but
     # weren't being graded — real distinct signals, now tracked:
     "ideal_attack_angle_pct",  # IAA — swing-quality (HR Criteria #4)
