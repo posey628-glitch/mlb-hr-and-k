@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v46.35-ui-smash-clarity"
+APP_VERSION = "2026.06.10-v46.37-audit-hardening"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -1854,6 +1854,7 @@ _HEALTH_SOURCE_TIERS = {
     "_zone_fetch_status_display":        ("Zone/plate-discipline",  "display"),
     "_hot_zone_status_display":          ("Hot/cold zones (statsapi)", "display"),
     "_saber_status_display":             ("wRC+ / expected stats (statsapi)", "display"),
+    "_hist_priors_status_display":       ("3-yr historical priors (tracked-only)", "display"),
     "_spray_status_display":             ("Spray pull-side (statsapi)", "display"),
     "_p_xstats_status_display":          ("Pitcher xSLG-allowed (statsapi)", "display"),
     "_scmetric_status_display":          ("Statcast metrics EV/LA (statsapi)", "display"),
@@ -3678,6 +3679,25 @@ if not use_bat_tracking:
         "Savant fetch is actively broken.",
         icon="📡",
     )
+
+# v46.36: 3-year historical power priors (tracked-only stability prior). Heavy
+# fetch (3 seasons × a few endpoints per hitter) but cached 24h since past-
+# season data is static — so it's ~free after the first load of the day.
+use_historical_priors = st.sidebar.checkbox(
+    "📚 Fetch 3-yr historical priors (experimental)",
+    value=True,
+    help=(
+        "Pulls each hitter's PRIOR 3 completed seasons of power stats "
+        "(ISO / xSLG / xwOBA / EV) and builds a 'hist_power_backing' prior — "
+        "how strongly a hitter's multi-year history says the power is REAL.\n\n"
+        "This is TRACKED-ONLY context (own hist_ columns, never blended into "
+        "current-season signal). It's observed by the pattern loop to see if "
+        "3-yr backing predicts HRs before it earns any scoring role.\n\n"
+        "Heavy first-load (many API calls) but cached 24h — prior-season data "
+        "never changes. Turn off to skip if page load is slow."
+    ),
+)
+
 if hide_started and selected_date == _today_et():  # v44.97: ET-aware
     try:
         # v43.43 (reviewer-validated bias fix): the snapshot payload records
@@ -3985,6 +4005,12 @@ if not hitter_hand_statcast.empty and "player_id" in hitter_stats.columns:
 # identical statcast every time. Merge these as the source of truth for the
 # hand split; apply_handedness_overrides already blends vs_lhp_iso etc.
 _hitter_api_split_status = "not attempted"
+# v46.37 (audit): define _slate_hitter_ids up front so downstream blocks in
+# SEPARATE try-scopes (e.g. historical priors) never hit NameError if the
+# import inside the try below fails before the id list is built.
+_slate_hitter_ids = tuple(
+    int(x) for x in hitter_stats["player_id"].dropna().unique()
+) if (hitter_stats is not None and "player_id" in getattr(hitter_stats, "columns", [])) else ()
 try:
     from data_fetcher import get_hitter_handedness_splits
     _slate_hitter_ids = tuple(
@@ -4091,6 +4117,36 @@ try:
 except Exception as _sm_err:
     _saber_status = f"error: {type(_sm_err).__name__}"
 st.session_state["_saber_status_display"] = _saber_status
+
+# v46.36: 3-YEAR HISTORICAL POWER PRIORS (tracked-only, hist_-prefixed).
+# A stability prior — how strongly a hitter's MULTI-YEAR history says the power
+# is real — kept fully SEPARATE from current-season measured signal (never
+# blended into live metrics; own hist_ columns only). Enters tracked-only; must
+# prove it predicts HRs via the pattern loop before earning any scoring role.
+# Gated behind a toggle: it's a heavy fetch (3 seasons × a few endpoints per
+# hitter), but cached 24h since prior-season data is static.
+_hist_status = "not attempted"
+try:
+    if use_historical_priors and _slate_hitter_ids:
+        from data_fetcher import get_hitter_historical_priors
+        _hp = get_hitter_historical_priors(hitter_ids=_slate_hitter_ids)
+        if _hp is not None and not _hp.empty and "player_id" in _hp.columns:
+            _hcols = [c for c in _hp.columns if c != "player_id"]
+            _hov = [c for c in _hcols if c in hitter_stats.columns]
+            if _hov:
+                hitter_stats = hitter_stats.drop(columns=_hov)
+            hitter_stats = hitter_stats.merge(
+                _hp[["player_id"] + _hcols], on="player_id", how="left")
+            _n_hist = int((_hp.get("hist_seasons", pd.Series(dtype=float)) > 0).sum())
+            _hist_status = (
+                f"✅ working ({_n_hist} hitters w/ 3-yr history, tracked-only prior)")
+        else:
+            _hist_status = "unavailable (no historical data returned)"
+    elif not use_historical_priors:
+        _hist_status = "⏸️ off (toggle in sidebar)"
+except Exception as _hist_err:
+    _hist_status = f"error: {type(_hist_err).__name__}"
+st.session_state["_hist_priors_status_display"] = _hist_status
 
 # v46.03: spray-chart pull tendency (statsapi, tracked-only). left_side_pct /
 # right_side_pct — caller can orient to pull by bat hand downstream. Cross-check
@@ -8750,7 +8806,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v46.35 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v46.37 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
