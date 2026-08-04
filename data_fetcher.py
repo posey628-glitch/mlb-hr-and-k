@@ -3720,6 +3720,127 @@ def get_hitter_expected_stats(season: int = None, hitter_ids: tuple = ()) -> pd.
     return pd.DataFrame(rows) if rows else pd.DataFrame()
 
 
+@st.cache_data(ttl=86400)  # 24h — prior-SEASON data is static, cache hard
+def get_hitter_historical_priors(hitter_ids: tuple = (),
+                                 current_year: int = None,
+                                 years_back: int = 3) -> pd.DataFrame:
+    """v46.36: 3-year historical POWER PRIORS per hitter (tracked-only context,
+    NOT blended into current-season signal). For each hitter, pull the prior
+    `years_back` completed seasons' power stats (barrel/ISO/xSLG/xwOBA/EV via
+    expectedStatistics + statcast), and summarise into a STABILITY PRIOR:
+      - hist_seasons: how many of the last N seasons had qualifying data
+      - hist_iso / hist_xslg / hist_xwoba / hist_ev: multi-year AVERAGE
+      - hist_power_backing: 0-1 score = how strongly a hitter's HISTORY says
+        the power is real (used later ONLY as a confidence prior on how much to
+        trust a cold/hot CURRENT sample — never mixed into the live metric).
+    Columns are all `hist_`-prefixed so they can NEVER collide with or
+    contaminate current-season columns the FDR pattern loop grades.
+
+    DISCIPLINE: this is a PRIOR on trustworthiness, kept fully separate from the
+    measured current-season signal. Enters tracked-only; must prove it predicts
+    HRs via the pattern loop before it earns any scoring role.
+    """
+    if not hitter_ids:
+        return pd.DataFrame()
+    cy = current_year if current_year is not None else current_season()
+    seasons = [cy - k for k in range(1, years_back + 1)]  # prior N completed yrs
+    rows = []
+    for hid in hitter_ids:
+        try:
+            _hid = int(hid)
+        except (TypeError, ValueError):
+            continue
+        per_season = []
+        for yr in seasons:
+            s = {}
+            # expected stats (xSLG / xwOBA) for the season
+            try:
+                u = (f"https://statsapi.mlb.com/api/v1/people/{_hid}/stats"
+                     f"?stats=expectedStatistics&group=hitting&season={yr}")
+                r = requests.get(u, headers=HEADERS, timeout=15)
+                if r.status_code == 200:
+                    for sg in r.json().get("stats", []):
+                        for sp in sg.get("splits", []):
+                            st_ = sp.get("stat", {})
+                            s["xslg"] = _saber_to_float(st_.get("slg"))
+                            s["xwoba"] = _saber_to_float(st_.get("woba"))
+                            s["xwoba_con"] = _saber_to_float(st_.get("wobaCon"))
+                            break
+            except Exception:
+                pass
+            # season ISO (from the regular hitting split: slg - avg)
+            try:
+                u2 = (f"https://statsapi.mlb.com/api/v1/people/{_hid}/stats"
+                      f"?stats=season&group=hitting&season={yr}")
+                r2 = requests.get(u2, headers=HEADERS, timeout=15)
+                if r2.status_code == 200:
+                    for sg in r2.json().get("stats", []):
+                        for sp in sg.get("splits", []):
+                            st_ = sp.get("stat", {})
+                            _slg = _saber_to_float(st_.get("slg"))
+                            _avg = _saber_to_float(st_.get("avg"))
+                            _pa = _saber_to_float(st_.get("plateAppearances"))
+                            if _slg is not None and _avg is not None:
+                                s["iso"] = round(_slg - _avg, 3)
+                            s["pa"] = _pa
+                            break
+            except Exception:
+                pass
+            # statcast EV for the season (metricAverages)
+            try:
+                u3 = (f"https://statsapi.mlb.com/api/v1/people/{_hid}/stats"
+                      f"?stats=metricAverages&metrics=launchSpeed&group=hitting&season={yr}")
+                r3 = requests.get(u3, headers=HEADERS, timeout=15)
+                if r3.status_code == 200:
+                    for sg in r3.json().get("stats", []):
+                        for sp in sg.get("splits", []):
+                            m = sp.get("stat", {}).get("metric", {})
+                            if m.get("name") == "launchSpeed":
+                                s["ev"] = _saber_to_float(m.get("averageValue"))
+                            break
+            except Exception:
+                pass
+            # only count a season if it had a real sample (>= 100 PA) + some data
+            if s.get("pa") and s["pa"] >= 100 and any(
+                    s.get(k) is not None for k in ("iso", "xslg", "xwoba", "ev")):
+                per_season.append(s)
+
+        if not per_season:
+            # no qualifying history — record an explicit "unproven" row so the
+            # downstream prior can distinguish "no history" from "not fetched"
+            rows.append({"player_id": _hid, "hist_seasons": 0,
+                         "hist_power_backing": 0.0})
+            continue
+
+        def _avg(key):
+            vals = [x[key] for x in per_season if x.get(key) is not None]
+            return round(sum(vals) / len(vals), 3) if vals else None
+
+        h_iso = _avg("iso"); h_xslg = _avg("xslg")
+        h_xwoba = _avg("xwoba"); h_ev = _avg("ev")
+        # power-backing prior (0-1): how strongly history says the power is real.
+        # Uses elite thresholds consistent with the rest of the app
+        # (iso .230, xslg .450, ev 91). Averaged across whichever are present,
+        # then scaled by how many seasons of evidence we have.
+        _components = []
+        if h_iso is not None:   _components.append(min(1.0, h_iso / 0.250))
+        if h_xslg is not None:  _components.append(min(1.0, h_xslg / 0.480))
+        if h_xwoba is not None: _components.append(min(1.0, h_xwoba / 0.360))
+        if h_ev is not None:    _components.append(min(1.0, max(0.0, (h_ev - 85.0) / 10.0)))
+        _base = sum(_components) / len(_components) if _components else 0.0
+        _season_conf = len(per_season) / float(years_back)  # 1.0 if full history
+        rows.append({
+            "player_id": _hid,
+            "hist_seasons": len(per_season),
+            "hist_iso": h_iso,
+            "hist_xslg": h_xslg,
+            "hist_xwoba": h_xwoba,
+            "hist_ev": h_ev,
+            "hist_power_backing": round(_base * (0.6 + 0.4 * _season_conf), 3),
+        })
+    return pd.DataFrame(rows) if rows else pd.DataFrame()
+
+
 @st.cache_data(ttl=3600)
 def get_hitter_hot_zones(season: int = None, hitter_ids: tuple = ()) -> pd.DataFrame:
     """v45.93: per-zone hitter performance from the RELIABLE statsapi
