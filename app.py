@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v46.40-build-hist-button"
+APP_VERSION = "2026.06.10-v46.41-build-button-visible"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -4197,8 +4197,11 @@ st.session_state["_hist_splits_status_display"] = _hist_splits_status
 # file to GitHub (Add file → Upload files → drag → commit) and the app loads it
 # instantly forever after. Remove this block once the file is committed (the
 # DATA stays in the repo; only this builder UI goes away).
-if owner_mode:
-    with st.sidebar.expander("🛠️ Build historical data (one-time)", expanded=False):
+# v46.41: build button is NO LONGER owner-gated (it just builds a data file —
+# nothing sensitive), so it always shows and there's no owner-mode confusion.
+# Remove this whole block once historical_data.json is committed to the repo.
+if True:
+    with st.sidebar.expander("🛠️ BUILD HISTORICAL DATA (one-time setup)", expanded=True):
         st.caption(
             "Builds the 3-yr historical file in the cloud, then gives you a "
             "download. Commit that file to GitHub and the app loads it instantly. "
@@ -8928,7 +8931,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v46.40 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v46.41 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
