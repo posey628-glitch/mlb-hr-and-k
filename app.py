@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v46.37-audit-hardening"
+APP_VERSION = "2026.06.10-v46.38-historical-precompute"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -1855,6 +1855,7 @@ _HEALTH_SOURCE_TIERS = {
     "_hot_zone_status_display":          ("Hot/cold zones (statsapi)", "display"),
     "_saber_status_display":             ("wRC+ / expected stats (statsapi)", "display"),
     "_hist_priors_status_display":       ("3-yr historical priors (tracked-only)", "display"),
+    "_hist_splits_status_display":       ("3-yr historical splits — platoon/day-night/month", "display"),
     "_spray_status_display":             ("Spray pull-side (statsapi)", "display"),
     "_p_xstats_status_display":          ("Pitcher xSLG-allowed (statsapi)", "display"),
     "_scmetric_status_display":          ("Statcast metrics EV/LA (statsapi)", "display"),
@@ -3684,17 +3685,19 @@ if not use_bat_tracking:
 # fetch (3 seasons × a few endpoints per hitter) but cached 24h since past-
 # season data is static — so it's ~free after the first load of the day.
 use_historical_priors = st.sidebar.checkbox(
-    "📚 Fetch 3-yr historical priors (experimental)",
-    value=True,
+    "📚 Live-fetch historical data (slow — prefer precomputed file)",
+    value=False,
     help=(
-        "Pulls each hitter's PRIOR 3 completed seasons of power stats "
-        "(ISO / xSLG / xwOBA / EV) and builds a 'hist_power_backing' prior — "
-        "how strongly a hitter's multi-year history says the power is REAL.\n\n"
-        "This is TRACKED-ONLY context (own hist_ columns, never blended into "
-        "current-season signal). It's observed by the pattern loop to see if "
-        "3-yr backing predicts HRs before it earns any scoring role.\n\n"
-        "Heavy first-load (many API calls) but cached 24h — prior-season data "
-        "never changes. Turn off to skip if page load is slow."
+        "3-year historical priors + splits (platoon / day-night / month). These "
+        "are STATIC (prior completed seasons never change), so the app loads them "
+        "instantly from a precomputed file (historical_data.json) built once per "
+        "season — NO API calls at page load.\n\n"
+        "This toggle is a FALLBACK that live-fetches from the API instead. It's "
+        "SLOW (thousands of calls) and off by default. Only turn it on if the "
+        "precomputed file is missing or you're rebuilding it. Normal use: leave "
+        "OFF — the file is loaded automatically.\n\n"
+        "All historical data is TRACKED-ONLY (own hist_ columns, never blended "
+        "into current-season signal); the pattern loop judges if it predicts."
     ),
 )
 
@@ -4127,9 +4130,17 @@ st.session_state["_saber_status_display"] = _saber_status
 # hitter), but cached 24h since prior-season data is static.
 _hist_status = "not attempted"
 try:
-    if use_historical_priors and _slate_hitter_ids:
-        from data_fetcher import get_hitter_historical_priors
-        _hp = get_hitter_historical_priors(hitter_ids=_slate_hitter_ids)
+    _hp = None
+    # v46.38: load from the precomputed file FIRST — instant, no API calls.
+    from data_fetcher import historical_frame_for, get_hitter_historical_priors
+    if _slate_hitter_ids:
+        _hp = historical_frame_for(_slate_hitter_ids, kind="priors")
+        _from_file = _hp is not None and not _hp.empty
+        # Only fall back to the SLOW live fetch if the file is missing AND the
+        # user explicitly opted into it.
+        if (_hp is None or _hp.empty) and use_historical_priors:
+            _hp = get_hitter_historical_priors(hitter_ids=_slate_hitter_ids)
+            _from_file = False
         if _hp is not None and not _hp.empty and "player_id" in _hp.columns:
             _hcols = [c for c in _hp.columns if c != "player_id"]
             _hov = [c for c in _hcols if c in hitter_stats.columns]
@@ -4137,16 +4148,48 @@ try:
                 hitter_stats = hitter_stats.drop(columns=_hov)
             hitter_stats = hitter_stats.merge(
                 _hp[["player_id"] + _hcols], on="player_id", how="left")
-            _n_hist = int((_hp.get("hist_seasons", pd.Series(dtype=float)) > 0).sum())
-            _hist_status = (
-                f"✅ working ({_n_hist} hitters w/ 3-yr history, tracked-only prior)")
+            _n_hist = int((_hp.get("hist_seasons", pd.Series(dtype=float)) > 0).sum()) \
+                if "hist_seasons" in _hp.columns else len(_hp)
+            _src = "precomputed file ⚡" if _from_file else "live API (slow)"
+            _hist_status = f"✅ {_n_hist} hitters w/ 3-yr priors ({_src}, tracked-only)"
+        elif not use_historical_priors:
+            _hist_status = "⏸️ no precomputed file (run build_historical_data.py)"
         else:
-            _hist_status = "unavailable (no historical data returned)"
-    elif not use_historical_priors:
-        _hist_status = "⏸️ off (toggle in sidebar)"
+            _hist_status = "unavailable (no historical data)"
 except Exception as _hist_err:
     _hist_status = f"error: {type(_hist_err).__name__}"
 st.session_state["_hist_priors_status_display"] = _hist_status
+
+# v46.38: historical SPLITS (platoon / day-night / current-month), file-first.
+_hist_splits_status = "not attempted"
+try:
+    _hs = None
+    from data_fetcher import historical_frame_for, get_hitter_historical_splits
+    if _slate_hitter_ids:
+        _hs = historical_frame_for(_slate_hitter_ids, kind="splits")
+        _hs_from_file = _hs is not None and not _hs.empty
+        if (_hs is None or _hs.empty) and use_historical_priors:
+            _hs = get_hitter_historical_splits(hitter_ids=_slate_hitter_ids)
+            _hs_from_file = False
+        if _hs is not None and not _hs.empty and "player_id" in _hs.columns:
+            _hscols = [c for c in _hs.columns if c != "player_id"]
+            _hsov = [c for c in _hscols if c in hitter_stats.columns]
+            if _hsov:
+                hitter_stats = hitter_stats.drop(columns=_hsov)
+            hitter_stats = hitter_stats.merge(
+                _hs[["player_id"] + _hscols], on="player_id", how="left")
+            _n_hs = _hs["player_id"].nunique()
+            _src = "precomputed file ⚡" if _hs_from_file else "live API (slow)"
+            _hist_splits_status = (
+                f"✅ {_n_hs} hitters w/ 3-yr splits — platoon/day-night/month "
+                f"({_src}, tracked-only)")
+        elif not use_historical_priors:
+            _hist_splits_status = "⏸️ no precomputed file"
+        else:
+            _hist_splits_status = "unavailable (no split data)"
+except Exception as _hs_err:
+    _hist_splits_status = f"error: {type(_hs_err).__name__}"
+st.session_state["_hist_splits_status_display"] = _hist_splits_status
 
 # v46.03: spray-chart pull tendency (statsapi, tracked-only). left_side_pct /
 # right_side_pct — caller can orient to pull by bat hand downstream. Cross-check
@@ -8806,7 +8849,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v46.37 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v46.38 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -16548,6 +16591,44 @@ if all_hitters:
         qualified = combined_all[combined_all["pa"].notna() & (combined_all["pa"] >= INSUFFICIENT_PA_THRESHOLD)]
     else:
         qualified = combined_all
+
+    # v46.38: HISTORICAL DATA VIEWER — the user asked "where do I view it?".
+    # Shows the 3-yr priors + splits for tonight's hitters in one sortable table.
+    try:
+        _hist_display_cols = [c for c in (
+            "player_name", "team", "hist_power_backing", "hist_iso", "hist_xwoba",
+            "hist_seasons", "hist_vs_lhp_iso", "hist_vs_rhp_iso", "hist_platoon_gap",
+            "hist_day_iso", "hist_night_iso", "hist_month_iso", "hist_month_hr_rate",
+        ) if c in combined_all.columns]
+        _has_hist = any(c.startswith("hist_") for c in _hist_display_cols)
+        if _has_hist:
+            _hist_view = combined_all[_hist_display_cols].copy()
+            # keep only rows that actually have some historical data
+            _hcols_only = [c for c in _hist_display_cols if c.startswith("hist_")]
+            _hist_view = _hist_view[_hist_view[_hcols_only].notna().any(axis=1)]
+            if not _hist_view.empty:
+                with st.expander(
+                        f"📚 Historical Data (3-yr) — {len(_hist_view)} hitters "
+                        f"[tracked-only context, not yet in scoring]",
+                        expanded=False):
+                    st.caption(
+                        "3-year history per hitter. **hist_power_backing** (0-1) = "
+                        "how strongly multi-year history says the power is real. "
+                        "**hist_platoon_gap** = ISO advantage vs LHP over RHP "
+                        "(positive = better vs lefties). **hist_month_*** = how "
+                        "this hitter has historically hit in THIS calendar month "
+                        "(catches slow-starters / late-bloomers). This is "
+                        "TRACKED-ONLY — the pattern loop is testing whether it "
+                        "predicts HRs before it influences any pick. Sort by any "
+                        "column to explore.")
+                    st.dataframe(
+                        _hist_view.sort_values(
+                            "hist_power_backing", ascending=False,
+                            na_position="last")
+                        if "hist_power_backing" in _hist_view.columns else _hist_view,
+                        hide_index=True, use_container_width=True)
+    except Exception:
+        pass
 
     # PLAYER SEARCH RESULTS (v39c)
     # If the user typed a search query, show matching players in a focused
