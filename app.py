@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v46.39-hist-splits-restored"
+APP_VERSION = "2026.06.10-v46.40-build-hist-button"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -4190,6 +4190,85 @@ try:
 except Exception as _hs_err:
     _hist_splits_status = f"error: {type(_hs_err).__name__}"
 st.session_state["_hist_splits_status_display"] = _hist_splits_status
+
+# v46.40: OWNER-ONLY "Build historical data" button. Streamlit Cloud CAN reach
+# MLB, so this builds historical_data.json IN THE CLOUD on a button press — no
+# script, no command line. It offers the result as a DOWNLOAD; you commit that
+# file to GitHub (Add file → Upload files → drag → commit) and the app loads it
+# instantly forever after. Remove this block once the file is committed (the
+# DATA stays in the repo; only this builder UI goes away).
+if owner_mode:
+    with st.sidebar.expander("🛠️ Build historical data (one-time)", expanded=False):
+        st.caption(
+            "Builds the 3-yr historical file in the cloud, then gives you a "
+            "download. Commit that file to GitHub and the app loads it instantly. "
+            "This is a one-time setup — remove after.")
+        _scope = st.radio(
+            "Scope", ["Tonight's hitters (fast test)", "Full league (complete)"],
+            index=0,
+            help="Start with tonight's hitters to confirm it works (~1 min), "
+                 "then do the full league (several minutes) for the real file.")
+        if st.button("📥 Build historical data now", use_container_width=True):
+            try:
+                import json as _bj
+                import data_fetcher as _bdf
+                from data_fetcher import (get_hitter_historical_priors as _gp,
+                                          get_hitter_historical_splits as _gs)
+                _pf = getattr(_gp, "__wrapped__", _gp)
+                _sf = getattr(_gs, "__wrapped__", _gs)
+                # resolve the id universe
+                if _scope.startswith("Full"):
+                    st.write("Fetching full league universe…")
+                    try:
+                        from build_historical_data import get_hitter_universe
+                        _ids = get_hitter_universe(_bdf.current_season())
+                    except Exception:
+                        _ids = list(_slate_hitter_ids)
+                else:
+                    _ids = list(_slate_hitter_ids)
+                if not _ids:
+                    st.error("No hitter IDs available — try again once the slate loads.")
+                else:
+                    st.write(f"Building for {len(_ids)} hitters…")
+                    _prog = st.progress(0.0)
+                    _priors, _splits = {}, {}
+                    _CH = 25
+                    for _bi in range(0, len(_ids), _CH):
+                        _chunk = tuple(_ids[_bi:_bi + _CH])
+                        try:
+                            _pr = _pf(_chunk, current_year=_bdf.current_season())
+                            for _, _rw in _pr.iterrows():
+                                _pid = str(int(_rw["player_id"]))
+                                _priors[_pid] = {k: (None if v != v else v)
+                                                 for k, v in _rw.items() if k != "player_id"}
+                        except Exception:
+                            pass
+                        try:
+                            _sr = _sf(_chunk, current_year=_bdf.current_season())
+                            for _, _rw in _sr.iterrows():
+                                _pid = str(int(_rw["player_id"]))
+                                _splits[_pid] = {k: (None if v != v else v)
+                                                 for k, v in _rw.items() if k != "player_id"}
+                        except Exception:
+                            pass
+                        _prog.progress(min(1.0, (_bi + _CH) / len(_ids)))
+                    _payload = {
+                        "meta": {"built_at": datetime.utcnow().isoformat() + "Z",
+                                 "season": _bdf.current_season(),
+                                 "n_priors": len(_priors), "n_splits": len(_splits)},
+                        "priors": _priors, "splits": _splits,
+                    }
+                    _jsonstr = _bj.dumps(_payload)
+                    st.success(
+                        f"✅ Built {len(_priors)} priors + {len(_splits)} splits. "
+                        f"Download below, then commit historical_data.json to your "
+                        f"GitHub repo.")
+                    st.download_button(
+                        "⬇️ Download historical_data.json",
+                        data=_jsonstr, file_name="historical_data.json",
+                        mime="application/json", use_container_width=True)
+            except Exception as _be:
+                st.error(f"Build failed: {type(_be).__name__}: {_be}")
 
 # v46.03: spray-chart pull tendency (statsapi, tracked-only). left_side_pct /
 # right_side_pct — caller can orient to pull by bat hand downstream. Cross-check
@@ -8849,7 +8928,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v46.39 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v46.40 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
