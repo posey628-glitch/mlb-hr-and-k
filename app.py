@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v46.30-peripheral-qualify"
+APP_VERSION = "2026.06.10-v46.32-trade-classification-mlb-clubs"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -5307,12 +5307,15 @@ if show_transactions:
         IMPACT_CODES = {
             # Roster moves that change WHERE a player is
             "TR":  ("🔁", "TRADE"),
-            "SC":  ("✍️", "SIGNING"),
+            "SFA": ("✍️", "SIGNING"),   # Signed as Free Agent (the REAL signing)
+            "SE":  ("✨", "SELECTED"),   # contract selected from minors (call-up)
+            "SC":  ("🔀", "STATUS"),     # Status Change (activation / IL move) — NOT a signing
             "DFA": ("⚠️", "DFA"),
             "REL": ("❌", "RELEASE"),
             "OUT": ("⬇️", "OUTRIGHTED"),
             # Roster moves that change WHO is available
             "CU":  ("⬆️", "CALL-UP"),
+            "OPT": ("⬇️", "OPTIONED"),
             "SD":  ("⬇️", "SENT DOWN"),
             "SCL": ("✨", "SELECTED"),
             "STA": ("📝", "STATUS"),
@@ -5320,17 +5323,68 @@ if show_transactions:
             "IL":  ("🏥", "TO IL"),
             "RTN": ("🟢", "FROM IL"),
         }
-        # Filter to "high-impact" moves only
-        impact_df = txn_df[txn_df["type_code"].isin(IMPACT_CODES.keys())].copy()
+        # v46.32: the 30 MLB clubs, exactly as statsapi names them in from/toTeam.
+        # A TRADE moves a player between two DIFFERENT MLB clubs; a call-up/option
+        # moves between an MLB club and its OWN minor-league affiliate (both teams
+        # present, but only one is an MLB club). This set distinguishes them.
+        _MLB_CLUBS = {
+            "Arizona Diamondbacks", "Atlanta Braves", "Baltimore Orioles",
+            "Boston Red Sox", "Chicago Cubs", "Chicago White Sox",
+            "Cincinnati Reds", "Cleveland Guardians", "Colorado Rockies",
+            "Detroit Tigers", "Houston Astros", "Kansas City Royals",
+            "Los Angeles Angels", "Los Angeles Dodgers", "Miami Marlins",
+            "Milwaukee Brewers", "Minnesota Twins", "New York Mets",
+            "New York Yankees", "Athletics", "Philadelphia Phillies",
+            "Pittsburgh Pirates", "San Diego Padres", "San Francisco Giants",
+            "Seattle Mariners", "St. Louis Cardinals", "Tampa Bay Rays",
+            "Texas Rangers", "Toronto Blue Jays", "Washington Nationals",
+        }
+        # Filter to "high-impact" moves. v46.32 (real deadline data): a TRADE is
+        # typeCode 'TR' OR a move between two DIFFERENT MLB clubs. The earlier
+        # "both teams present" test was too loose — call-ups (minors→MLB),
+        # options (MLB→minors) and contract selections ALSO have both teams, and
+        # were being mislabeled as trades. Require both teams be MLB clubs.
+        _ft_s = txn_df.get("from_team", pd.Series("", index=txn_df.index)).fillna("").astype(str).str.strip()
+        _tt_s = txn_df.get("to_team", pd.Series("", index=txn_df.index)).fillna("").astype(str).str.strip()
+        _is_mlb_trade = (
+            _ft_s.isin(_MLB_CLUBS) & _tt_s.isin(_MLB_CLUBS) & (_ft_s != _tt_s)
+        )
+        impact_df = txn_df[
+            txn_df["type_code"].isin(IMPACT_CODES.keys()) | _is_mlb_trade
+        ].copy()
         if not impact_df.empty:
-            impact_df["icon"] = impact_df["type_code"].map(lambda c: IMPACT_CODES.get(c, ("", ""))[0])
-            impact_df["category"] = impact_df["type_code"].map(lambda c: IMPACT_CODES.get(c, ("", ""))[1])
+            # v46.32: a row is a TRADE iff typeCode == 'TR' OR it moves a player
+            # between two different MLB clubs. Everything else keeps its code-
+            # based category (SC=Status Change, SFA=Signing, CU=Call-Up, etc.).
+            def _reclassify(row):
+                _ft = str(row.get("from_team", "") or "").strip()
+                _tt = str(row.get("to_team", "") or "").strip()
+                _code = row.get("type_code", "")
+                _both_mlb = (_ft in _MLB_CLUBS and _tt in _MLB_CLUBS and _ft != _tt)
+                if _code == "TR" or _both_mlb:
+                    return ("🔁", "TRADE")
+                return IMPACT_CODES.get(_code, ("", ""))
+                # club name by requiring the names to differ.)
+                if _ft and _tt and _ft != _tt:
+                    return ("🔁", "TRADE")
+                return IMPACT_CODES.get(_code, ("", ""))
+            _recat = impact_df.apply(_reclassify, axis=1)
+            impact_df["icon"] = [c[0] for c in _recat]
+            impact_df["category"] = [c[1] for c in _recat]
             # Group by category for a clean summary count
             cat_counts = impact_df["category"].value_counts()
+            # v46.32: summarize by CATEGORY label (not raw code) since a category
+            # like TRADE now comes from multiple codes / the MLB-club test.
+            _summary_cats = [
+                ("🔁", "TRADE"), ("✍️", "SIGNING"), ("✨", "SELECTED"),
+                ("⬆️", "CALL-UP"), ("⬇️", "OPTIONED"), ("⚠️", "DFA"),
+                ("❌", "RELEASE"), ("⬇️", "OUTRIGHTED"), ("🔀", "STATUS"),
+                ("🏥", "TO IL"), ("🟢", "FROM IL"),
+            ]
             count_pills = " · ".join(
-                f"{IMPACT_CODES[code][0]} {IMPACT_CODES[code][1]}: **{cat_counts.get(IMPACT_CODES[code][1], 0)}**"
-                for code in ["TR", "SC", "DFA", "REL", "CU", "SD", "SCL", "IL", "RTN"]
-                if cat_counts.get(IMPACT_CODES[code][1], 0) > 0
+                f"{_ic} {_lbl}: **{cat_counts.get(_lbl, 0)}**"
+                for _ic, _lbl in _summary_cats
+                if cat_counts.get(_lbl, 0) > 0
             )
             with st.expander(
                 f"🔄 Recent roster moves (last 2 days): {len(impact_df)} transactions — {count_pills}",
@@ -8691,7 +8745,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v46.30 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v46.32 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
