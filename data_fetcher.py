@@ -3557,7 +3557,13 @@ def get_hitter_statcast_metrics(season: int = None, hitter_ids: tuple = (),
                     _val = _saber_to_float(m.get("averageValue"))
                     if _name and _val is not None:
                         row[f"sc_{_name}"] = _val
-                    _bbe = sp.get("numOccurrences", _bbe)
+                    # v46.33 (verified vs real Judge response): take the MAX
+                    # numOccurrences across splits, not the last — hrDistance's
+                    # split reports only the HR count (17) while launchSpeed/
+                    # distance report all BBE (143-144). We want the all-BBE n.
+                    _occ = sp.get("numOccurrences")
+                    if _occ is not None:
+                        _bbe = _occ if _bbe is None else max(_bbe, _occ)
             if _bbe is not None:
                 row["sc_bbe"] = _bbe  # batted-ball-event sample size
             if len(row) > 1:  # got at least one metric
