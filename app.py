@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v46.33-api-verified-parsers"
+APP_VERSION = "2026.06.10-v46.34-reweight-02-iso-up"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -119,7 +119,7 @@ def _calibration_snapshot() -> dict:
         # v45.82: name the reweight generation so graded slates can be bucketed
         # pre/post each reweight when judging whether a change helped. Bump this
         # string every time DINGER_BASE_WEIGHTS changes.
-        "dinger_reweight": "reweight-01-2026-07-25",
+        "dinger_reweight": "reweight-02-2026-08-03",
         # v45.99: DATA-LAYER version marker. The 2026-07-31 overhaul fixed the
         # hitter L/R split (was identical → real MLB API), made two_way hand-
         # aware, retired the dead statcast fetch, and added hotColdZones. Slates
@@ -2069,12 +2069,17 @@ def log_swallowed_error(where: str, exc: Exception, surface: bool = True) -> Non
 # barrel metrics DOWN (pulled_brl, barrel). JUDGE THIS BY EDGE + Section G
 # correlations over ~15 graded days, NOT by Brier (which sits at flat-guess).
 DINGER_BASE_WEIGHTS = {
-    "pulled_brl_pct": 1.758,  # was 2.00 — barrel metric eased down
-    "avg_ev": 2.058,          # was 2.00 — now the top evidence weight
-    "barrel_pct": 1.748,      # was 1.90 — eased down
-    "hard_hit": 1.618,        # was 1.50 — contact quality up
-    "iso": 1.529,             # was 1.40 — contact quality up
-    "blast_pct": 1.289,       # was 1.20 — up, but least-observed (31% imputed)
+    # v46.34 reweight-02 (½-step, FDR-guarded evidence): shift from barrel-family
+    # toward iso + hard_hit. iso was the largest, most stable mover (top-5
+    # predictor over 25 slates, survives FDR); avg_ev eased from #1 but still
+    # leads. ½-step = half the distance current→proposed, so it self-corrects if
+    # the signal partly reverts (next cycle re-derives from fresh data).
+    "pulled_brl_pct": 1.694,  # reweight-01 1.758 → ½-step toward 1.63
+    "avg_ev": 2.019,          # 2.058 → ½-step toward 1.98 (still the top weight)
+    "barrel_pct": 1.674,      # 1.748 → ½-step toward 1.60
+    "hard_hit": 1.714,        # 1.618 → ½-step toward 1.81 (contact quality UP)
+    "iso": 1.679,             # 1.529 → ½-step toward 1.83 (biggest mover, UP)
+    "blast_pct": 1.220,       # 1.289 → ½-step toward 1.15 (least-observed)
 }
 # Context multipliers: each maps a per-slate signal to a gentle multiplier
 # on the base. Kept modest (max ~±20% each) so context TILTS the power
@@ -8745,7 +8750,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v46.33 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v46.34 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
