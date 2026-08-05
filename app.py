@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v46.42-build-download-persist"
+APP_VERSION = "2026.06.10-v46.43-build-bulletproof"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -4197,85 +4197,101 @@ st.session_state["_hist_splits_status_display"] = _hist_splits_status
 # stored in session_state and the download button renders OUTSIDE the build
 # conditional, so it stays until you download it. Remove this whole block once
 # historical_data.json is committed to the repo.
-if True:
-    with st.sidebar.expander("🛠️ BUILD HISTORICAL DATA (one-time setup)", expanded=True):
-        st.caption(
-            "Builds the 3-yr historical file in the cloud, then gives you a "
-            "download that STAYS until you click it. Commit that file to GitHub "
-            "and the app loads it instantly. One-time setup — remove after.")
-        _scope = st.radio(
-            "Scope", ["Tonight's hitters (fast test)", "Full league (complete)"],
-            index=0,
-            help="Do the fast test FIRST to confirm it works (~1 min). The full "
-                 "league takes several minutes — keep this tab open while it runs.")
-        if st.button("📥 Build historical data now", use_container_width=True):
+# v46.43: BULLETPROOF build. Prior versions relied on st.download_button inside
+# an expander, which Streamlit's rerun model kept wiping. This version gives
+# THREE ways to get the data at once (download button + copy-paste text area +
+# a clear built-count diagnostic), stores everything in session_state, and
+# renders the output OUTSIDE the expander so nothing wipes it. Remove this whole
+# block once historical_data.json is committed.
+st.sidebar.markdown("### 🛠️ Build historical data (one-time)")
+_bcol = st.sidebar
+_bscope = _bcol.radio(
+    "Scope", ["Tonight's hitters (fast test)", "Full league (complete)"],
+    index=0, key="_hist_build_scope")
+if _bcol.button("📥 Build now", use_container_width=True, key="_hist_build_go"):
+    try:
+        import json as _bj
+        import data_fetcher as _bdf
+        from data_fetcher import (get_hitter_historical_priors as _gp,
+                                  get_hitter_historical_splits as _gs)
+        _pf = getattr(_gp, "__wrapped__", _gp)
+        _sf = getattr(_gs, "__wrapped__", _gs)
+        if _bscope.startswith("Full"):
             try:
-                import json as _bj
-                import data_fetcher as _bdf
-                from data_fetcher import (get_hitter_historical_priors as _gp,
-                                          get_hitter_historical_splits as _gs)
-                _pf = getattr(_gp, "__wrapped__", _gp)
-                _sf = getattr(_gs, "__wrapped__", _gs)
-                if _scope.startswith("Full"):
-                    with st.spinner("Fetching full league roster…"):
-                        try:
-                            from build_historical_data import get_hitter_universe
-                            _ids = get_hitter_universe(_bdf.current_season())
-                        except Exception:
-                            _ids = list(_slate_hitter_ids)
-                else:
-                    _ids = list(_slate_hitter_ids)
-                if not _ids:
-                    st.error("No hitter IDs yet — wait for the slate to load, then retry.")
-                else:
-                    _priors, _splits = {}, {}
-                    _CH = 25
-                    _prog = st.progress(0.0, text=f"Building for {len(_ids)} hitters…")
-                    for _bi in range(0, len(_ids), _CH):
-                        _chunk = tuple(_ids[_bi:_bi + _CH])
-                        try:
-                            _pr = _pf(_chunk, current_year=_bdf.current_season())
-                            for _, _rw in _pr.iterrows():
-                                _pid = str(int(_rw["player_id"]))
-                                _priors[_pid] = {k: (None if v != v else v)
-                                                 for k, v in _rw.items() if k != "player_id"}
-                        except Exception:
-                            pass
-                        try:
-                            _sr = _sf(_chunk, current_year=_bdf.current_season())
-                            for _, _rw in _sr.iterrows():
-                                _pid = str(int(_rw["player_id"]))
-                                _splits[_pid] = {k: (None if v != v else v)
-                                                 for k, v in _rw.items() if k != "player_id"}
-                        except Exception:
-                            pass
-                        _frac = min(1.0, (_bi + _CH) / len(_ids))
-                        _prog.progress(_frac, text=f"{min(_bi+_CH,len(_ids))}/{len(_ids)} hitters…")
-                    _payload = {
-                        "meta": {"built_at": datetime.utcnow().isoformat() + "Z",
-                                 "season": _bdf.current_season(),
-                                 "n_priors": len(_priors), "n_splits": len(_splits)},
-                        "priors": _priors, "splits": _splits,
-                    }
-                    # STORE in session_state so it survives reruns (the fix)
-                    st.session_state["_built_hist_json"] = _bj.dumps(_payload)
-                    st.session_state["_built_hist_meta"] = (
-                        f"{len(_priors)} priors + {len(_splits)} splits")
-            except Exception as _be:
-                st.error(f"Build failed: {type(_be).__name__}: {_be}")
+                from build_historical_data import get_hitter_universe
+                _ids = get_hitter_universe(_bdf.current_season())
+            except Exception:
+                _ids = list(_slate_hitter_ids)
+        else:
+            _ids = list(_slate_hitter_ids)
+        if not _ids:
+            st.session_state["_built_hist_error"] = "No hitter IDs yet — wait for the slate to load."
+            st.session_state.pop("_built_hist_json", None)
+        else:
+            _priors, _splits = {}, {}
+            _prog = st.sidebar.progress(0.0, text=f"0/{len(_ids)}…")
+            _CH = 25
+            for _bi in range(0, len(_ids), _CH):
+                _chunk = tuple(_ids[_bi:_bi + _CH])
+                try:
+                    _pr = _pf(_chunk, current_year=_bdf.current_season())
+                    for _, _rw in _pr.iterrows():
+                        _priors[str(int(_rw["player_id"]))] = {
+                            k: (None if v != v else v)
+                            for k, v in _rw.items() if k != "player_id"}
+                except Exception:
+                    pass
+                try:
+                    _sr = _sf(_chunk, current_year=_bdf.current_season())
+                    for _, _rw in _sr.iterrows():
+                        _splits[str(int(_rw["player_id"]))] = {
+                            k: (None if v != v else v)
+                            for k, v in _rw.items() if k != "player_id"}
+                except Exception:
+                    pass
+                _prog.progress(min(1.0, (_bi + _CH) / len(_ids)),
+                               text=f"{min(_bi+_CH,len(_ids))}/{len(_ids)}…")
+            _payload = {
+                "meta": {"built_at": datetime.utcnow().isoformat() + "Z",
+                         "season": _bdf.current_season(),
+                         "n_priors": len(_priors), "n_splits": len(_splits)},
+                "priors": _priors, "splits": _splits,
+            }
+            st.session_state["_built_hist_json"] = _bj.dumps(_payload)
+            st.session_state["_built_hist_meta"] = f"{len(_priors)} priors, {len(_splits)} splits"
+            st.session_state.pop("_built_hist_error", None)
+    except Exception as _be:
+        st.session_state["_built_hist_error"] = f"{type(_be).__name__}: {_be}"
 
-        # Download button renders OUTSIDE the build 'if' — so it PERSISTS across
-        # reruns until you actually download it.
-        if st.session_state.get("_built_hist_json"):
-            st.success(
-                f"✅ Built {st.session_state.get('_built_hist_meta','')}. "
-                f"Click below to download, then commit historical_data.json to "
-                f"GitHub (Add file → Upload files → drag → Commit).")
-            st.download_button(
-                "⬇️ DOWNLOAD historical_data.json",
-                data=st.session_state["_built_hist_json"],
-                file_name="historical_data.json",
-                mime="application/json", use_container_width=True)
+# OUTPUT — rendered every run from session_state, OUTSIDE any button/expander so
+# Streamlit reruns can never wipe it. Three ways to get the data.
+if st.session_state.get("_built_hist_error"):
+    st.sidebar.error("Build error: " + st.session_state["_built_hist_error"])
+if st.session_state.get("_built_hist_json"):
+    _bjson = st.session_state["_built_hist_json"]
+    _bmeta = st.session_state.get("_built_hist_meta", "")
+    # DIAGNOSTIC: did the fetch actually get data? (0 = MLB fetch failed)
+    if _bjson and '"n_priors": 0' in _bjson and '"n_splits": 0' in _bjson:
+        st.sidebar.warning(
+            "⚠️ Built, but got 0 players — the MLB fetch returned nothing. "
+            "That's a data-fetch problem, not a download problem. Tell me and "
+            "we'll fix the fetch.")
+    else:
+        st.sidebar.success(f"✅ Built {_bmeta}. Get the file 3 ways below 👇")
+    # Way 1: download button
+    st.sidebar.download_button(
+        "⬇️ Download historical_data.json", data=_bjson,
+        file_name="historical_data.json", mime="application/json",
+        use_container_width=True, key="_hist_dl_btn")
+    # Way 2: copy-paste text area (reruns CANNOT wipe visible text)
+    with st.sidebar.expander("📋 Or copy the text (paste into a new file named historical_data.json)"):
+        st.code(_bjson, language="json")
+    # Way 3: clear it when done
+    if st.sidebar.button("Clear built data", key="_hist_clear"):
+        st.session_state.pop("_built_hist_json", None)
+        st.session_state.pop("_built_hist_meta", None)
+
+# v46.03: spray-chart pull tendency (statsapi, tracked-only). left_side_pct /
 
 # v46.03: spray-chart pull tendency (statsapi, tracked-only). left_side_pct /
 # right_side_pct — caller can orient to pull by bat hand downstream. Cross-check
@@ -8935,7 +8951,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v46.42 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v46.43 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
