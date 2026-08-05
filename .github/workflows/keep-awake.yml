@@ -1,0 +1,50 @@
+name: Keep app awake (LaunchCast)
+
+# WHAT THIS DOES + WHY IT'S SAFE
+# Streamlit Cloud puts an app to sleep when it's idle. Waking it from sleep is
+# the slow part when you reopen it. This job sends a lightweight ping during
+# game hours so the app stays awake → reopening is instant.
+#
+# CRITICAL: this ONLY loads the app URL. It does NOT touch data logic, the
+# snapshot pipeline, or anything slate-related. It cannot affect the next day's
+# slate — it's just a "stay awake" tap. The real data collection is handled by
+# the separate auto-snapshot workflow. Keeping these two workflows separate means
+# the keep-alive can never interfere with snapshotting.
+#
+# COST NOTE: this pings every 15 min during game hours only (not overnight), to
+# stay light on the free Actions budget. If you'd rather save budget and don't
+# mind a slow reopen, you can delete this file — it's purely a convenience and
+# removing it has zero effect on data collection.
+
+on:
+  schedule:
+    # Every 15 minutes, but ONLY during the hours games are live/relevant.
+    # Times are UTC. Game-relevant window ≈ 11am ET (16:00 UTC) through
+    # ~11:30pm ET (03:30 UTC next day). Cron can't span midnight in one line,
+    # so we use two ranges: 16:00-23:59 UTC and 00:00-04:00 UTC.
+    - cron: "*/15 16-23 * * *"   # 12pm-8pm ET-ish (afternoon + evening games)
+    - cron: "*/15 0-4 * * *"     # 8pm ET - 12am ET (late + west-coast games)
+  workflow_dispatch:
+
+# Prevent overlapping runs piling up if one is slow.
+concurrency:
+  group: keep-awake
+  cancel-in-progress: true
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Light ping to keep the app awake
+        env:
+          APP_URL: ${{ secrets.APP_URL }}
+        run: |
+          if [ -z "$APP_URL" ]; then
+            echo "APP_URL secret not set — skipping (nothing to ping)."
+            exit 0
+          fi
+          # A single quick load is enough to reset the idle timer. We don't wait
+          # or retry — this is just a tap, not a data run. Never fail the job.
+          code=$(curl -s -o /dev/null -w "%{http_code}" -L --max-time 60 "$APP_URL" || echo "000")
+          echo "Keep-alive ping → HTTP $code"
+          exit 0
