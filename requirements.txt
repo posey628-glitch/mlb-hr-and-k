@@ -1,18 +1,19 @@
-# DingerMaven dependencies (v45.02 — merged: existing packages + review-flagged bumps).
-# CHANGES vs the prior file:
-#   pandas 2.0 -> 2.1  (Styler.map replaced applymap in 2.1; older raises AttributeError)
-#   streamlit 1.31 -> 1.37  (st.fragment, used to isolate interactive reruns, is stable from 1.37)
-#   added pytz  (used by _today_et() and ET conversions; was relying on it being transitively present)
-# KEPT from your existing file (do not drop these):
-#   openpyxl  -> the .xlsx Hitters export (pd.ExcelWriter engine="openpyxl") breaks without it
-#   lxml / html5lib  -> pandas HTML-table parsing backends for Savant/MLB reads
-#   tzdata  -> zoneinfo data on slim Linux images
-streamlit>=1.37
-pandas>=2.1
-requests>=2.31
-numpy>=1.24
-lxml>=4.9
-html5lib>=1.1
-openpyxl>=3.1
-tzdata>=2024.1
-pytz>=2023.3
+# DingerMaven dependencies (v45.03 — pinned to fix the Streamlit Cloud Python-3.14
+# / uvicorn "GZipResponder ... thread_minimum_size" startup crash).
+# WHY PINNED (== not >=): the old >= minimums let Cloud install the newest
+# streamlit on Python 3.14, whose uvicorn/starlette combo crashes on startup.
+# Exact pins force a known-good, mutually-compatible stack. Paired with
+# runtime.txt (python-3.11). To upgrade later, bump deliberately + test.
+# ALL packages from the prior file are KEPT (dropping any breaks features):
+#   openpyxl  -> the .xlsx Hitters export (pd.ExcelWriter engine="openpyxl")
+#   lxml / html5lib -> pandas HTML-table parsing backends for Savant/MLB reads
+#   tzdata / pytz -> timezone data + ET conversions (_today_et())
+streamlit==1.44.0
+pandas==2.2.3
+requests==2.32.3
+numpy==1.26.4
+lxml==5.3.0
+html5lib==1.1
+openpyxl==3.1.5
+tzdata==2024.2
+pytz==2024.2
