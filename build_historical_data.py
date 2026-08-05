@@ -42,6 +42,36 @@ from datetime import datetime
 import data_fetcher as d
 
 
+def get_qualified_hitter_universe(season: int, min_pa: int = 100) -> list:
+    """v46.45: only hitters with MEANINGFUL recent playing time (>= min_pa in
+    the current OR prior season). This is a much smaller, more relevant set than
+    the full leaderboard (~300-400 vs 1000+) — it excludes bench/September-
+    callup/rarely-plays guys who bloat the build, slow it down, and add noise.
+    Everyone who actually appears in your lineups regularly is included."""
+    pa_by_id = {}
+    for yr in (season, season - 1):
+        try:
+            url = (f"https://statsapi.mlb.com/api/v1/stats"
+                   f"?stats=season&group=hitting&season={yr}&sportId=1"
+                   f"&limit=2000&playerPool=All")
+            r = d.requests.get(url, headers=d.HEADERS, timeout=30)
+            if r.status_code == 200:
+                for sg in r.json().get("stats", []):
+                    for sp in sg.get("splits", []):
+                        pid = (sp.get("player") or {}).get("id")
+                        pa = (sp.get("stat") or {}).get("plateAppearances", 0)
+                        if pid:
+                            try:
+                                pa = int(pa)
+                            except (TypeError, ValueError):
+                                pa = 0
+                            # keep the max PA seen across the two seasons
+                            pa_by_id[int(pid)] = max(pa_by_id.get(int(pid), 0), pa)
+        except Exception as e:
+            print(f"  ! qualified universe fetch {yr} failed: {e}")
+    return sorted(pid for pid, pa in pa_by_id.items() if pa >= min_pa)
+
+
 def get_hitter_universe(season: int) -> list:
     """All hitters with MLB playing time in the current or prior season — the
     set worth precomputing history for. Uses the stats leaderboard so we don't
