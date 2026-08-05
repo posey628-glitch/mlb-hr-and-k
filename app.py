@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v46.45-resumable-build"
+APP_VERSION = "2026.06.10-v46.47-hist-tools-owner-lower"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -662,160 +662,11 @@ st.set_page_config(
 )
 
 # ══════════════════════════════════════════════════════════════════════════
-# v46.44: BUILD HISTORICAL DATA — placed at the VERY TOP so it renders
-# INSTANTLY, before any slow slate/hitter loading. The prior versions sat deep
-# in the app (~line 4200), so if the slate load was slow the button never even
-# appeared — which is why "no message appeared". This block is fully self-
-# contained (fetches its own player universe; does NOT depend on the slate).
-# Remove this whole block once historical_data.json is committed to the repo.
-# ══════════════════════════════════════════════════════════════════════════
-with st.sidebar:
-    st.markdown("### 🛠️ Build historical data")
-    st.caption("One-time setup. Builds in resumable batches so a crash never "
-               "loses your progress.")
-    _hb_scope = st.radio(
-        "How many players",
-        ["Quick test (~30 star hitters)", "Regular hitters (~350, recommended)",
-         "Full league (all, slow)"],
-        index=1, key="_hb_scope")
-    # how many players to process PER click (small enough to never hit the
-    # Streamlit Cloud crash limit; click again / Resume to continue)
-    _hb_batch = st.select_slider(
-        "Players per batch", options=[25, 50, 75, 100], value=50,
-        key="_hb_batch",
-        help="Each click processes this many, then saves. If it ever crashes, "
-             "your progress is kept — just click Resume.")
+# v46.46: the BUILD-HISTORICAL-DATA button was REMOVED here — the file
+# (historical_data.json) is now committed to the repo and loads instantly.
+# Re-add the builder only when rebuilding for a new season (see
+# build_historical_data.py / git history for v46.45's block).
 
-    _c1, _c2 = st.columns(2)
-    _hb_start = _c1.button("▶️ Start / Resume", use_container_width=True, key="_hb_go")
-    _hb_reset = _c2.button("↺ Start over", use_container_width=True, key="_hb_reset")
-
-    if _hb_reset:
-        for _k in ("_hb_ids", "_hb_done", "_hb_priors", "_hb_splits",
-                   "_hb_json", "_hb_meta", "_hb_error"):
-            st.session_state.pop(_k, None)
-
-    if _hb_start:
-        try:
-            import json as _hbj
-            import data_fetcher as _hbdf
-            _hbpf = getattr(_hbdf.get_hitter_historical_priors, "__wrapped__",
-                            _hbdf.get_hitter_historical_priors)
-            _hbsf = getattr(_hbdf.get_hitter_historical_splits, "__wrapped__",
-                            _hbdf.get_hitter_historical_splits)
-
-            # Resolve the id list ONCE and cache it in session_state, so Resume
-            # continues the same list instead of re-fetching / restarting.
-            if "_hb_ids" not in st.session_state:
-                if _hb_scope.startswith("Quick"):
-                    st.session_state["_hb_ids"] = [
-                        592450, 660271, 665742, 605141, 545361, 547180,
-                        592518, 596019, 641355, 502671, 518692, 608336,
-                        663586, 656941, 571448, 519317, 656555, 621043,
-                        650391, 606192, 664034, 663728, 657077, 668939,
-                        677951, 665862, 682985, 683734, 694192, 700022]
-                elif _hb_scope.startswith("Regular"):
-                    try:
-                        from build_historical_data import get_qualified_hitter_universe
-                        st.session_state["_hb_ids"] = get_qualified_hitter_universe(
-                            _hbdf.current_season(), min_pa=100)
-                    except Exception as _ue:
-                        st.session_state["_hb_error"] = f"universe fetch failed: {_ue}"
-                        st.session_state["_hb_ids"] = []
-                else:
-                    try:
-                        from build_historical_data import get_hitter_universe
-                        st.session_state["_hb_ids"] = get_hitter_universe(
-                            _hbdf.current_season())
-                    except Exception as _ue:
-                        st.session_state["_hb_error"] = f"universe fetch failed: {_ue}"
-                        st.session_state["_hb_ids"] = []
-                st.session_state["_hb_done"] = 0
-                st.session_state["_hb_priors"] = {}
-                st.session_state["_hb_splits"] = {}
-
-            _hbids = st.session_state.get("_hb_ids", [])
-            _done = st.session_state.get("_hb_done", 0)
-            _priors = st.session_state.get("_hb_priors", {})
-            _splits = st.session_state.get("_hb_splits", {})
-
-            if not _hbids:
-                st.session_state["_hb_error"] = (
-                    st.session_state.get("_hb_error") or "no player IDs resolved")
-            else:
-                # process ONE batch this click, then save + stop
-                _end = min(_done + _hb_batch, len(_hbids))
-                _batch = _hbids[_done:_end]
-                _prog = st.progress(_done / len(_hbids),
-                                    text=f"{_done}/{len(_hbids)} done…")
-                _CH = 20
-                for _bi in range(0, len(_batch), _CH):
-                    _chunk = tuple(_batch[_bi:_bi + _CH])
-                    try:
-                        _pr = _hbpf(_chunk, current_year=_hbdf.current_season())
-                        for _, _rw in _pr.iterrows():
-                            _priors[str(int(_rw["player_id"]))] = {
-                                k: (None if v != v else v)
-                                for k, v in _rw.items() if k != "player_id"}
-                    except Exception:
-                        pass
-                    try:
-                        _sr = _hbsf(_chunk, current_year=_hbdf.current_season())
-                        for _, _rw in _sr.iterrows():
-                            _splits[str(int(_rw["player_id"]))] = {
-                                k: (None if v != v else v)
-                                for k, v in _rw.items() if k != "player_id"}
-                    except Exception:
-                        pass
-                    _cur = _done + min(_bi + _CH, len(_batch))
-                    _prog.progress(_cur / len(_hbids), text=f"{_cur}/{len(_hbids)} done…")
-
-                # SAVE progress after the batch
-                st.session_state["_hb_done"] = _end
-                st.session_state["_hb_priors"] = _priors
-                st.session_state["_hb_splits"] = _splits
-                _payload = {
-                    "meta": {"built_at": datetime.utcnow().isoformat() + "Z",
-                             "season": _hbdf.current_season(),
-                             "n_priors": len(_priors), "n_splits": len(_splits),
-                             "complete": _end >= len(_hbids)},
-                    "priors": _priors, "splits": _splits,
-                }
-                st.session_state["_hb_json"] = _hbj.dumps(_payload)
-                st.session_state["_hb_meta"] = (
-                    f"{_end}/{len(_hbids)} players · {len(_priors)} priors, "
-                    f"{len(_splits)} splits")
-                st.session_state.pop("_hb_error", None)
-        except Exception as _hbe:
-            st.session_state["_hb_error"] = f"{type(_hbe).__name__}: {_hbe}"
-
-    # OUTPUT — always rendered from session_state, survives reruns.
-    if st.session_state.get("_hb_error"):
-        st.error("⚠️ " + str(st.session_state["_hb_error"]))
-    if st.session_state.get("_hb_json"):
-        _hbjson = st.session_state["_hb_json"]
-        _done = st.session_state.get("_hb_done", 0)
-        _total = len(st.session_state.get("_hb_ids", []) or [1])
-        _complete = _done >= _total
-        if '"n_priors": 0' in _hbjson and '"n_splits": 0' in _hbjson:
-            st.warning("Built, but got 0 players — MLB fetch returned nothing. "
-                       "That's a fetch problem; tell me.")
-        elif _complete:
-            st.success(f"✅ DONE — {st.session_state.get('_hb_meta','')}. "
-                       f"Download or copy below 👇")
-        else:
-            st.info(f"⏳ In progress — {st.session_state.get('_hb_meta','')}. "
-                    f"Click ▶️ Start / Resume again for the next batch. Your "
-                    f"progress is saved.")
-        st.download_button(
-            "⬇️ Download historical_data.json", data=_hbjson,
-            file_name="historical_data.json", mime="application/json",
-            use_container_width=True, key="_hb_dl")
-        with st.expander("📋 Or COPY the text"):
-            st.caption("Select all, copy, paste into a new file, save as "
-                       "historical_data.json:")
-            st.code(_hbjson, language="json")
-    st.divider()
 
 # v43.77: reset the diagnostics bucket at the start of each rerun.
 # Streamlit persists session_state across reruns, so warnings stashed on
@@ -3840,22 +3691,137 @@ if not use_bat_tracking:
 # v46.36: 3-year historical power priors (tracked-only stability prior). Heavy
 # fetch (3 seasons × a few endpoints per hitter) but cached 24h since past-
 # season data is static — so it's ~free after the first load of the day.
-use_historical_priors = st.sidebar.checkbox(
-    "📚 Live-fetch historical data (slow — prefer precomputed file)",
-    value=False,
-    help=(
-        "3-year historical priors + splits (platoon / day-night / month). These "
-        "are STATIC (prior completed seasons never change), so the app loads them "
-        "instantly from a precomputed file (historical_data.json) built once per "
-        "season — NO API calls at page load.\n\n"
-        "This toggle is a FALLBACK that live-fetches from the API instead. It's "
-        "SLOW (thousands of calls) and off by default. Only turn it on if the "
-        "precomputed file is missing or you're rebuilding it. Normal use: leave "
-        "OFF — the file is loaded automatically.\n\n"
-        "All historical data is TRACKED-ONLY (own hist_ columns, never blended "
-        "into current-season signal); the pattern loop judges if it predicts."
-    ),
-)
+# v46.47: the live-fetch toggle + build tool moved LOWER into an owner-only
+# "Historical data tools" section (see below). Default the flag to False here so
+# all downstream historical code still works; the owner section can flip it.
+use_historical_priors = st.session_state.get("_use_hist_live", False)
+
+# ── OWNER-ONLY: Historical data tools (live-fetch toggle + one-time builder) ──
+# Placed low in the sidebar + owner-gated so it stays out of the way. The normal
+# path needs none of this: the committed historical_data.json loads automatically.
+if owner_mode:
+    with st.sidebar.expander("🗄️ Historical data tools (owner)", expanded=False):
+        st.session_state["_use_hist_live"] = st.checkbox(
+            "Live-fetch historical (slow fallback)",
+            value=st.session_state.get("_use_hist_live", False),
+            help="Off by default. The committed historical_data.json loads "
+                 "automatically and instantly. Only turn this on if that file is "
+                 "missing and you need the slow live API fallback.")
+        use_historical_priors = st.session_state["_use_hist_live"]
+
+        st.markdown("**Rebuild historical file** (yearly, at season start)")
+        st.caption("Builds in resumable batches — a crash never loses progress.")
+        _hb_scope = st.radio(
+            "How many players",
+            ["Quick test (~30)", "Regular hitters (~350–550, recommended)",
+             "Full league (all, slow)"],
+            index=1, key="_hb_scope")
+        _hb_batch = st.select_slider(
+            "Players per batch", options=[25, 50, 75, 100], value=50, key="_hb_batch",
+            help="Each click processes this many, then saves. Click Resume to continue.")
+        _c1, _c2 = st.columns(2)
+        _hb_start = _c1.button("▶️ Start / Resume", use_container_width=True, key="_hb_go")
+        _hb_reset = _c2.button("↺ Start over", use_container_width=True, key="_hb_reset")
+        if _hb_reset:
+            for _k in ("_hb_ids", "_hb_done", "_hb_priors", "_hb_splits",
+                       "_hb_json", "_hb_meta", "_hb_error"):
+                st.session_state.pop(_k, None)
+        if _hb_start:
+            try:
+                import json as _hbj
+                import data_fetcher as _hbdf
+                _hbpf = getattr(_hbdf.get_hitter_historical_priors, "__wrapped__",
+                                _hbdf.get_hitter_historical_priors)
+                _hbsf = getattr(_hbdf.get_hitter_historical_splits, "__wrapped__",
+                                _hbdf.get_hitter_historical_splits)
+                if "_hb_ids" not in st.session_state:
+                    if _hb_scope.startswith("Quick"):
+                        st.session_state["_hb_ids"] = [
+                            592450, 660271, 665742, 605141, 545361, 547180,
+                            592518, 596019, 641355, 502671, 518692, 608336,
+                            663586, 656941, 571448, 519317, 656555, 621043,
+                            650391, 606192, 664034, 663728, 657077, 668939,
+                            677951, 665862, 682985, 683734, 694192, 700022]
+                    elif _hb_scope.startswith("Regular"):
+                        try:
+                            from build_historical_data import get_qualified_hitter_universe
+                            st.session_state["_hb_ids"] = get_qualified_hitter_universe(
+                                _hbdf.current_season(), min_pa=100)
+                        except Exception as _ue:
+                            st.session_state["_hb_error"] = f"universe fetch failed: {_ue}"
+                            st.session_state["_hb_ids"] = []
+                    else:
+                        try:
+                            from build_historical_data import get_hitter_universe
+                            st.session_state["_hb_ids"] = get_hitter_universe(
+                                _hbdf.current_season())
+                        except Exception as _ue:
+                            st.session_state["_hb_error"] = f"universe fetch failed: {_ue}"
+                            st.session_state["_hb_ids"] = []
+                    st.session_state["_hb_done"] = 0
+                    st.session_state["_hb_priors"] = {}
+                    st.session_state["_hb_splits"] = {}
+                _hbids = st.session_state.get("_hb_ids", [])
+                _done = st.session_state.get("_hb_done", 0)
+                _priors = st.session_state.get("_hb_priors", {})
+                _splits = st.session_state.get("_hb_splits", {})
+                if not _hbids:
+                    st.session_state["_hb_error"] = (
+                        st.session_state.get("_hb_error") or "no player IDs resolved")
+                else:
+                    _end = min(_done + _hb_batch, len(_hbids))
+                    _batch = _hbids[_done:_end]
+                    _prog = st.progress(_done / len(_hbids), text=f"{_done}/{len(_hbids)}…")
+                    _CH = 20
+                    for _bi in range(0, len(_batch), _CH):
+                        _chunk = tuple(_batch[_bi:_bi + _CH])
+                        try:
+                            _pr = _hbpf(_chunk, current_year=_hbdf.current_season())
+                            for _, _rw in _pr.iterrows():
+                                _priors[str(int(_rw["player_id"]))] = {
+                                    k: (None if v != v else v)
+                                    for k, v in _rw.items() if k != "player_id"}
+                        except Exception:
+                            pass
+                        try:
+                            _sr = _hbsf(_chunk, current_year=_hbdf.current_season())
+                            for _, _rw in _sr.iterrows():
+                                _splits[str(int(_rw["player_id"]))] = {
+                                    k: (None if v != v else v)
+                                    for k, v in _rw.items() if k != "player_id"}
+                        except Exception:
+                            pass
+                        _cur = _done + min(_bi + _CH, len(_batch))
+                        _prog.progress(_cur / len(_hbids), text=f"{_cur}/{len(_hbids)}…")
+                    st.session_state["_hb_done"] = _end
+                    st.session_state["_hb_priors"] = _priors
+                    st.session_state["_hb_splits"] = _splits
+                    _payload = {
+                        "meta": {"built_at": datetime.utcnow().isoformat() + "Z",
+                                 "season": _hbdf.current_season(),
+                                 "n_priors": len(_priors), "n_splits": len(_splits),
+                                 "complete": _end >= len(_hbids)},
+                        "priors": _priors, "splits": _splits}
+                    st.session_state["_hb_json"] = _hbj.dumps(_payload)
+                    st.session_state["_hb_meta"] = (
+                        f"{_end}/{len(_hbids)} · {len(_priors)} priors, {len(_splits)} splits")
+                    st.session_state.pop("_hb_error", None)
+            except Exception as _hbe:
+                st.session_state["_hb_error"] = f"{type(_hbe).__name__}: {_hbe}"
+        if st.session_state.get("_hb_error"):
+            st.error("⚠️ " + str(st.session_state["_hb_error"]))
+        if st.session_state.get("_hb_json"):
+            _hbjson = st.session_state["_hb_json"]
+            _done = st.session_state.get("_hb_done", 0)
+            _total = len(st.session_state.get("_hb_ids", []) or [1])
+            if _done >= _total:
+                st.success(f"✅ DONE — {st.session_state.get('_hb_meta','')}. Download 👇")
+            else:
+                st.info(f"⏳ {st.session_state.get('_hb_meta','')} — click Resume for more.")
+            st.download_button(
+                "⬇️ Download historical_data.json", data=_hbjson,
+                file_name="historical_data.json", mime="application/json",
+                use_container_width=True, key="_hb_dl")
 
 if hide_started and selected_date == _today_et():  # v44.97: ET-aware
     try:
@@ -9021,7 +8987,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v46.45 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v46.47 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
