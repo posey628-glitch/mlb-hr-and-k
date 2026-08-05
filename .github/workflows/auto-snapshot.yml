@@ -17,16 +17,23 @@ name: Auto snapshot + grade (LaunchCast)
 
 on:
   schedule:
-    # ── Evening ET snapshot pings (catch lineups as they post) ──
-    # 21:00 UTC = 5pm ET / 4pm CT / 2pm PT  (afternoon slate lineups)
-    - cron: "0 21 * * *"
-    # 23:00 UTC = 7pm ET  (most everyday-slate lineups are up)
-    - cron: "0 23 * * *"
-    # 01:00 UTC = 9pm ET  (late/west-coast lineups)
-    - cron: "0 1 * * *"
-    # ── Morning ET grade ping (yesterday's games are final) ──
-    # 15:00 UTC = 11am ET  (grade yesterday)
+    # ── AFTERNOON slate coverage (day games ~1pm ET first pitch) ──
+    # 15:00 UTC = 11am ET  (afternoon-game lineups post + GRADE yesterday)
     - cron: "0 15 * * *"
+    # 16:30 UTC = 12:30pm ET  (final confirmed lineups before 1pm games)
+    - cron: "30 16 * * *"
+    # ── EVENING slate coverage (most games 6:40-7:10pm ET) ──
+    # 20:00 UTC = 4pm ET  (early evening lineups start posting)
+    - cron: "0 20 * * *"
+    # 22:00 UTC = 6pm ET  (most evening lineups now confirmed)
+    - cron: "0 22 * * *"
+    # 23:00 UTC = 7pm ET  (last confirmations before first pitch)
+    - cron: "0 23 * * *"
+    # ── LATE / WEST-COAST coverage (games to ~10pm ET) ──
+    # 01:00 UTC = 9pm ET  (west-coast lineups confirmed)
+    - cron: "0 1 * * *"
+    # 02:30 UTC = 10:30pm ET  (final full-slate capture — every game locked)
+    - cron: "30 2 * * *"
   # lets you run it by hand from the Actions tab too
   workflow_dispatch:
 
