@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v46.43-build-bulletproof"
+APP_VERSION = "2026.06.10-v46.44-build-at-top"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -660,6 +660,110 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# ══════════════════════════════════════════════════════════════════════════
+# v46.44: BUILD HISTORICAL DATA — placed at the VERY TOP so it renders
+# INSTANTLY, before any slow slate/hitter loading. The prior versions sat deep
+# in the app (~line 4200), so if the slate load was slow the button never even
+# appeared — which is why "no message appeared". This block is fully self-
+# contained (fetches its own player universe; does NOT depend on the slate).
+# Remove this whole block once historical_data.json is committed to the repo.
+# ══════════════════════════════════════════════════════════════════════════
+with st.sidebar:
+    st.markdown("### 🛠️ Build historical data")
+    st.caption("One-time setup. Builds the file, then gives you the data 3 ways.")
+    _hb_scope = st.radio(
+        "How many players",
+        ["Quick test (~30 star hitters)", "Full league (all hitters)"],
+        index=0, key="_hb_scope")
+    if st.button("📥 Build now", use_container_width=True, key="_hb_go"):
+        try:
+            import json as _hbj
+            import data_fetcher as _hbdf
+            _hbpf = getattr(_hbdf.get_hitter_historical_priors, "__wrapped__",
+                            _hbdf.get_hitter_historical_priors)
+            _hbsf = getattr(_hbdf.get_hitter_historical_splits, "__wrapped__",
+                            _hbdf.get_hitter_historical_splits)
+            # resolve player IDs — self-contained, no slate dependency
+            if _hb_scope.startswith("Quick"):
+                # a fixed set of well-known hitters for a fast, reliable test
+                _hbids = [592450, 660271, 665742, 605141, 545361, 547180,
+                          592518, 596019, 641355, 502671, 518692, 608336,
+                          663586, 656941, 571448, 519317, 656555, 621043,
+                          650391, 606192, 664034, 663728, 657077, 668939,
+                          677951, 665862, 682985, 683734, 694192, 700022]
+            else:
+                try:
+                    from build_historical_data import get_hitter_universe
+                    _hbids = get_hitter_universe(_hbdf.current_season())
+                except Exception as _ue:
+                    _hbids = []
+                    st.session_state["_hb_error"] = f"universe fetch failed: {_ue}"
+            if not _hbids:
+                st.session_state["_hb_error"] = (
+                    st.session_state.get("_hb_error", "") or "no player IDs resolved")
+                st.session_state.pop("_hb_json", None)
+            else:
+                _hbp, _hbs = {}, {}
+                _hbprog = st.progress(0.0, text=f"0/{len(_hbids)}…")
+                _HBC = 20
+                for _hbi in range(0, len(_hbids), _HBC):
+                    _hbchunk = tuple(_hbids[_hbi:_hbi + _HBC])
+                    try:
+                        _hbpr = _hbpf(_hbchunk, current_year=_hbdf.current_season())
+                        for _, _hbrw in _hbpr.iterrows():
+                            _hbp[str(int(_hbrw["player_id"]))] = {
+                                k: (None if v != v else v)
+                                for k, v in _hbrw.items() if k != "player_id"}
+                    except Exception:
+                        pass
+                    try:
+                        _hbsr = _hbsf(_hbchunk, current_year=_hbdf.current_season())
+                        for _, _hbrw in _hbsr.iterrows():
+                            _hbs[str(int(_hbrw["player_id"]))] = {
+                                k: (None if v != v else v)
+                                for k, v in _hbrw.items() if k != "player_id"}
+                    except Exception:
+                        pass
+                    _hbprog.progress(min(1.0, (_hbi + _HBC) / len(_hbids)),
+                                     text=f"{min(_hbi+_HBC,len(_hbids))}/{len(_hbids)}…")
+                _hbpayload = {
+                    "meta": {"built_at": datetime.utcnow().isoformat() + "Z",
+                             "season": _hbdf.current_season(),
+                             "n_priors": len(_hbp), "n_splits": len(_hbs)},
+                    "priors": _hbp, "splits": _hbs,
+                }
+                st.session_state["_hb_json"] = _hbj.dumps(_hbpayload)
+                st.session_state["_hb_meta"] = f"{len(_hbp)} priors, {len(_hbs)} splits"
+                st.session_state.pop("_hb_error", None)
+        except Exception as _hbe:
+            st.session_state["_hb_error"] = f"{type(_hbe).__name__}: {_hbe}"
+
+    # OUTPUT — always rendered from session_state, so reruns can't wipe it.
+    if st.session_state.get("_hb_error"):
+        st.error("⚠️ " + str(st.session_state["_hb_error"]))
+    if st.session_state.get("_hb_json"):
+        _hbjson = st.session_state["_hb_json"]
+        if '"n_priors": 0' in _hbjson and '"n_splits": 0' in _hbjson:
+            st.warning(
+                "Built, but got 0 players — the MLB fetch returned nothing from "
+                "Streamlit Cloud. That's a fetch problem, not a download problem. "
+                "Tell me and we'll fix the fetch.")
+        else:
+            st.success(f"✅ Built {st.session_state.get('_hb_meta','')}. "
+                       f"Get the file below 👇")
+        st.download_button(
+            "⬇️ Download historical_data.json", data=_hbjson,
+            file_name="historical_data.json", mime="application/json",
+            use_container_width=True, key="_hb_dl")
+        with st.expander("📋 Or COPY the text (if download doesn't work)"):
+            st.caption("Select all this text, copy it, paste into a new file, "
+                       "save it as historical_data.json:")
+            st.code(_hbjson, language="json")
+        if st.button("Clear", key="_hb_clear"):
+            for _k in ("_hb_json", "_hb_meta", "_hb_error"):
+                st.session_state.pop(_k, None)
+    st.divider()
 
 # v43.77: reset the diagnostics bucket at the start of each rerun.
 # Streamlit persists session_state across reruns, so warnings stashed on
@@ -4201,95 +4305,9 @@ st.session_state["_hist_splits_status_display"] = _hist_splits_status
 # an expander, which Streamlit's rerun model kept wiping. This version gives
 # THREE ways to get the data at once (download button + copy-paste text area +
 # a clear built-count diagnostic), stores everything in session_state, and
-# renders the output OUTSIDE the expander so nothing wipes it. Remove this whole
-# block once historical_data.json is committed.
-st.sidebar.markdown("### 🛠️ Build historical data (one-time)")
-_bcol = st.sidebar
-_bscope = _bcol.radio(
-    "Scope", ["Tonight's hitters (fast test)", "Full league (complete)"],
-    index=0, key="_hist_build_scope")
-if _bcol.button("📥 Build now", use_container_width=True, key="_hist_build_go"):
-    try:
-        import json as _bj
-        import data_fetcher as _bdf
-        from data_fetcher import (get_hitter_historical_priors as _gp,
-                                  get_hitter_historical_splits as _gs)
-        _pf = getattr(_gp, "__wrapped__", _gp)
-        _sf = getattr(_gs, "__wrapped__", _gs)
-        if _bscope.startswith("Full"):
-            try:
-                from build_historical_data import get_hitter_universe
-                _ids = get_hitter_universe(_bdf.current_season())
-            except Exception:
-                _ids = list(_slate_hitter_ids)
-        else:
-            _ids = list(_slate_hitter_ids)
-        if not _ids:
-            st.session_state["_built_hist_error"] = "No hitter IDs yet — wait for the slate to load."
-            st.session_state.pop("_built_hist_json", None)
-        else:
-            _priors, _splits = {}, {}
-            _prog = st.sidebar.progress(0.0, text=f"0/{len(_ids)}…")
-            _CH = 25
-            for _bi in range(0, len(_ids), _CH):
-                _chunk = tuple(_ids[_bi:_bi + _CH])
-                try:
-                    _pr = _pf(_chunk, current_year=_bdf.current_season())
-                    for _, _rw in _pr.iterrows():
-                        _priors[str(int(_rw["player_id"]))] = {
-                            k: (None if v != v else v)
-                            for k, v in _rw.items() if k != "player_id"}
-                except Exception:
-                    pass
-                try:
-                    _sr = _sf(_chunk, current_year=_bdf.current_season())
-                    for _, _rw in _sr.iterrows():
-                        _splits[str(int(_rw["player_id"]))] = {
-                            k: (None if v != v else v)
-                            for k, v in _rw.items() if k != "player_id"}
-                except Exception:
-                    pass
-                _prog.progress(min(1.0, (_bi + _CH) / len(_ids)),
-                               text=f"{min(_bi+_CH,len(_ids))}/{len(_ids)}…")
-            _payload = {
-                "meta": {"built_at": datetime.utcnow().isoformat() + "Z",
-                         "season": _bdf.current_season(),
-                         "n_priors": len(_priors), "n_splits": len(_splits)},
-                "priors": _priors, "splits": _splits,
-            }
-            st.session_state["_built_hist_json"] = _bj.dumps(_payload)
-            st.session_state["_built_hist_meta"] = f"{len(_priors)} priors, {len(_splits)} splits"
-            st.session_state.pop("_built_hist_error", None)
-    except Exception as _be:
-        st.session_state["_built_hist_error"] = f"{type(_be).__name__}: {_be}"
-
-# OUTPUT — rendered every run from session_state, OUTSIDE any button/expander so
-# Streamlit reruns can never wipe it. Three ways to get the data.
-if st.session_state.get("_built_hist_error"):
-    st.sidebar.error("Build error: " + st.session_state["_built_hist_error"])
-if st.session_state.get("_built_hist_json"):
-    _bjson = st.session_state["_built_hist_json"]
-    _bmeta = st.session_state.get("_built_hist_meta", "")
-    # DIAGNOSTIC: did the fetch actually get data? (0 = MLB fetch failed)
-    if _bjson and '"n_priors": 0' in _bjson and '"n_splits": 0' in _bjson:
-        st.sidebar.warning(
-            "⚠️ Built, but got 0 players — the MLB fetch returned nothing. "
-            "That's a data-fetch problem, not a download problem. Tell me and "
-            "we'll fix the fetch.")
-    else:
-        st.sidebar.success(f"✅ Built {_bmeta}. Get the file 3 ways below 👇")
-    # Way 1: download button
-    st.sidebar.download_button(
-        "⬇️ Download historical_data.json", data=_bjson,
-        file_name="historical_data.json", mime="application/json",
-        use_container_width=True, key="_hist_dl_btn")
-    # Way 2: copy-paste text area (reruns CANNOT wipe visible text)
-    with st.sidebar.expander("📋 Or copy the text (paste into a new file named historical_data.json)"):
-        st.code(_bjson, language="json")
-    # Way 3: clear it when done
-    if st.sidebar.button("Clear built data", key="_hist_clear"):
-        st.session_state.pop("_built_hist_json", None)
-        st.session_state.pop("_built_hist_meta", None)
+# v46.44: the build-historical-data UI was moved to the TOP of the app (right
+# after set_page_config) so it renders INSTANTLY regardless of how slow the
+# slate data loads. See that block near the top. (Removed from here.)
 
 # v46.03: spray-chart pull tendency (statsapi, tracked-only). left_side_pct /
 
@@ -8951,7 +8969,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v46.43 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v46.44 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
