@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v46.47-hist-tools-owner-lower"
+APP_VERSION = "2026.06.10-v46.48-fix-nested-expanders"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -5481,8 +5481,13 @@ if _eval_metrics and _eval_date:
                 _report.append("")
                 _report.append(f"PATTERN DISCOVERY: {_pd_note}")
 
-            with st.expander("📋 Copy results as text (tables paste intact)", expanded=False):
-                st.caption("Click the copy icon in the top-right of the box below.")
+            # v46.48: was st.expander, but Streamlit 1.44 forbids an expander
+            # nested inside another expander (this is inside "Yesterday's
+            # results"). Use a bordered container instead — same copy box, no
+            # nesting violation.
+            with st.container(border=True):
+                st.caption("📋 Copy results as text — click the copy icon in the "
+                           "top-right of the box below.")
                 st.code("\n".join(_report), language="text")
 
             # v45.99: COPY EVERYTHING master button. Gathers this main report
@@ -5739,11 +5744,7 @@ if show_backtest:
                                         b_label = "OK (calibration drifting)"
                                     else:
                                         b_label = "Needs tuning"
-                                    with st.expander(
-                                        f"🔍 Brier score (calibration diagnostic): "
-                                        f"{brier:.4f} — {b_label}",
-                                        expanded=False,
-                                    ):
+                                    with st.container(border=True):  # v46.48: was nested expander
                                         st.caption(
                                             "**Calibration ≠ ranking.** Top-10 hit "
                                             "rate above is the primary signal for "
@@ -7640,8 +7641,7 @@ if show_diagnostic:
             st.dataframe(pool_df.sort_values("_sort").drop(columns="_sort"),
                          hide_index=True, use_container_width=True)
             if retired_rows:
-                with st.expander(f"{label}: {len(retired_rows)} known-retired "
-                                 f"field(s) — no action needed"):
+                with st.container(border=True):  # v46.48: was nested expander
                     st.caption(
                         "Raw Savant names superseded by renamed canonical "
                         "columns, or fields the endpoint stopped returning. "
@@ -8832,12 +8832,12 @@ if not p_slate.empty:
             st.error(f"LA fill error: {la_err}")
             tb = st.session_state.get("_la_fill_traceback")
             if tb:
-                with st.expander("Show traceback"):
+                with st.container(border=True):  # v46.48: was nested expander
                     st.code(tb, language="text")
         # Show step-by-step diagnostic log from inside fill_hitter_la_for_slate
         la_steps = st.session_state.get("_la_fill_steps") or []
         if la_steps:
-            with st.expander(f"📋 Step-by-step log ({len(la_steps)} entries)", expanded=la_after is not None and la_after > 50):
+            with st.container(border=True):  # v46.48: was nested expander
                 for step in la_steps:
                     st.text(step)
         if not la_ran and (la_before is not None and la_before > 30):
@@ -8987,7 +8987,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v46.47 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v46.48 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
@@ -22351,7 +22351,7 @@ with st.expander("🎛️ Custom Grade Builder — pick your own metrics", expan
                     # custom metric so it persists and can be re-applied any
                     # day from the preset dropdown (prefixed 💾). Stores the
                     # {metric: weight} set that produced the table above.
-                    with st.expander("💾 Save this as a named custom metric", expanded=False):
+                    with st.container(border=True):  # v46.48: was nested expander
                         st.caption(
                             "Give this weight formula a name to save it. It'll "
                             "appear in the preset dropdown (💾 prefix) on future "
@@ -22417,7 +22417,7 @@ if owner_mode:
     try:
         from backtest import emergency_reset_gist, durable_storage_configured
         if durable_storage_configured():
-            with st.expander("🆘 Emergency: reset gist storage", expanded=False):
+            with st.container(border=True):  # v46.48: was nested expander
                 st.caption(
                     "Use this ONLY if gist saves are failing with an "
                     "'invalid JSON' / 'Expecting :' error. Resets the "
