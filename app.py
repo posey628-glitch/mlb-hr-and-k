@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v46.48-fix-nested-expanders"
+APP_VERSION = "2026.06.10-v46.49-fix-nested-expanders-2"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -5495,7 +5495,8 @@ if _eval_metrics and _eval_date:
             # rolling-aggregate, pattern-discovery, data-health) into ONE block,
             # so you can grab the whole slate's analysis in a single copy instead
             # of hunting for each expander.
-            with st.expander("📋📋 Copy EVERYTHING (all sections at once)", expanded=False):
+            with st.container(border=True):  # v46.49: was nested expander
+                st.markdown("**📋📋 Copy EVERYTHING (all sections at once)**")
                 _all_parts = ["═══ MAIN RESULTS ═══", "\n".join(_report)]
                 _extra_keys = [
                     ("_data_health_copy_text", "DATA HEALTH"),
@@ -6204,7 +6205,8 @@ if show_pattern_analysis:
                     )
 
                     # ====== v45.20: Calibration (reviews P4/P5/P7 #1 ask) ======
-                    with st.expander("🎯 Calibration — what the scores actually mean", expanded=False):
+                    with st.container(border=True):  # v46.49: was nested expander
+                        st.markdown("**🎯 Calibration — what the scores actually mean**")
                         st.caption(
                             "The most fundamental model test. Left: observed HR "
                             "rate by **HR Score band** (gives '87' a real-world "
@@ -6257,7 +6259,8 @@ if show_pattern_analysis:
                             log_swallowed_error("calibration_tables", _cal_e, surface=False)
 
                     # ====== v45.37: Handedness × Park × Environment segments ======
-                    with st.expander("🧪 Segments — handedness × park × environment", expanded=False):
+                    with st.container(border=True):  # v46.49: was nested expander
+                        st.markdown("**🧪 Segments — handedness × park × environment**")
                         st.caption(
                             "Your idea made queryable: do RHB facing LHP in "
                             "favorable conditions homer more than the norm? "
@@ -7573,7 +7576,8 @@ if show_pattern_analysis:
                         if _ctc:
                             _pa_report.append(_ctc)
                         st.session_state["_pattern_copy_text"] = "\n".join(_pa_report)
-                        with st.expander("📋 Copy pattern analysis as text (tables paste intact)", expanded=False):
+                        with st.container(border=True):  # v46.49: was nested expander
+                            st.markdown("**📋 Copy pattern analysis as text**")
                             st.caption("Click the copy icon in the top-right of the box below.")
                             st.code("\n".join(_pa_report), language="text")
                 except Exception:
@@ -8987,7 +8991,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v46.48 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v46.49 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
