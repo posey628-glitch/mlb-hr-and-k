@@ -1,0 +1,69 @@
+name: Auto snapshot + grade (LaunchCast)
+
+# WHAT THIS DOES
+# The app already auto-snapshots today's slate and grades yesterday whenever it
+# LOADS (once per hour, for today's date). The only thing missing was something
+# to load it on a schedule so YOU don't have to. This job does exactly that:
+# it "wakes" the app by loading its URL at set times, which triggers the app's
+# own proven snapshot+grade pipeline (saving to the durable Gist). No data logic
+# lives here — it just knocks on the door so the app runs itself.
+#
+# SCHEDULE (times are UTC; cron can't do timezones). Adjust the hours to your
+# needs. Defaults below aim at:
+#   - a few afternoon/evening ET pings to catch lineups as they post
+#   - a morning ET ping to grade yesterday's completed games
+# MLB lineups usually post 3-5 hours before first pitch; multiple evening pings
+# catch both early and late slates.
+
+on:
+  schedule:
+    # ── Evening ET snapshot pings (catch lineups as they post) ──
+    # 21:00 UTC = 5pm ET / 4pm CT / 2pm PT  (afternoon slate lineups)
+    - cron: "0 21 * * *"
+    # 23:00 UTC = 7pm ET  (most everyday-slate lineups are up)
+    - cron: "0 23 * * *"
+    # 01:00 UTC = 9pm ET  (late/west-coast lineups)
+    - cron: "0 1 * * *"
+    # ── Morning ET grade ping (yesterday's games are final) ──
+    # 15:00 UTC = 11am ET  (grade yesterday)
+    - cron: "0 15 * * *"
+  # lets you run it by hand from the Actions tab too
+  workflow_dispatch:
+
+jobs:
+  wake-app:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wake the app (triggers its auto-snapshot + grade)
+        env:
+          APP_URL: ${{ secrets.APP_URL }}
+        run: |
+          if [ -z "$APP_URL" ]; then
+            echo "ERROR: APP_URL secret is not set. Add it in repo Settings →"
+            echo "Secrets and variables → Actions → New repository secret."
+            exit 1
+          fi
+          echo "Waking app at $APP_URL"
+          # Streamlit Cloud apps sleep when idle; the FIRST hit wakes them and
+          # can take 30-60s to fully boot. We hit it, wait, then hit again to
+          # ensure the app fully loaded and ran its pipeline.
+          for attempt in 1 2 3; do
+            echo "--- wake attempt $attempt ---"
+            code=$(curl -s -o /dev/null -w "%{http_code}" -L --max-time 120 "$APP_URL" || echo "000")
+            echo "HTTP status: $code"
+            if [ "$code" = "200" ]; then
+              echo "App responded OK. Waiting 90s for it to finish loading + snapshotting…"
+              sleep 90
+              # a second load ensures the pipeline completed even if the first
+              # hit only started the wake-from-sleep
+              curl -s -o /dev/null -L --max-time 120 "$APP_URL" || true
+              echo "Done."
+              exit 0
+            fi
+            echo "Not ready yet, waiting 45s before retry…"
+            sleep 45
+          done
+          echo "WARNING: app did not return 200 after 3 attempts. It may still"
+          echo "have woken and snapshotted — check the app's backtest history."
+          # don't fail the whole job on a flaky wake; the app may still have run
+          exit 0
