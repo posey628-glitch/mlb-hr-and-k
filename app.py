@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v46.51-review-response"
+APP_VERSION = "2026.06.10-v46.53-review-response-3"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -954,7 +954,7 @@ COLUMN_HELP = {
 #   Card border:   #27492F
 #   Primary text:  #F2EDDD
 #   Muted text:    #A8B5A0
-#   Accent:        #F5C518 (electric blue)
+#   Accent:        #F5C518 (amber/gold)
 #   Accent hover:  #FFD966
 #   Success:       #00ff9d (neon green for HR/win signals)
 #   Warning:       #FF9F1C
@@ -4061,64 +4061,13 @@ try:
     # harmless no-ops.
     hitter_hand_statcast = pd.DataFrame()
     _hand_statcast_status = "retired (superseded by MLB API split)"
-    if False:  # dead branch preserved for reference; never executes
-        from data_fetcher import get_hitter_handedness_statcast
-        hitter_hand_statcast = (
-            get_hitter_handedness_statcast(stats_day=_stats_day_key())
-            if not slate.empty else pd.DataFrame()
-        )
-    if hitter_hand_statcast.empty:
-        pass  # expected — fetch retired
-    else:
-        # Count how many hitters have either side populated as a quality signal
-        _l_count = 0
-        _r_count = 0
-        if "vs_lhp_barrel_pct" in hitter_hand_statcast.columns:
-            _l_count = hitter_hand_statcast["vs_lhp_barrel_pct"].notna().sum()
-        if "vs_rhp_barrel_pct" in hitter_hand_statcast.columns:
-            _r_count = hitter_hand_statcast["vs_rhp_barrel_pct"].notna().sum()
-        if _l_count > 0 and _r_count > 0:
-            # v45.90: DON'T trust "both populated" as proof of a real split —
-            # that's exactly what fooled us on the pitcher arsenal (identical
-            # L/R data with L/R labels). Verify vs-LHP actually DIFFERS from
-            # vs-RHP for the same hitters. If they're identical, the split is
-            # fake (one side copied to the other) even though both look "full".
-            _split_is_real = None
-            try:
-                _pair_cols = [
-                    ("vs_lhp_barrel_pct", "vs_rhp_barrel_pct"),
-                    ("vs_lhp_xwoba", "vs_rhp_xwoba"),
-                    ("vs_lhp_hard_hit", "vs_rhp_hard_hit"),
-                ]
-                _have = [(l, r) for l, r in _pair_cols
-                         if l in hitter_hand_statcast.columns
-                         and r in hitter_hand_statcast.columns]
-                if _have:
-                    _diff_frac = 0.0
-                    for _lc, _rc in _have:
-                        _both = hitter_hand_statcast[[_lc, _rc]].dropna()
-                        if len(_both) > 0:
-                            _d = (_both[_lc] != _both[_rc]).mean()
-                            _diff_frac = max(_diff_frac, float(_d))
-                    _split_is_real = _diff_frac > 0.10  # >10% of hitters differ
-                    _pct = _diff_frac * 100.0
-            except Exception:
-                _split_is_real = None
-
-            if _split_is_real is True:
-                _hand_statcast_status = (
-                    f"✅ real split ({_l_count} LHP, {_r_count} RHP; "
-                    f"{_pct:.0f}% of hitters differ L vs R)")
-            elif _split_is_real is False:
-                _hand_statcast_status = (
-                    f"❌ BROKEN — vs-LHP and vs-RHP IDENTICAL "
-                    f"({_l_count}/{_r_count} rows but not a real split)")
-            else:
-                _hand_statcast_status = f"✅ working ({_l_count} LHP, {_r_count} RHP)"
-        elif _l_count > 0 or _r_count > 0:
-            _hand_statcast_status = f"⚠️ partial ({_l_count} LHP, {_r_count} RHP)"
-        else:
-            _hand_statcast_status = "❌ empty (using season-overall)"
+    # v46.52 (review-response item 6): the Savant hitter hand-split fetch is
+    # RETIRED (superseded by the reliable MLB Stats API split fetched elsewhere).
+    # Removed the dead `if False:` fetch scaffolding a reviewer flagged. The
+    # empty-frame contract is kept intentionally so downstream merges are
+    # harmless no-ops, and the status write below is preserved for Pipeline
+    # Health. The old verification/anti-fake-split logic is unreachable when the
+    # frame is empty, so it's been dropped with the scaffolding.
 except Exception as _hsc_err:
     hitter_hand_statcast = pd.DataFrame()
     _hand_statcast_status = f"❌ error: {type(_hsc_err).__name__}"
@@ -4510,6 +4459,21 @@ try:
     elif "⏸️" in str(_bat_tracking_status):
         _bt_msg += "  ← toggle is off. HR Criteria #4 will be '·' for everyone."
     stash_diagnostic("pipeline_health", _bt_msg)
+except Exception:
+    pass
+
+# v46.52 (review-response item 5): surface a props hit/TB import failure so the
+# app doesn't SILENTLY blank out hits/total-bases for every hitter with no
+# indication why. _PROPS_IMPORT_ERR_MSG is captured at module load but was never
+# shown; check it here (after session_state + stash_diagnostic are ready).
+try:
+    if not _PROPS_HIT_TB_AVAILABLE:
+        _pm = globals().get("_PROPS_IMPORT_ERR_MSG", "unknown import error")
+        stash_diagnostic(
+            "pipeline_health",
+            f"⚠️ props hit/TB module unavailable — hits/total-bases columns will "
+            f"be blank for every hitter. Import error: {_pm}",
+            level="warning")
 except Exception:
     pass
 
@@ -5630,10 +5594,6 @@ if show_transactions:
                 _code = row.get("type_code", "")
                 _both_mlb = (_ft in _MLB_CLUBS and _tt in _MLB_CLUBS and _ft != _tt)
                 if _code == "TR" or _both_mlb:
-                    return ("🔁", "TRADE")
-                return IMPACT_CODES.get(_code, ("", ""))
-                # club name by requiring the names to differ.)
-                if _ft and _tt and _ft != _tt:
                     return ("🔁", "TRADE")
                 return IMPACT_CODES.get(_code, ("", ""))
             _recat = impact_df.apply(_reclassify, axis=1)
@@ -9011,7 +8971,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v46.51 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v46.53 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
