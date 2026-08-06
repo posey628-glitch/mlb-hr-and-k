@@ -1232,6 +1232,7 @@ def _snapshot_merge_cols():
 MODEL_OUTPUT_FEATURES = {
     "hr_score_raw",  # v45.74: pre-rescale composite — tracked, never a predictor
     "pick_score_no_env",  # v46.01: env-ablation shadow score — graded, not a predictor
+    "power_score_no_env",  # v46.50: power WITHOUT env_mult — tests if env belongs in power_score
     "hit_pa_pct",  # v45.70: prop output, never a predictor
     "ctx_lift_pp",  # v45.49: derived from hr_game_pct — tracked, never a predictor
     "hr_score", "hr_game_pct", "hr_pa_pct", "adaptive_score",
