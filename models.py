@@ -1018,6 +1018,7 @@ def build_matchup_table(
         "hr_form", "hr_form_label", "hr_form_arrow", "kHR",
         # Pitches / BIP / ISO / xwOBA family
         "pitches", "bip", "iso", "xwoba", "xwobacon",
+        "power_score", "power_score_no_env",  # v46.50: env-ablation shadow (tracked)
         # Quality of contact
         "barrel_pct", "pulled_brl_pct", "hard_hit", "sweet_spot_pct",
         "fb_pct", "gb_pct", "ld_pct",
@@ -1374,6 +1375,14 @@ def add_power_score(
 
     df["power_score"] = (base_power * env_mult).clip(0, 99).round(1)
     df["env_mult"] = round(env_mult, 3)
+    # v46.50 (deep-dive finding): env appears BOTH inside power_score (via
+    # env_mult) AND as the standalone ps_env pick_score component. The existing
+    # pick_score_no_env shadow only removes the SMALL standalone ps_env (weight
+    # 0.05); it does NOT isolate the LARGER env exposure baked in here. Since
+    # favorable-env HR lift has been running BELOW random (0.56-0.72x), we track
+    # power WITHOUT the env multiplier so the pattern loop can measure whether
+    # env belongs in power_score at all. Tracked-only — does NOT affect scoring.
+    df["power_score_no_env"] = base_power.clip(0, 99).round(1)
 
     # MATCHUP OPPORTUNITY SCORE - separate from Power Score.
     # This is a "the situation favors a HR today regardless of who's batting"
