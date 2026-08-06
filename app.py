@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v46.50-power-noenv-shadow"
+APP_VERSION = "2026.06.10-v46.51-review-response"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -65,6 +65,19 @@ PICK_SCORE_WEIGHTS = {
     "ps_sleeper":     0.05,
     "ps_env":         0.05,
 }
+# NOTE (v46.51, review-response): these sum to 0.91, not 1.0 — a leftover from
+# removing ps_bvp (0.09) in v45.14. This is INTENTIONALLY LEFT because it has
+# ZERO functional effect: pick_score divides by the PER-ROW sum of PRESENT
+# component weights (weighted_sum / present_weight_total), so scaling every
+# weight by a constant leaves every score AND the entire ranking identical
+# (verified numerically). Renormalizing to 1.0 would only change the cosmetic
+# magnitude and would muddy calibration-snapshot weight continuity across the
+# reweight boundary. What matters for ranking is the RELATIVE weights, which are
+# unchanged. Do NOT "fix" the sum expecting it to change scores — it won't.
+assert abs(sum(PICK_SCORE_WEIGHTS.values()) - 0.91) < 1e-9, (
+    "PICK_SCORE_WEIGHTS drifted from the documented 0.91 sum — if you changed a "
+    "component weight, update this check and re-verify the reweight generation tag."
+)
 
 # Other key calibration constants — same SOT principle.
 LEAGUE_HR_PER_PA = 0.030       # Matches props.LEAGUE_HR_PER_PA
@@ -250,9 +263,16 @@ def smash_tier(hr_score, pitcher_grade, env_boost, lineup_confirmed=True):
     lineup_confirmed = the hitter is in the confirmed starting lineup
     (v45.14: restored — the override had dropped this documented gate; an
     unconfirmed hitter can't be a smash spot no matter the score).
-    Rules: never smash vs an ELITE/TOUGH pitcher; otherwise tier by HR Score +
-    a favorable/neutral env gate. Referenced by both the scoring override and
-    the caption text so they can never drift.
+    Rules: never smash vs an ELITE/TOUGH pitcher, AND require an EXPLOIT/EXPLOIT+
+    pitcher (a MIXED/neutral pitcher does NOT qualify for any smash tier — this
+    matches the user-facing legend everywhere: "HR Score ≥N + EXPLOIT/EXPLOIT+
+    pitcher + env gate"). Given an EXPLOIT pitcher, tier by HR Score + a
+    favorable/neutral env gate. Referenced by both the scoring override and the
+    caption text so they can never drift.
+    (v46.51 review-response: the prior one-line docstring said only "otherwise
+    tier by HR Score + env", omitting the EXPLOIT requirement — a reviewer read
+    that as a bug where MIXED pitchers were wrongly excluded. The CODE is correct
+    and matches the legend; the docstring was incomplete. Fixed here.)
     """
     if not lineup_confirmed:
         return ""
@@ -1533,8 +1553,8 @@ def _render_deep_dive_card(_dd):
             for line in filter(None, [
                 _fmt_metric("Barrel%", "barrel_pct", "{:.1f}", "%"),
                 _fmt_metric("Pulled-Brl%", "pulled_brl_pct", "{:.1f}", "%"),
-            _fmt_metric("Pull-Air%", "pull_air_pct", "{:.1f}", "%"),
-            _fmt_metric("Tonight vs usual", "ctx_lift_pp", "{:+.1f}", "pp"),
+                _fmt_metric("Pull-Air%", "pull_air_pct", "{:.1f}", "%"),
+                _fmt_metric("Tonight vs usual", "ctx_lift_pp", "{:+.1f}", "pp"),
                 _fmt_metric("Avg EV", "avg_ev", "{:.1f}", " mph"),
                 _fmt_metric("HardHit%", "hard_hit", "{:.1f}", "%"),
                 _fmt_metric("ISO", "iso", "{:.3f}"),
@@ -8991,7 +9011,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v46.50 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v46.51 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
