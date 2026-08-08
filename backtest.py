@@ -1419,6 +1419,38 @@ def auto_run_pattern_discovery() -> dict:
 
         today_corrs = new_entries[-1]  # newest slate, for result reporting
 
+        # v46.54 (user-caught bug): per_player_patterns reads FULL snapshots,
+        # which the 700KB size-cap prunes to ~4 days — so no player ever reached
+        # the 8-game threshold no matter how long the app ran. Fix: bank a LEAN
+        # per-player outcome log under a protected "_" key (never pruned, like
+        # _pattern_history), holding just {pid, hr, proj, nm} per hitter per
+        # slate date. per_player_patterns reads THIS instead of the doomed raw
+        # snapshots, so per-player history now outlives the raw window too.
+        # Same per-slate/backfill structure as _pattern_history so lost days
+        # self-heal while their snapshots still exist.
+        _pp_new = {}  # date_str -> list of lean per-player dicts
+        for d_str, day_df in merged.groupby("snapshot_date"):
+            _rows = []
+            _pcol = "hr_game_pct" if "hr_game_pct" in day_df.columns else None
+            for _, _r in day_df.iterrows():
+                _pid = _r.get("player_id")
+                if _pid is None or pd.isna(_pid):
+                    continue
+                _hom = _r.get("homered")
+                if _hom is None or pd.isna(_hom):
+                    continue
+                _entry = {"pid": int(_pid), "hr": int(_hom)}
+                if _pcol is not None:
+                    _pv = _r.get(_pcol)
+                    if _pv is not None and not pd.isna(_pv):
+                        _entry["proj"] = round(float(_pv), 2)
+                _nm = _r.get("player_name") or _r.get("name")
+                if _nm is not None and not pd.isna(_nm):
+                    _entry["nm"] = str(_nm)
+                _rows.append(_entry)
+            if _rows:
+                _pp_new[str(d_str)] = _rows
+
         # Persist: replace any existing entries for recomputed dates, keep rest
         if result["gist_configured"]:
             try:
@@ -1447,6 +1479,16 @@ def auto_run_pattern_discovery() -> dict:
                     _ph.extend(_entries)
                     _ph = sorted(_ph, key=lambda h: h.get("date_computed", ""))[-60:]
                     snaps[_hk] = _ph
+                # v46.54: persist the lean per-player outcome log (dict keyed by
+                # slate date). Replace recomputed dates, keep the rest, cap 60d.
+                if _pp_new:
+                    _pp_log = snaps.get("_player_outcome_log") or {}
+                    if not isinstance(_pp_log, dict):
+                        _pp_log = {}
+                    _pp_log.update(_pp_new)  # recomputed dates overwrite
+                    _keep_dates = sorted(_pp_log.keys())[-60:]
+                    _pp_log = {d: _pp_log[d] for d in _keep_dates}
+                    snaps["_player_outcome_log"] = _pp_log
                 _gist_write_all(snaps)
                 result["n_history_days"] = len(history)
             except Exception:
@@ -1551,6 +1593,43 @@ def save_custom_metric(name: str, weights: dict) -> bool:
     except Exception:
         pass
     return False
+
+
+def load_player_outcome_log() -> "pd.DataFrame":
+    """v46.54: Return the retained per-player outcome log as a merged-style
+    DataFrame (one row per player per slate date), so per_player_patterns can
+    read a LONG history that survives raw-snapshot size pruning.
+
+    Columns: player_id, player_name, snapshot_date, homered, hr_game_pct.
+    Empty DataFrame if the log doesn't exist yet.
+    """
+    import pandas as pd
+    cols = ["player_id", "player_name", "snapshot_date", "homered", "hr_game_pct"]
+    log = {}
+    try:
+        if durable_storage_configured():
+            snaps = _gist_read_all() or {}
+            log = snaps.get("_player_outcome_log") or {}
+    except Exception:
+        log = {}
+    if not isinstance(log, dict) or not log:
+        return pd.DataFrame(columns=cols)
+    rows = []
+    for d_str, entries in log.items():
+        if not isinstance(entries, list):
+            continue
+        for e in entries:
+            try:
+                rows.append({
+                    "player_id": int(e["pid"]),
+                    "player_name": e.get("nm", ""),
+                    "snapshot_date": str(d_str),
+                    "homered": int(e.get("hr", 0)),
+                    "hr_game_pct": e.get("proj"),
+                })
+            except Exception:
+                continue
+    return pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame(columns=cols)
 
 
 def load_custom_metrics() -> dict:
