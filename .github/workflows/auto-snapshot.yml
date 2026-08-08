@@ -40,6 +40,11 @@ on:
 jobs:
   wake-app:
     runs-on: ubuntu-latest
+    # v46.54: hard cap so a slow/unresponsive app can NEVER burn 15 min again.
+    # A failed fast ping is harmless — the next scheduled ping retries. If this
+    # trips repeatedly, the APP itself is slow/down (check it in a browser), not
+    # the workflow.
+    timeout-minutes: 6
     steps:
       - name: Wake the app (triggers its auto-snapshot + grade)
         env:
