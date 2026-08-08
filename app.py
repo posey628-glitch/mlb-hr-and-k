@@ -21,7 +21,7 @@ import streamlit as st
 # On startup we compare this against the cached version and clear @st.cache_data
 # if they differ. This avoids the "user uploads new code but Streamlit serves
 # the old cached function output until 1-hour TTL expires" problem.
-APP_VERSION = "2026.06.10-v46.53-review-response-3"
+APP_VERSION = "2026.06.10-v46.54-per-player-outcome-log"
 
 # v43.8 (reviewer-validated): single source of truth for pick_score component
 # weights. Previously these were literal dicts in three places (the scoring
@@ -6465,7 +6465,20 @@ if show_pattern_analysis:
                     # Surface the players the model most over/under-rates.
                     try:
                         from pattern_analysis import per_player_patterns
-                        _pp = per_player_patterns(merged, min_games=8)
+                        # v46.54: read the RETAINED per-player outcome log (which
+                        # survives raw-snapshot pruning) instead of only the ~4
+                        # un-pruned days in `merged`. This is why no player ever
+                        # reached 8 games before — the raw snapshots were pruned
+                        # for size long before anyone accumulated enough history.
+                        try:
+                            from backtest import load_player_outcome_log
+                            _pp_hist = load_player_outcome_log()
+                        except Exception:
+                            _pp_hist = None
+                        if _pp_hist is not None and not _pp_hist.empty:
+                            _pp = per_player_patterns(_pp_hist, min_games=8)
+                        else:
+                            _pp = per_player_patterns(merged, min_games=8)
                         if _pp.get("players"):
                             st.markdown("---")
                             st.markdown("### 👤 Per-player patterns — where the model mis-fits individuals")
@@ -8971,7 +8984,7 @@ except Exception:
     _storage_label = "unknown"
 
 st.caption(
-    f"📦 v46.53 · {_wx_status_emoji} Weather: {_wx_status_label} · "
+    f"📦 v46.54 · {_wx_status_emoji} Weather: {_wx_status_label} · "
     f"{_storage_emoji} Storage: {_storage_label} · "
     f"🎯 Zone tiers: {_zone_fetch_status} · "
     f"🤚 Hand Statcast: {_hand_statcast_status} · "
